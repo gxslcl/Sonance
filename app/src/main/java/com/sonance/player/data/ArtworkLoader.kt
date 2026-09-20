@@ -83,6 +83,19 @@ object ArtworkLoader {
     private fun keyOf(albumId: Long, size: Int, sourceUri: Uri?, coverKey: String?): Key =
         Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), coverKey)
 
+    /**
+     * **本地**封面（MediaStore / 内嵌）的缓存键 —— 不带 coverKey。
+     *
+     * 这是性能关键：同一张专辑的每首歌都有自己的 coverKey（标题不同），
+     * 如果用完整键去缓存本地封面，那么 12 首歌的专辑会被**逐首**重新探测一遍
+     * MediaStore（每次都是一轮 binder IPC + 解码）—— 快速滚动后列表要等
+     * 一两秒才出封面，主要就是这笔开销。
+     *
+     * 本地封面跟歌无关、只跟专辑和尺寸有关，所以单独用这个键共用一份结果。
+     */
+    private fun localKeyOf(albumId: Long, size: Int, sourceUri: Uri?): Key =
+        Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), null)
+
     /** 按**字节**算上限，不是按条数 —— 80 张 900px 位图能吃掉一百多 MB */
     private val maxBytes: Int = run {
         val heap = Runtime.getRuntime().maxMemory()
@@ -117,8 +130,14 @@ object ArtworkLoader {
         synchronized(coverMiss) { coverMiss.remove(coverKey) }
     }
 
-    /** 同时进行的解码任务上限，防止快速滚动时几十个解码一起上 */
-    private val decodeGate = Semaphore(permits = 2)
+    /**
+     * 同时进行的解码任务上限。
+     *
+     * 原来只有 2 —— 一屏十来行封面要排 5~6 批，每批都要等一轮 MediaStore IPC，
+     * 加起来就是肉眼可见的一两秒。取 6：一屏的量基本能一波跑完，
+     * 而 256px 的 RGB_565 缩略图每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
+     */
+    private val decodeGate = Semaphore(permits = 6)
 
     /**
      * 列表 / 网格滚动中：跳过**新发起**的加载。
@@ -177,8 +196,11 @@ object ArtworkLoader {
         if (albumId <= 0 && sourceUri == null && coverKey == null) return null
         val size = bucketOf(sizePx)
         val key = keyOf(albumId, size, sourceUri, coverKey)
+        val localKey = localKeyOf(albumId, size, sourceUri)
 
-        // 缓存命中直接返回，不切线程、不暂停检查
+        // 缓存命中直接返回，不切线程、不暂停检查。
+        // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
+        cache.get(localKey)?.let { return it }
         cache.get(key)?.let { return it }
         // 滚动中跳过新发起的加载
         if (paused) return null
@@ -191,8 +213,9 @@ object ArtworkLoader {
 
         return withContext(Dispatchers.IO) {
             decodeGate.withPermit {
+                cache.get(localKey)?.let { return@withPermit it }
                 cache.get(key)?.let { return@withPermit it }
-                decode(context, albumId, size, key, sourceUri, coverKey)
+                decode(context, albumId, size, key, localKey, sourceUri, coverKey)
             }
         }
     }
@@ -205,6 +228,7 @@ object ArtworkLoader {
         albumId: Long,
         size: Int,
         key: Key,
+        localKey: Key,
         sourceUri: Uri?,
         coverKey: String?
     ): ImageBitmap? {
@@ -244,10 +268,19 @@ object ArtworkLoader {
             if (bitmap == null) synchronized(missing) { missing.add(missKey) }
         }
 
+        // 本地拿到图 → 按**本地键**缓存（同专辑、同尺寸的歌共用一份）。
+        // 这是"同专辑逐首重复探测 MediaStore"的修复点。
+        if (bitmap != null) {
+            val image = bitmap.asImageBitmap()
+            cache.put(localKey, image)
+            return image
+        }
+
         // ---- 3) 本地确实没有 → 用之前下载并落盘的在线封面 ----
         // 这一步是本地文件读取，没有 IPC，所以不受上面 missing 标记的约束；
         // 但同样要记一笔「磁盘也没有」，否则每次滚动都会重新 stat 一遍。
-        if (bitmap == null && coverKey != null) {
+        // 下载封面是**按歌**的（每首的 coverKey 不同），所以这里用完整键。
+        if (coverKey != null) {
             val hit = CoverCache.lookup(context, coverKey)
             if (hit is CoverCache.Lookup.Hit) bitmap = decodeSampled(hit.bytes, size)
             if (bitmap == null) synchronized(coverMiss) { coverMiss.add(coverKey) }

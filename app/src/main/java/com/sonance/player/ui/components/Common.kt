@@ -368,6 +368,16 @@ fun PlayPauseButton(
  * 滑块（进度 / 音量）
  * ============================================================ */
 
+/**
+ * 自绘滑块。
+ *
+ * **手势判定**（这一点很重要，改之前是"按下就跳"）：
+ * - 按下**不立即跳进度**。底座贴着屏幕底部时，系统的"上滑回桌面"会先给我们一个
+ *   DOWN，原来那一瞬间就 seek 了 —— 这就是平板上滑误改进度的根因。
+ * - 只有**横向意图明确**（横移超过 touch slop 且大于纵向位移）才进入拖动并跳转。
+ * - 纵向意图明确 → 直接放弃这次手势，不消耗事件，交还给系统 / 外层滚动容器。
+ * - 整个手势都没有超过 slop → 认定为**精确点击**，按落点跳一次。
+ */
 @Composable
 fun SonanceSlider(
     value: Float,
@@ -390,19 +400,43 @@ fun SonanceSlider(
             .onSizeChanged { trackWidth = it.width.toFloat().coerceAtLeast(1f) }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
+                val slop = viewConfiguration.touchSlop
                 awaitEachGesture {
                     val down = awaitFirstDown()
-                    pressed = true
-                    onValueChange((down.position.x / size.width).coerceIn(0f, 1f))
-                    down.consume()
+                    var dx = 0f
+                    var dy = 0f
+                    var scrubbing = false
+                    var abandoned = false
+
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (!change.pressed) break
-                        onValueChange((change.position.x / size.width).coerceIn(0f, 1f))
-                        change.consume()
+                        dx += change.position.x - change.previousPosition.x
+                        dy += change.position.y - change.previousPosition.y
+
+                        if (!scrubbing && !abandoned) {
+                            val hx = kotlin.math.abs(dx)
+                            val hy = kotlin.math.abs(dy)
+                            if (hx > slop && hx >= hy) {
+                                scrubbing = true
+                                pressed = true
+                                onValueChange((change.position.x / size.width).coerceIn(0f, 1f))
+                                change.consume()
+                            } else if (hy > slop) {
+                                abandoned = true
+                            }
+                        } else if (scrubbing) {
+                            onValueChange((change.position.x / size.width).coerceIn(0f, 1f))
+                            change.consume()
+                        }
                     }
-                    pressed = false
+
+                    if (scrubbing) {
+                        pressed = false
+                    } else if (!abandoned) {
+                        onValueChange((down.position.x / size.width).coerceIn(0f, 1f))
+                    }
                 }
             },
         contentAlignment = Alignment.CenterStart
