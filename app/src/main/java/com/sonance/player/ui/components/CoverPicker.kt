@@ -2,12 +2,13 @@ package com.sonance.player.ui.components
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -17,9 +18,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
@@ -170,21 +168,39 @@ fun CoverPickerDialog(vm: SonanceViewModel) {
                         style = MaterialTheme.typography.labelSmall,
                         color = skin.textMuted
                     )
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
-                        modifier = Modifier
+                    // 这里刻意**不用 LazyVerticalGrid**：
+                    //
+                    // 1. iTunes 搜一首歌经常返回同一张专辑的多个曲目，它们的
+                    //    artworkUrl100 一模一样 → fullUrl 重复 → 拿 fullUrl 当
+                    //    `key` 会直接抛 "Key ... was already used" 崩溃（这就是
+                    //    "搜封面闪退"的原因）。用普通网格就完全没有 key 的概念。
+                    // 2. 懒加载组件嵌在 AlertDialog 的文本槽里，还要担心
+                    //    "scrollable 被无限高度约束测量"那一类问题。
+                    //
+                    // 结果最多 12 条，普通 Column 足够，还更省。
+                    Column(
+                        Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 280.dp),
-                        contentPadding = PaddingValues(2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            .heightIn(max = 300.dp)
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(vm.coverResults, key = { it.fullUrl }) { c ->
-                            CoverCandidateCell(
-                                candidate = c,
-                                skin = skin,
-                                onPick = { vm.applyCover(songId, c) }
-                            )
+                        vm.coverResults.chunked(3).forEach { rowItems ->
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                rowItems.forEach { c ->
+                                    Box(Modifier.weight(1f)) {
+                                        CoverCandidateCell(
+                                            candidate = c,
+                                            skin = skin,
+                                            onPick = { vm.applyCover(songId, c) }
+                                        )
+                                    }
+                                }
+                                repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                            }
                         }
                     }
                 }

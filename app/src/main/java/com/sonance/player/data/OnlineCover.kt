@@ -202,16 +202,22 @@ object OnlineCover {
         val json = JSONObject(body)
         val arr = json.optJSONArray("results") ?: return@runCatching emptyList()
         val out = ArrayList<CoverCandidate>(arr.length())
+        // 按封面 URL 去重：搜一首歌经常返回同一张专辑的好几个曲目，
+        // 它们的 artworkUrl100 完全相同 —— 不去重的话候选列表里会是一排一样的图，
+        // 而且（早先版本）还会因为拿 fullUrl 当 LazyGrid 的 key 而直接崩掉。
+        val seen = HashSet<String>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val art = o.optString("artworkUrl100")
             if (art.isNullOrBlank()) continue
+            val full = resizeUrl(art, FULL_PX)
+            if (!seen.add(full)) continue
             out += CoverCandidate(
                 trackName = o.optString("trackName").orEmpty(),
                 artistName = o.optString("artistName").orEmpty(),
                 collectionName = o.optString("collectionName").orEmpty(),
                 thumbUrl = resizeUrl(art, THUMB_PX),
-                fullUrl = resizeUrl(art, FULL_PX)
+                fullUrl = full
             )
         }
         out

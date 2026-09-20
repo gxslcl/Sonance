@@ -116,4 +116,7 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+    // android.jar 里的 org.json 是空壳桩（方法体被抽掉），单测跑不了真实解析。
+    // 这里挂一份真实现，让封面搜索的 JSON 解析能在 JVM 上测。
+    testImplementation("org.json:json:20240303")
 }

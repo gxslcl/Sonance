@@ -81,6 +81,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_VIZ_MIRROR, true)
         set(v) = sp.edit().putBoolean(KEY_VIZ_MIRROR, v).apply()
 
+    /** 柱子配色档位，0 = 跟随皮肤 */
+    var vizColorIndex: Int
+        get() = sp.getInt(KEY_VIZ_COLOR, 0)
+        set(v) = sp.edit().putInt(KEY_VIZ_COLOR, v).apply()
+
+    /** 柱子宽度：占单个槽位的比例，0.25 ~ 1.0 */
+    var vizBarWidth: Float
+        get() = sp.getFloat(KEY_VIZ_BARW, 0.62f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_BARW, v.coerceIn(0.25f, 1f)).apply()
+
     /** 在律动柱左下角显示实时帧率（排查性能用） */
     var vizShowFps: Boolean
         get() = sp.getBoolean(KEY_VIZ_FPS, false)
@@ -256,6 +266,8 @@ class Prefs(context: Context) {
         private const val KEY_VIZ_BARS = "viz_bars"
         private const val KEY_VIZ_SENS = "viz_sensitivity"
         private const val KEY_VIZ_MIRROR = "viz_mirror"
+        private const val KEY_VIZ_COLOR = "viz_color_index"
+        private const val KEY_VIZ_BARW = "viz_bar_width"
         private const val KEY_VIZ_FPS = "viz_show_fps"
         private const val KEY_ONLINE_LYRICS = "online_lyrics_enabled"
         private const val KEY_LYRICS_API = "lyrics_api_base"

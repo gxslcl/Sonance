@@ -10,6 +10,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -79,6 +82,26 @@ import kotlin.math.sin
 /** 可视化样式 */
 enum class VizStyle(val label: String) { BARS("直立柱"), MIRROR("镜像柱"), WAVE("波形") }
 
+/**
+ * 律动柱配色。
+ *
+ * [SKIN] 是"跟随皮肤"，其余是固定色板 —— 每档给一个主色 + 一个暗色，
+ * 暗色用于柱底和反射，这样一根柱子从下到上有明暗过渡，不是一块死色。
+ */
+enum class VizColor(val label: String, val main: Long, val dim: Long) {
+    SKIN("跟随皮肤", 0L, 0L),
+    AMBER("琥珀金", 0xFFE8A838, 0xFF7A5218),
+    AQUA("青蓝", 0xFF4ECDC4, 0xFF1F5B57),
+    ROSE("品红", 0xFFE0556A, 0xFF6E2233),
+    JADE("翠绿", 0xFF5CC98A, 0xFF1F5B3A),
+    VIOLET("紫罗兰", 0xFF9B72D9, 0xFF3E2A63),
+    ICE("冰白", 0xFFE8EEF5, 0xFF5A6675),
+    EMBER("霓虹橙", 0xFFFF7A45, 0xFF7A2E14),
+    SKY("晴空蓝", 0xFF7EB8E8, 0xFF264A6B);
+
+    val isSkin: Boolean get() = this == SKIN
+}
+
 /** 没有真实数据时的程序化动画周期（3 秒） */
 private const val FALLBACK_PERIOD_NS = 3_000_000_000L
 
@@ -106,6 +129,13 @@ fun VisualizerOverlay(
     var mirror by remember { mutableStateOf(prefs.vizMirror) }
     var settingsOpen by remember { mutableStateOf(false) }
     var showFps by remember { mutableStateOf(prefs.vizShowFps) }
+    var colorIndex by remember { mutableStateOf(prefs.vizColorIndex) }
+    var barWidth by remember { mutableStateOf(prefs.vizBarWidth) }
+
+    // 选定配色；「跟随皮肤」时用皮肤强调色
+    val vizColor = VizColor.entries.getOrNull(colorIndex) ?: VizColor.SKIN
+    val barColor = if (vizColor.isSkin) skin.accent else Color(vizColor.main)
+    val barColorDim = if (vizColor.isSkin) skin.accentDim else Color(vizColor.dim)
 
     // 每个柱数档位一个 Visualizer 实例，换档重建
     val viz = remember(barCount) { AudioVisualizer(barCount) }
@@ -134,8 +164,9 @@ fun VisualizerOverlay(
             mirror = mirror,
             sensitivity = sensitivity,
             showFps = showFps,
-            color = skin.accent,
-            colorDim = skin.accentDim,
+            barWidthRatio = barWidth,
+            color = barColor,
+            colorDim = barColorDim,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -290,6 +321,9 @@ fun VisualizerOverlay(
                 sensitivity = sensitivity,
                 mirror = mirror,
                 showFps = showFps,
+                colorIndex = colorIndex,
+                barWidth = barWidth,
+                accentPreview = barColor,
                 onStyle = {
                     style = it
                     prefs.vizStyle = it.ordinal
@@ -309,6 +343,14 @@ fun VisualizerOverlay(
                 onShowFps = {
                     showFps = it
                     prefs.vizShowFps = it
+                },
+                onColor = {
+                    colorIndex = it
+                    prefs.vizColorIndex = it
+                },
+                onBarWidth = {
+                    barWidth = it
+                    prefs.vizBarWidth = it
                 },
                 onDismiss = { settingsOpen = false }
             )
@@ -330,6 +372,7 @@ private fun VisualizerCanvas(
     mirror: Boolean,
     sensitivity: Float,
     showFps: Boolean,
+    barWidthRatio: Float,
     color: Color,
     colorDim: Color,
     modifier: Modifier = Modifier
@@ -403,7 +446,8 @@ private fun VisualizerCanvas(
 
             // ---- 几何：只在尺寸/柱数变化时算一次 ----
             val slot = w / n
-            val barW = (slot * 0.62f).coerceAtMost(6.dp.toPx())
+            // 宽度由设置决定；上限放宽到 20dp，否则柱数少的时候"拉满"也还是细的
+            val barW = (slot * barWidthRatio).coerceIn(1f, 20.dp.toPx())
             val gap = slot - barW
 
             val base = h * 0.78f
@@ -595,11 +639,16 @@ private fun VizSettingsPanel(
     sensitivity: Float,
     mirror: Boolean,
     showFps: Boolean,
+    colorIndex: Int,
+    barWidth: Float,
+    accentPreview: Color,
     onStyle: (VizStyle) -> Unit,
     onBarCount: (Int) -> Unit,
     onSensitivity: (Float) -> Unit,
     onMirror: (Boolean) -> Unit,
     onShowFps: (Boolean) -> Unit,
+    onColor: (Int) -> Unit,
+    onBarWidth: (Float) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -612,13 +661,15 @@ private fun VizSettingsPanel(
     ) {
 Column(
                 Modifier
-                    .padding(top = 92.dp, end = 12.dp)
+                    .padding(top = 92.dp, end = 12.dp, bottom = 12.dp)
                     .width(280.dp)
+                    .heightIn(max = 520.dp)
                     .shadow(8.dp, RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
                     .background(skin.surface2)
                     .border(1.dp, skin.border2, RoundedCornerShape(16.dp))
                     .clickable { /* 吃掉点击，避免穿透关闭 */ }
+                    .verticalScroll(rememberScrollState())
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
@@ -659,6 +710,79 @@ Column(
                 SonanceSlider(
                     value = ((sensitivity - 0.4f) / 2.6f).coerceIn(0f, 1f),
                     onValueChange = { onSensitivity(0.4f + it * 2.6f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    trackHeight = 3.dp,
+                    thumbSize = 11.dp,
+                    alwaysShowThumb = true
+                )
+            }
+
+            // ---- 柱子颜色 ----
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("柱子颜色", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text(
+                        VizColor.entries.getOrNull(colorIndex)?.label ?: VizColor.SKIN.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = accentPreview
+                    )
+                }
+                // 色板用 FlowRow 自动换行；每个色块是圆形，选中的加一圈描边
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    VizColor.entries.forEachIndexed { i, c ->
+                        val selected = i == colorIndex
+                        val swatch = if (c.isSkin) skin.accent else Color(c.main)
+                        Box(
+                            Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(swatch)
+                                .border(
+                                    width = if (selected) 2.dp else 1.dp,
+                                    color = if (selected) skin.text else skin.border,
+                                    shape = CircleShape
+                                )
+                                .clickable { onColor(i) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (selected) {
+                                // 选中标记：小圆点，深浅色都能看清
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (c.isSkin) skin.onAccent else Color.Black.copy(alpha = 0.45f)
+                                        )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- 柱子宽度 ----
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("柱子宽度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text(
+                        when {
+                            barWidth < 0.4f -> "细"
+                            barWidth < 0.62f -> "偏细"
+                            barWidth < 0.8f -> "标准"
+                            barWidth < 0.95f -> "偏粗"
+                            else -> "拉满"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = accentPreview
+                    )
+                }
+                SonanceSlider(
+                    value = ((barWidth - 0.25f) / 0.75f).coerceIn(0f, 1f),
+                    onValueChange = { onBarWidth(0.25f + it * 0.75f) },
                     modifier = Modifier.fillMaxWidth(),
                     trackHeight = 3.dp,
                     thumbSize = 11.dp,
