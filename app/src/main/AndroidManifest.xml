@@ -1,0 +1,733 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 本地音频读取 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- 音频可视化：读取本应用音频会话的频谱（Visualizer 不需要录音权限） -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!--
+      在线歌词（LrcAPI）。默认**关闭**，只有用户在「设置 → 歌词」里显式打开才会联网；
+      不打开时这个权限不会被用到。播放器本身依旧不联网、不上传任何数据。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 后台播放与通知 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <uses-feature
+        android:name="android.hardware.audio.output"
+        android:required="false" />
+
+    <application
+        android:name=".SonanceApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:hardwareAccelerated="true"
+        android:largeHeap="false"
+        android:theme="@style/Theme.Sonance"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.Sonance">
+            <!-- 支持从文件管理器用本播放器打开音频 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".playback.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+    <!-- ===== 应用图标变体：同一 MainActivity 的多个别名，运行时只启用一个 ===== -->
+        <!-- 原版 · Sonance -->
+        <activity-alias
+            android:name=".alias.Icon_default"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 原版线条 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_1"
+            android:roundIcon="@mipmap/ic_launcher_s1_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 实心填充 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_2"
+            android:roundIcon="@mipmap/ic_launcher_s1_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 半切拼接 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_3"
+            android:roundIcon="@mipmap/ic_launcher_s1_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 双环进度 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_4"
+            android:roundIcon="@mipmap/ic_launcher_s1_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 负空间挖空 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_5"
+            android:roundIcon="@mipmap/ic_launcher_s1_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 暂停键变体 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_6"
+            android:roundIcon="@mipmap/ic_launcher_s1_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · 虚线旋转 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_7"
+            android:roundIcon="@mipmap/ic_launcher_s1_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 播放圆环 · App图标 -->
+        <activity-alias
+            android:name=".alias.Icon_s1_8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s1_8"
+            android:roundIcon="@mipmap/ic_launcher_s1_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 原版柱形 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_1"
+            android:roundIcon="@mipmap/ic_launcher_s2_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 双色交替 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_2"
+            android:roundIcon="@mipmap/ic_launcher_s2_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 镜像对称 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_3"
+            android:roundIcon="@mipmap/ic_launcher_s2_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 圆弧波形 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_4"
+            android:roundIcon="@mipmap/ic_launcher_s2_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 负空间挖空 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_5"
+            android:roundIcon="@mipmap/ic_launcher_s2_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 中心播放叠加 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_6"
+            android:roundIcon="@mipmap/ic_launcher_s2_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · 顶部波动线 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_7"
+            android:roundIcon="@mipmap/ic_launcher_s2_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 均衡器 · App图标 -->
+        <activity-alias
+            android:name=".alias.Icon_s2_8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s2_8"
+            android:roundIcon="@mipmap/ic_launcher_s2_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 原版音符 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_1"
+            android:roundIcon="@mipmap/ic_launcher_s3_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 双色分件 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_2"
+            android:roundIcon="@mipmap/ic_launcher_s3_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 撞色拼接 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_3"
+            android:roundIcon="@mipmap/ic_launcher_s3_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 双符连接 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_4"
+            android:roundIcon="@mipmap/ic_launcher_s3_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 负空间挖空 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_5"
+            android:roundIcon="@mipmap/ic_launcher_s3_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 加五线谱 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_6"
+            android:roundIcon="@mipmap/ic_launcher_s3_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · 倾斜动感 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_7"
+            android:roundIcon="@mipmap/ic_launcher_s3_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 八分音符 · App图标 -->
+        <activity-alias
+            android:name=".alias.Icon_s3_8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s3_8"
+            android:roundIcon="@mipmap/ic_launcher_s3_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 原版耳机 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_1"
+            android:roundIcon="@mipmap/ic_launcher_s4_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 双色耳罩 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_2"
+            android:roundIcon="@mipmap/ic_launcher_s4_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 金调双色 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_3"
+            android:roundIcon="@mipmap/ic_launcher_s4_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 两侧出声波 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_4"
+            android:roundIcon="@mipmap/ic_launcher_s4_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 负空间挖空 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_5"
+            android:roundIcon="@mipmap/ic_launcher_s4_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 圆耳罩细节 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_6"
+            android:roundIcon="@mipmap/ic_launcher_s4_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · 虚线头梁 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_7"
+            android:roundIcon="@mipmap/ic_launcher_s4_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 耳机 · App图标 -->
+        <activity-alias
+            android:name=".alias.Icon_s4_8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s4_8"
+            android:roundIcon="@mipmap/ic_launcher_s4_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 原版三层波 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_1"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_1"
+            android:roundIcon="@mipmap/ic_launcher_s5_1"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 柱状声波 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_2"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_2"
+            android:roundIcon="@mipmap/ic_launcher_s5_2"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 上下分色波 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_3"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_3"
+            android:roundIcon="@mipmap/ic_launcher_s5_3"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 环形声波 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_4"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_4"
+            android:roundIcon="@mipmap/ic_launcher_s5_4"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 负空间挖空 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_5"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_5"
+            android:roundIcon="@mipmap/ic_launcher_s5_5"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 中心播放叠加 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_6"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_6"
+            android:roundIcon="@mipmap/ic_launcher_s5_6"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · 折线锯齿波 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_7"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_7"
+            android:roundIcon="@mipmap/ic_launcher_s5_7"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+
+        <!-- 声波 · App图标 -->
+        <activity-alias
+            android:name=".alias.Icon_s5_8"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_s5_8"
+            android:roundIcon="@mipmap/ic_launcher_s5_8"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+    </application>
+
+</manifest>

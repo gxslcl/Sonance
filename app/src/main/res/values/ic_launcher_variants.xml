@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="icon_label_s1_1">播放圆环 · 原版线条</string>
+    <string name="icon_label_s1_2">播放圆环 · 实心填充</string>
+    <string name="icon_label_s1_3">播放圆环 · 半切拼接</string>
+    <string name="icon_label_s1_4">播放圆环 · 双环进度</string>
+    <string name="icon_label_s1_5">播放圆环 · 负空间挖空</string>
+    <string name="icon_label_s1_6">播放圆环 · 暂停键变体</string>
+    <string name="icon_label_s1_7">播放圆环 · 虚线旋转</string>
+    <string name="icon_label_s1_8">播放圆环 · App图标</string>
+    <string name="icon_label_s2_1">均衡器 · 原版柱形</string>
+    <string name="icon_label_s2_2">均衡器 · 双色交替</string>
+    <string name="icon_label_s2_3">均衡器 · 镜像对称</string>
+    <string name="icon_label_s2_4">均衡器 · 圆弧波形</string>
+    <string name="icon_label_s2_5">均衡器 · 负空间挖空</string>
+    <string name="icon_label_s2_6">均衡器 · 中心播放叠加</string>
+    <string name="icon_label_s2_7">均衡器 · 顶部波动线</string>
+    <string name="icon_label_s2_8">均衡器 · App图标</string>
+    <string name="icon_label_s3_1">八分音符 · 原版音符</string>
+    <string name="icon_label_s3_2">八分音符 · 双色分件</string>
+    <string name="icon_label_s3_3">八分音符 · 撞色拼接</string>
+    <string name="icon_label_s3_4">八分音符 · 双符连接</string>
+    <string name="icon_label_s3_5">八分音符 · 负空间挖空</string>
+    <string name="icon_label_s3_6">八分音符 · 加五线谱</string>
+    <string name="icon_label_s3_7">八分音符 · 倾斜动感</string>
+    <string name="icon_label_s3_8">八分音符 · App图标</string>
+    <string name="icon_label_s4_1">耳机 · 原版耳机</string>
+    <string name="icon_label_s4_2">耳机 · 双色耳罩</string>
+    <string name="icon_label_s4_3">耳机 · 金调双色</string>
+    <string name="icon_label_s4_4">耳机 · 两侧出声波</string>
+    <string name="icon_label_s4_5">耳机 · 负空间挖空</string>
+    <string name="icon_label_s4_6">耳机 · 圆耳罩细节</string>
+    <string name="icon_label_s4_7">耳机 · 虚线头梁</string>
+    <string name="icon_label_s4_8">耳机 · App图标</string>
+    <string name="icon_label_s5_1">声波 · 原版三层波</string>
+    <string name="icon_label_s5_2">声波 · 柱状声波</string>
+    <string name="icon_label_s5_3">声波 · 上下分色波</string>
+    <string name="icon_label_s5_4">声波 · 环形声波</string>
+    <string name="icon_label_s5_5">声波 · 负空间挖空</string>
+    <string name="icon_label_s5_6">声波 · 中心播放叠加</string>
+    <string name="icon_label_s5_7">声波 · 折线锯齿波</string>
+    <string name="icon_label_s5_8">声波 · App图标</string>
+    <string-array name="app_icon_ids">
+        <item>s1_1</item>
+        <item>s1_2</item>
+        <item>s1_3</item>
+        <item>s1_4</item>
+        <item>s1_5</item>
+        <item>s1_6</item>
+        <item>s1_7</item>
+        <item>s1_8</item>
+        <item>s2_1</item>
+        <item>s2_2</item>
+        <item>s2_3</item>
+        <item>s2_4</item>
+        <item>s2_5</item>
+        <item>s2_6</item>
+        <item>s2_7</item>
+        <item>s2_8</item>
+        <item>s3_1</item>
+        <item>s3_2</item>
+        <item>s3_3</item>
+        <item>s3_4</item>
+        <item>s3_5</item>
+        <item>s3_6</item>
+        <item>s3_7</item>
+        <item>s3_8</item>
+        <item>s4_1</item>
+        <item>s4_2</item>
+        <item>s4_3</item>
+        <item>s4_4</item>
+        <item>s4_5</item>
+        <item>s4_6</item>
+        <item>s4_7</item>
+        <item>s4_8</item>
+        <item>s5_1</item>
+        <item>s5_2</item>
+        <item>s5_3</item>
+        <item>s5_4</item>
+        <item>s5_5</item>
+        <item>s5_6</item>
+        <item>s5_7</item>
+        <item>s5_8</item>
+    </string-array>
+</resources>

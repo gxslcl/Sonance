@@ -1,0 +1,50 @@
+# ============================================================
+# Sonance — 忽略规则（精简范围：只跟踪源码与构建脚本）
+# ============================================================
+
+# ---------- 构建产物 ----------
+build/
+*/build/
+.gradle/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+release/
+
+# ---------- 本机相关 / IDE ----------
+local.properties
+.idea/
+*.iml
+.omo/
+.DS_Store
+Thumbs.db
+*.log
+*.hprof
+
+# ---------- 打包产物 ----------
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.idsig
+
+# ---------- 开发与验证用的临时数据 ----------
+/shots/
+/testaudio/
+/lyricstest/
+/kgmtest/
+/badtrack/
+/lockedtest/
+/.apklist.txt
+/res/
+/.apkx/
+
+# ---------- Python（tools 下的辅助脚本）----------
+__pycache__/
+*.pyc
+
+# ---------- 说明 ----------
+# sonance.keystore 按你的选择纳入版本管理，故不在此忽略。
+# app/build.gradle.kts 里的签名口令同样是明文提交，二者保持一致。

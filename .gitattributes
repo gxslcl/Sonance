@@ -1,0 +1,25 @@
+# 仓库内文本统一存为 LF，检出时由 git 按平台处理。
+# 工作区里现在 CRLF / LF 混用，先归一化，避免以后出现整文件 diff 抖动。
+* text=auto
+
+# 二进制，禁止任何行尾转换
+*.keystore binary
+*.jks      binary
+*.jar      binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.webp     binary
+*.wav      binary
+*.mp3      binary
+*.flac     binary
+*.m4a      binary
+*.ttf      binary
+*.otf      binary
+
+# Windows 批处理脚本必须保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Gradle Wrapper 在 Unix 上要可执行
+gradlew text eol=lf

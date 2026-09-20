@@ -1,0 +1,118 @@
+###############################################################################
+# Sonance baseline profile
+#
+# 手写版 baseline profile。ART 在安装 APK 时把这些方法标记为 hot，
+# 提前 AOT，避免首启 / 滑动时仍走解释执行。
+#
+# 每行规则前缀必须是 HSPL/HSP/HPL/SPL/HL/SL 等组合之一。
+# 这里统一用 HSPL（Hot, Startup, Post-startup, low level）。
+#
+# 用宏基准模块跑过交互脚本后，可以用 baselineprofile-rules-collector 自动
+# 替换为更精准的版本。
+###############################################################################
+
+# ---------- 应用自身热路径（滑动 / 播放页 / 封面解码）----------
+
+HSPLcom/sonance/player/ui/screens/ScreensKt;->SongList(Ljava/util/List;Lcom/sonance/player/SonanceViewModel;Lcom/sonance/player/playback/PlayerUiState;Landroidx/compose/ui/Modifier;ZLZLandroidx/compose/foundation/layout/PaddingValues;Landroidx/compose/runtime/Composer;II)V
+HSPLcom/sonance/player/ui/screens/ScreensKt;->AlbumGrid(Ljava/util/List;Lcom/sonance/player/SonanceViewModel;Lcom/sonance/player/playback/PlayerUiState;Landroidx/compose/ui/Modifier;Lkotlin/jvm/functions/Function1;Landroidx/compose/runtime/Composer;II)V
+
+# 行渲染
+HSPLcom/sonance/player/ui/components/ListItemsKt;->SongRow(Lcom/sonance/player/data/Song;IZZZLkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Landroidx/compose/ui/Modifier;ZZLkotlin/jvm/functions/Function2;Landroidx/compose/runtime/Composer;IIII)V
+
+# 封面
+HSPLcom/sonance/player/ui/components/CommonKt;->CoverArt(JLjava/lang/String;Landroidx/compose/ui/Modifier;FLandroidx/compose/ui/unit/Dp;IZLandroidx/compose/runtime/Composer;II)V
+
+# 全屏播放页
+HSPLcom/sonance/player/ui/components/FullPlayerKt;->FullPlayer(Lcom/sonance/player/playback/PlayerUiState;Ljava/util/List;Ljava/util/Set;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;Landroidx/compose/ui/Modifier;Landroidx/compose/runtime/Composer;II)V
+HSPLcom/sonance/player/ui/components/FullPlayerKt;->PlayerPage(Lcom/sonance/player/data/Song;ZJJZLcom/sonance/player/playback/RepeatMode;FLkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;Landroidx/compose/runtime/Composer;III)V
+
+# 播放控制器 / 状态层
+HSPLcom/sonance/player/playback/PlayerController;->startTicker()V
+HSPLcom/sonance/player/playback/PlayerController;->sync(Landroidx/media3/common/Player;Landroidx/media3/common/Player$Events;)V
+
+# 封面解码
+HSPLcom/sonance/player/data/ArtworkLoader;->load(Landroid/content/Context;JI)Landroidx/compose/ui/graphics/ImageBitmap;
+HSPLcom/sonance/player/data/ArtworkLoader;->decode(Landroid/content/Context;JILcom/sonance/player/data/ArtworkLoader$Key;)Landroidx/compose/ui/graphics/ImageBitmap;
+HSPLcom/sonance/player/data/ArtworkLoader$Key;->equals(Ljava/lang/Object;)Z
+HSPLcom/sonance/player/data/ArtworkLoader$Key;->hashCode()I
+
+# ViewModel 派生数据（每帧可能触发读）
+HSPLcom/sonance/player/SonanceViewModel;->getSongs()Ljava/util/List;
+HSPLcom/sonance/player/SonanceViewModel;->getFavorites()Ljava/util/Set;
+HSPLcom/sonance/player/SonanceViewModel;->visibleSongs()Ljava/util/List;
+HSPLcom/sonance/player/SonanceViewModel;->songMap()Ljava/util/Map;
+
+# ---------- Compose runtime 热路径（每个组合动作都会走）----------
+
+HSPLandroidx/compose/runtime/Composer;->startReplaceableGroup(I)Landroidx/compose/runtime/Composer;
+HSPLandroidx/compose/runtime/Composer;->endReplaceableGroup()V
+HSPLandroidx/compose/runtime/Composer;->startRestartGroup(I)Landroidx/compose/runtime/Composer;
+HSPLandroidx/compose/runtime/Composer;->endRestartGroup()Landroidx/compose/runtime/ScopeUpdateScope;
+HSPLandroidx/compose/runtime/Composer;->updateRememberableValue(Landroidx/compose/runtime/Updater;)V
+HSPLandroidx/compose/runtime/Composer;->updateChanged(I)Ljava/lang/Object;
+HSPLandroidx/compose/runtime/Composer;->updateChanged(Ljava/lang/Object;)Ljava/lang/Object;
+HSPLandroidx/compose/runtime/Composer;->rememberedValue()Ljava/lang/Object;
+HSPLandroidx/compose/runtime/Composer;->consume(ILandroidx/compose/runtime/Object;)V
+HSPLandroidx/compose/runtime/Composer;->apply(Ljava/lang/Object;Landroidx/compose/runtime/PersistentCompositionLocalMap;)V
+HSPLandroidx/compose/runtime/Composer;->sourceInformation(Ljava/lang/String;)V
+HSPLandroidx/compose/runtime/Composer;->skipToGroupEnd()V
+HSPLandroidx/compose/runtime/Composer;->skipCurrentGroup()V
+
+HSPLandroidx/compose/runtime/Recomposer;->recompose(Ljava/util/List;)V
+HSPLandroidx/compose/runtime/Recomposer;->performRecompose(Ljava/util/List;)Landroidx/compose/runtime/MonotonicFrameClock$WithFrameNanos;
+HSPLandroidx/compose/runtime/Recomposer;-><init>(Landroidx/compose/runtime/MonotonicFrameClock;Landroidx/compose/runtime/CompositionContext;)V
+
+# ---------- Foundation：LazyList 是滚动时的核心 ----------
+
+HSPLandroidx/compose/foundation/lazy/LazyDslKt;->LazyColumn(Landroidx/compose/foundation/lazy/LazyListState;Landroidx/compose/ui/Modifier;Landroidx/compose/foundation/layout/PaddingValues;ZZLandroidx/compose/foundation/gestures/ScrollableState;Landroidx/compose/foundation/layout/Arrangement$Vertical;Lkotlin/jvm/functions/Function1;Landroidx/compose/runtime/Composer;II)V
+HSPLandroidx/compose/foundation/lazy/LazyListState;->getFirstVisibleItemIndex()I
+HSPLandroidx/compose/foundation/lazy/LazyListState;->getFirstVisibleItemScrollOffset()I
+HSPLandroidx/compose/foundation/lazy/LazyListMeasure;->measure(I[Landroidx/compose/foundation/lazy/LazyListMeasuredItem;IILandroidx/compose/ui/MeasureScope;)I
+HSPLandroidx/compose/foundation/lazy/LazyListMeasuredItem;->place(I)I
+
+# LazyVerticalGrid
+HSPLandroidx/compose/foundation/lazy/grid/LazyDslKt;->LazyVerticalGrid(Landroidx/compose/foundation/lazy/grid/LazyGridState;Landroidx/compose/foundation/lazy/grid/GridCells;Landroidx/compose/ui/Modifier;Landroidx/compose/foundation/layout/PaddingValues;Landroidx/compose/foundation/layout/Arrangement$Horizontal;Landroidx/compose/foundation/layout/Arrangement$Vertical;Lkotlin/jvm/functions/Function1;Landroidx/compose/runtime/Composer;II)V
+
+# VerticalPager（播放页上下切歌）
+HSPLandroidx/compose/foundation/pager/PagerKt;->VerticalPager(Landroidx/compose/foundation/pager/PagerState;ILandroidx/compose/ui/Modifier;Landroidx/compose/foundation/pager/PagerSnapFlingBehavior;Lkotlin/jvm/functions/Function2;Landroidx/compose/runtime/Composer;II)V
+
+# ---------- UI 测量 / 布局节点 ----------
+
+HSPLandroidx/compose/ui/node/LayoutNode;->measure(Landroidx/compose/ui/layout/Constraints;)Landroidx/compose/ui/layout/Placeable;
+HSPLandroidx/compose/ui/node/LayoutNode;->layout(ZIIII)V
+HSPLandroidx/compose/ui/node/OwnerSnapshotObserver;->observeLayoutSnapshotReads(Ljava/lang/Object;Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;
+HSPLandroidx/compose/ui/node/NodeChain;->measure(Landroidx/compose/ui/layout/MeasureScope;Landroidx/compose/ui/layout/Measurable;Landroidx/compose/ui/layout/Constraints;)Landroidx/compose/ui/layout/Placeable;
+HSPLandroidx/compose/ui/node/NodeChain;->layout(ZIIII)V
+
+HSPLandroidx/compose/ui/layout/SubcomposeLayout;-><init>(Lkotlin/jvm/functions/Function3;)V
+HSPLandroidx/compose/ui/layout/SubcomposeLayoutKt;->SubcomposeLayout(Landroidx/compose/ui/Modifier;Lkotlin/jvm/functions/Function3;Landroidx/compose/runtime/Composer;II)V
+# ---------- 律动柱：FFT 与 PCM 取样（每帧 / 每个音频缓冲都会走）----------
+# 这些方法原先不在 profile 里，只能靠 JIT 慢慢热起来，是"打开律动柱就掉帧"的
+# 一部分原因。补进来让 ART 安装时就 AOT。
+
+HSPLcom/sonance/player/playback/AudioVisualizer;-><init>(I)V
+HSPLcom/sonance/player/playback/AudioVisualizer;->poll(FZ)Z
+HSPLcom/sonance/player/playback/AudioVisualizer;->fft([F[F)V
+HSPLcom/sonance/player/playback/AudioVisualizer;->computeBands(FZ)V
+HSPLcom/sonance/player/playback/AudioVisualizer;->decayToZero()V
+HSPLcom/sonance/player/playback/AudioVisualizer;->start(I)Z
+
+HSPLcom/sonance/player/playback/PcmTapProcessor;->queueInput(Ljava/nio/ByteBuffer;)V
+HSPLcom/sonance/player/playback/PcmTapProcessor;->tap(Ljava/nio/ByteBuffer;)V
+HSPLcom/sonance/player/playback/PcmTapProcessor;->onConfigure(Landroidx/media3/common/audio/AudioProcessor$AudioFormat;)Landroidx/media3/common/audio/AudioProcessor$AudioFormat;
+
+HSPLcom/sonance/player/playback/PcmRing;->write([FI)V
+HSPLcom/sonance/player/playback/PcmRing;->readLatest([FI)I
+
+# ---------- 内嵌封面 / 歌词解析（列表首次加载每个文件走一次）----------
+
+HSPLcom/sonance/player/data/AudioTags;->readCoverArt(Landroid/content/Context;Landroid/net/Uri;)[B
+HSPLcom/sonance/player/data/AudioTags;->readLyrics(Landroid/content/Context;Landroid/net/Uri;)Ljava/lang/String;
+HSPLcom/sonance/player/data/AudioTags;->scan(Ljava/io/InputStream;ZZ)Lcom/sonance/player/data/AudioTags$Found;
+HSPLcom/sonance/player/data/AudioTags;->scanId3v2(Ljava/io/InputStream;[B[BLcom/sonance/player/data/AudioTags$Found;ZZ)V
+HSPLcom/sonance/player/data/AudioTags;->extractApicImage([B)[B
+HSPLcom/sonance/player/data/AudioTags;->scanFlac(Ljava/io/InputStream;[BLcom/sonance/player/data/AudioTags$Found;ZZ)V
+HSPLcom/sonance/player/data/AudioTags;->scanMp4(Ljava/io/InputStream;[B[BLcom/sonance/player/data/AudioTags$Found;ZZ)V
+HSPLcom/sonance/player/data/AudioTags;->walkDataPayload(Ljava/io/InputStream;J)[B
+
+HSPLcom/sonance/player/data/LyricsRepository;->parse(Ljava/lang/String;)Lcom/sonance/player/data/Lyrics;

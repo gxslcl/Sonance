@@ -1,0 +1,858 @@
+package com.sonance.player.ui.components
+
+import android.os.Build
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.LyricLine
+import com.sonance.player.data.Lyrics
+import com.sonance.player.data.LyricsRepository
+import com.sonance.player.data.LyricsResult
+import com.sonance.player.data.LyricsSource
+import com.sonance.player.data.Prefs
+import com.sonance.player.data.Song
+import com.sonance.player.data.indexAt
+import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/**
+ * 全屏歌词页。
+ *
+ * 布局是「顶栏 / 内容 / 底部歌名」三段式，**顶栏不再和内容叠在一起** ——
+ * 之前的写法把关闭按钮和内容区同时塞进一个 Box，内容区的 LazyColumn 是可滚动的，
+ * 会盖住按钮下半部分并吞掉点击，表现就是"叉号点了没反应"。
+ *
+ * 数据来自 [LyricsRepository]：内嵌歌词 → 本地缓存 → 在线（需用户开启）。
+ */
+@Composable
+fun LyricsOverlay(
+    song: Song,
+    positionMs: Long,
+    prefs: Prefs,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var result by remember(song.id) { mutableStateOf<LyricsResult?>(null) }
+    var loading by remember(song.id) { mutableStateOf(true) }
+    var showSearch by remember { mutableStateOf(false) }
+    var showFontRow by remember { mutableStateOf(false) }
+    var showGlassRow by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+
+    // 背景玻璃：本地状态，改了立刻写回 prefs
+    var glassStyle by remember(song.id) { mutableStateOf(GlassStyle.of(prefs.glassStyle)) }
+    var glassBlur by remember(song.id) { mutableIntStateOf(prefs.glassBlurDp) }
+    var glassVisibility by remember(song.id) { mutableIntStateOf(prefs.glassVisibility) }
+
+    fun applyStyle(s: GlassStyle) {
+        glassStyle = s
+        glassBlur = s.defaultBlurDp
+        glassVisibility = s.defaultVisibility
+        prefs.glassStyle = s.ordinal
+        prefs.glassBlurDp = s.defaultBlurDp
+        prefs.glassVisibility = s.defaultVisibility
+    }
+
+    val onlineEnabled = prefs.onlineLyricsEnabled
+    val apiBase = prefs.lyricsApiBase
+
+    // 字号 / 简体开关在页面内可调，用本地状态驱动重组；换歌时回到全局设置值
+    var fontSize by remember(song.id) { mutableIntStateOf(prefs.lyricsFontSizeSp) }
+    var convertT2S by remember(song.id) { mutableStateOf(prefs.lyricsConvertToSimplified) }
+
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S) {
+        loading = true
+        result = LyricsRepository.load(
+            context = context,
+            songId = song.id,
+            uri = song.uri,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            onlineEnabled = onlineEnabled,
+            apiBase = apiBase,
+            convertToSimplified = convertT2S
+        )
+        loading = false
+    }
+
+    val lyrics = result?.lyrics
+
+    Box(modifier.fillMaxSize().background(skin.bg)) {
+
+        // ===== 玻璃背景（可调强度 / 液态玻璃）=====
+        GlassBackdrop(
+            song = song,
+            style = glassStyle,
+            blurDp = glassBlur,
+            visibility = glassVisibility
+        )
+
+        // ===== 三段式内容 =====
+        Column(Modifier.fillMaxSize()) {
+
+            // ---- 顶栏 ----
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = when (result?.source) {
+                        LyricsSource.EMBEDDED -> "内嵌歌词"
+                        LyricsSource.ONLINE -> "在线歌词 · LrcAPI"
+                        null -> "歌词"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (result?.source == LyricsSource.ONLINE) skin.accent else skin.textDim,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                // 手动搜索：拿到错误歌词时的补救入口
+                if (onlineEnabled) {
+                    IconAction(
+                        icon = SonanceIcons.Search,
+                        contentDescription = "手动搜索歌词",
+                        onClick = { showSearch = true },
+                        iconSize = 19.dp,
+                        tint = skin.textDim
+                    )
+                }
+                // 背景玻璃
+                IconAction(
+                    icon = SonanceIcons.Layers,
+                    contentDescription = "背景玻璃",
+                    onClick = { showGlassRow = !showGlassRow },
+                    iconSize = 19.dp,
+                    tint = if (showGlassRow) skin.accent else skin.textDim
+                )
+                // 字号 / 简体开关
+                IconAction(
+                    icon = SonanceIcons.Sort,
+                    contentDescription = "字号与简繁",
+                    onClick = { showFontRow = !showFontRow },
+                    iconSize = 19.dp,
+                    tint = if (showFontRow) skin.accent else skin.textDim
+                )
+                IconAction(
+                    icon = SonanceIcons.Close,
+                    contentDescription = "关闭歌词",
+                    onClick = onClose,
+                    iconSize = 22.dp,
+                    tint = skin.text
+                )
+            }
+
+            // ---- 背景玻璃调节行（可折叠）----
+            if (showGlassRow) {
+                GlassControls(
+                    style = glassStyle,
+                    blurDp = glassBlur,
+                    visibility = glassVisibility,
+                    onStyleChange = ::applyStyle,
+                    onBlurChange = {
+                        glassBlur = it
+                        prefs.glassBlurDp = it
+                    },
+                    onVisibilityChange = {
+                        glassVisibility = it
+                        prefs.glassVisibility = it
+                    }
+                )
+            }
+
+            // ---- 字号 / 简繁 调节行（可折叠）----
+            if (showFontRow) {
+                FontSizeRow(
+                    fontSize = fontSize,
+                    onFontSizeChange = {
+                        fontSize = it
+                        prefs.lyricsFontSizeSp = it
+                    },
+                    convertT2S = convertT2S,
+                    onT2SChange = {
+                        convertT2S = it
+                        prefs.lyricsConvertToSimplified = it
+                    },
+                    skin = skin
+                )
+            }
+
+            notice?.let { msg ->
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(skin.surface2)
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text(msg, style = MaterialTheme.typography.bodySmall, color = skin.textDim)
+                }
+            }
+
+            // ---- 歌词主体 ----
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    searching -> Text(
+                        "正在按你填的信息搜索…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = skin.textMuted,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+
+                    loading -> Text(
+                        if (onlineEnabled) "正在读取歌词（本地 → 在线）…" else "正在读取歌词…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = skin.textMuted,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+
+                    lyrics == null -> EmptyLyrics(
+                        song = song,
+                        onlineEnabled = onlineEnabled,
+                        onManualSearch = { showSearch = true }
+                    )
+
+                    lyrics is Lyrics.Synced -> SyncedLyrics(
+                        lines = lyrics.lines,
+                        positionMs = positionMs,
+                        fontSizeSp = fontSize
+                    )
+
+                    else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize)
+                }
+            }
+
+            // ---- 底部歌名 ----
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 28.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = song.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = skin.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = song.artist,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+
+    // ===== 手动搜索对话框 =====
+    if (showSearch) {
+        LyricsSearchDialog(
+            initialTitle = song.title,
+            initialArtist = song.artist,
+            onDismiss = { showSearch = false },
+            onConfirm = { title, artist ->
+                showSearch = false
+                searching = true
+                notice = null
+                scope.launch {
+                    val r = LyricsRepository.searchOnline(
+                        context = context,
+                        title = title,
+                        artist = artist,
+                        album = song.album,
+                        apiBase = apiBase,
+                        convertToSimplified = convertT2S
+                    )
+                    result = r
+                    searching = false
+                    notice = if (r.lyrics == null) {
+                        "没找到「$title${if (artist.isNotBlank()) " - $artist" else ""}」的歌词，换个写法再试"
+                    } else {
+                        null
+                    }
+                }
+            }
+        )
+    }
+}
+
+/* ============================================================
+ * 毛玻璃背景
+ * ============================================================ */
+
+/**
+ * 可调强度的玻璃背景。
+ *
+ * 三层叠加：
+ *  1) 放大 + 模糊 + 提饱和度的专辑封面（可见度控制透多少出来）
+ *  2) 一层渐变遮罩，保证文字对比度（可见度越高遮得越薄，但保留下限）
+ *  3) 仅液态玻璃：顶部镜面高光 + 一道上边缘亮线，模拟玻璃的反射与折射
+ *
+ * API 31+ 才有 RenderEffect 真模糊；低于 31 只能靠降不透明度 + 加厚遮罩近似。
+ */
+@Composable
+private fun GlassBackdrop(
+    song: Song,
+    style: GlassStyle,
+    blurDp: Int,
+    visibility: Int,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+
+    if (style == GlassStyle.OFF) {
+        Box(
+            modifier
+                .fillMaxSize()
+                .background(Brush.verticalGradient(listOf(skin.bg, skin.surface, skin.bg)))
+        )
+        return
+    }
+
+    val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val artAlpha = GlassStyle.artAlpha(visibility)
+    val scrim = GlassStyle.scrimAlpha(visibility)
+
+    var art by remember(song.id) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(song.albumId, song.id) {
+        art = ArtworkLoader.load(context, song.albumId, 320)
+            ?: ArtworkLoader.online(song.id)
+    }
+
+    art?.let { bmp ->
+        val matrix = remember(style.liquid, visibility) {
+            ColorMatrix().apply {
+                setToSaturation(GlassStyle.saturation(style.liquid, visibility))
+            }
+        }
+        Image(
+            bitmap = bmp,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            colorFilter = if (style.liquid) ColorFilter.colorMatrix(matrix) else null,
+            modifier = modifier
+                .fillMaxSize()
+                .scale(1.35f)
+                .then(if (canBlur && blurDp > 0) Modifier.blur(blurDp.dp) else Modifier)
+                .alpha(if (canBlur) artAlpha else (artAlpha * 0.45f))
+        )
+    }
+
+    // 遮罩
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        skin.bg.copy(alpha = scrim),
+                        skin.bg.copy(alpha = (scrim + 0.10f).coerceAtMost(0.97f)),
+                        skin.bg.copy(alpha = (scrim + 0.22f).coerceAtMost(0.99f))
+                    )
+                )
+            )
+    )
+
+    if (style.liquid) {
+        // 顶部镜面高光
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.0f to Color.White.copy(alpha = 0.20f),
+                        0.18f to Color.White.copy(alpha = 0.07f),
+                        0.40f to Color.Transparent,
+                        1.0f to Color.Transparent
+                    )
+                )
+        )
+        // 上边缘折射亮线
+        Box(
+            Modifier
+                .fillMaxSize()
+                .drawBehind {
+                    drawLine(
+                        brush = Brush.horizontalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color.White.copy(alpha = 0.30f),
+                                Color.White.copy(alpha = 0.42f),
+                                Color.Transparent
+                            )
+                        ),
+                        start = Offset(0f, 0.5f),
+                        end = Offset(size.width, 0.5f),
+                        strokeWidth = 1.2.dp.toPx()
+                    )
+                }
+        )
+    }
+}
+
+/* ============================================================
+ * 背景玻璃调节行（样式 + 模糊 + 可见度）
+ * ============================================================ */
+
+@Composable
+fun GlassControls(
+    style: GlassStyle,
+    blurDp: Int,
+    visibility: Int,
+    onStyleChange: (GlassStyle) -> Unit,
+    onBlurChange: (Int) -> Unit,
+    onVisibilityChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        // 样式
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            GlassStyle.entries.forEach { s ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (s == style) skin.accentGlow else skin.surface3)
+                        .clickable { onStyleChange(s) }
+                        .padding(vertical = 7.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        s.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (s == style) skin.accent else skin.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
+
+        if (style != GlassStyle.OFF) {
+            SliderLine("模糊", "${blurDp}dp", (blurDp / 80f)) { f ->
+                onBlurChange((f * 80).roundToInt())
+            }
+            SliderLine("透出", "$visibility%", visibility / 100f) { f ->
+                onVisibilityChange((f * 100).roundToInt())
+            }
+        }
+    }
+}
+
+@Composable
+private fun SliderLine(
+    label: String,
+    valueText: String,
+    value: Float,
+    onChange: (Float) -> Unit
+) {
+    val skin = LocalSkin.current
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = skin.textMuted, modifier = Modifier.width(28.dp))
+        SonanceSlider(
+            value = value,
+            onValueChange = onChange,
+            modifier = Modifier
+                .weight(1f)
+                .height(26.dp),
+            trackHeight = 3.dp,
+            thumbSize = 11.dp,
+            alwaysShowThumb = true
+        )
+        Text(
+            valueText,
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.accent,
+            modifier = Modifier.width(42.dp),
+            textAlign = TextAlign.End
+        )
+    }
+}
+
+/* ============================================================
+ * 字号 / 简繁调节
+ * ============================================================ */
+
+@Composable
+private fun FontSizeRow(
+    fontSize: Int,
+    onFontSizeChange: (Int) -> Unit,
+    convertT2S: Boolean,
+    onT2SChange: (Boolean) -> Unit,
+    skin: Skin
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text("A", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+        SonanceSlider(
+            value = (fontSize - Prefs.MIN_LYRICS_FONT).toFloat() /
+                (Prefs.MAX_LYRICS_FONT - Prefs.MIN_LYRICS_FONT).toFloat(),
+            onValueChange = { f ->
+                val v = Prefs.MIN_LYRICS_FONT +
+                    (f * (Prefs.MAX_LYRICS_FONT - Prefs.MIN_LYRICS_FONT)).roundToInt()
+                onFontSizeChange(v.coerceIn(Prefs.MIN_LYRICS_FONT, Prefs.MAX_LYRICS_FONT))
+            },
+            modifier = Modifier
+                .weight(1f)
+                .height(28.dp),
+            trackHeight = 3.dp,
+            thumbSize = 12.dp,
+            alwaysShowThumb = true
+        )
+        Text(
+            "$fontSize",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.accent,
+            modifier = Modifier.width(24.dp),
+            textAlign = TextAlign.End
+        )
+        Box(Modifier.width(1.dp).height(20.dp).background(skin.border))
+        Text(
+            "简",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (convertT2S) skin.accent else skin.textMuted
+        )
+        androidx.compose.material3.Switch(
+            checked = convertT2S,
+            onCheckedChange = onT2SChange,
+            modifier = Modifier.height(24.dp),
+            colors = androidx.compose.material3.SwitchDefaults.colors(
+                checkedThumbColor = skin.onAccent,
+                checkedTrackColor = skin.accent,
+                uncheckedThumbColor = skin.textMuted,
+                uncheckedTrackColor = skin.surface3
+            )
+        )
+    }
+}
+
+/* ============================================================
+ * 带时间轴：跟随播放高亮 + 自动居中
+ * ============================================================ */
+
+@Composable
+private fun SyncedLyrics(lines: List<LyricLine>, positionMs: Long, fontSizeSp: Int) {
+    val skin = LocalSkin.current
+    val listState = rememberLazyListState()
+    val current = remember(positionMs, lines) { lines.indexAt(positionMs) }
+
+    // 当前行变化时滚到中间（contentPadding 让首尾也能居中）
+    LaunchedEffect(current) {
+        if (current >= 0) {
+            runCatching { listState.animateScrollToItem(current) }
+        }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val centerPad = maxHeight * 0.34f
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 28.dp,
+                end = 28.dp,
+                top = centerPad,
+                bottom = centerPad
+            ),
+            verticalArrangement = Arrangement.spacedBy((fontSizeSp * 0.62f).dp)
+        ) {
+            itemsIndexed(lines) { index, line ->
+                val isCurrent = index == current
+                Text(
+                    text = line.text,
+                    fontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp,
+                    lineHeight = (fontSizeSp * 1.5f).sp,
+                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                    color = when {
+                        isCurrent -> skin.accent
+                        index < current -> skin.textMuted
+                        else -> skin.textDim
+                    },
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+/* ============================================================
+ * 纯文本
+ * ============================================================ */
+
+@Composable
+private fun PlainLyrics(lines: List<String>, fontSizeSp: Int) {
+    val skin = LocalSkin.current
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 28.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy((fontSizeSp * 0.5f).dp)
+    ) {
+        itemsIndexed(lines) { _, line ->
+            Text(
+                text = line,
+                fontSize = fontSizeSp.sp,
+                lineHeight = (fontSizeSp * 1.5f).sp,
+                color = skin.textDim,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+/* ============================================================
+ * 没有歌词
+ * ============================================================ */
+
+@Composable
+private fun EmptyLyrics(song: Song, onlineEnabled: Boolean, onManualSearch: () -> Unit) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(skin.surface2)
+                    .padding(horizontal = 20.dp, vertical = 18.dp)
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = SonanceIcons.Music,
+                    contentDescription = null,
+                    tint = skin.textMuted,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                if (onlineEnabled) "本地和在线都没找到歌词" else "这首歌没有内嵌歌词",
+                style = MaterialTheme.typography.titleMedium,
+                color = skin.text,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                if (onlineEnabled) {
+                    "已尝试：① 文件内嵌歌词（ID3 USLT / FLAC LYRICS / M4A ©lyr）\n" +
+                        "② 在线歌词接口（LrcAPI）\n" +
+                        "歌名/歌手标签不准的话，可以手动填一次。"
+                } else {
+                    "歌词从音频文件里直接读取（ID3 的 USLT、FLAC 的 LYRICS、M4A 的 ©lyr）。\n" +
+                        "纯本地解析，不联网、不上传。\n" +
+                        "想要联网补歌词，可以到「设置 → 歌词」里打开在线歌词。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                if (onlineEnabled) {
+                    PillButton(label = "手动搜索", onClick = onManualSearch)
+                }
+                PillButton(
+                    label = "清除本首缓存",
+                    onClick = {
+                        val base = Prefs(context).lyricsApiBase
+                        LyricsRepository.forget(context, song.title, song.artist, base)
+                    },
+                    filled = false
+                )
+            }
+        }
+    }
+}
+
+/* ============================================================
+ * 手动搜索对话框
+ * ============================================================ */
+
+@Composable
+private fun LyricsSearchDialog(
+    initialTitle: String,
+    initialArtist: String,
+    onDismiss: () -> Unit,
+    onConfirm: (title: String, artist: String) -> Unit
+) {
+    val skin = LocalSkin.current
+    var title by remember { mutableStateOf(initialTitle) }
+    var artist by remember { mutableStateOf(initialArtist) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = skin.surface2,
+        titleContentColor = skin.text,
+        textContentColor = skin.textDim,
+        title = {
+            Text("手动搜索歌词", style = MaterialTheme.typography.titleMedium, color = skin.text)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "默认填的是当前歌曲的标签信息。如果之前匹配到错误歌词，\n" +
+                        "改一下歌名或歌手再搜一次，搜到会记住这次的写法。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+                LabeledField(
+                    label = "歌曲名",
+                    value = title,
+                    onValueChange = { title = it },
+                    skin = skin
+                )
+                LabeledField(
+                    label = "歌手",
+                    value = artist,
+                    onValueChange = { artist = it },
+                    skin = skin
+                )
+            }
+        },
+        confirmButton = {
+            PillButton(
+                label = "搜索",
+                onClick = {
+                    if (title.isNotBlank()) onConfirm(title.trim(), artist.trim())
+                }
+            )
+        },
+        dismissButton = {
+            PillButton(label = "取消", onClick = onDismiss, filled = false)
+        }
+    )
+}
+
+@Composable
+private fun LabeledField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    skin: Skin
+) {
+    Column {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(skin.surface)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = skin.text),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(skin.accent),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
