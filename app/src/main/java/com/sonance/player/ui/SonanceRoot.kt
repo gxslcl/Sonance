@@ -282,7 +282,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 },
                 onPlayAt = { vm.player.playAt(it) },
                 onToggleFavorite = { vm.toggleFavorite(it) },
-                onShuffle = { vm.player.toggleShuffle() },
+                onShuffle = { vm.toggleShuffle() },
                 onPrev = { vm.player.previous() },
                 onPlayPause = { vm.player.togglePlay() },
                 onNext = { vm.player.next() },
@@ -316,7 +316,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             onDismiss = { queueOpen = false },
             onPlayAt = { vm.player.playAt(it) },
             onRemoveAt = { vm.player.removeAt(it) },
-            onShuffle = { vm.player.toggleShuffle() },
+            onShuffle = { vm.toggleShuffle() },
             onClear = {
                 vm.player.clearQueue()
                 queueOpen = false
@@ -572,7 +572,7 @@ private fun ExpandedLayout(
                 NowPlayingPanel(
                     state = playerState,
                     song = null,
-                    onShuffle = { vm.player.toggleShuffle() },
+                    onShuffle = { vm.toggleShuffle() },
                     onPrev = { vm.player.previous() },
                     onPlayPause = { vm.player.togglePlay() },
                     onNext = { vm.player.next() },
@@ -594,7 +594,7 @@ private fun ExpandedLayout(
                 state = playerState,
                 song = null,
                 onOpen = onOpenFullPlayer,
-                onShuffle = { vm.player.toggleShuffle() },
+                onShuffle = { vm.toggleShuffle() },
                 onPrev = { vm.player.previous() },
                 onPlayPause = { vm.player.togglePlay() },
                 onNext = { vm.player.next() },

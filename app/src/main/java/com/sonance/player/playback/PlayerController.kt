@@ -78,7 +78,13 @@ class PlayerController(private val context: Context) {
     private var pendingRequest: PlayRequest? = null
     private var controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
 
-    private data class PlayRequest(val songs: List<Song>, val index: Int, val autoplay: Boolean)
+    private data class PlayRequest(
+        val songs: List<Song>,
+        val index: Int,
+        val autoplay: Boolean,
+        /** 从第几毫秒开始播。重排队列（开关随机）时要保住当前进度，不能从头开始 */
+        val startPositionMs: Long = 0L
+    )
 
     init {
         connect()
@@ -253,8 +259,13 @@ class PlayerController(private val context: Context) {
 
     // ===== 对外操作 =====
 
-    fun play(songs: List<Song>, index: Int, autoplay: Boolean = true) {
-        val req = PlayRequest(songs, index, autoplay)
+    fun play(
+        songs: List<Song>,
+        index: Int,
+        autoplay: Boolean = true,
+        startPositionMs: Long = 0L
+    ) {
+        val req = PlayRequest(songs, index, autoplay, startPositionMs)
         val c = controller
         if (c == null) {
             pendingRequest = req
@@ -269,7 +280,7 @@ class PlayerController(private val context: Context) {
         if (items.isEmpty()) return
         val start = req.index.coerceIn(0, items.lastIndex)
         lastNotifiedId = -1L
-        c.setMediaItems(items, start, 0L)
+        c.setMediaItems(items, start, req.startPositionMs.coerceAtLeast(0L))
         c.prepare()
         if (req.autoplay) c.play() else c.pause()
         refreshQueue(c)

@@ -2,6 +2,8 @@ package com.sonance.player.ui.components
 
 import android.os.Build
 import androidx.compose.foundation.Image
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -87,8 +89,17 @@ fun LyricsOverlay(
     song: Song,
     positionMs: Long,
     prefs: Prefs,
+    /** 点歌词某一行时把播放进度跳到那一句 */
+    onSeek: (Long) -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * 就地嵌入模式（盖在封面区域上，而不是整屏另开一页）。
+     *
+     * 差别只有两点：不再重复显示底部歌名/歌手（页面下面本来就有），
+     * 以及去掉 navigationBarsPadding（它不在屏幕底部）。
+     */
+    inline: Boolean = false
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
@@ -284,39 +295,42 @@ fun LyricsOverlay(
                     lyrics is Lyrics.Synced -> SyncedLyrics(
                         lines = lyrics.lines,
                         positionMs = positionMs,
-                        fontSizeSp = fontSize
+                        fontSizeSp = fontSize,
+                        onSeek = onSeek
                     )
 
                     else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize)
                 }
             }
 
-            // ---- 底部歌名 ----
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 28.dp, vertical = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                Text(
-                    text = song.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = skin.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    text = song.artist,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
+            // ---- 底部歌名（就地嵌入时不重复显示，页面下方本来就有）----
+            if (!inline) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 28.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text(
+                        text = song.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = song.artist,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
     }
@@ -645,19 +659,49 @@ private fun FontSizeRow(
  * ============================================================ */
 
 @Composable
-private fun SyncedLyrics(lines: List<LyricLine>, positionMs: Long, fontSizeSp: Int) {
+private fun SyncedLyrics(
+    lines: List<LyricLine>,
+    positionMs: Long,
+    fontSizeSp: Int,
+    onSeek: (Long) -> Unit
+) {
     val skin = LocalSkin.current
     val listState = rememberLazyListState()
     val current = remember(positionMs, lines) { lines.indexAt(positionMs) }
 
-    // 当前行变化时滚到中间（contentPadding 让首尾也能居中）
+    // 用户最近一次触摸屏幕的时间。
+    //
+    // 为什么需要它：`positionMs` 每 500ms 变一次，当前行一变就 animateScrollToItem，
+    // 用户根本没法手动翻到别处 —— 刚滑走就被拽回来。
+    // 这里记录触摸时刻，触摸后 6 秒内不自动跟随；之后就自然恢复（当前行还在继续变）。
+    //
+    // 用数组而不是 Compose state：它每帧都可能被写，但没有任何 composable 读它，
+    // 走快照系统纯属浪费。
+    val lastTouch = remember { longArrayOf(0L) }
+
+    // 当前行变化时滚到中间（contentPadding 让首尾也能居中），但用户正在浏览时不打扰
     LaunchedEffect(current) {
-        if (current >= 0) {
-            runCatching { listState.animateScrollToItem(current) }
-        }
+        if (current < 0) return@LaunchedEffect
+        if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < 6_000L) return@LaunchedEffect
+        runCatching { listState.animateScrollToItem(current) }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            // 只**观察**指针事件，不消费 —— LazyColumn 自己的滚动不受影响。
+            // 用 PointerEventPass.Initial 在分发链最前面拿到，确保不会漏。
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val e = awaitPointerEvent(PointerEventPass.Initial)
+                        if (e.changes.any { it.pressed }) {
+                            lastTouch[0] = android.os.SystemClock.uptimeMillis()
+                        }
+                    }
+                }
+            }
+    ) {
         val centerPad = maxHeight * 0.34f
         LazyColumn(
             state = listState,
@@ -672,6 +716,8 @@ private fun SyncedLyrics(lines: List<LyricLine>, positionMs: Long, fontSizeSp: I
         ) {
             itemsIndexed(lines) { index, line ->
                 val isCurrent = index == current
+                // 有时间轴的行才可点：点了把播放进度跳到那一句
+                val seekable = line.timeMs >= 0
                 Text(
                     text = line.text,
                     fontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp,
@@ -683,7 +729,18 @@ private fun SyncedLyrics(lines: List<LyricLine>, positionMs: Long, fontSizeSp: I
                         else -> skin.textDim
                     },
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (seekable) {
+                                Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onSeek(line.timeMs) }
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .padding(vertical = 2.dp)
                 )
             }
         }

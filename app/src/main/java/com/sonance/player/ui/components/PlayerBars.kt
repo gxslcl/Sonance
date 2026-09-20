@@ -57,6 +57,10 @@ fun TransportControls(
     onNext: () -> Unit,
     onRepeat: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 当前是否正在就地显示歌词 */
+    lyricsOn: Boolean = false,
+    /** 点歌词图标：在**当前页面**就地显示/收起歌词（不切页） */
+    onToggleLyrics: () -> Unit = {},
     ctrlSize: Dp = 36.dp,
     ctrlIcon: Dp = 18.dp,
     playSize: Dp = 52.dp,
@@ -103,6 +107,15 @@ fun TransportControls(
             size = ctrlSize,
             iconSize = ctrlIcon,
             active = repeat != RepeatMode.OFF
+        )
+        // 歌词：点了在**当前页面**就地显示，不跳转到另一页
+        CtrlButton(
+            icon = SonanceIcons.Lyrics,
+            contentDescription = if (lyricsOn) "收起歌词" else "显示歌词",
+            onClick = onToggleLyrics,
+            size = ctrlSize,
+            iconSize = ctrlIcon,
+            active = lyricsOn
         )
     }
 }

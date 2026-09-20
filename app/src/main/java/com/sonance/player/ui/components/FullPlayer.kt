@@ -1,6 +1,7 @@
 package com.sonance.player.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,9 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
@@ -41,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
@@ -78,6 +83,16 @@ fun FullPlayer(
     val context = LocalContext.current
     val prefs = remember { com.sonance.player.data.Prefs(context) }
     val scope = rememberCoroutineScope()
+
+    /**
+     * 是否在**当前页面**就地显示歌词。
+     *
+     * 与「歌词层」（HorizontalPager 的第二页）是两条不同的路径：
+     * 这个开关只把封面区域换成歌词，页面本身不切换 —— 歌名、进度条、
+     * 控制条全部留在原位，用户还能直接暂停/切歌。
+     * 由播放控制行里那个歌词小图标切换。
+     */
+    var inlineLyrics by rememberSaveable { mutableStateOf(false) }
 
     // 播放页的三层（封面 / 歌词 / 律动柱）做成**环形轮播**：
     // 页数取极大值、用「页号 % 3」映射到层，于是左右两个方向都能一直滑下去，
@@ -163,41 +178,42 @@ fun FullPlayer(
         0 -> Column(Modifier.fillMaxSize()) {
 
             // ===== 顶栏（固定，不随页滚动）=====
-            Row(
+            //
+            // 用 Box 叠一层，而不是把标题塞进 Row 的中间格：
+            // 左侧只有 1 个图标、右侧有 3 个，塞进 Row 的话标题是在**剩余空间**里居中，
+            // 结果明显偏左。这里让标题独立居中于整条栏。
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
                     .height(56.dp)
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 8.dp)
             ) {
-                IconAction(
-                    icon = SonanceIcons.ChevronDown,
-                    contentDescription = "收起",
-                    onClick = onClose,
-                    iconSize = 22.dp
-                )
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "正在播放",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = skin.textMuted
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconAction(
+                        icon = SonanceIcons.ChevronDown,
+                        contentDescription = "收起",
+                        onClick = onClose,
+                        iconSize = 22.dp
                     )
-                }
-                // 歌词 / 律动柱开关：当前就在那一层时再点一次，回到封面层
-                IconAction(
-                    icon = SonanceIcons.Lyrics,
-                    contentDescription = if (layer == PlayerLayer.LYRICS) "关闭歌词" else "显示歌词",
-                    onClick = {
-                        goToLayer(
-                            if (layer == PlayerLayer.LYRICS) PlayerLayer.COVER else PlayerLayer.LYRICS
-                        )
-                    },
-                    iconSize = 20.dp,
-                    tint = if (layer == PlayerLayer.LYRICS) skin.accent else skin.textMuted
-                )
-                IconAction(
-                    icon = SonanceIcons.Equalizer,
+                    Spacer(Modifier.weight(1f))
+                    // 歌词 / 律动柱开关：当前就在那一层时再点一次，回到封面层
+                    IconAction(
+                        icon = SonanceIcons.Lyrics,
+                        contentDescription = if (layer == PlayerLayer.LYRICS) "关闭歌词" else "显示歌词",
+                        onClick = {
+                            goToLayer(
+                                if (layer == PlayerLayer.LYRICS) PlayerLayer.COVER else PlayerLayer.LYRICS
+                            )
+                        },
+                        iconSize = 20.dp,
+                        tint = if (layer == PlayerLayer.LYRICS) skin.accent else skin.textMuted
+                    )
+                    IconAction(
+                        icon = SonanceIcons.Equalizer,
                     contentDescription = if (layer == PlayerLayer.VISUALIZER) "关闭律动柱" else "显示律动柱",
                     onClick = {
                         goToLayer(
@@ -211,11 +227,20 @@ fun FullPlayer(
                     iconSize = 20.dp,
                     tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
                 )
-                IconAction(
-                    icon = SonanceIcons.Queue,
-                    contentDescription = "播放队列",
-                    onClick = onOpenQueue,
-                    iconSize = 20.dp
+                    IconAction(
+                        icon = SonanceIcons.Queue,
+                        contentDescription = "播放队列",
+                        onClick = onOpenQueue,
+                        iconSize = 20.dp
+                    )
+                }
+
+                // 标题独立居中于整条栏，不受左右图标数量影响
+                Text(
+                    text = "正在播放",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.textMuted,
+                    modifier = Modifier.align(Alignment.Center)
                 )
             }
 
@@ -266,7 +291,10 @@ fun FullPlayer(
                         onSeek = onSeek,
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
-                        onOpenCover = onOpenCover
+                        onOpenCover = onOpenCover,
+                        prefs = prefs,
+                        lyricsOn = inlineLyrics,
+                        onToggleLyrics = { inlineLyrics = !inlineLyrics }
                     )
                 }
             }
@@ -278,6 +306,7 @@ fun FullPlayer(
                 song = currentSong,
                 positionMs = state.positionMs,
                 prefs = prefs,
+                onSeek = onSeek,
                 onClose = { goToLayer(PlayerLayer.COVER) },
                 modifier = Modifier.fillMaxSize()
             )
@@ -342,7 +371,11 @@ private fun PlayerPage(
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
-    onOpenCover: () -> Unit
+    onOpenCover: () -> Unit,
+    prefs: Prefs,
+    /** 是否正在**当前页面**就地显示歌词（不是切到另一页） */
+    lyricsOn: Boolean,
+    onToggleLyrics: () -> Unit
 ) {
     val skin = LocalSkin.current
     val seed = song.title + song.artist
@@ -384,18 +417,31 @@ private fun PlayerPage(
                 horizontalArrangement = Arrangement.spacedBy(40.dp)
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    CoverArt(
-                        albumId = song.albumId,
-                        seed = seed,
-                        modifier = Modifier
-                            .size(landscapeSide)
-                            .clip(RoundedCornerShape(16.dp)),
-                        cornerRadius = 16.dp,
-                        sizePx = 900,
-                        sourceUri = song.uri,
-                        songId = song.id,
-                        coverKey = OnlineCover.keyOf(song.title, song.artist)
-                    )
+                    // 就地显示歌词：盖住封面这块区域，右侧的歌名/进度/控制条保持原样
+                    if (lyricsOn) {
+                        LyricsOverlay(
+                            song = song,
+                            positionMs = positionMs,
+                            prefs = prefs,
+                            onSeek = onSeek,
+                            onClose = onToggleLyrics,
+                            modifier = Modifier.fillMaxSize(),
+                            inline = true
+                        )
+                    } else {
+                        CoverArt(
+                            albumId = song.albumId,
+                            seed = seed,
+                            modifier = Modifier
+                                .size(landscapeSide)
+                                .clip(RoundedCornerShape(16.dp)),
+                            cornerRadius = 16.dp,
+                            sizePx = 900,
+                            sourceUri = song.uri,
+                            songId = song.id,
+                            coverKey = OnlineCover.keyOf(song.title, song.artist)
+                        )
+                    }
                 }
                 Column(
                     modifier = Modifier
@@ -404,7 +450,7 @@ private fun PlayerPage(
                     verticalArrangement = Arrangement.Center
                 ) {
                     TrackText(song.title, song.artist, song.album)
-                    Spacer(Modifier.height(20.dp))
+                    Spacer(Modifier.height(18.dp))
                     ProgressBlock(frac, positionMs, durationMs, onSeek)
                     Spacer(Modifier.height(14.dp))
                     TransportControls(
@@ -416,6 +462,8 @@ private fun PlayerPage(
                         onPlayPause = onPlayPause,
                         onNext = onNext,
                         onRepeat = onRepeat,
+                        lyricsOn = lyricsOn,
+                        onToggleLyrics = onToggleLyrics,
                         ctrlSize = 40.dp,
                         ctrlIcon = 20.dp,
                         playSize = 60.dp,
@@ -441,23 +489,38 @@ private fun PlayerPage(
                         .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
-                    CoverArt(
-                        albumId = song.albumId,
-                        seed = seed,
-                        modifier = Modifier
-                            .size(portraitSide)
-                            .clip(RoundedCornerShape(16.dp)),
-                        cornerRadius = 16.dp,
-                        sizePx = 900,
-                        sourceUri = song.uri,
-                        songId = song.id,
-                        coverKey = OnlineCover.keyOf(song.title, song.artist)
-                    )
+                    // 歌词就地显示：盖住封面这块区域，下面的歌名 / 进度 / 控制条
+                    // 全部保持原位可见可用 —— 这就是「在当前页面显示歌词」，
+                    // 而不是滑到另一页去。
+                    if (lyricsOn) {
+                        LyricsOverlay(
+                            song = song,
+                            positionMs = positionMs,
+                            prefs = prefs,
+                            onSeek = onSeek,
+                            onClose = onToggleLyrics,
+                            modifier = Modifier.fillMaxSize(),
+                            inline = true
+                        )
+                    } else {
+                        CoverArt(
+                            albumId = song.albumId,
+                            seed = seed,
+                            modifier = Modifier
+                                .size(portraitSide)
+                                .clip(RoundedCornerShape(16.dp)),
+                            cornerRadius = 16.dp,
+                            sizePx = 900,
+                            sourceUri = song.uri,
+                            songId = song.id,
+                            coverKey = OnlineCover.keyOf(song.title, song.artist)
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(10.dp))
                 TrackText(song.title, song.artist, song.album, centered = true)
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(18.dp))
                 ProgressBlock(frac, positionMs, durationMs, onSeek)
                 Spacer(Modifier.height(16.dp))
                 TransportControls(
@@ -469,6 +532,8 @@ private fun PlayerPage(
                     onPlayPause = onPlayPause,
                     onNext = onNext,
                     onRepeat = onRepeat,
+                    lyricsOn = lyricsOn,
+                    onToggleLyrics = onToggleLyrics,
                     ctrlSize = 44.dp,
                     ctrlIcon = 22.dp,
                     playSize = 64.dp,

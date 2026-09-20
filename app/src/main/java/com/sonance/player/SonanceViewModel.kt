@@ -834,11 +834,69 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun songMap(): Map<Long, Song> = songs.associateBy { it.id }
 
+    // ===== 随机播放 =====
+
+    /**
+     * 开启随机前的原始队列顺序，关闭随机时用来还原。
+     * 只保存一份 —— 每次「开」的时候覆盖，「关」的时候消费掉。
+     */
+    private var preShuffleOrder: List<Song>? = null
+
+    /** 当前播放队列（按播放器里的顺序还原成 Song 列表） */
+    private fun currentQueue(): List<Song> {
+        val map = songMap()
+        return player.state.value.queueIds.mapNotNull { map[it] }
+    }
+
+    /**
+     * 开关随机播放。
+     *
+     * 为什么是**重排队列**而不是只切播放器的 shuffle 标志：
+     * 播放页的上下滑动是 `VerticalPager`，页序 = 队列顺序。只切
+     * `shuffleModeEnabled` 的话，`seekToNext()` 确实会随机，但**滑动仍然是时间轴顺序** ——
+     * 这就是"开了随机，上下滑还是按原顺序"的原因。
+     *
+     * 这里直接把队列本身打乱（当前歌放队首，其余随机），于是：
+     * 上下滑动、上一首/下一首、自动续播、队列页显示，全都走同一份随机序。
+     * 关闭时用 [preShuffleOrder] 还原原顺序，并把播放位置停在当前这首歌上。
+     */
+    fun toggleShuffle() {
+        val st = player.state.value
+        if (!st.shuffle) {
+            val q = currentQueue()
+            if (q.size > 1) {
+                preShuffleOrder = q
+                val cur = q.getOrNull(st.queueIndex)
+                val rest = q.filter { it.id != cur?.id }.shuffled()
+                val shuffled = if (cur != null) listOf(cur) + rest else rest
+                player.toggleShuffle()
+                // 保住进度：重排队列不等于重头播
+                player.play(shuffled, 0, autoplay = st.isPlaying, startPositionMs = st.positionMs)
+                showToast("随机播放已开启")
+                return
+            }
+        } else {
+            val orig = preShuffleOrder
+            if (orig != null) {
+                val idx = orig.indexOfFirst { it.id == st.mediaId }.coerceAtLeast(0)
+                player.toggleShuffle()
+                player.play(orig, idx, autoplay = st.isPlaying, startPositionMs = st.positionMs)
+                preShuffleOrder = null
+                showToast("随机播放已关闭")
+                return
+            }
+        }
+        // 队列只有一首 / 没有记录过原顺序：只切标志
+        player.toggleShuffle()
+    }
+
     // ===== 播放入口 =====
 
     fun playFrom(list: List<Song>, song: Song) {
         val idx = list.indexOfFirst { it.id == song.id }
         player.play(list, if (idx < 0) 0 else idx)
+        // 换了播放列表，之前记的原顺序就失效了
+        preShuffleOrder = null
         showToast("正在播放 · ${song.title}")
     }
 
@@ -846,6 +904,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (list.isEmpty()) return
         val ordered = if (shuffled) list.shuffled() else list
         player.play(ordered, 0)
+        preShuffleOrder = null
         showToast(if (shuffled) "随机播放 ${list.size} 首" else "播放全部 ${list.size} 首")
     }
 

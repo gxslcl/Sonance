@@ -78,12 +78,36 @@ class AudioVisualizer(barCount: Int) {
             hann[i] = (0.5 - 0.5 * cos(2.0 * PI * i / (fftN - 1))).toFloat()
             i++
         }
+        // 频段边界：先按对数分布算，再量化成**严格递增**的整数边界。
+        //
+        // 为什么不能直接 toInt()：对数分布下低频端相邻柱子的边界差不到 1 个 bin，
+        // toInt() 之后会落在同一个 bin 上 → 这几根柱子高度**完全相同** → 视觉上糊成
+        // 一整块，看起来"左边的柱子比右边明显少"。
+        // 实测：48 柱时前 6 根都映射到 bin 1（20% 的柱子重复）；
+        // 96 柱时前 12 根都是 bin 1（31% 重复），全在左侧。
+        //
+        // 这里保证每根柱子至少分到 1 个独立 bin。usable(384) 远大于最大柱数(128)，
+        // 所以不会把高频端挤没。
+        var prev = 0
         i = 0
         while (i <= bars) {
-            bandEdges[i] = logIndex(i, bars, usable)
+            val raw = logIndex(i, bars, usable)
+            val v = maxOf(raw, prev + 1).coerceAtMost(usable)
+            bandEdges[i] = v
+            prev = v
             i++
         }
+        bandEdges[bars] = usable
     }
+
+    /**
+     * 频段边界的只读快照，**只给单元测试用**。
+     *
+     * 它必须满足「严格递增」：一旦相邻两根柱子落在同一个 bin 上，
+     * 它们的高度就完全一样，视觉上会糊成一块（表现就是"左边的柱子比右边少"）。
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun bandEdgesSnapshot(): IntArray = bandEdges.copyOf()
 
     /**
      * 保留旧签名以免改动 UI —— 新数据源和 audio session 无关，[sessionId] 被忽略。

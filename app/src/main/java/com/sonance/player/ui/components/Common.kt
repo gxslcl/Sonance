@@ -111,7 +111,17 @@ fun CoverArt(
     val online = ArtworkLoader.online(songId)
 
     Box(modifier.clip(RoundedCornerShape(cornerRadius))) {
-        val bmp = bitmap ?: online
+        // ⚠️ 顺序是 `online ?: bitmap`，**不能反过来**。
+        //
+        // 本地/内嵌封面优先的话，用户「手动搜索封面」选中的那张永远不会生效 ——
+        // 因为能用到这个功能的歌，基本都已经有本地封面了，`bitmap` 一直非空，
+        // 于是提示"封面已更新"但画面纹丝不动。
+        //
+        // 反过来是安全的：`onlineCovers` 只在两种情况下有非空值 ——
+        // ① `ensureCover` 自动补的，而它只在本地确实没有封面时才会去补；
+        // ② `applyCover` 用户手选的，那就该盖过本地封面。
+        // 值为 null（"确认没有"的哨兵）时 `online` 返回 null，自然回落到本地封面。
+        val bmp = online ?: bitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp,
