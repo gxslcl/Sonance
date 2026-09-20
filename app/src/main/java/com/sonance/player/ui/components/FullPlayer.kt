@@ -236,7 +236,10 @@ fun FullPlayer(
                 VerticalPager(
                     state = pagerState,
                     beyondViewportPageCount = 1,
-                    key = { page -> queue.getOrNull(page)?.id ?: page },
+                    // key 必须带上页码：`playNext` 不查重，队列里可能出现同一首歌两次
+                    // （用户对已在队列里的歌点"下一首播放"就会），只拿 song.id 当 key
+                    // 会撞成重复 key，分页器直接抛 "Key ... was already used"。
+                    key = { page -> "$page-${queue.getOrNull(page)?.id ?: -1L}" },
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
