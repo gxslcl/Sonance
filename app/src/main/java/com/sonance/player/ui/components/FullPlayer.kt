@@ -84,16 +84,6 @@ fun FullPlayer(
     val prefs = remember { com.sonance.player.data.Prefs(context) }
     val scope = rememberCoroutineScope()
 
-    /**
-     * 是否在**当前页面**就地显示歌词。
-     *
-     * 与「歌词层」（HorizontalPager 的第二页）是两条不同的路径：
-     * 这个开关只把封面区域换成歌词，页面本身不切换 —— 歌名、进度条、
-     * 控制条全部留在原位，用户还能直接暂停/切歌。
-     * 由播放控制行里那个歌词小图标切换。
-     */
-    var inlineLyrics by rememberSaveable { mutableStateOf(false) }
-
     // 播放页的三层（封面 / 歌词 / 律动柱）做成**环形轮播**：
     // 页数取极大值、用「页号 % 3」映射到层，于是左右两个方向都能一直滑下去，
     // 到边自然绕回另一端。起始页取 3 的倍数，保证初始停在封面层。
@@ -292,9 +282,7 @@ fun FullPlayer(
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
                         onOpenCover = onOpenCover,
-                        prefs = prefs,
-                        lyricsOn = inlineLyrics,
-                        onToggleLyrics = { inlineLyrics = !inlineLyrics }
+                        onOpenLyrics = { goToLayer(PlayerLayer.LYRICS) }
                     )
                 }
             }
@@ -372,10 +360,8 @@ private fun PlayerPage(
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit,
-    prefs: Prefs,
-    /** 是否正在**当前页面**就地显示歌词（不是切到另一页） */
-    lyricsOn: Boolean,
-    onToggleLyrics: () -> Unit
+    /** 点「歌词」入口：切到全屏歌词页 */
+    onOpenLyrics: () -> Unit
 ) {
     val skin = LocalSkin.current
     val seed = song.title + song.artist
@@ -417,31 +403,18 @@ private fun PlayerPage(
                 horizontalArrangement = Arrangement.spacedBy(40.dp)
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    // 就地显示歌词：盖住封面这块区域，右侧的歌名/进度/控制条保持原样
-                    if (lyricsOn) {
-                        LyricsOverlay(
-                            song = song,
-                            positionMs = positionMs,
-                            prefs = prefs,
-                            onSeek = onSeek,
-                            onClose = onToggleLyrics,
-                            modifier = Modifier.fillMaxSize(),
-                            inline = true
-                        )
-                    } else {
-                        CoverArt(
-                            albumId = song.albumId,
-                            seed = seed,
-                            modifier = Modifier
-                                .size(landscapeSide)
-                                .clip(RoundedCornerShape(16.dp)),
-                            cornerRadius = 16.dp,
-                            sizePx = 900,
-                            sourceUri = song.uri,
-                            songId = song.id,
-                            coverKey = OnlineCover.keyOf(song.title, song.artist)
-                        )
-                    }
+                    CoverArt(
+                        albumId = song.albumId,
+                        seed = seed,
+                        modifier = Modifier
+                            .size(landscapeSide)
+                            .clip(RoundedCornerShape(16.dp)),
+                        cornerRadius = 16.dp,
+                        sizePx = 900,
+                        sourceUri = song.uri,
+                        songId = song.id,
+                        coverKey = OnlineCover.keyOf(song.title, song.artist)
+                    )
                 }
                 Column(
                     modifier = Modifier
@@ -450,6 +423,8 @@ private fun PlayerPage(
                     verticalArrangement = Arrangement.Center
                 ) {
                     TrackText(song.title, song.artist, song.album)
+                    Spacer(Modifier.height(12.dp))
+                    LyricsEntryButton(onClick = onOpenLyrics)
                     Spacer(Modifier.height(18.dp))
                     ProgressBlock(frac, positionMs, durationMs, onSeek)
                     Spacer(Modifier.height(14.dp))
@@ -462,8 +437,6 @@ private fun PlayerPage(
                         onPlayPause = onPlayPause,
                         onNext = onNext,
                         onRepeat = onRepeat,
-                        lyricsOn = lyricsOn,
-                        onToggleLyrics = onToggleLyrics,
                         ctrlSize = 40.dp,
                         ctrlIcon = 20.dp,
                         playSize = 60.dp,
@@ -489,37 +462,24 @@ private fun PlayerPage(
                         .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
-                    // 歌词就地显示：盖住封面这块区域，下面的歌名 / 进度 / 控制条
-                    // 全部保持原位可见可用 —— 这就是「在当前页面显示歌词」，
-                    // 而不是滑到另一页去。
-                    if (lyricsOn) {
-                        LyricsOverlay(
-                            song = song,
-                            positionMs = positionMs,
-                            prefs = prefs,
-                            onSeek = onSeek,
-                            onClose = onToggleLyrics,
-                            modifier = Modifier.fillMaxSize(),
-                            inline = true
-                        )
-                    } else {
-                        CoverArt(
-                            albumId = song.albumId,
-                            seed = seed,
-                            modifier = Modifier
-                                .size(portraitSide)
-                                .clip(RoundedCornerShape(16.dp)),
-                            cornerRadius = 16.dp,
-                            sizePx = 900,
-                            sourceUri = song.uri,
-                            songId = song.id,
-                            coverKey = OnlineCover.keyOf(song.title, song.artist)
-                        )
-                    }
+                    CoverArt(
+                        albumId = song.albumId,
+                        seed = seed,
+                        modifier = Modifier
+                            .size(portraitSide)
+                            .clip(RoundedCornerShape(16.dp)),
+                        cornerRadius = 16.dp,
+                        sizePx = 900,
+                        sourceUri = song.uri,
+                        songId = song.id,
+                        coverKey = OnlineCover.keyOf(song.title, song.artist)
+                    )
                 }
 
                 Spacer(Modifier.height(10.dp))
                 TrackText(song.title, song.artist, song.album, centered = true)
+                Spacer(Modifier.height(12.dp))
+                LyricsEntryButton(onClick = onOpenLyrics)
                 Spacer(Modifier.height(18.dp))
                 ProgressBlock(frac, positionMs, durationMs, onSeek)
                 Spacer(Modifier.height(16.dp))
@@ -532,8 +492,6 @@ private fun PlayerPage(
                     onPlayPause = onPlayPause,
                     onNext = onNext,
                     onRepeat = onRepeat,
-                    lyricsOn = lyricsOn,
-                    onToggleLyrics = onToggleLyrics,
                     ctrlSize = 44.dp,
                     ctrlIcon = 22.dp,
                     playSize = 64.dp,
@@ -653,6 +611,38 @@ private fun BottomRow(
             onClick = onOpenCover,
             iconSize = 20.dp,
             tint = skin.textMuted
+        )
+    }
+}
+
+/**
+ * 「歌词」入口胶囊。
+ *
+ * 顶栏虽然有一个歌词图标按钮，但纯图标辨识度低、用户反馈找不到，
+ * 所以在封面页的控制区给一个**带文字**的入口，点一下切到全屏歌词页。
+ */
+@Composable
+private fun LyricsEntryButton(onClick: () -> Unit) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(skin.surface2)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        androidx.compose.material3.Icon(
+            imageVector = SonanceIcons.Lyrics,
+            contentDescription = null,
+            tint = skin.accent,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = "歌词",
+            style = MaterialTheme.typography.labelMedium,
+            color = skin.text
         )
     }
 }

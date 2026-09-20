@@ -92,14 +92,7 @@ fun LyricsOverlay(
     /** 点歌词某一行时把播放进度跳到那一句 */
     onSeek: (Long) -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier,
-    /**
-     * 就地嵌入模式（盖在封面区域上，而不是整屏另开一页）。
-     *
-     * 差别只有两点：不再重复显示底部歌名/歌手（页面下面本来就有），
-     * 以及去掉 navigationBarsPadding（它不在屏幕底部）。
-     */
-    inline: Boolean = false
+    modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
@@ -303,34 +296,32 @@ fun LyricsOverlay(
                 }
             }
 
-            // ---- 底部歌名（就地嵌入时不重复显示，页面下方本来就有）----
-            if (!inline) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 28.dp, vertical = 16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Text(
-                        text = song.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = skin.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
-                    Text(
-                        text = song.artist,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = skin.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center
-                    )
-                }
+            // ---- 底部歌名 ----
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 28.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = song.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = skin.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = song.artist,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
             }
         }
     }
