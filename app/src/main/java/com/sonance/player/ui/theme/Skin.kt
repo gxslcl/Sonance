@@ -81,7 +81,7 @@ data class Skin(
 
 private fun c(hex: Long) = Color(hex)
 
-/** 8 套皮肤 */
+/** 14 套皮肤：6 套深色 + 8 套浅色 */
 object Skins {
 
     /** 1 · 午夜琥珀 —— 原型默认 */
@@ -246,9 +246,101 @@ object Skins {
         )
     )
 
+    /** 10 · 雾霭蓝 */
+    val Mist = Skin(
+        id = "mist",
+        name = "雾霭蓝",
+        tagline = "清冷 · 雾蓝",
+        isLight = true,
+        bg = c(0xFFF3F6FA), surface = c(0xFFFFFFFF), surface2 = c(0xFFE9EFF6), surface3 = c(0xFFDAE3EE),
+        border = c(0xFFE1E8F0), border2 = c(0xFFC9D5E4),
+        text = c(0xFF17202B), textDim = c(0xFF5A6879), textMuted = c(0xFF93A1B2),
+        accent = c(0xFF2E6DB4), accentDim = c(0xFF1F5490), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x332E6DB4), danger = c(0xFFD1453D),
+        gradients = listOf(
+            listOf(c(0xFFDCE8F6), c(0xFFBCCFE8)),
+            listOf(c(0xFFD2E0F0), c(0xFFB3C8E3)),
+            listOf(c(0xFFE4EEF9), c(0xFFC6D8EC)),
+        )
+    )
+
+    /** 11 · 素白极简 */
+    val Cloud = Skin(
+        id = "cloud",
+        name = "素白极简",
+        tagline = "中性 · 极简",
+        isLight = true,
+        bg = c(0xFFF5F6F8), surface = c(0xFFFFFFFF), surface2 = c(0xFFECEEF1), surface3 = c(0xFFDFE2E7),
+        border = c(0xFFE4E7EB), border2 = c(0xFFCFD4DB),
+        text = c(0xFF1B1E23), textDim = c(0xFF5F656F), textMuted = c(0xFF969CA6),
+        accent = c(0xFF4A63E7), accentDim = c(0xFF3649B8), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x334A63E7), danger = c(0xFFD1453D),
+        gradients = listOf(
+            listOf(c(0xFFE3E6EC), c(0xFFC9CFD9)),
+            listOf(c(0xFFDADEE6), c(0xFFC1C7D3)),
+            listOf(c(0xFFEAEDF2), c(0xFFD2D8E0)),
+        )
+    )
+
+    /** 12 · 薰衣草田 */
+    val Lavender = Skin(
+        id = "lavender",
+        name = "薰衣草田",
+        tagline = "柔和 · 浅紫",
+        isLight = true,
+        bg = c(0xFFF8F6FC), surface = c(0xFFFFFFFF), surface2 = c(0xFFEFEAF8), surface3 = c(0xFFE1D9F0),
+        border = c(0xFFE9E3F5), border2 = c(0xFFD5CBE9),
+        text = c(0xFF1F1A2B), textDim = c(0xFF615878), textMuted = c(0xFF9C93B2),
+        accent = c(0xFF7A5AD0), accentDim = c(0xFF5E41AB), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x337A5AD0), danger = c(0xFFD1453D),
+        gradients = listOf(
+            listOf(c(0xFFE7DEF8), c(0xFFCFC0EE)),
+            listOf(c(0xFFDED4F4), c(0xFFC4B3E8)),
+            listOf(c(0xFFEDE6FA), c(0xFFD8CCF1)),
+        )
+    )
+
+    /** 13 · 珊瑚暖阳 */
+    val Coral = Skin(
+        id = "coral",
+        name = "珊瑚暖阳",
+        tagline = "暖阳 · 珊瑚",
+        isLight = true,
+        bg = c(0xFFFDF6F2), surface = c(0xFFFFFFFF), surface2 = c(0xFFFAEBE3), surface3 = c(0xFFF2DBCD),
+        border = c(0xFFF6E4DA), border2 = c(0xFFE8CBBA),
+        text = c(0xFF2B1C14), textDim = c(0xFF77584A), textMuted = c(0xFFB0968A),
+        accent = c(0xFFDE6239), accentDim = c(0xFFB44A28), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x33DE6239), danger = c(0xFFC9403A),
+        gradients = listOf(
+            listOf(c(0xFFFBDDCC), c(0xFFF3C3AA)),
+            listOf(c(0xFFF8D5C4), c(0xFFEFB99D)),
+            listOf(c(0xFFFCE4D6), c(0xFFF5CDB6)),
+        )
+    )
+
+    /** 14 · 陶土暖棕 */
+    val Clay = Skin(
+        id = "clay",
+        name = "陶土暖棕",
+        tagline = "质朴 · 陶土",
+        isLight = true,
+        bg = c(0xFFF9F4F0), surface = c(0xFFFFFFFF), surface2 = c(0xFFF2E7E0), surface3 = c(0xFFE5D5C9),
+        border = c(0xFFEFE1D8), border2 = c(0xFFDCC6B8),
+        text = c(0xFF26190F), textDim = c(0xFF6D5442), textMuted = c(0xFFA8917F),
+        accent = c(0xFF9C5B3C), accentDim = c(0xFF7A432A), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x339C5B3C), danger = c(0xFFC9403A),
+        gradients = listOf(
+            listOf(c(0xFFEDD9C8), c(0xFFDCC0AA)),
+            listOf(c(0xFFE6CEBB), c(0xFFD3B49C)),
+            listOf(c(0xFFF2E2D4), c(0xFFE0C8B4)),
+        )
+    )
+
     val all: List<Skin> = listOf(
+        // ---- 深色 ----
         MidnightAmber, Graphite, Ocean, NeonViolet, Forest, Crimson,
-        Ivory, Sakura, Mint
+        // ---- 浅色 ----
+        Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay
     )
 
     fun byId(id: String?): Skin = all.firstOrNull { it.id == id } ?: MidnightAmber

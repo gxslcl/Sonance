@@ -202,6 +202,16 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
     BackHandler(enabled = !fullPlayerOpen && detail != null) { detail = null }
+    // 设置页按返回 → 回主页面（「全部歌曲」），而不是直接退出应用。
+    //
+    // 必须注册在上面两个之后：BackHandler 是「后注册且 enabled 的优先」，
+    // 放在前面会被全屏播放页 / 详情页抢走。另外这里刻意要求 detail == null ——
+    // 详情页的返回优先级要高于设置页。
+    BackHandler(
+        enabled = !fullPlayerOpen && detail == null && vm.tab == LibraryTab.SETTINGS
+    ) {
+        vm.selectTab(LibraryTab.SONGS)
+    }
 
     val dense = configuration.screenHeightDp < 520
 

@@ -1,5 +1,12 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.sonance.player.data.OnlineCover
@@ -79,15 +87,19 @@ fun FullPlayer(
     val skin = LocalSkin.current
     val context = LocalContext.current
     val prefs = remember { com.sonance.player.data.Prefs(context) }
-    var showVisualizer by rememberSaveable { mutableStateOf(false) }
-    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    // 播放页的三层：封面 / 歌词 / 律动柱。横向滑动在它们之间**循环**切换。
+    var layer by rememberSaveable { mutableStateOf(PlayerLayer.COVER) }
     val pagerState = rememberPagerState(
         initialPage = state.queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
     ) { queue.size }
 
-    // 律动柱 / 歌词打开时用返回键先关它，而不是直接收起播放页
-    BackHandler(enabled = showVisualizer) { showVisualizer = false }
-    BackHandler(enabled = showLyrics) { showLyrics = false }
+    // 歌词 / 律动柱打开时用返回键先回到封面层，而不是直接收起播放页
+    BackHandler(enabled = layer != PlayerLayer.COVER) { layer = PlayerLayer.COVER }
+
+    // 横向滑动切层：左滑下一层、右滑上一层，到边了绕回另一端
+    val layerSwipe = rememberLayerSwipe { left ->
+        layer = layer.step(forward = left)
+    }
 
     // 分页器 → 播放器：只在页面「落定」后切歌，避免滑动过程中反复触发。
     // 用 rememberUpdatedState 读取最新 queueIndex，否则快照流里会捕获到旧值。
@@ -113,7 +125,7 @@ fun FullPlayer(
         // 而不是盖在上面 —— 否则 Compose 每帧仍要重录整棵子树的绘制指令
         // （VerticalPager + 封面图 + 进度条 + 一排控制按钮），这是律动柱
         // 帧率上不去的主要原因之一。
-        val overlayOpen = showVisualizer || showLyrics
+        val overlayOpen = layer != PlayerLayer.COVER
         if (!overlayOpen) {
         Column(Modifier.fillMaxSize()) {
 
@@ -139,27 +151,32 @@ fun FullPlayer(
                         color = skin.textMuted
                     )
                 }
-                // 歌词开关
+                // 歌词 / 律动柱开关：当前就在那一层时再点一次，回到封面层
                 IconAction(
                     icon = SonanceIcons.Lyrics,
-                    contentDescription = if (showLyrics) "关闭歌词" else "显示歌词",
+                    contentDescription = if (layer == PlayerLayer.LYRICS) "关闭歌词" else "显示歌词",
                     onClick = {
-                        showLyrics = !showLyrics
-                        if (showLyrics) showVisualizer = false
+                        layer = if (layer == PlayerLayer.LYRICS) {
+                            PlayerLayer.COVER
+                        } else {
+                            PlayerLayer.LYRICS
+                        }
                     },
                     iconSize = 20.dp,
-                    tint = if (showLyrics) skin.accent else skin.textMuted
+                    tint = if (layer == PlayerLayer.LYRICS) skin.accent else skin.textMuted
                 )
-                // 律动柱开关
                 IconAction(
                     icon = SonanceIcons.Equalizer,
-                    contentDescription = if (showVisualizer) "关闭律动柱" else "显示律动柱",
+                    contentDescription = if (layer == PlayerLayer.VISUALIZER) "关闭律动柱" else "显示律动柱",
                     onClick = {
-                        showVisualizer = !showVisualizer
-                        if (showVisualizer) showLyrics = false
+                        layer = if (layer == PlayerLayer.VISUALIZER) {
+                            PlayerLayer.COVER
+                        } else {
+                            PlayerLayer.VISUALIZER
+                        }
                     },
                     iconSize = 20.dp,
-                    tint = if (showVisualizer) skin.accent else skin.textMuted
+                    tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
                 )
                 IconAction(
                     icon = SonanceIcons.Queue,
@@ -213,78 +230,116 @@ fun FullPlayer(
                         onSeek = onSeek,
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
-                        // 左滑封面进歌词页（和顶栏的歌词按钮等价）
                         onOpenCover = onOpenCover,
-                        onSwipeToLyrics = {
-                            showLyrics = true
-                            showVisualizer = false
-                        }
+                        // 滑动热区覆盖整页（见 rememberLayerSwipe）
+                        swipeModifier = layerSwipe
                     )
                 }
             }
         }
         }   // if (!overlayOpen)
 
-        // ===== 全屏歌词 =====
-        if (showLyrics) {
-            val current = queue.getOrNull(state.queueIndex)
-            if (current != null) {
-                LyricsOverlay(
-                    song = current,
-                    positionMs = state.positionMs,
-                    prefs = prefs,
-                    onClose = { showLyrics = false },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(11f)
-                )
-            } else {
-                showLyrics = false
-            }
-        }
+        // ===== 歌词 / 律动柱覆盖层 =====
+        // 两层之间用 AnimatedContent 滑动过渡，做出「轮播」的感觉。
+        // 方向直接由环上的相对位置推出来，不需要额外记一个方向状态：
+        // 目标层是「当前层的下一层」就是左滑（新页从右进、旧页往左出）。
+        val currentSong = queue.getOrNull(state.queueIndex)
+        if (overlayOpen && currentSong != null) {
+            AnimatedContent(
+                targetState = layer,
+                transitionSpec = {
+                    val forward = targetState == initialState.step(forward = true)
+                    val dir = if (forward) 1 else -1
+                    val spec = tween<IntOffset>(LAYER_SLIDE_MS)
+                    (
+                        slideInHorizontally(spec) { w -> dir * w } +
+                            fadeIn(tween(LAYER_SLIDE_MS))
+                        ).togetherWith(
+                        slideOutHorizontally(spec) { w -> -dir * w } +
+                            fadeOut(tween(LAYER_SLIDE_MS))
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(10f),
+                label = "playerLayer"
+            ) { target ->
+                // 覆盖层自己也要能横滑，才能「歌词 ←→ 律动柱」互相切过去
+                Box(Modifier.fillMaxSize().then(layerSwipe)) {
+                    when (target) {
+                        PlayerLayer.LYRICS -> LyricsOverlay(
+                            song = currentSong,
+                            positionMs = state.positionMs,
+                            prefs = prefs,
+                            onClose = { layer = PlayerLayer.COVER },
+                            modifier = Modifier.fillMaxSize()
+                        )
 
-        // ===== 全屏律动柱 =====
-        if (showVisualizer) {
-            val current = queue.getOrNull(state.queueIndex)
-            if (current != null) {
-                VisualizerOverlay(
-                    song = current,
-                    isPlaying = state.isPlaying,
-                    positionMs = state.positionMs,
-                    durationMs = if (state.durationMs > 0) state.durationMs else current.durationMs,
-                    prefs = prefs,
-                    onClose = { showVisualizer = false },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(10f)
-                )
-            } else {
-                showVisualizer = false
+                        PlayerLayer.VISUALIZER -> VisualizerOverlay(
+                            song = currentSong,
+                            isPlaying = state.isPlaying,
+                            positionMs = state.positionMs,
+                            durationMs = if (state.durationMs > 0) {
+                                state.durationMs
+                            } else {
+                                currentSong.durationMs
+                            },
+                            prefs = prefs,
+                            onClose = { layer = PlayerLayer.COVER },
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                        PlayerLayer.COVER -> Unit
+                    }
+                }
             }
         }
     }
 }
 
+/** 播放页的三层。横向滑动在它们之间**循环**切换（封面 → 歌词 → 律动柱 → 封面）。 */
+private enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
+
 /**
- * 「左滑封面进歌词」的手势。
+ * 沿着环走一步。
  *
- * 用 [detectHorizontalDragGestures] 而不是自己处理原始事件：它只在**水平**方向
- * 超过 touch slop 后才接管，所以不会和 VerticalPager 的上下滑动抢事件；
- * 又因为只挂在封面区域（不覆盖进度条 / 音量条），也不会把横向拖动的滑杆吞掉。
+ * 用取模而不是 when 枚举：三层首尾相连，`step` 在两个方向上都是对称的一句，
+ * 以后加层也不用改这里。
+ */
+private fun PlayerLayer.step(forward: Boolean): PlayerLayer {
+    val n = PlayerLayer.entries.size
+    val i = (ordinal + if (forward) 1 else n - 1) % n
+    return PlayerLayer.entries[i]
+}
+
+/** 层间滑动过渡时长。短一点：这是整屏内容，拖久了会显得拖沓 */
+private const val LAYER_SLIDE_MS = 220
+
+/**
+ * 播放页的横向滑动切层手势。
  *
- * 阈值取 72dp —— 太短会误触，太长滑不动。
+ * **热区挂在整页上**，不再只挂封面那一块 —— 之前手指落在歌词文字、进度条上方或者
+ * 大片留白处都没反应，只有正好按在封面上才有效。
+ *
+ * 用 [detectHorizontalDragGestures] 而不是自己处理原始事件：它只在**水平**方向超过
+ * touch slop 之后才接管，于是
+ * - 不会和 VerticalPager 的上下滑动抢事件（竖向它根本不参与）
+ * - 铺满整页也不会吞掉进度条 / 音量条 —— 子级 Slider 在 Main 阶段先消费横向拖动，
+ *   而 `awaitHorizontalTouchSlopOrCancellation` 一旦发现手势被消费就会放弃
+ *
+ * 阈值 64dp：太短会误触，太长滑不动。
  */
 @Composable
-private fun rememberSwipeLeftToLyrics(onTrigger: () -> Unit): Modifier {
-    val cb by rememberUpdatedState(onTrigger)
+private fun rememberLayerSwipe(onSwipe: (left: Boolean) -> Unit): Modifier {
+    val cb by rememberUpdatedState(onSwipe)
     return Modifier.pointerInput(Unit) {
-        val threshold = 72.dp.toPx()
+        val threshold = 64.dp.toPx()
         var total = 0f
         detectHorizontalDragGestures(
             onDragStart = { total = 0f },
             onDragCancel = { total = 0f },
             onDragEnd = {
-                if (total <= -threshold) cb()
+                if (total <= -threshold) cb(true) else if (total >= threshold) cb(false)
                 total = 0f
             }
         ) { _, dragAmount ->
@@ -318,17 +373,16 @@ private fun PlayerPage(
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit,
-    onSwipeToLyrics: () -> Unit = {}
+    /** 横向滑动切层的热区，挂在整页最外层（见 [rememberLayerSwipe]） */
+    swipeModifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
     val seed = song.title + song.artist
-    // 左滑封面进歌词页
-    val swipeToLyrics = rememberSwipeLeftToLyrics(onSwipeToLyrics)
     val frac = if (durationMs > 0) {
         (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
     } else 0f
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize().then(swipeModifier)) {
         val boxW = maxWidth
         val boxH = maxHeight
         val isWide = boxW >= 620.dp && boxW > boxH
@@ -361,7 +415,7 @@ private fun PlayerPage(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(40.dp)
             ) {
-                Box(Modifier.weight(1f).then(swipeToLyrics), contentAlignment = Alignment.Center) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     CoverArt(
                         albumId = song.albumId,
                         seed = seed,
@@ -416,8 +470,7 @@ private fun PlayerPage(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth()
-                        .then(swipeToLyrics),
+                        .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
                     CoverArt(

@@ -449,7 +449,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun selectTab(value: LibraryTab) {
         val changed = tab != value
         tab = value
-        prefs.lastTab = value.id
+        // 不把「皮肤与设置」记成上次的标签页：它在导航结构里是附属页（齿轮进入、
+        // 返回回到主页面），记住了会导致下次冷启动直接停在设置页。
+        if (value != LibraryTab.SETTINGS) prefs.lastTab = value.id
         // 切回「全部歌曲」时把正在播放的那首滚进可视区
         if (value == LibraryTab.SONGS && changed) requestScrollToCurrent()
     }

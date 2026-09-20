@@ -31,10 +31,16 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -65,55 +71,27 @@ fun SettingsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        // ===== 皮肤 =====
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = SonanceIcons.Palette,
-                    contentDescription = null,
-                    tint = skin.accent,
-                    modifier = Modifier.size(17.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "外观皮肤",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = skin.text
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "${Skins.all.size} 套 · 点击即时切换",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
-                )
-            }
-            Spacer(Modifier.height(12.dp))
+        // ===== 皮肤（默认收起：14 套预览卡展开会把下面所有设置挤到好几屏之外）=====
+        var skinExpanded by rememberSaveable { mutableStateOf(false) }
+        CollapsibleSection(
+            title = "外观皮肤",
+            summary = "当前：${vm.skin.name} · 共 ${Skins.all.size} 套",
+            icon = SonanceIcons.Palette,
+            expanded = skinExpanded,
+            onToggle = { skinExpanded = !skinExpanded }
+        ) {
             SkinGrid(current = vm.skin, onSelect = { vm.changeSkin(it) })
         }
 
-        // ===== 应用图标 =====
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = SonanceIcons.Palette,
-                    contentDescription = null,
-                    tint = skin.accent,
-                    modifier = Modifier.size(17.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "应用图标",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = skin.text
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "${AppIcons.all.size} 款 · 点击更换桌面图标",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
-                )
-            }
-            Spacer(Modifier.height(6.dp))
+        // ===== 应用图标（同样默认收起）=====
+        var iconExpanded by rememberSaveable { mutableStateOf(false) }
+        CollapsibleSection(
+            title = "应用图标",
+            summary = "${AppIcons.all.size} 款 · 点击更换桌面图标",
+            icon = SonanceIcons.Palette,
+            expanded = iconExpanded,
+            onToggle = { iconExpanded = !iconExpanded }
+        ) {
             Text(
                 "切换后桌面图标会在几秒内刷新；部分第三方桌面可能需要重启桌面。",
                 style = MaterialTheme.typography.labelSmall,
@@ -747,6 +725,83 @@ private fun SkinCard(
 /* ============================================================
  * 设置项
  * ============================================================ */
+
+/**
+ * 可折叠的设置区块。
+ *
+ * 皮肤（14 套）和图标（40 款）这两块的选项卡加起来有几十张，全部展开会把下面
+ * **所有**设置项挤到好几屏之外 —— 所以默认收起，点标题栏展开。
+ *
+ * [summary] 会一直显示在标题下面，收起状态下也能看到「当前是哪套皮肤 / 有多少款图标」，
+ * 不至于因为折叠而丢失信息。
+ */
+@Composable
+private fun CollapsibleSection(
+    title: String,
+    summary: String,
+    icon: ImageVector,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val skin = LocalSkin.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = skin.accent,
+                modifier = Modifier.size(17.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = skin.text
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Icon(
+                imageVector = SonanceIcons.ChevronDown,
+                contentDescription = if (expanded) "收起" else "展开",
+                tint = skin.textDim,
+                modifier = Modifier
+                    .size(18.dp)
+                    // 收起时箭头朝下（提示"可展开"），展开后翻上来
+                    .rotate(if (expanded) 180f else 0f)
+            )
+        }
+        // 只在展开时组合内容：40 款图标卡每张都要解码一个矢量预览，
+        // 收起来就不该付这份钱
+        if (expanded) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
+            ) {
+                content()
+            }
+        }
+    }
+}
 
 @Composable
 private fun SettingsSection(
