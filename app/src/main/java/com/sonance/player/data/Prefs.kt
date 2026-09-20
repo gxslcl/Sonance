@@ -53,10 +53,6 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_EXCLUDE_NON_SONG, true)
         set(v) = sp.edit().putBoolean(KEY_EXCLUDE_NON_SONG, v).apply()
 
-    var crossfadeEnabled: Boolean
-        get() = sp.getBoolean(KEY_CROSSFADE, false)
-        set(v) = sp.edit().putBoolean(KEY_CROSSFADE, v).apply()
-
     /** 当前选中的应用图标（对应 manifest 里的 activity-alias 后缀） */
     var appIconId: String
         get() = sp.getString(KEY_APP_ICON, null) ?: "default"
@@ -240,10 +236,27 @@ class Prefs(context: Context) {
     }
 
     /** 在“最近播放”里按最近使用顺序重排歌曲列表 */
-    fun orderByRecent(songs: List<Song>): List<Song> {
-        val order = recentIds().withIndex().associate { (i, id) -> id to i }
-        return songs.filter { order.containsKey(it.id) }
-            .sortedBy { order[it.id] }
+    /**
+     * 最近播放的顺序表：songId -> 序号（越小越近）。
+     *
+     * 抽出来给排序用；顺带说明为什么删掉了原来的 `orderByRecent(songs)` ——
+     * 那个函数全项目零调用，是死代码，而它唯一有价值的中间结果就是这个 map。
+     */
+    fun recentOrderMap(): Map<Long, Int> =
+        recentIds().withIndex().associate { (i, id) -> id to i }
+
+    /**
+     * 一次读出所有播放次数。
+     *
+     * 不要逐首调 [playCount] —— 那是 300+ 次 SharedPreferences 查询（每次都要加锁 + 解析 XML 缓存），
+     * 在排序热路径上会明显卡。这里只遍历一遍 `sp.all`。
+     */
+    fun allPlayCounts(): Map<Long, Int> = buildMap {
+        for ((k, v) in sp.all) {
+            if (!k.startsWith(KEY_COUNT)) continue
+            val id = k.removePrefix(KEY_COUNT).toLongOrNull() ?: continue
+            (v as? Int)?.let { put(id, it) }
+        }
     }
 
     companion object {
@@ -260,7 +273,6 @@ class Prefs(context: Context) {
         private const val KEY_EXCLUDE_LOCKED = "scan_exclude_locked"
         private const val KEY_EXCLUDE_UNSUPPORTED = "scan_exclude_unsupported"
         private const val KEY_EXCLUDE_NON_SONG = "scan_exclude_nonsong"
-        private const val KEY_CROSSFADE = "crossfade"
         private const val KEY_APP_ICON = "app_icon_id"
         private const val KEY_VIZ_STYLE = "viz_style"
         private const val KEY_VIZ_BARS = "viz_bars"

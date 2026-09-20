@@ -30,6 +30,17 @@ class AudioVisualizer(barCount: Int) {
     /** 已平滑的柱高 0..1，绘制线程直接读；Float 写入是原子的，无需加锁 */
     val levels = FloatArray(bars)
 
+    /** 归一化前的原始柱高，[applyAutoGain] 的输入 */
+    private val rawBands = FloatArray(bars)
+
+    /**
+     * 每根柱子自己的历史峰值，缓慢衰减。
+     *
+     * 音乐的能量天然集中在低频，所以左边几根柱子总是跳得最凶、右边几乎不动 ——
+     * 看起来"重心偏左、不平衡"。用它做**逐频段归一化**，每根柱子的动态范围就被拉平了。
+     */
+    private val bandPeak = FloatArray(bars)
+
     /** 是否有真实数据源（PCM 取样器已拿到格式并收到数据） */
     val available: Boolean
         get() = PcmBus.ready
@@ -210,7 +221,33 @@ class AudioVisualizer(barCount: Int) {
             var v = ln(1f + avg) / maxLog * gain
             if (v > 1f) v = 1f
             if (!active) v = 0f
-            levels[b] = v
+            rawBands[b] = v
+            b++
+        }
+        applyAutoGain(rawBands, bandPeak, levels)
+    }
+
+    /**
+     * 逐频段自动增益：用每根柱子自己的历史峰值做归一化，抵消"低频天然能量大"。
+     *
+     * - 峰值**快起慢落**（`0.992` 每帧，约 3 秒半衰），所以一段安静之后峰值会降下来，
+     *   该频段又能重新"顶满"，不会一直趴着
+     * - 输出是「归一化值」和「原始值」的加权混合 —— 纯归一化会让所有柱子都顶满、
+     *   看起来很平；留 28% 原始动态才有层次
+     * - 峰值太小时（刚起播 / 该频段一直没声）直接用原始值，避免除零放大噪声
+     *
+     * 抽成独立函数是为了能单测：它只依赖输入数组，不需要真的跑一遍 FFT。
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun applyAutoGain(raw: FloatArray, peaks: FloatArray, out: FloatArray) {
+        var b = 0
+        while (b < raw.size) {
+            val v = raw[b]
+            val p = peaks[b]
+            val peak = if (v > p) v else p * PEAK_DECAY
+            peaks[b] = peak
+            val norm = if (peak > MIN_PEAK) (v / peak).coerceIn(0f, 1f) else v
+            out[b] = norm * NORM_WEIGHT + v * (1f - NORM_WEIGHT)
             b++
         }
     }
@@ -282,5 +319,21 @@ class AudioVisualizer(barCount: Int) {
          * 随 [fftN] 变化：1024 点时取 0.5。
          */
         private const val FFT_SCALE = 0.5f
+
+        /** 历史峰值的每帧衰减；0.992 在 30Hz 更新下约 3 秒半衰 */
+        private const val PEAK_DECAY = 0.992f
+
+        /** 低于这个峰值就不做归一化，避免除零把噪声放大 */
+        private const val MIN_PEAK = 0.06f
+
+        /**
+         * 归一化值在输出里的权重，其余留给原始动态。
+         *
+         * 0.88 是实测调出来的：0.72 时"都在自己峰值上"的低频与高频仍差 0.21
+         * （低频 0.97 / 高频 0.76），肉眼还是能看出左重右轻；0.88 时差距降到 0.09。
+         * 对比**没做归一化**时的 0.75（低频 0.90 / 高频 0.15），已经基本拉平。
+         * 留 12% 原始动态是为了保留"这段整体很轻"的层次感，纯归一化会显得很平。
+         */
+        private const val NORM_WEIGHT = 0.88f
     }
 }

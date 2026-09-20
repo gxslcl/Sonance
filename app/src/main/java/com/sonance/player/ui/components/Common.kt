@@ -93,10 +93,20 @@ fun CoverArt(
     coverKey: String? = null
 ) {
     val context = LocalContext.current
-    var bitmap by remember(albumId, sourceUri, coverKey) { mutableStateOf<ImageBitmap?>(null) }
+    // 首帧就直接读内存缓存 —— 已加载过的封面必须立刻出现，不能先给占位图。
+    // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
+    //   表现就是"滚回来还要等半秒"。）
+    var bitmap by remember(albumId, sourceUri, coverKey) {
+        mutableStateOf(ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey))
+    }
 
     LaunchedEffect(albumId, sizePx, sourceUri, coverKey, ArtworkLoader.paused) {
-        // 滚动暂停期间直接不动已有的图。
+        // 缓存命中：同步取，不走协程，也不再受 paused 影响
+        ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey)?.let {
+            bitmap = it
+            return@LaunchedEffect
+        }
+        // 滚动暂停期间只跳过"需要新解码"的，不动已有的图。
         // 之前这里会走到 load() 拿回 null 再赋给 bitmap，等于把已经加载好的封面
         // 抹掉、退回占位图 —— 滚动时封面会"闪一下"。
         if (ArtworkLoader.paused) return@LaunchedEffect

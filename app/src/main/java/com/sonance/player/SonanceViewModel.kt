@@ -31,6 +31,7 @@ import com.sonance.player.data.ScanOutcome
 import com.sonance.player.data.RestoreEngine
 import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.Song
+import com.sonance.player.data.SongStats
 import com.sonance.player.data.SortField
 import com.sonance.player.data.UnplayableFileScanner
 import com.sonance.player.data.UnplayableScanResult
@@ -759,12 +760,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         showToast("已更换图标 · 桌面稍后刷新")
     }
 
+    /**
+     * 排序需要的用户行为数据。
+     *
+     * 只在排序时算一次，不做成常驻状态 —— `sp.all` 是同步读，放进 Composition 会拖慢每一帧。
+     */
+    private fun songStats() = SongStats(
+        playCounts = prefs.allPlayCounts(),
+        recentOrder = prefs.recentOrderMap()
+    )
+
     fun changeSort(value: SortField) {
         if (sortField == value) {
             sortAscending = !sortAscending
         } else {
             sortField = value
-            sortAscending = true
+            // 「播放最多 / 最近播放」的自然读法是"最多的 / 最近的在前"，所以切过去默认降序。
+            // 其他字段保持原来的默认升序。
+            sortAscending = value != SortField.PLAY_COUNT && value != SortField.RECENT_PLAYED
         }
         prefs.sortField = sortField.name
         prefs.sortAscending = sortAscending
@@ -811,7 +824,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun visibleSongs(): List<Song> {
         val searched = MediaRepository.search(songs, searchQuery)
-        return MediaRepository.sortSongs(searched, sortField, sortAscending)
+        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
 
     fun recentSongs(): List<Song> {
@@ -821,7 +834,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun favoriteSongs(): List<Song> {
         val searched = MediaRepository.search(songs.filter { favorites.contains(it.id) }, searchQuery)
-        return MediaRepository.sortSongs(searched, sortField, sortAscending)
+        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
 
     fun songById(id: Long): Song? = songs.firstOrNull { it.id == id }

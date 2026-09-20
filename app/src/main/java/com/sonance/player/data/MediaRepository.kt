@@ -240,7 +240,30 @@ class MediaRepository(private val context: Context) {
                 .map { (path, list) -> MusicFolder(path = path, name = list.first().folderName, songs = list) }
                 .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
 
-        fun sortSongs(songs: List<Song>, field: SortField, ascending: Boolean): List<Song> {
+        /**
+         * 行为类排序字段（播放次数 / 最近播放）的排序键。
+         *
+         * 抽成纯函数是为了能单测 —— [Song] 带 `android.net.Uri` 字段，
+         * 纯 JVM 测试构造不出来（项目没引 Robolectric）。
+         *
+         * 两个关键约定：
+         * - 没有播放记录的当 **0** 次（降序时自然排最后）
+         * - 没播过的用 **Int.MAX_VALUE** 当"最近播放序号"，降序时排在末尾
+         */
+        internal fun statsSortKey(songId: Long, field: SortField, stats: SongStats): Long =
+            when (field) {
+                SortField.PLAY_COUNT -> (stats.playCounts[songId] ?: 0).toLong()
+                SortField.RECENT_PLAYED ->
+                    (stats.recentOrder[songId] ?: Int.MAX_VALUE).toLong()
+                else -> 0L
+            }
+
+        fun sortSongs(
+            songs: List<Song>,
+            field: SortField,
+            ascending: Boolean,
+            stats: SongStats = SongStats()
+        ): List<Song> {
             val cmp: Comparator<Song> = when (field) {
                 SortField.TITLE -> Comparator { a, b ->
                     a.title.compareTo(b.title, ignoreCase = true)
@@ -261,6 +284,19 @@ class MediaRepository(private val context: Context) {
                 SortField.FILE_NAME -> Comparator { a, b ->
                     a.displayName.compareTo(b.displayName, ignoreCase = true)
                 }
+
+                SortField.PLAY_COUNT -> Comparator { a, b ->
+                    val ca = statsSortKey(a.id, field, stats)
+                    val cb = statsSortKey(b.id, field, stats)
+                    // 键相同的按标题，避免顺序每次刷新都乱跳
+                    if (ca != cb) ca.compareTo(cb) else a.title.compareTo(b.title, ignoreCase = true)
+                }
+
+                SortField.RECENT_PLAYED -> Comparator { a, b ->
+                    val ia = statsSortKey(a.id, field, stats)
+                    val ib = statsSortKey(b.id, field, stats)
+                    if (ia != ib) ia.compareTo(ib) else a.title.compareTo(b.title, ignoreCase = true)
+                }
             }
             return if (ascending) songs.sortedWith(cmp) else songs.sortedWith(cmp.reversed())
         }
@@ -277,6 +313,19 @@ class MediaRepository(private val context: Context) {
         }
     }
 }
+
+/**
+ * 排序需要的用户行为数据。
+ *
+ * 单独作为参数传进来，而不是让 `MediaRepository` 去依赖 `Prefs` ——
+ * 这样这个对象仍然是无状态纯函数，也方便单测。
+ */
+data class SongStats(
+    /** songId -> 播放次数 */
+    val playCounts: Map<Long, Int> = emptyMap(),
+    /** songId -> 最近播放序号（越小越近） */
+    val recentOrder: Map<Long, Int> = emptyMap()
+)
 
 /**
  * 一组重复条目：保留 [keep]，其余 [duplicates] 建议从列表里隐藏。

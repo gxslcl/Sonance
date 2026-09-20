@@ -179,6 +179,32 @@ object ArtworkLoader {
     fun isMissing(albumId: Long): Boolean =
         albumId <= 0 || synchronized(missing) { missing.contains("a:$albumId") }
 
+    /**
+     * **同步**查内存缓存，命中就立刻返回，否则 null。
+     *
+     * 给 UI 首帧用。为什么需要它：`load()` 是 suspend 的，即使缓存命中也要
+     * 走一次协程调度（`withContext(Dispatchers.IO)`），实际要等好几帧 ——
+     * 表现就是"已经加载过的封面，滚回来还要等半秒才出来"。
+     *
+     * 另外它也**不看 [paused]**：滚动中看到已经缓存的封面应该立刻显示，
+     * 只有"需要解码的新封面"才该在滚动时跳过。
+     *
+     * 在 Composition 里调用是安全的：内部只有两次 `LruCache.get`（各自加锁，
+     * 但只是一次哈希查找），可见行数量级下开销可忽略。
+     */
+    fun peek(
+        albumId: Long,
+        sizePx: Int,
+        sourceUri: Uri? = null,
+        coverKey: String? = null
+    ): ImageBitmap? {
+        if (albumId <= 0 && sourceUri == null && coverKey == null) return null
+        val size = bucketOf(sizePx)
+        // 先查本地键（同专辑共用），再查带 coverKey 的完整键
+        cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
+        return cache.get(keyOf(albumId, size, sourceUri, coverKey))
+    }
+
     suspend fun load(
         context: Context,
         albumId: Long,

@@ -63,7 +63,18 @@ enum class SortField(val label: String) {
     ALBUM("专辑"),
     DURATION("时长"),
     DATE_ADDED("添加时间"),
-    FILE_NAME("文件名")
+    FILE_NAME("文件名"),
+
+    /**
+     * 按播放次数排序。
+     *
+     * 播放次数其实一直在记（每次切歌写一次），但此前**只写不读** —— 属于无效 IO。
+     * 这里把它用起来，让"我最常听的是哪些"有地方体现。
+     */
+    PLAY_COUNT("播放最多"),
+
+    /** 按最近播放时间排序（没播过的排在最后） */
+    RECENT_PLAYED("最近播放")
 }
 
 enum class ViewMode { LIST, GRID }

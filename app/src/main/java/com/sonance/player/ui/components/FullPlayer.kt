@@ -84,6 +84,14 @@ fun FullPlayer(
     val prefs = remember { com.sonance.player.data.Prefs(context) }
     val scope = rememberCoroutineScope()
 
+    /**
+     * 「歌词」那一行是否展开成了单行滚动歌词。
+     *
+     * 注意与顶栏那个歌词图标是两条路：顶栏仍然进**全屏歌词页**（那里能看完整歌词、
+     * 能点行跳转、能调字号/玻璃），这里的展开只在原地显示一行。
+     */
+    var lyricsExpanded by rememberSaveable { mutableStateOf(false) }
+
     // 播放页的三层（封面 / 歌词 / 律动柱）做成**环形轮播**：
     // 页数取极大值、用「页号 % 3」映射到层，于是左右两个方向都能一直滑下去，
     // 到边自然绕回另一端。起始页取 3 的倍数，保证初始停在封面层。
@@ -282,7 +290,9 @@ fun FullPlayer(
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
                         onOpenCover = onOpenCover,
-                        onOpenLyrics = { goToLayer(PlayerLayer.LYRICS) }
+                        prefs = prefs,
+                        lyricsExpanded = lyricsExpanded,
+                        onToggleLyrics = { lyricsExpanded = !lyricsExpanded }
                     )
                 }
             }
@@ -360,8 +370,11 @@ private fun PlayerPage(
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit,
-    /** 点「歌词」入口：切到全屏歌词页 */
-    onOpenLyrics: () -> Unit
+    prefs: Prefs,
+    /** 「歌词」那一行是否已展开成单行滚动歌词 */
+    lyricsExpanded: Boolean,
+    /** 展开 / 收起那一行（不切页、不改布局） */
+    onToggleLyrics: () -> Unit
 ) {
     val skin = LocalSkin.current
     val seed = song.title + song.artist
@@ -424,7 +437,17 @@ private fun PlayerPage(
                 ) {
                     TrackText(song.title, song.artist, song.album)
                     Spacer(Modifier.height(12.dp))
-                    LyricsEntryButton(onClick = onOpenLyrics)
+                    if (lyricsExpanded) {
+                        LyricsTickerRow(
+                            song = song,
+                            positionMs = positionMs,
+                            durationMs = durationMs,
+                            prefs = prefs,
+                            onClose = onToggleLyrics
+                        )
+                    } else {
+                        LyricsEntryButton(onClick = onToggleLyrics)
+                    }
                     Spacer(Modifier.height(18.dp))
                     ProgressBlock(frac, positionMs, durationMs, onSeek)
                     Spacer(Modifier.height(14.dp))
@@ -479,7 +502,17 @@ private fun PlayerPage(
                 Spacer(Modifier.height(10.dp))
                 TrackText(song.title, song.artist, song.album, centered = true)
                 Spacer(Modifier.height(12.dp))
-                LyricsEntryButton(onClick = onOpenLyrics)
+                if (lyricsExpanded) {
+                    LyricsTickerRow(
+                        song = song,
+                        positionMs = positionMs,
+                        durationMs = durationMs,
+                        prefs = prefs,
+                        onClose = onToggleLyrics
+                    )
+                } else {
+                    LyricsEntryButton(onClick = onToggleLyrics)
+                }
                 Spacer(Modifier.height(18.dp))
                 ProgressBlock(frac, positionMs, durationMs, onSeek)
                 Spacer(Modifier.height(16.dp))
