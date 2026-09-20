@@ -69,7 +69,9 @@ import com.sonance.player.ui.screens.RecentScreen
 import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
 import com.sonance.player.ui.screens.SongsScreen
+import com.sonance.player.ui.sheets.EqualizerSheet
 import com.sonance.player.ui.sheets.QueueSheet
+import com.sonance.player.ui.sheets.SleepTimerSheet
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.SonanceTheme
 import com.sonance.player.ui.components.CoverPickerDialog
@@ -198,6 +200,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     var fullPlayerOpen by rememberSaveable { mutableStateOf(false) }
     var queueOpen by rememberSaveable { mutableStateOf(false) }
+    // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
+    // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
+    var eqOpen by remember { mutableStateOf(false) }
+    var sleepOpen by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Detail?>(null) }
 
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
@@ -226,6 +232,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         fullPlayerOpen = false
     }
 
+    // 播放页底栏、设置页的"调节"按钮都汇到这里，避免同时渲染两个面板
+    val openEqualizer: () -> Unit = {
+        vm.openEqualizer()
+        eqOpen = true
+    }
+
     CompositionLocalProvider(LocalDenseLayout provides dense) {
         Box(Modifier.fillMaxSize().background(skin.bg)) {
 
@@ -238,7 +250,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 onOpenFullPlayer = { fullPlayerOpen = true },
-                onOpenQueue = { queueOpen = true }
+                onOpenQueue = { queueOpen = true },
+                onOpenEqualizer = openEqualizer
             )
 
             LayoutMode.MEDIUM -> MediumLayout(
@@ -248,7 +261,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 onOpenFullPlayer = { fullPlayerOpen = true },
-                onOpenQueue = { queueOpen = true }
+                onOpenQueue = { queueOpen = true },
+                onOpenEqualizer = openEqualizer
             )
 
             LayoutMode.EXPANDED -> ExpandedLayout(
@@ -258,7 +272,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 onOpenFullPlayer = { fullPlayerOpen = true },
-                onOpenQueue = { queueOpen = true }
+                onOpenQueue = { queueOpen = true },
+                onOpenEqualizer = openEqualizer
             )
         }
 
@@ -290,7 +305,11 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onSeek = { vm.player.seekTo(it) },
                 onVolume = { vm.player.setVolume(it) },
                 onOpenQueue = { queueOpen = true },
-                onOpenCover = { vm.openCoverPicker(playerState.mediaId) }
+                onOpenCover = { vm.openCoverPicker(playerState.mediaId) },
+                onOpenEqualizer = openEqualizer,
+                onOpenSleepTimer = { sleepOpen = true },
+                sleepTimerActive = vm.sleepTimerLabel != null,
+                eqEnabled = vm.eqEnabled
             )
         }
 
@@ -324,6 +343,14 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         )
     }
 
+    if (eqOpen) {
+        EqualizerSheet(vm = vm, onDismiss = { eqOpen = false })
+    }
+
+    if (sleepOpen) {
+        SleepTimerSheet(vm = vm, onDismiss = { sleepOpen = false })
+    }
+
     // 打开专辑详情时收起全屏播放页
     LaunchedEffect(detail) {
         if (detail != null) fullPlayerOpen = false
@@ -352,7 +379,8 @@ private fun CompactLayout(
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
-    onOpenQueue: () -> Unit
+    onOpenQueue: () -> Unit,
+    onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
     Column(Modifier.fillMaxSize()) {
@@ -399,7 +427,8 @@ private fun CompactLayout(
                     vm = vm,
                     playerState = playerState,
                     detail = detail,
-                    onOpenDetail = onOpenDetail
+                    onOpenDetail = onOpenDetail,
+                    onOpenEqualizer = onOpenEqualizer
                 )
             }
         }
@@ -438,7 +467,8 @@ private fun MediumLayout(
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
-    onOpenQueue: () -> Unit
+    onOpenQueue: () -> Unit,
+    onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
     Row(Modifier.fillMaxSize()) {
@@ -478,7 +508,8 @@ private fun MediumLayout(
                         vm = vm,
                         playerState = playerState,
                         detail = detail,
-                        onOpenDetail = onOpenDetail
+                        onOpenDetail = onOpenDetail,
+                        onOpenEqualizer = onOpenEqualizer
                     )
                 }
             }
@@ -512,7 +543,8 @@ private fun ExpandedLayout(
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
-    onOpenQueue: () -> Unit
+    onOpenQueue: () -> Unit,
+    onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
     val configuration = LocalConfiguration.current
@@ -562,7 +594,8 @@ private fun ExpandedLayout(
                             vm = vm,
                             playerState = playerState,
                             detail = detail,
-                            onOpenDetail = onOpenDetail
+                            onOpenDetail = onOpenDetail,
+                            onOpenEqualizer = onOpenEqualizer
                         )
                     }
                 }
@@ -617,7 +650,9 @@ private fun ScreenBody(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
     detail: Detail?,
-    onOpenDetail: (Detail) -> Unit
+    onOpenDetail: (Detail) -> Unit,
+    /** 设置页里的"调节均衡器"要打开的是 Shell 层的面板，所以把回调透传下去 */
+    onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
 
@@ -704,7 +739,10 @@ private fun ScreenBody(
 
         LibraryTab.FAVORITES -> FavoritesScreen(vm = vm, playerState = playerState)
 
-        LibraryTab.SETTINGS -> SettingsScreen(vm = vm)
+        LibraryTab.SETTINGS -> SettingsScreen(
+            vm = vm,
+            onOpenEqualizer = onOpenEqualizer
+        )
     }
 }
 

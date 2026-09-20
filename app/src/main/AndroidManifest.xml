@@ -89,6 +89,62 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+
+        <!--
+          ===== 桌面小组件：四种样式，各自是一个独立的 receiver =====
+
+          之所以拆成四个而不是一个带参数的 provider：系统的小组件选择器是按
+          `<receiver>` + `<meta-data>` 一条条列出来的，用户看到的就是四条
+          「山水有清音 · 紧凑横条 / 封面卡片 / 信息宽条 / 极简文字」，
+          可以按桌面空间和喜好各挑一个。渲染逻辑全部共用基类。
+        -->
+        <receiver
+            android:name=".widget.SonanceWidgetBar"
+            android:exported="false"
+            android:label="@string/widget_label_bar">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_bar_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetCard"
+            android:exported="false"
+            android:label="@string/widget_label_card">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_card_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetWide"
+            android:exported="false"
+            android:label="@string/widget_label_wide">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_wide_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetMinimal"
+            android:exported="false"
+            android:label="@string/widget_label_minimal">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_minimal_info" />
+        </receiver>
     <!-- ===== 应用图标变体：同一 MainActivity 的多个别名，运行时只启用一个 ===== -->
         <!-- 原版 · Sonance -->
         <activity-alias

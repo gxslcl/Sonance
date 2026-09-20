@@ -2,4 +2,27 @@
 <resources>
     <string name="app_name">山水有清音</string>
     <string name="app_slogan">本地音乐播放器</string>
+
+    <!-- ===== 桌面小组件 ===== -->
+    <!-- 样式名（会显示在系统的小组件选择列表里，所以名字要短且能一眼区分） -->
+    <string name="widget_label_bar">山水有清音 · 紧凑横条</string>
+    <string name="widget_label_card">山水有清音 · 封面卡片</string>
+    <string name="widget_label_wide">山水有清音 · 信息宽条</string>
+    <string name="widget_label_minimal">山水有清音 · 极简文字</string>
+
+    <!-- 系统选择器里的描述文案（Android 12+ 显示） -->
+    <string name="widget_desc_bar">小封面 + 歌名，只有一个播放键，最省空间</string>
+    <string name="widget_desc_card">大封面 + 上一首/播放/下一首，桌面上的迷你播放器</string>
+    <string name="widget_desc_wide">横排铺开，信息最多：封面、歌名、三键控制与打开应用</string>
+    <string name="widget_desc_minimal">不显示封面，只有歌名和播放键，最省内存</string>
+
+    <!-- 空态与无障碍 -->
+    <string name="widget_idle_title">未在播放</string>
+    <string name="widget_idle_subtitle">打开山水有清音开始听</string>
+    <string name="widget_paused_subtitle">已暂停</string>
+    <string name="widget_cover_desc">专辑封面</string>
+    <string name="widget_play_desc">播放或暂停</string>
+    <string name="widget_prev_desc">上一首</string>
+    <string name="widget_next_desc">下一首</string>
+    <string name="widget_open_desc">打开应用</string>
 </resources>

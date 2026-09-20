@@ -134,6 +134,29 @@ object SonanceIcons {
         "M19,12 h3.5 v9 h-3.5 z"
     )
 
+    /** 睡眠定时器：带指针的圆 + 顶上两根"发条" */
+    val Timer by o(
+        "Timer",
+        circle(12.0, 13.5, 8.0),
+        "M12 9.5v4l2.5 1.5",
+        "M9 2h6",
+        "M12 2v3.5"
+    )
+
+    /** 均衡器滑杆（区别于 Equalizer 的实心柱，用细杆 + 旋钮表示"可调"） */
+    val Sliders by o(
+        "Sliders",
+        "M4 21v-7",
+        "M4 10V3",
+        "M12 21v-9",
+        "M12 8V3",
+        "M20 21v-5",
+        "M20 12V3",
+        "M1 14h6",
+        "M9 8h6",
+        "M17 16h6"
+    )
+
     // ===== 播放 =====
     val Play by f("Play", "M6 3l14 9-14 9z")
     val Pause by f("Pause", "M6 4h4v16H6z", "M14 4h4v16h-4z")

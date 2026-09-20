@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  紧凑横条 · 2x1
+  minWidth/minHeight 是老系统（API < 31）唯一的尺寸声明方式，按 70dp/格 换算；
+  targetCellWidth/Height 是 Android 12+ 的精确格数，新系统优先用它。
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:description="@string/widget_desc_bar"
+    android:initialLayout="@layout/widget_bar"
+    android:minHeight="70dp"
+    android:minWidth="180dp"
+    android:previewImage="@mipmap/ic_launcher"
+    android:previewLayout="@layout/widget_bar"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="1"
+    android:targetCellWidth="2"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    tools:targetApi="31" />

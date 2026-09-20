@@ -77,6 +77,14 @@ fun FullPlayer(
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit = {},
+    /** 打开均衡器面板 */
+    onOpenEqualizer: () -> Unit = {},
+    /** 打开睡眠定时器面板 */
+    onOpenSleepTimer: () -> Unit = {},
+    /** 睡眠定时器是否在计时中（顶栏图标高亮用） */
+    sleepTimerActive: Boolean = false,
+    /** 均衡器是否开着（图标高亮用） */
+    eqEnabled: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -197,6 +205,16 @@ fun FullPlayer(
                         onClick = onClose,
                         iconSize = 22.dp
                     )
+                    // 睡眠定时器：放在左侧第二格。
+                    // 不放右边 —— 右侧已经有歌词/律动柱/队列三个图标，再挤一个会把
+                    // 居中的「正在播放」顶到，左侧只有"收起"一个，还有富余。
+                    IconAction(
+                        icon = SonanceIcons.Timer,
+                        contentDescription = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
+                        onClick = onOpenSleepTimer,
+                        iconSize = 20.dp,
+                        tint = if (sleepTimerActive) skin.accent else skin.textMuted
+                    )
                     Spacer(Modifier.weight(1f))
                     // 歌词 / 律动柱开关：当前就在那一层时再点一次，回到封面层
                     IconAction(
@@ -290,6 +308,8 @@ fun FullPlayer(
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
                         onOpenCover = onOpenCover,
+                        onOpenEqualizer = onOpenEqualizer,
+                        eqEnabled = eqEnabled,
                         prefs = prefs,
                         lyricsExpanded = lyricsExpanded,
                         onToggleLyrics = { lyricsExpanded = !lyricsExpanded }
@@ -370,6 +390,10 @@ private fun PlayerPage(
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit,
+    /** 打开均衡器面板 */
+    onOpenEqualizer: () -> Unit,
+    /** 均衡器是否开着（图标高亮用） */
+    eqEnabled: Boolean,
     prefs: Prefs,
     /** 「歌词」那一行是否已展开成单行滚动歌词 */
     lyricsExpanded: Boolean,
@@ -468,7 +492,10 @@ private fun PlayerPage(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(16.dp))
-                    BottomRow(isFavorite, volume, onToggleFavorite, onVolume, onOpenQueue, onOpenCover)
+                    BottomRow(
+                        isFavorite, volume, onToggleFavorite, onVolume,
+                        onOpenQueue, onOpenCover, onOpenEqualizer, eqEnabled
+                    )
                 }
             }
         } else {
@@ -532,7 +559,10 @@ private fun PlayerPage(
                     gap = 14.dp
                 )
                 Spacer(Modifier.height(14.dp))
-                BottomRow(isFavorite, volume, onToggleFavorite, onVolume, onOpenQueue, onOpenCover)
+                BottomRow(
+                    isFavorite, volume, onToggleFavorite, onVolume,
+                    onOpenQueue, onOpenCover, onOpenEqualizer, eqEnabled
+                )
                 // 距底部 20dp（再叠加系统导航栏安全区）
                 Spacer(Modifier.height(BottomGap))
                 Spacer(Modifier.navigationBarsPadding())
@@ -611,7 +641,9 @@ private fun BottomRow(
     onFavorite: () -> Unit,
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
-    onOpenCover: () -> Unit
+    onOpenCover: () -> Unit,
+    onOpenEqualizer: () -> Unit,
+    eqEnabled: Boolean
 ) {
     val skin = LocalSkin.current
     Row(
@@ -633,10 +665,12 @@ private fun BottomRow(
         )
         IconAction(
             icon = SonanceIcons.Waveform,
-            contentDescription = "音效",
-            onClick = onOpenQueue,
+            contentDescription = "均衡器",
+            // 这里以前错接成了「播放队列」—— 图标是音效波形、名字也叫音效，
+            // 点下去却弹队列，跟顶栏那个队列按钮完全重复。现在接均衡器。
+            onClick = onOpenEqualizer,
             iconSize = 20.dp,
-            tint = skin.textMuted
+            tint = if (eqEnabled) skin.accent else skin.textMuted
         )
         IconAction(
             icon = SonanceIcons.Image,

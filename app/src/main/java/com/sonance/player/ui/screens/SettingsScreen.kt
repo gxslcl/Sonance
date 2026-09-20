@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -61,7 +63,11 @@ import com.sonance.player.ui.theme.Skins
 import com.sonance.player.ui.components.GlassControls
 
 @Composable
-fun SettingsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    vm: SonanceViewModel,
+    modifier: Modifier = Modifier,
+    onOpenEqualizer: () -> Unit = {}
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val skin = LocalSkin.current
     Column(
@@ -174,6 +180,15 @@ fun SettingsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
             }
         }
 
+        // ===== 播放与音效 =====
+        PlaybackSettingsSection(
+            vm = vm,
+            onOpenEqualizer = onOpenEqualizer
+        )
+
+        // ===== 桌面小组件 =====
+        WidgetSettingsSection(vm = vm)
+
         // ===== 歌词 =====
         LyricsSettingsSection(vm = vm)
 
@@ -199,6 +214,215 @@ fun SettingsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
         }
 
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/* ============================================================
+ * 播放与音效（均衡器 + 睡眠定时器）
+ * ============================================================ */
+
+/** 设置页里可选的倒计时时长（分钟） */
+private val SETTINGS_SLEEP_MINUTES = listOf(15, 30, 45, 60, 90)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () -> Unit) {
+    val skin = LocalSkin.current
+    val timerLabel = vm.sleepTimerLabel
+
+    SettingsSection(title = "播放与音效") {
+
+        // ---- 均衡器 ----
+        SettingsActionRow(
+            title = "均衡器",
+            subtitle = if (vm.eqEnabled) {
+                // 括号不能省：Kotlin 里 `a + if (c) x else y + z` 会解析成
+                // `a + (if (c) x else (y + z))`，"N 段"会被吞进 else 分支
+                "已开启 · ${vm.eqPreset.label}" +
+                    (if (vm.eqCustom) "（手动微调）" else "") +
+                    " · ${vm.eqCenterFreqs.size} 段"
+            } else {
+                "10 段软件均衡器 · 全机型可用，不影响原始文件"
+            },
+            onClick = onOpenEqualizer,
+            actionLabel = "调节"
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        // ---- 睡眠定时器 ----
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("睡眠定时器", style = MaterialTheme.typography.titleSmall, color = skin.text)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    timerLabel?.let { "计时中 · 剩余 $it，到点自动暂停" }
+                        ?: "到点自动暂停播放，适合睡前听",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (timerLabel != null) skin.accent else skin.textMuted
+                )
+            }
+            if (timerLabel != null) {
+                PillButton(
+                    label = "取消",
+                    onClick = {
+                        vm.clearSleepTimer()
+                        vm.showToast("已取消睡眠定时器")
+                    },
+                    filled = false
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SETTINGS_SLEEP_MINUTES.forEach { m ->
+                val active =
+                    vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.COUNTDOWN &&
+                        vm.sleepTimerTotalMinutes == m
+                SleepChip(
+                    label = if (m >= 60) "${m / 60} 小时" else "$m 分钟",
+                    selected = active
+                ) { vm.setSleepTimer(m) }
+            }
+            SleepChip(
+                label = "播完当前",
+                selected = vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.AFTER_CURRENT
+            ) { vm.setSleepAfterCurrent() }
+        }
+    }
+}
+
+/** 睡眠定时器的小胶囊选项（设置页用，比面板里的窄一点） */
+@Composable
+private fun SleepChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val skin = LocalSkin.current
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) skin.accent else skin.surface2)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (selected) skin.onAccent else skin.textDim
+        )
+    }
+}
+
+/* ============================================================
+ * 桌面小组件
+ * ============================================================ */
+
+/**
+ * 小组件的四种样式。
+ *
+ * 这里刻意只做"介绍 + 一键刷新"，不做"在这里切换样式" ——
+ * 小组件是**桌面上独立存在**的，添加/删除由系统的小组件选择器管，
+ * 应用内能做的只有把内容刷新一遍。
+ */
+private data class WidgetStyleInfo(
+    val name: String,
+    val size: String,
+    val desc: String,
+    val hasCover: Boolean
+)
+
+private val WIDGET_STYLES = listOf(
+    WidgetStyleInfo("封面卡片", "2×2", "大封面 + 上一首 / 播放 / 下一首，桌面上的迷你播放器", true),
+    WidgetStyleInfo("信息宽条", "4×1", "横排铺开：封面、歌名、三键控制，外加一个打开应用的箭头", true),
+    WidgetStyleInfo("紧凑横条", "2×1", "小封面 + 歌名，只有一个播放键，最省空间", true),
+    WidgetStyleInfo("极简文字", "2×1", "不显示封面，只有歌名和播放键，最省内存", false)
+)
+
+@Composable
+private fun WidgetSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var expanded by rememberSaveable { mutableStateOf(false) }
+
+    CollapsibleSection(
+        title = "桌面小组件",
+        summary = "${WIDGET_STYLES.size} 种样式 · 长按桌面 → 小组件 里添加",
+        icon = SonanceIcons.GridView,
+        expanded = expanded,
+        onToggle = { expanded = !expanded }
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            WIDGET_STYLES.forEach { w ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(skin.surface2)
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = if (w.hasCover) SonanceIcons.Image else SonanceIcons.Lyrics,
+                        contentDescription = null,
+                        tint = skin.accent,
+                        modifier = Modifier
+                            .padding(top = 2.dp)
+                            .size(16.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                w.name,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = skin.text
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                w.size,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = skin.accent
+                            )
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            w.desc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "添加方式：长按桌面空白处 → 小组件 → 找到「山水有清音」。\n" +
+                    "小组件上的按钮直接控制播放，不需要先打开应用；" +
+                    "封面优先用你下载过的图，没有就退回文件内嵌封面。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PillButton(
+                    label = "立即刷新",
+                    onClick = {
+                        // 渲染要读封面文件，别压在主线程上
+                        Thread {
+                            runCatching { com.sonance.player.widget.SonanceWidgets.refreshAll(context) }
+                        }.start()
+                        vm.showToast("已刷新桌面小组件")
+                    },
+                    filled = false
+                )
+            }
+        }
     }
 }
 

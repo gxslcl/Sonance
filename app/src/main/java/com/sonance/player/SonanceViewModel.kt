@@ -36,11 +36,18 @@ import com.sonance.player.data.SortField
 import com.sonance.player.data.UnplayableFileScanner
 import com.sonance.player.data.UnplayableScanResult
 import com.sonance.player.data.ViewMode
+import com.sonance.player.playback.EQ_BAND_COUNT
+import com.sonance.player.playback.EQ_CENTER_FREQS
+import com.sonance.player.playback.EQ_MAX_DB
+import com.sonance.player.playback.EQ_MIN_DB
+import com.sonance.player.playback.EqBus
+import com.sonance.player.playback.EqPreset
 import com.sonance.player.playback.PlayerController
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -844,6 +851,215 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun artistByName(name: String): Artist? = artists.firstOrNull { it.name == name }
 
     fun folderByPath(path: String): MusicFolder? = folders.firstOrNull { it.path == path }
+
+    // ===== 均衡器 =====
+    //
+    // 走**软件实现**（EqProcessor 挂在音频链路上），不是系统 AudioEffect ——
+    // 这台 ColorOS 的 AudioFlinger 拒绝给应用会话创建音效，系统均衡器在它上面
+    // 根本建不起来。软件实现全机型可用，段数也固定 10 段，换机不变形。
+
+    /** 各段增益（dB），UI 滑杆直接绑它 */
+    var eqBands by mutableStateOf(FloatArray(EQ_BAND_COUNT))
+        private set
+
+    var eqPreset by mutableStateOf(EqPreset.OFF)
+        private set
+
+    /** 总开关。"关闭"预设等价于 false，此时整条滤波链旁路 */
+    var eqEnabled by mutableStateOf(false)
+        private set
+
+    /** 用户手动拖过滑杆：UI 据此取消预设高亮、显示"自定义" */
+    var eqCustom by mutableStateOf(false)
+        private set
+
+    val eqCenterFreqs: IntArray get() = EQ_CENTER_FREQS
+    val eqMinDb: Float get() = EQ_MIN_DB
+    val eqMaxDb: Float get() = EQ_MAX_DB
+
+    // 单独一个 init 块：必须放在上面几个属性**之后**。
+    // Kotlin 的初始化按源码顺序执行，写进前面那个 init 块会被这里的
+    // `by mutableStateOf(...)` 初值覆盖掉。
+    init {
+        val preset = EqPreset.fromName(prefs.eqPreset)
+        val custom = parseEqBands(prefs.eqCustomBands)
+        eqPreset = preset
+        eqCustom = custom != null
+        eqBands = custom ?: EqPreset.curveOf(preset)
+        // 自定义值一旦存在就以它为准（用户拖过的成果不能被预设抹掉）
+        eqEnabled = if (custom != null) prefs.eqEnabled else prefs.eqEnabled && preset != EqPreset.OFF
+        pushEq()
+    }
+
+    /**
+     * 打开均衡器面板时调用。
+     *
+     * 软件均衡器没有"挂载失败"这回事，这里只把状态再推一遍 ——
+     * 防的是进程被回收后重建 ViewModel 时总线与界面不同步。
+     */
+    fun openEqualizer() {
+        pushEq()
+    }
+
+    fun toggleEq(on: Boolean) {
+        eqEnabled = on
+        prefs.eqEnabled = on
+        pushEq()
+        showToast(if (on) "均衡器已开启" else "均衡器已关闭")
+    }
+
+    fun chooseEqPreset(preset: EqPreset) {
+        eqPreset = preset
+        eqCustom = false
+        eqBands = EqPreset.curveOf(preset)
+        eqEnabled = preset != EqPreset.OFF
+        prefs.eqPreset = preset.name
+        prefs.eqCustomBands = ""
+        prefs.eqEnabled = eqEnabled
+        pushEq()
+        showToast("音效 · ${preset.label}")
+    }
+
+    /**
+     * 拖某一段。
+     *
+     * 会打开总开关（用户拖滑杆的意思显然是想听到效果），并转入"自定义"。
+     * 预设名保留不清 —— 于是"在流行基础上微调"这种用法，回头点一下"流行"
+     * 就能还原。
+     */
+    fun setEqBand(index: Int, db: Float) {
+        if (index !in eqBands.indices) return
+        val next = eqBands.copyOf()
+        next[index] = db.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+        eqBands = next
+        eqCustom = true
+        eqEnabled = true
+        prefs.eqEnabled = true
+        prefs.eqCustomBands = next.joinToString(",")
+        pushEq()
+    }
+
+    /** 复位成平直（自定义状态下的"归零"） */
+    fun resetEqBands() {
+        eqBands = FloatArray(EQ_BAND_COUNT)
+        eqCustom = false
+        prefs.eqCustomBands = ""
+        pushEq()
+        showToast("已复位为平直")
+    }
+
+    private fun pushEq() {
+        EqBus.update(eqEnabled, eqBands)
+    }
+
+    /** 解析持久化的自定义曲线；长度不对或含脏数据都返回 null（回落到预设） */
+    private fun parseEqBands(raw: String): FloatArray? {
+        if (raw.isBlank()) return null
+        val parts = raw.split(',')
+        if (parts.size != EQ_BAND_COUNT) return null
+        val out = FloatArray(EQ_BAND_COUNT)
+        var i = 0
+        while (i < EQ_BAND_COUNT) {
+            val v = parts[i].trim().toFloatOrNull() ?: return null
+            out[i] = v.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+            i++
+        }
+        return out
+    }
+
+    // ===== 睡眠定时器 =====
+
+    /** 睡眠定时器模式 */
+    enum class SleepTimerMode { OFF, COUNTDOWN, AFTER_CURRENT }
+
+    var sleepTimerMode by mutableStateOf(SleepTimerMode.OFF)
+        private set
+
+    /** 剩余毫秒（倒计时模式）；UI 每秒刷新 */
+    var sleepTimerRemainingMs by mutableLongStateOf(0L)
+        private set
+
+    /** 倒计时选的是多少分钟（面板高亮用）；非倒计时模式为 0 */
+    var sleepTimerTotalMinutes by mutableIntStateOf(0)
+        private set
+
+    /** 「播完当前曲」模式下，记住开启时是哪一首 */
+    private var sleepAnchorSongId = -1L
+    private var sleepTimerJob: Job? = null
+
+    /** 定时器状态文案，null 表示未开启 */
+    val sleepTimerLabel: String?
+        get() = when (sleepTimerMode) {
+            SleepTimerMode.OFF -> null
+            SleepTimerMode.AFTER_CURRENT -> "播完当前曲"
+            SleepTimerMode.COUNTDOWN -> {
+                val total = (sleepTimerRemainingMs / 1000).coerceAtLeast(0)
+                "%d:%02d".format(total / 60, total % 60)
+            }
+        }
+
+    /** 倒计时 N 分钟后暂停 */
+    fun setSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        sleepTimerMode = SleepTimerMode.COUNTDOWN
+        sleepTimerTotalMinutes = minutes
+        val totalMs = minutes * 60_000L
+        sleepTimerRemainingMs = totalMs
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+
+        sleepTimerJob = viewModelScope.launch {
+            while (isActive) {
+                val left = totalMs - (android.os.SystemClock.elapsedRealtime() - startedAt)
+                if (left <= 0L) break
+                sleepTimerRemainingMs = left
+                delay(1_000L)
+            }
+            // 到点：暂停播放（已经在暂停状态就什么都不做）
+            if (player.state.value.isPlaying) player.togglePlay()
+            clearSleepTimer()
+            showToast("睡眠定时器到点，已暂停播放")
+        }
+        showToast("将在 $minutes 分钟后暂停播放")
+    }
+
+    /**
+     * 播完当前这首就暂停。
+     *
+     * 不用 `onSongStarted` 来做 —— 那要等下一首**已经开始播**才触发，会多放一小段。
+     * 这里轮询进度，在离结尾还有 700ms 时就暂停。
+     */
+    fun setSleepAfterCurrent() {
+        sleepTimerJob?.cancel()
+        sleepTimerMode = SleepTimerMode.AFTER_CURRENT
+        sleepTimerTotalMinutes = 0
+        sleepTimerRemainingMs = 0L
+        sleepAnchorSongId = player.state.value.mediaId
+
+        sleepTimerJob = viewModelScope.launch {
+            while (isActive) {
+                val st = player.state.value
+                val ended = st.mediaId != sleepAnchorSongId ||
+                    (st.durationMs > 0 && st.positionMs >= st.durationMs - 700L)
+                if (ended) {
+                    if (player.state.value.isPlaying) player.togglePlay()
+                    clearSleepTimer()
+                    showToast("睡眠定时器：已暂停播放")
+                    return@launch
+                }
+                delay(400L)
+            }
+        }
+        showToast("播完当前这首就暂停")
+    }
+
+    fun clearSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        sleepTimerMode = SleepTimerMode.OFF
+        sleepTimerTotalMinutes = 0
+        sleepTimerRemainingMs = 0L
+        sleepAnchorSongId = -1L
+    }
 
     fun songMap(): Map<Long, Song> = songs.associateBy { it.id }
 

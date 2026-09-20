@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 圆形按钮底。用 ripple 而不是 selector：RemoteViews 也支持 ripple -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#33FFFFFF">
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="@color/widget_btn_bg" />
+        </shape>
+    </item>
+</ripple>

@@ -3,4 +3,23 @@
     <color name="window_bg">#FF121212</color>
     <color name="icon_bg">#FF121212</color>
     <color name="ic_launcher_background">#FF121212</color>
+
+    <!--
+      桌面小组件配色。
+
+      刻意**不跟随应用内皮肤**：小组件由桌面进程渲染，改皮肤时它不会自动重绘，
+      而且 14 套皮肤每套都得在 XML 里再写一遍颜色。这里统一用默认皮肤
+      「午夜琥珀」的一套色（暗底 + 琥珀金强调色），底色带透明度以便融进任何壁纸。
+    -->
+    <color name="widget_bg">#E61A1A1A</color>
+    <color name="widget_bg_solid">#F21A1A1A</color>
+    <color name="widget_border">#33E8A838</color>
+    <color name="widget_text">#FFEDE8E0</color>
+    <color name="widget_text_dim">#FF9A958E</color>
+    <color name="widget_text_muted">#FF5A5550</color>
+    <color name="widget_accent">#FFE8A838</color>
+    <color name="widget_btn_bg">#1FFFFFFF</color>
+    <!-- 播放/暂停图标画在琥珀色实心按钮上，必须用深色才看得清 -->
+    <color name="widget_btn_icon">#FF121212</color>
+    <color name="widget_cover_bg">#FF2A2A2A</color>
 </resources>

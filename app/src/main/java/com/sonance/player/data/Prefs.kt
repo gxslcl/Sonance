@@ -2,6 +2,7 @@ package com.sonance.player.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.sonance.player.playback.EqPreset
 import com.sonance.player.ui.theme.GlassStyle
 
 /** 轻量持久化：收藏、最近播放、皮肤、排序、视图模式 */
@@ -153,6 +154,28 @@ class Prefs(context: Context) {
     }
 
 
+    // ===== 均衡器 =====
+
+    /** 均衡器总开关。默认关闭 —— 不动用户的原始音色 */
+    var eqEnabled: Boolean
+        get() = sp.getBoolean(KEY_EQ_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_EQ_ENABLED, v).apply()
+
+    /** 当前预设名（[EqPreset] 的 `name`），脏数据回落到 `OFF` */
+    var eqPreset: String
+        get() = sp.getString(KEY_EQ_PRESET, null) ?: EqPreset.OFF.name
+        set(v) = sp.edit().putString(KEY_EQ_PRESET, v).apply()
+
+    /**
+     * 手动拖动后的各段增益（dB，逗号分隔）。
+     *
+     * 只有用户真的拖过滑杆才会写这里；点预设时不写，让它继续跟预设走 ——
+     * 否则以后想微调预设曲线，老用户的旧数值会一直盖着。
+     */
+    var eqCustomBands: String
+        get() = sp.getString(KEY_EQ_BANDS, null) ?: ""
+        set(v) = sp.edit().putString(KEY_EQ_BANDS, v).apply()
+
     // ===== 曲库隐藏（清理重复 / 同名歌曲只从列表隐藏，不动文件）=====
 
     /** 被隐藏的曲目 id，逗号分隔 */
@@ -290,6 +313,9 @@ class Prefs(context: Context) {
         private const val KEY_GLASS_VIS = "glass_visibility"
         private const val KEY_COVER_ENABLED = "online_cover_enabled"
         private const val KEY_COVER_PIN = "cover_pin_"
+        private const val KEY_EQ_ENABLED = "eq_enabled"
+        private const val KEY_EQ_PRESET = "eq_preset"
+        private const val KEY_EQ_BANDS = "eq_custom_bands"
 
         const val DEFAULT_LYRICS_FONT = 18
         const val MIN_LYRICS_FONT = 14

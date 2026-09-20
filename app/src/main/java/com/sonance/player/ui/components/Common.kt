@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -408,11 +409,21 @@ fun SonanceSlider(
     activeColor: Color = LocalSkin.current.accent,
     inactiveColor: Color = LocalSkin.current.surface3,
     alwaysShowThumb: Boolean = false,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    /**
+     * 手势结束（松手 / 精确点击落地）后回调一次。
+     *
+     * 给"拖动中实时预览、松手才落盘"的场景用 —— 比如均衡器滑杆：
+     * 拖动时立刻改音频链路上的增益（听得到），但不必每帧都写 SharedPreferences。
+     */
+    onValueChangeFinished: (() -> Unit)? = null
 ) {
     var trackWidth by remember { mutableStateOf(1f) }
     var pressed by remember { mutableStateOf(false) }
     val safe = value.coerceIn(0f, 1f)
+
+    // pointerInput(enabled) 的 key 不含这个回调，直接捕获会拿到旧 lambda
+    val latestFinished by rememberUpdatedState(onValueChangeFinished)
 
     Box(
         modifier = modifier
@@ -454,8 +465,10 @@ fun SonanceSlider(
 
                     if (scrubbing) {
                         pressed = false
+                        latestFinished?.invoke()
                     } else if (!abandoned) {
                         onValueChange((down.position.x / size.width).coerceIn(0f, 1f))
+                        latestFinished?.invoke()
                     }
                 }
             },
