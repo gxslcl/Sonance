@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -61,6 +62,7 @@ import com.sonance.player.data.Lyrics
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.LyricsResult
 import com.sonance.player.data.LyricsSource
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.indexAt
@@ -390,9 +392,18 @@ private fun GlassBackdrop(
     val scrim = GlassStyle.scrimAlpha(visibility)
 
     var art by remember(song.id) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(song.albumId, song.id) {
-        art = ArtworkLoader.load(context, song.albumId, 320)
-            ?: ArtworkLoader.online(song.id)
+    // 走和列表 / 播放页**完全相同**的取图链路：专辑封面 → 歌曲内嵌 → 之前下载落盘的封面。
+    // 早先这里只传了 albumId，两个兜底都没接上，于是**磁盘上已经下好的封面读不到**：
+    // 表现是「列表里明明有封面，歌词页背景却是空的」，冷启动后尤其明显
+    // （那时内存里的 onlineCovers 是空的）。sourceUri 兜内嵌封面，coverKey 兜磁盘缓存。
+    LaunchedEffect(song.albumId, song.id, song.title, song.artist) {
+        art = ArtworkLoader.load(
+            context = context,
+            albumId = song.albumId,
+            sizePx = 320,
+            sourceUri = song.uri,
+            coverKey = OnlineCover.keyOf(song.title, song.artist)
+        ) ?: ArtworkLoader.online(song.id)
     }
 
     art?.let { bmp ->
@@ -406,8 +417,14 @@ private fun GlassBackdrop(
             contentDescription = null,
             contentScale = ContentScale.Crop,
             colorFilter = if (style.liquid) ColorFilter.colorMatrix(matrix) else null,
+            // clipToBounds 必须放在 scale **之前**：1.35 倍放大是为了把模糊后发虚的边缘
+            // 推出可视区，但 Modifier.scale 默认**不裁剪**内容，于是图会向左右各溢出
+            // 17.5% 的页面宽度。播放页三层横向轮播时相邻层同时参与组合，这些溢出就盖到了
+            // 邻层上（表现为一条只在中途出现的竖条）。裁剪矩形就是本层页面矩形，
+            // 所以落定后的观感和原来完全一致。
             modifier = modifier
                 .fillMaxSize()
+                .clipToBounds()
                 .scale(1.35f)
                 .then(if (canBlur && blurDp > 0) Modifier.blur(blurDp.dp) else Modifier)
                 .alpha(if (canBlur) artAlpha else (artAlpha * 0.45f))

@@ -33,6 +33,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -145,6 +146,17 @@ fun FullPlayer(
             beyondViewportPageCount = 0,
             modifier = Modifier.fillMaxSize()
         ) { page ->
+        // 每层裁到自己的页面矩形。这层裁剪不是保险，是必须的：
+        // 歌词层的背景是 `scale(1.35f)` 的模糊封面，而 Modifier.scale 默认**不裁剪**内容，
+        // 于是它向左右各溢出 17.5% 的页面宽度（1080 宽的手机恰好 189px）。
+        // 滑动过程中相邻两层会同时参与组合（beyondViewportPageCount = 0 只保证落定后
+        // 不多组合，滑动中该组合的照样组合），溢出部分就盖到邻层上 ——
+        // 表现即「只在中途出现、切换完就没了」的竖条。
+        // pager 自己的视口裁剪挡不住它：竖条落在屏幕内，而不是视口外。
+        //
+        // 实测（1080x2400 / android-36）：去掉这两处裁剪后，封面页背景区亮度从 18.0
+        // 变成 85.4 —— 就是那条带；加回裁剪即恢复 18.0，且歌词页自身亮度完全不变。
+        Box(Modifier.fillMaxSize().clipToBounds()) {
         when (page % PlayerLayer.entries.size) {
 
         // ===== 第 0 层：封面 + 顶栏 =====
@@ -285,6 +297,7 @@ fun FullPlayer(
             )
         }
         }
+        }   // Box(fillMaxSize().clipToBounds())
         }
     }
 }
