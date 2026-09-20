@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
@@ -170,7 +171,8 @@ fun MiniPlayer(
                 cornerRadius = 7.dp,
                 sizePx = 200,
                 sourceUri = coverUri,
-                songId = state.mediaId
+                songId = state.mediaId,
+                coverKey = OnlineCover.keyOf(state.title, state.artist)
             )
             Column(Modifier.weight(1f)) {
                 Text(
@@ -266,7 +268,8 @@ fun PlayerBar(
                 cornerRadius = 7.dp,
                 sizePx = 220,
                 sourceUri = coverUri,
-                songId = state.mediaId
+                songId = state.mediaId,
+                coverKey = OnlineCover.keyOf(state.title, state.artist)
             )
             Column(Modifier.weight(1f)) {
                 Text(
@@ -445,7 +448,8 @@ fun NowPlayingPanel(
                     cornerRadius = 14.dp,
                     sizePx = 800,
                     sourceUri = coverUri,
-                    songId = state.mediaId
+                    songId = state.mediaId,
+                    coverKey = OnlineCover.keyOf(state.title, state.artist)
                 )
             }
         }

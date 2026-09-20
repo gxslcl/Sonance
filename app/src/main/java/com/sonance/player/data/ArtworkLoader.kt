@@ -26,12 +26,15 @@ import kotlinx.coroutines.withContext
  * 专辑封面加载。
  *
  * 取图顺序：
- * 1. 内存 LRU（按「专辑 id + 尺寸档位」，专辑未知时再带 URI 指纹）
+ * 1. 内存 LRU（按「专辑 id + 尺寸档位」，专辑未知时再带 URI 指纹，并带上 coverKey）
  * 2. MediaStore 专辑封面：API 29+ 用 `loadThumbnail`，低版本回退传统 `albumart` URI
  * 3. `sourceUri`（歌曲自身的 content:// URI）：用它再试一次
  *    —— 专辑级查询拿不到时，从音频文件里抠内嵌封面（`loadThumbnail`，
  *    再不行用 `MediaMetadataRetriever.embeddedPicture`）
- * 4. 都没有 → 由界面显示占位图；上层可再通过 [putOnline] 补在线封面
+ * 4. 传了 `coverKey` 就再读一次 [CoverCache] —— **之前下载并落盘的在线封面**。
+ *    没有这一步，下载的封面只活在 [onlineCovers] 里，重启就没了，
+ *    列表要等播放到那首歌才显示封面
+ * 5. 都没有 → 由界面显示占位图；上层可再通过 [putOnline] 补在线封面
  *
  * [paused] 由列表 / 网格的滚动状态驱动：滚动过程中跳过加载。
  * 注意只影响"新发起的加载"，不动已经拿到图的那些 —— 早先的实现在这里会把
@@ -57,16 +60,28 @@ object ArtworkLoader {
      * **URI 指纹**是为了 albumId <= 0 的情况：只用 (albumId, size) 会让所有
      * "未知专辑"的歌共用一个键，第一首的封面被套到后面每一首上。
      */
-    private class Key(val albumId: Long, val size: Int, val uriKey: Int) {
+    private class Key(
+        val albumId: Long,
+        val size: Int,
+        val uriKey: Int,
+        /**
+         * 这首歌的在线封面缓存 key（见 [OnlineCover.keyOf]）。
+         *
+         * 必须进键：同一张专辑下的两首歌各有各的下载封面（标题不同 → key 不同），
+         * 只用 (albumId, size) 会让它们互相顶掉。
+         */
+        val coverKey: String?
+    ) {
         override fun equals(other: Any?): Boolean =
             other is Key && other.albumId == albumId &&
-                other.size == size && other.uriKey == uriKey
+                other.size == size && other.uriKey == uriKey && other.coverKey == coverKey
 
-        override fun hashCode(): Int = ((albumId * 31L + size) * 31L + uriKey).hashCode()
+        override fun hashCode(): Int =
+            (((albumId * 31L + size) * 31L + uriKey) * 31L + (coverKey?.hashCode() ?: 0)).hashCode()
     }
 
-    private fun keyOf(albumId: Long, size: Int, sourceUri: Uri?): Key =
-        Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0))
+    private fun keyOf(albumId: Long, size: Int, sourceUri: Uri?, coverKey: String?): Key =
+        Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), coverKey)
 
     /** 按**字节**算上限，不是按条数 —— 80 张 900px 位图能吃掉一百多 MB */
     private val maxBytes: Int = run {
@@ -86,6 +101,21 @@ object ArtworkLoader {
 
     private fun missingKeyOf(albumId: Long, sourceUri: Uri?): String =
         if (albumId > 0) "a:$albumId" else "u:${sourceUri?.toString() ?: "?"}"
+
+    /**
+     * 确认过「磁盘缓存里也没有这张下载封面」的 coverKey。
+     *
+     * 单独一个集合，**不复用 [missing]** —— 后者的语义是「本地（MediaStore / 内嵌）
+     * 没有封面」，还被 [isMissing] 对外暴露；混在一起会把语义搅乱，
+     * 而且会让「同专辑的第一首没封面」把后面每首歌的下载封面一起挡掉。
+     */
+    private val coverMiss = HashSet<String>(256)
+
+    /** 封面刚写入缓存后调用，让上面那条短路失效 */
+    fun forgetCoverMiss(coverKey: String?) {
+        if (coverKey == null) return
+        synchronized(coverMiss) { coverMiss.remove(coverKey) }
+    }
 
     /** 同时进行的解码任务上限，防止快速滚动时几十个解码一起上 */
     private val decodeGate = Semaphore(permits = 2)
@@ -134,24 +164,35 @@ object ArtworkLoader {
         context: Context,
         albumId: Long,
         sizePx: Int = 512,
-        sourceUri: Uri? = null
+        sourceUri: Uri? = null,
+        /**
+         * 这首歌的在线封面缓存 key（[OnlineCover.keyOf]）。
+         *
+         * 传了它，本地没有封面时会继续去读**之前下载并落盘**的那张 ——
+         * 这是「重启后列表要等播放到这首歌才显示封面」的修复点：
+         * 以前只有 [onlineCovers]（纯内存）能提供下载封面，重启即丢。
+         */
+        coverKey: String? = null
     ): ImageBitmap? {
-        if (albumId <= 0 && sourceUri == null) return null
+        if (albumId <= 0 && sourceUri == null && coverKey == null) return null
         val size = bucketOf(sizePx)
-        val key = keyOf(albumId, size, sourceUri)
-        val missKey = missingKeyOf(albumId, sourceUri)
+        val key = keyOf(albumId, size, sourceUri, coverKey)
 
         // 缓存命中直接返回，不切线程、不暂停检查
         cache.get(key)?.let { return it }
-        if (isMissingKey(missKey)) return null
         // 滚动中跳过新发起的加载
         if (paused) return null
+
+        // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
+        // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
+        val localGone = isMissingKey(missingKeyOf(albumId, sourceUri))
+        val coverGone = coverKey == null || synchronized(coverMiss) { coverMiss.contains(coverKey) }
+        if (localGone && coverGone) return null
 
         return withContext(Dispatchers.IO) {
             decodeGate.withPermit {
                 cache.get(key)?.let { return@withPermit it }
-                if (isMissingKey(missKey)) return@withPermit null
-                decode(context, albumId, size, key, sourceUri, missKey)
+                decode(context, albumId, size, key, sourceUri, coverKey)
             }
         }
     }
@@ -165,44 +206,54 @@ object ArtworkLoader {
         size: Int,
         key: Key,
         sourceUri: Uri?,
-        missKey: String
+        coverKey: String?
     ): ImageBitmap? {
+        val missKey = missingKeyOf(albumId, sourceUri)
         var bitmap: Bitmap? = null
 
-        // ---- 1) MediaStore 专辑封面 ----
-        if (albumId > 0) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                bitmap = runCatching {
-                    context.contentResolver.loadThumbnail(
-                        albumContentUri(albumId), Size(size, size), null
-                    )
-                }.getOrNull()
+        // ---- 1) MediaStore 专辑封面 + 2) 音频文件内嵌封面 ----
+        if (!isMissingKey(missKey)) {
+            if (albumId > 0) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    bitmap = runCatching {
+                        context.contentResolver.loadThumbnail(
+                            albumContentUri(albumId), Size(size, size), null
+                        )
+                    }.getOrNull()
+                }
+                if (bitmap == null) {
+                    bitmap = runCatching {
+                        context.contentResolver.openInputStream(legacyAlbumArtUri(albumId))?.use {
+                            decodeSampled(it.readBytes(), size)
+                        }
+                    }.getOrNull()
+                }
             }
-            if (bitmap == null) {
-                bitmap = runCatching {
-                    context.contentResolver.openInputStream(legacyAlbumArtUri(albumId))?.use {
-                        decodeSampled(it.readBytes(), size)
-                    }
-                }.getOrNull()
+
+            if (bitmap == null && sourceUri != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    bitmap = runCatching {
+                        context.contentResolver.loadThumbnail(sourceUri, Size(size, size), null)
+                    }.getOrNull()
+                }
+                if (bitmap == null) {
+                    bitmap = readEmbeddedPicture(context, sourceUri, size)
+                }
             }
+
+            if (bitmap == null) synchronized(missing) { missing.add(missKey) }
         }
 
-        // ---- 2) 退回音频文件自身的内嵌封面 ----
-        if (bitmap == null && sourceUri != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                bitmap = runCatching {
-                    context.contentResolver.loadThumbnail(sourceUri, Size(size, size), null)
-                }.getOrNull()
-            }
-            if (bitmap == null) {
-                bitmap = readEmbeddedPicture(context, sourceUri, size)
-            }
+        // ---- 3) 本地确实没有 → 用之前下载并落盘的在线封面 ----
+        // 这一步是本地文件读取，没有 IPC，所以不受上面 missing 标记的约束；
+        // 但同样要记一笔「磁盘也没有」，否则每次滚动都会重新 stat 一遍。
+        if (bitmap == null && coverKey != null) {
+            val hit = CoverCache.lookup(context, coverKey)
+            if (hit is CoverCache.Lookup.Hit) bitmap = decodeSampled(hit.bytes, size)
+            if (bitmap == null) synchronized(coverMiss) { coverMiss.add(coverKey) }
         }
 
-        if (bitmap == null) {
-            synchronized(missing) { missing.add(missKey) }
-            return null
-        }
+        if (bitmap == null) return null
         val image = bitmap.asImageBitmap()
         cache.put(key, image)
         return image
@@ -247,6 +298,7 @@ object ArtworkLoader {
     fun clear() {
         cache.evictAll()
         synchronized(missing) { missing.clear() }
+        synchronized(coverMiss) { coverMiss.clear() }
         onlineCovers.clear()
     }
 }

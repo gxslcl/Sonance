@@ -260,6 +260,16 @@ object OnlineCover {
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
     /**
+     * `keyOf` 的记忆化。
+     *
+     * 界面（列表每一行、播放条、全屏页）都会在 Composition 里直接调用 `keyOf`，
+     * 一次列表重组就是几十次调用 —— SHA-1 只该算一次。
+     * 命中时返回的是**同一个字符串实例**，值不变，所以可以安全地当作
+     * `remember` / `LaunchedEffect` 的 key 用。
+     */
+    private val keyMemo = android.util.LruCache<String, String>(512)
+
+    /**
      * 缓存 key：和歌词缓存同样的思路，用「歌名+歌手」而不是 MediaStore id（重扫后 id 会变）。
      *
      * 前缀带 `v2` —— 搜索策略改过（过滤占位歌手 / 清理文件名序号）之后，
@@ -269,7 +279,9 @@ object OnlineCover {
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
         if (t.isEmpty() && a.isEmpty()) return null
-        return sha1("cover|v2|$t|$a")
+        val raw = "$t|$a"
+        keyMemo.get(raw)?.let { return it }
+        return sha1("cover|v2|$raw").also { keyMemo.put(raw, it) }
     }
 
     private fun sha1(s: String): String {

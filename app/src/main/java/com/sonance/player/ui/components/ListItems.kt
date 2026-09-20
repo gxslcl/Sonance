@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.sonance.player.data.Album
 import com.sonance.player.data.Artist
 import com.sonance.player.data.MusicFolder
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
@@ -103,7 +104,8 @@ fun SongRow(
             cornerRadius = if (compact) 6.dp else 7.dp,
             sizePx = 200,
             sourceUri = song.uri,
-            songId = song.id
+            songId = song.id,
+            coverKey = OnlineCover.keyOf(song.title, song.artist)
         )
 
         Spacer(Modifier.width(12.dp))
@@ -215,7 +217,9 @@ fun AlbumCard(
                 cornerRadius = 0.dp,
                 sizePx = 600,
                 sourceUri = album.songs.firstOrNull()?.uri,
-                songId = album.songs.firstOrNull()?.id ?: -1L
+                songId = album.songs.firstOrNull()?.id ?: -1L,
+                coverKey = album.songs.firstOrNull()
+                    ?.let { OnlineCover.keyOf(it.title, it.artist) }
             )
             Box(
                 Modifier
@@ -283,6 +287,8 @@ fun ArtistRow(
         seed = artist.name,
         albumId = artist.songs.firstOrNull()?.albumId ?: -1L,
         sourceUri = artist.songs.firstOrNull()?.uri,
+        coverKey = artist.songs.firstOrNull()
+            ?.let { OnlineCover.keyOf(it.title, it.artist) },
         circular = true,
         onClick = onClick,
         modifier = modifier
@@ -320,6 +326,7 @@ private fun EntityRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     sourceUri: android.net.Uri? = null,
+    coverKey: String? = null,
     leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     leadingTint: Color = Color.Unspecified
 ) {
@@ -354,7 +361,8 @@ private fun EntityRow(
                     cornerRadius = if (circular) 26.dp else 8.dp,
                     sizePx = 220,
                     showPlaceholderMark = false,
-                    sourceUri = sourceUri
+                    sourceUri = sourceUri,
+                    coverKey = coverKey
                 )
             }
         }

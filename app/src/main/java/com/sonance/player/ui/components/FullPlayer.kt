@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
@@ -370,7 +371,8 @@ private fun PlayerPage(
                         cornerRadius = 16.dp,
                         sizePx = 900,
                         sourceUri = song.uri,
-                        songId = song.id
+                        songId = song.id,
+                        coverKey = OnlineCover.keyOf(song.title, song.artist)
                     )
                 }
                 Column(
@@ -427,7 +429,8 @@ private fun PlayerPage(
                         cornerRadius = 16.dp,
                         sizePx = 900,
                         sourceUri = song.uri,
-                        songId = song.id
+                        songId = song.id,
+                        coverKey = OnlineCover.keyOf(song.title, song.artist)
                     )
                 }
 

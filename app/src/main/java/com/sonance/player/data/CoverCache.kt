@@ -3,10 +3,12 @@ package com.sonance.player.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -70,6 +72,36 @@ object CoverCache {
     fun remove(context: Context, key: String?) {
         if (key == null) return
         runCatching { fileOf(context, key).delete() }
+    }
+
+    /**
+     * 这首歌是否已经有**真实**封面（空文件是"确认没有"的哨兵，不算）。
+     */
+    fun hasCover(context: Context, key: String?): Boolean {
+        if (key == null) return false
+        return runCatching {
+            val f = fileOf(context, key)
+            f.exists() && f.length() > 0
+        }.getOrDefault(false)
+    }
+
+    /**
+     * 封面文件的 `content://` URI，经 FileProvider 暴露（authority = `<包名>.covers`）。
+     *
+     * 存在的理由：MediaSession 要把封面交给通知栏和锁屏，而它们只认 URI 或位图 ——
+     * 拿不到应用私有目录里的 `File`。没有下载过封面时返回 null，
+     * 调用方据此退回 MediaStore 的 albumart URI。
+     */
+    fun contentUri(context: Context, key: String?): Uri? {
+        if (key == null) return null
+        if (!hasCover(context, key)) return null
+        return runCatching {
+            FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.covers",
+                fileOf(context, key)
+            )
+        }.getOrNull()
     }
 
     fun count(context: Context): Int =

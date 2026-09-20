@@ -65,6 +65,23 @@
             </intent-filter>
         </service>
 
+        <!--
+          把下载的封面交给通知栏 / 锁屏用的 FileProvider。
+
+          下载的封面存在应用私有目录（files/cover_cache），系统进程读不到 File，
+          而 MediaSession 只认 URI 或位图 —— 所以经这里转成 content:// URI。
+          authority 与 CoverCache.contentUri 里的 "${包名}.covers" 必须一致。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.covers"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <receiver
             android:name="androidx.media3.session.MediaButtonReceiver"
             android:exported="true">

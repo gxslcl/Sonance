@@ -83,18 +83,25 @@ fun CoverArt(
     showPlaceholderMark: Boolean = true,
     sourceUri: android.net.Uri? = null,
     /** 传入后即可享受「本地没封面时用在线补的封面」 */
-    songId: Long = -1L
+    songId: Long = -1L,
+    /**
+     * 这首歌的在线封面缓存 key（`OnlineCover.keyOf(title, artist)`）。
+     *
+     * 传了它，本地（MediaStore / 内嵌）没有封面时会继续去读**已经下载落盘**的封面 ——
+     * 重启后不播放也能直接显示，而不是先给占位图。传 null 就退回原来的行为。
+     */
+    coverKey: String? = null
 ) {
     val context = LocalContext.current
-    var bitmap by remember(albumId, sourceUri) { mutableStateOf<ImageBitmap?>(null) }
+    var bitmap by remember(albumId, sourceUri, coverKey) { mutableStateOf<ImageBitmap?>(null) }
 
-    LaunchedEffect(albumId, sizePx, sourceUri, ArtworkLoader.paused) {
+    LaunchedEffect(albumId, sizePx, sourceUri, coverKey, ArtworkLoader.paused) {
         // 滚动暂停期间直接不动已有的图。
         // 之前这里会走到 load() 拿回 null 再赋给 bitmap，等于把已经加载好的封面
         // 抹掉、退回占位图 —— 滚动时封面会"闪一下"。
         if (ArtworkLoader.paused) return@LaunchedEffect
-        bitmap = if (albumId > 0 || sourceUri != null) {
-            ArtworkLoader.load(context, albumId, sizePx, sourceUri)
+        bitmap = if (albumId > 0 || sourceUri != null || coverKey != null) {
+            ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)
         } else {
             null
         }

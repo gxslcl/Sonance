@@ -105,7 +105,8 @@ fun CoverPickerDialog(vm: SonanceViewModel) {
                         cornerRadius = 6.dp,
                         sizePx = 200,
                         sourceUri = song.uri,
-                        songId = song.id
+                        songId = song.id,
+                        coverKey = OnlineCover.keyOf(song.title, song.artist)
                     )
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {

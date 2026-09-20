@@ -38,6 +38,7 @@ import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.Album
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.ViewMode
 import com.sonance.player.data.formatDuration
@@ -572,7 +573,9 @@ fun SongCollectionScreen(
                     cornerRadius = 12.dp,
                     sizePx = 500,
                     sourceUri = coverUri,
-                    songId = songs.firstOrNull()?.id ?: -1L
+                    songId = songs.firstOrNull()?.id ?: -1L,
+                    coverKey = songs.firstOrNull()
+                        ?.let { OnlineCover.keyOf(it.title, it.artist) }
                 )
                 Column(Modifier.weight(1f)) {
                     Text(

@@ -2,6 +2,7 @@ package com.sonance.player.playback
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -10,6 +11,8 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.CoverCache
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -189,6 +192,28 @@ class PlayerController(private val context: Context) {
         }
     }
 
+    /**
+     * 刷新当前曲目的封面 metadata。
+     *
+     * 两个调用时机：切歌之后、封面刚下载完成之后。以前只有 `setMediaItems` 那一刻
+     * 会写一次 artworkUri，所以播放中补到的封面永远进不了通知栏。
+     *
+     * [MediaController.replaceMediaItem] 在**媒体源没变**时只更新 metadata、
+     * 不会重新准备播放（ExoPlayer 会比较 `MediaItem.localConfiguration`），
+     * 所以播放不中断、进度不丢。开头先比一次 URI，避免每次切歌都白替换一遍。
+     */
+    fun refreshCurrentArtwork(song: Song) {
+        val c = controller ?: return
+        val idx = c.currentMediaItemIndex
+        if (idx !in 0 until c.mediaItemCount) return
+        val current = runCatching { c.getMediaItemAt(idx) }.getOrNull() ?: return
+        if (current.mediaId != song.id.toString()) return
+        val wanted = song.artworkUri(context)
+        if (current.mediaMetadata.artworkUri == wanted) return
+        runCatching { c.replaceMediaItem(idx, song.toMediaItem(context)) }
+            .onFailure { android.util.Log.w("SonanceCover", "刷新通知栏封面失败: ${it.message}") }
+    }
+
     /** 把 ExoPlayer 的错误码翻译成用户能看懂的一句话 */
     private fun describeError(error: PlaybackException): String {
         val title = _state.value.title
@@ -240,7 +265,7 @@ class PlayerController(private val context: Context) {
 
     private fun applyPlay(req: PlayRequest) {
         val c = controller ?: return
-        val items = req.songs.map { it.toMediaItem() }
+        val items = req.songs.map { it.toMediaItem(context) }
         if (items.isEmpty()) return
         val start = req.index.coerceIn(0, items.lastIndex)
         lastNotifiedId = -1L
@@ -344,7 +369,7 @@ class PlayerController(private val context: Context) {
     fun playNext(song: Song) {
         val c = controller ?: return
         val idx = (c.currentMediaItemIndex + 1).coerceIn(0, c.mediaItemCount)
-        c.addMediaItem(idx, song.toMediaItem())
+        c.addMediaItem(idx, song.toMediaItem(context))
         refreshQueue(c)
     }
 
@@ -375,7 +400,22 @@ class PlayerController(private val context: Context) {
         const val EXTRA_ALBUM_ID = "sonance.album_id"
         const val EXTRA_URI = "sonance.source_uri"
 
-        fun Song.toMediaItem(): MediaItem {
+        /**
+         * 通知栏 / 锁屏取封面的地址。
+         *
+         * 优先用**本应用下载并落盘**的那张。能走到"需要下载封面"这一步的歌，
+         * 本地（MediaStore 专辑封面 / 文件内嵌）本来就是空的 —— 也就是说原来的
+         * `legacyAlbumArtUri(albumId)` 对它们必定取不到图，这就是
+         * 「系统下拉只显示播放信息、没有封面」的原因。
+         *
+         * 下载的封面躺在应用私有目录里，系统进程读不到 `File`，所以经 FileProvider
+         * 转成 `content://` URI（见 [CoverCache.contentUri]）再交出去。
+         */
+        fun Song.artworkUri(context: Context): Uri =
+            CoverCache.contentUri(context, OnlineCover.keyOf(title, artist))
+                ?: ArtworkLoader.legacyAlbumArtUri(albumId)
+
+        fun Song.toMediaItem(context: Context): MediaItem {
             val extras = android.os.Bundle().apply {
                 putLong(EXTRA_ALBUM_ID, albumId)
                 putString(EXTRA_URI, uri.toString())
@@ -388,7 +428,7 @@ class PlayerController(private val context: Context) {
                         .setTitle(title)
                         .setArtist(artist)
                         .setAlbumTitle(album)
-                        .setArtworkUri(ArtworkLoader.legacyAlbumArtUri(albumId))
+                        .setArtworkUri(artworkUri(context))
                         .setExtras(extras)
                         .setIsBrowsable(false)
                         .setIsPlayable(true)
