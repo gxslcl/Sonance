@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.core.graphics.ColorUtils
+import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.getValue
@@ -20,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -176,6 +178,9 @@ object ArtworkLoader {
         if (coverKey == null) return
         // 从「没有」变回「可能有」，晕染那边也要重新判断
         if (synchronized(coverMiss) { coverMiss.remove(coverKey) }) artworkGoneVersion++
+        // 色卡也要一起丢掉：这张封面**换掉了**（用户手动搜了一张新的），
+        // 留着旧色卡的话，屏幕上是新封面、背景却还是旧封面取出来的颜色。
+        forgetTint("t:c$coverKey")
     }
 
     /**
@@ -231,6 +236,14 @@ object ArtworkLoader {
     private const val TINT_SAMPLE = 24
 
     /**
+     * 预取封面时的解码边长。
+     *
+     * 取色只要 24×24，这里给大一点是为了让预取出来的位图还能顶一次真实的封面显示
+     * （[bucketOf] 会把尺寸归一到几档，192 落在小档里，代价很低）。
+     */
+    private const val PREFETCH_PX = 192
+
+    /**
      * 按封面来源存的色卡。
      *
      * 用 [SnapshotStateMap] 而不是普通 map：色卡是异步解码时顺手算出来的，
@@ -241,16 +254,55 @@ object ArtworkLoader {
      */
     private val tints: SnapshotStateMap<String, CoverTint> = mutableStateMapOf()
 
-    /** 界面同步读色卡；还没取到就是 null，此时界面退回皮肤占位色 */
+    /**
+     * 界面同步读色卡；还没取到就是 null，此时界面退回皮肤占位色。
+     *
+     * 查询顺序**必须和 [com.sonance.player.ui.components.CoverArt] 的显示优先级一致**
+     * （那里是 `online ?: bitmap`，在线封面优先）。反过来的话，用户手动给某首歌
+     * 换了一张在线封面时，屏幕上显示的是新图、晕染却还按本地专辑封面取色 ——
+     * 颜色和封面不是一回事。
+     */
     fun tintOf(albumId: Long, sourceUri: Uri?, coverKey: String?): CoverTint? {
-        tints["t:" + missingKeyOf(albumId, sourceUri)]?.let { return it }
-        return if (coverKey != null) tints["t:c$coverKey"] else null
+        if (coverKey != null) tints["t:c$coverKey"]?.let { return it }
+        return tints["t:" + missingKeyOf(albumId, sourceUri)]
     }
 
     private fun rememberTint(key: String, bitmap: Bitmap) {
         if (tints.containsKey(key)) return
         val tint = extractTint(bitmap) ?: return
         tints[key] = tint
+    }
+
+    private fun forgetTint(key: String) {
+        if (tints.remove(key) != null) artworkGoneVersion++
+    }
+
+    /**
+     * 预取色卡：提前把某首歌的封面解出来、算一遍颜色。
+     *
+     * 色卡是「解码封面时顺手算」的，所以换歌瞬间新歌多半还没有颜色可用 ——
+     * 那段时间晕染只能沿用上一首的色，表现为「颜色慢半拍才变过来」。
+     * 提前给相邻的下一首算一遍，切歌时新色已经就绪，过渡就完全跟得上了。
+     *
+     * 走的就是 [load] 那条路（封面通常已在内存 / 磁盘缓存里，命中时几乎不花钱），
+     * 顺带把封面位图也预热了，上下滑动切歌时封面出现得更快。
+     *
+     * 已经有色卡就直接返回 —— 别为了"预取"把已经算好的东西再解一遍。
+     */
+    suspend fun prefetchTint(context: Context, albumId: Long, sourceUri: Uri?, coverKey: String?) {
+        if (tintOf(albumId, sourceUri, coverKey) != null) return
+        withContext(Dispatchers.IO) {
+            try {
+                load(context, albumId, sizePx = PREFETCH_PX, sourceUri = sourceUri, coverKey = coverKey)
+            } catch (c: CancellationException) {
+                // 用户快速跳歌时这个协程会被取消。必须原样抛出 —— 吞掉 CancellationException
+                // 会让结构化并发失效（外层以为还活着）。
+                throw c
+            } catch (t: Throwable) {
+                // 预取是尽力而为：失败不影响任何功能，只是这首歌的颜色要等界面自己去解码时才算。
+                Log.w("SonanceCover", "预取色卡失败: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
     }
 
     /**
@@ -527,6 +579,8 @@ object ArtworkLoader {
         cache.evictAll()
         synchronized(missing) { missing.clear() }
         synchronized(coverMiss) { coverMiss.clear() }
+        // 色卡也要清：封面缓存都清了，按旧封面算出来的颜色自然也不作数了
+        tints.clear()
         artworkGoneVersion++
         onlineCovers.clear()
     }
