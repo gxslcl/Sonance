@@ -79,6 +79,23 @@ enum class SortField(val label: String) {
 
 enum class ViewMode { LIST, GRID }
 
+/**
+ * 播放页封面颜色的「包裹方式」—— 决定颜色从封面的哪一侧向外晕开。
+ *
+ * 默认 [AROUND]：这是最初的需求本身（「图片四周的颜色渐变到背景上」），
+ * 只在下方那一版是当时选项受限的产物。
+ */
+enum class GlowMode(val id: String, val label: String, val hint: String) {
+    BOTTOM("bottom", "下方", "只从封面下边缘向外晕开"),
+    SIDES("sides", "左右", "从封面左右两侧向外晕开"),
+    AROUND("around", "四周", "封面四条边都向外晕开，上方也带一点"),
+    FULL("full", "全屏", "扩散到屏幕边缘才淡出，范围最大");
+
+    companion object {
+        fun fromId(id: String?): GlowMode = entries.firstOrNull { it.id == id } ?: AROUND
+    }
+}
+
 enum class LibraryTab(val id: String, val label: String) {
     SONGS("songs", "全部歌曲"),
     ALBUMS("albums", "专辑"),

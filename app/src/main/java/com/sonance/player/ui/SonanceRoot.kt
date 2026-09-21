@@ -309,7 +309,11 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenEqualizer = openEqualizer,
                 onOpenSleepTimer = { sleepOpen = true },
                 sleepTimerActive = vm.sleepTimerLabel != null,
-                eqEnabled = vm.eqEnabled
+                eqEnabled = vm.eqEnabled,
+                glowMode = vm.glowMode,
+                glowStrength = vm.glowStrength,
+                onGlowModeChange = { vm.changeGlowMode(it) },
+                onGlowStrengthChange = { vm.changeGlowStrength(it) }
             )
         }
 

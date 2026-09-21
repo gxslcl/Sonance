@@ -11,6 +11,24 @@ class Prefs(context: Context) {
     private val sp: SharedPreferences =
         context.applicationContext.getSharedPreferences("sonance_prefs", Context.MODE_PRIVATE)
 
+    /** 播放页封面颜色往背景上晕开的包裹方式（见 [GlowMode]） */
+    var glowMode: String
+        get() = sp.getString(KEY_GLOW_MODE, null) ?: GlowMode.AROUND.id
+        set(v) = sp.edit().putString(KEY_GLOW_MODE, v).apply()
+
+    /**
+     * 晕染浓度。
+     *
+     * 默认 0.60 是「能一眼看出来、但不抢封面」的档位 ——
+     * 早先默认 0.10 那版太含蓄，用户以为功能根本没做出来。
+     */
+    var glowStrength: Float
+        get() = sp.getFloat(KEY_GLOW_STRENGTH, DEFAULT_GLOW_STRENGTH)
+            .coerceIn(MIN_GLOW_STRENGTH, MAX_GLOW_STRENGTH)
+        set(v) = sp.edit()
+            .putFloat(KEY_GLOW_STRENGTH, v.coerceIn(MIN_GLOW_STRENGTH, MAX_GLOW_STRENGTH))
+            .apply()
+
     var skinId: String
         get() = sp.getString(KEY_SKIN, null) ?: "midnight_amber"
         set(v) = sp.edit().putString(KEY_SKIN, v).apply()
@@ -324,6 +342,13 @@ class Prefs(context: Context) {
     }
 
     companion object {
+        /** 晕染浓度的可调范围（界面上的滑块直接用这两个值） */
+        const val MIN_GLOW_STRENGTH = 0.02f
+        const val MAX_GLOW_STRENGTH = 0.95f
+        const val DEFAULT_GLOW_STRENGTH = 0.60f
+
+        private const val KEY_GLOW_MODE = "glow_mode"
+        private const val KEY_GLOW_STRENGTH = "glow_strength"
         private const val KEY_SKIN = "skin_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"

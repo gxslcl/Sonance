@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.VerticalPager
@@ -26,8 +28,12 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -43,12 +49,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import android.graphics.Bitmap
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.CoverTint
+import com.sonance.player.data.GlowMode
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
@@ -59,6 +85,7 @@ import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * 全屏播放页。竖向翻页（TikTok / 汽水音乐式）：整页上下滑动切歌，
@@ -90,6 +117,14 @@ fun FullPlayer(
     sleepTimerActive: Boolean = false,
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean = false,
+    /** 播放页封面的颜色往哪边晕开 */
+    glowMode: GlowMode = GlowMode.AROUND,
+    /** 晕染浓度 */
+    glowStrength: Float = 0.6f,
+    /** 双击封面那个面板改了包裹方式 */
+    onGlowModeChange: (GlowMode) -> Unit = {},
+    /** 双击封面那个面板改了浓度 */
+    onGlowStrengthChange: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -104,6 +139,55 @@ fun FullPlayer(
      * 能点行跳转、能调字号/玻璃），这里的展开只在原地显示一行。
      */
     var lyricsExpanded by rememberSaveable { mutableStateOf(false) }
+
+    /** 双击封面打开的「晕染」面板 */
+    var showGlowSheet by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 本页（FullPlayer 根 Box）在 root 坐标系里的左上角。
+     *
+     * `boundsInRoot()` 量出来的是相对 **Composition 根**的坐标，
+     * 而晕染画在根 Box 的 drawBehind 里、用的是**根 Box 的局部坐标**。
+     * 两者差一个偏移，不换算的话：区域小的模式（下方 / 左右 / 四周）会整体错位、
+     * 看上去像「完全没画」；只有全屏因为范围极大，偏出去也能盖住屏幕，才蒙混过关。
+     */
+    var rootTopLeft by remember { mutableStateOf(Offset.Zero) }
+
+    /** 封面在**本页坐标系**里的矩形 —— 由 PlayerPage 量出来上报，晕染靠它定位 */
+    var coverBounds by remember { mutableStateOf<Rect?>(null) }
+
+    // 当前这首的晕染色卡。取色是异步算的，所以把 tint 也放进 remember 的 key：
+    // 只按 songId 缓存的话，第一帧拿到的「还没取到色」的兜底色会一直被记住。
+    val glowSong = queue.getOrNull(state.queueIndex)
+    val glowTint = glowSong?.let {
+        ArtworkLoader.tintOf(it.albumId, it.uri, OnlineCover.keyOf(it.title, it.artist))
+    }
+    val glowColors = remember(glowSong?.id, glowSong?.title, glowTint, skin.id) {
+        val song = glowSong
+        if (song == null) {
+            emptyList()
+        } else if (glowTint != null) {
+            listOf(Color(glowTint.left), Color(glowTint.center), Color(glowTint.right))
+        } else {
+            // 还没取到色（或封面是纯黑纯白）：用占位图的配色兜底，
+            // 免得晕染在「有 / 没有」之间跳
+            val c = skin.gradientFor(song.title + song.artist)
+            listOf(c.first(), c[c.size / 2], c.last())
+        }
+    }
+    val glowSpec = coverBounds
+        ?.takeIf { glowColors.isNotEmpty() && it.width > 0f && it.height > 0f }
+        ?.let { GlowSpec(colors = glowColors, mode = glowMode, strength = glowStrength, cover = it) }
+
+    // 晕染的二维渐变图（横向取封面色、纵向做淡出）。
+    //
+    // 以前这里是「横向切 32 段、每段画一条纵向渐变」。段与段之间会留下接缝：
+    // 每段都是独立的 drawRect，交界处的像素会被两个矩形各画一次，
+    // 于是屏幕上出现一排等距的竖线（32 段 → 1080 宽的手机上每 34px 一条）。
+    // 一张小位图拉伸就能彻底避免 —— 横向是连续的，没有段就没有缝。
+    val glowImage = remember(glowColors, glowMode, glowStrength) {
+        buildGlowImage(glowColors, glowMode, glowStrength)
+    }
 
     // 播放页的三层（封面 / 歌词 / 律动柱）做成**环形轮播**：
     // 页数取极大值、用「页号 % 3」映射到层，于是左右两个方向都能一直滑下去，
@@ -155,7 +239,19 @@ fun FullPlayer(
         }
     }
 
-    Box(modifier.fillMaxSize().background(skin.bg)) {
+    Box(
+        modifier
+            .fillMaxSize()
+            .background(skin.bg)
+            // 记下自己在 root 里的位置，用来把封面的 root 坐标换算成本页坐标
+            .onGloballyPositioned { rootTopLeft = it.positionInRoot() }
+            // 晕染画在**整页背景层**：这一层天然包含顶栏和状态栏，颜色能一路覆盖上去。
+            // （之前画在封面那一层，被分页器裁掉了顶栏部分，所以顶部一直缺一块。）
+            .drawBehind {
+                val spec = glowSpec ?: return@drawBehind
+                drawGlow(spec, glowImage)
+            }
+    ) {
         val currentSong = queue.getOrNull(state.queueIndex)
 
         // 三层横向轮播。这里用 HorizontalPager 而不是 AnimatedContent：
@@ -279,6 +375,15 @@ fun FullPlayer(
                     )
                 }
             } else {
+                // 分页器外面**再套一层裁剪**。
+                //
+                // 只给 `VerticalPager` 挂 `clipToBounds()` 是不够的：它内部还要处理
+                // 「相邻页提前组合」（beyondViewportPageCount），那套 beyond-bounds 机制
+                // 会让视口外的页照样参与绘制，挂在它自己身上的裁剪被绕过去了。
+                // 实测现象：往回滑（看上一曲）时，上一页停在视口上方的那一截
+                // —— 控制按钮、音量条 —— 会画在顶栏和状态栏那一条上。
+                // 裁在这一层就绕不过去了。
+                Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
                 VerticalPager(
                     state = pagerState,
                     beyondViewportPageCount = 1,
@@ -286,12 +391,19 @@ fun FullPlayer(
                     // （用户对已在队列里的歌点"下一首播放"就会），只拿 song.id 当 key
                     // 会撞成重复 key，分页器直接抛 "Key ... was already used"。
                     key = { page -> "$page-${queue.getOrNull(page)?.id ?: -1L}" },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                    modifier = Modifier.fillMaxSize()
                 ) { page ->
                     val song = queue.getOrNull(page) ?: return@VerticalPager
                     val isCurrent = page == state.queueIndex
+                    // 每一页都裁到自己的范围 —— **包括当前页**。
+                    //
+                    // 早先这里给当前页留了豁免（不裁），理由是「晕染画在封面层、
+                    // 需要向上溢出才能覆盖顶栏」。但现在晕染已经搬到整页背景层了，
+                    // 那个理由不再成立，豁免只剩下副作用：
+                    // 滑动过程中当前页整体上移，它的**封面会溢出到分页器之外**，
+                    // 也就是顶栏 / 状态栏那一条 —— 表现是屏幕上半截突然出现
+                    // 不属于当前页的画面（用户反馈的「遮罩异常」）。
+                    Box(Modifier.fillMaxSize().clipToBounds()) {
                     PlayerPage(
                         song = song,
                         isFavorite = song.id in favorites,
@@ -317,9 +429,25 @@ fun FullPlayer(
                         eqEnabled = eqEnabled,
                         prefs = prefs,
                         lyricsExpanded = lyricsExpanded,
-                        onToggleLyrics = { lyricsExpanded = !lyricsExpanded }
+                        onToggleLyrics = { lyricsExpanded = !lyricsExpanded },
+                        glowMode = glowMode,
+                        glowStrength = glowStrength,
+                        onOpenGlow = { showGlowSheet = true },
+                        // 量出来的是 root 坐标，换算成本页（根 Box）坐标再交给晕染。
+                        //
+                        // 只有**当前页**的上报算数：分页器会同时组合相邻页
+                        // （beyondViewportPageCount = 1），那些页停在屏幕外，
+                        // 它们的封面位置一旦参与上报，晕染就会被拽到屏幕外去 ——
+                        // 表现是颜色突然消失、或者闪到别的位置。
+                        onCoverBounds = {
+                            if (isCurrent) {
+                                coverBounds = it.translate(-rootTopLeft.x, -rootTopLeft.y)
+                            }
+                        }
                     )
+                    }
                 }
+                }   // Box(weight(1f).clipToBounds()) —— 分页器的视口裁剪
             }
         }
 
@@ -355,6 +483,16 @@ fun FullPlayer(
         }   // Box(fillMaxSize().clipToBounds())
         }
     }
+
+    if (showGlowSheet) {
+        GlowSheet(
+            mode = glowMode,
+            strength = glowStrength,
+            onModeChange = onGlowModeChange,
+            onStrengthChange = onGlowStrengthChange,
+            onDismiss = { showGlowSheet = false }
+        )
+    }
 }
 
 /**
@@ -370,6 +508,335 @@ private enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
  * 又让左右两个方向都有足够余量一直滑下去。
  */
 private const val LAYER_RING_START = 3000
+
+/* ============================================================
+ * 封面颜色渗到背景
+ * ============================================================ */
+
+/**
+ * 「下方」模式里，颜色从封面高度的这个比例处开始。
+ *
+ * ⚠️ 必须贴着封面底边（不能小太多）。第一版取 0.72，叠上背景色遮罩之后，
+ * 颜色最浓的位置落在了封面高度的 91% 处 —— 也就是**封面自己背后**，
+ * 被封面挡得干干净净，看起来就像「没有效果」。
+ */
+private const val GLOW_TOP = 0.86f
+
+/** 晕染向外扩散的距离，按封面高度的比例算（「下方」「四周」模式用） */
+private const val GLOW_REACH = 0.62f
+
+/** 「左右」模式里，颜色上下各超出封面高度的比例 */
+private const val GLOW_SIDE_PAD = 0.10f
+
+/**
+ * 颜色边界的过渡长度，按区域总长的**比例**算。
+ *
+ * 早先用的是固定的 14dp。抹掉硬边是够的，但放到「左右」这种整条色带上，
+ * 上下两端只剩十几像素的过渡，看着就是一刀切的硬边 —— 用户反馈「生硬、不自然」。
+ * 改成按比例之后，长度会随区域自适应：短的地方依旧是小过渡，长的地方用 18% 自然淡出。
+ */
+private const val GLOW_FADE = 0.18f
+
+/**
+ * 晕染位图的分辨率。
+ *
+ * 每个模式都要「横向取封面的颜色 + 纵向淡出」这种二维效果，而 Compose 的 [Brush]
+ * 只支持单一方向，所以是把渐变**烘成一张小位图**再拉伸：
+ * - 横向 64 是颜色插值的方向（色卡只有左 / 中 / 右三色，双线性拉伸出来就是精确的连续渐变）；
+ * - 纵向 128 是浓度曲线的方向，几个折点（起点、GLOW_FADE、终点）都能被采样到。
+ *
+ * 位图很小（64×128 = 8192 像素），而且只在 颜色 / 模式 / 浓度 变化时重建，
+ * 拖动滑块时每帧重建一次也在 0.2ms 量级，不值得再做缓存。
+ *
+ * 为什么不继续用「横向切 N 段、每段一条纵向渐变」：每个分段都是独立的 `drawRect`，
+ * 交界像素被两个矩形各画一次，屏幕上会出现一排等距竖线；而且分段本身是常数色，
+ * 渐变区还会带出竖条状色阶。一张连续位图两头都占。
+ */
+private const val GLOW_BITMAP_W = 64
+private const val GLOW_BITMAP_H = 128
+
+/**
+ * 纵向浓度曲线：`v = 0` 是晕染区**靠封面的那一端**，`v = 1` 是远端。
+ * 端点都收在 0，所以无论哪种模式，边界都是渐变淡出、不会留下硬边。
+ */
+private fun glowVerticalCurve(mode: GlowMode, v: Float): Float = when (mode) {
+    // 只从下边缘向下晕：贴着封面的地方最浓，向下逐渐淡掉
+    GlowMode.BOTTOM -> if (v < GLOW_FADE) v / GLOW_FADE else (1f - v) / (1f - GLOW_FADE)
+    // 左右两侧：上下两端各收一段，中间保持满色
+    GlowMode.SIDES -> when {
+        v < GLOW_FADE -> v / GLOW_FADE
+        v > 1f - GLOW_FADE -> (1f - v) / GLOW_FADE
+        else -> 1f
+    }
+    // 全屏：顶部最浓，向下线性淡到没有（底部按钮区应该几乎看不见颜色）
+    else -> (1f - v) * 0.92f
+}
+
+/**
+ * 把「横向色卡 + 纵向浓度」烘成一张 [ImageBitmap]。
+ *
+ * 径向那个模式（[GlowMode.AROUND]）直接用 `Brush.radialGradient`，不需要位图 ——
+ * 径向渐变本身就是二维的，没有分段，也就没有竖线问题。
+ */
+private fun buildGlowImage(
+    colors: List<Color>,
+    mode: GlowMode,
+    strength: Float
+): ImageBitmap? {
+    if (colors.isEmpty() || strength <= 0f) return null
+    if (mode == GlowMode.AROUND) return null
+    val w = GLOW_BITMAP_W
+    val h = GLOW_BITMAP_H
+    val px = IntArray(w * h)
+    for (y in 0 until h) {
+        val v = y / (h - 1f)
+        val a = (glowVerticalCurve(mode, v) * strength).coerceIn(0f, 1f)
+        val ai = (a * 255f + 0.5f).toInt()
+        if (ai == 0) continue   // 全透明，留 0 就行
+        for (x in 0 until w) {
+            val argb = glowTintAt(colors, x / (w - 1f)).toArgb()
+            px[y * w + x] = (ai shl 24) or (argb and 0x00FFFFFF)
+        }
+    }
+    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    bitmap.setPixels(px, 0, w, 0, 0, w, h)
+    return bitmap.asImageBitmap()
+}
+
+/** 在封面的几个取样色之间按 [t]（0~1）插值 */
+private fun glowTintAt(colors: List<Color>, t: Float): Color {
+    if (colors.size == 1) return colors[0]
+    val scaled = t.coerceIn(0f, 1f) * (colors.size - 1)
+    val i = scaled.toInt().coerceIn(0, colors.size - 2)
+    return lerp(colors[i], colors[i + 1], scaled - i)
+}
+
+/**
+ * 双击手势（用来打开晕染面板）。
+ *
+ * 自己比两次点击的时间戳，**不用** `detectTapGestures(onDoubleTap=)` ——
+ * 后者的判定窗口是系统写死的 300ms，且实测用 `adb shell input tap` 注入的
+ * 两次点击根本挤不进这个窗口，模拟器和真机上都很难触发。
+ * 800ms 对真人双击（通常 100~250ms）绰绰有余，也不会把两次无关点击算成双击。
+ *
+ * 用 `clickable` 而不是自己写 `pointerInput`：后者实测 up 事件会被判成
+ * 「已被消费」直接返回 null，一次都不触发。
+ */
+@Composable
+private fun Modifier.onDoubleTapGlow(action: () -> Unit): Modifier {
+    val lastTap = remember { longArrayOf(0L) }
+    val source = remember { MutableInteractionSource() }
+    return this.clickable(interactionSource = source, indication = null) {
+        val now = System.currentTimeMillis()
+        if (now - lastTap[0] < 800L) {
+            lastTap[0] = 0L
+            action()
+        } else {
+            lastTap[0] = now
+        }
+    }
+}
+
+/**
+ * 晕染需要的全部参数。
+ *
+ * 它画在**整页背景层**（[FullPlayer] 最外层那个 Box 上），而不是封面那一层：
+ * 封面层在分页器内部，向上溢出到顶栏的那部分会被分页器裁掉，顶栏就永远缺一块颜色。
+ * 代价是这一层不知道封面画在哪（竖屏居中、横屏在左栏），
+ * 所以封面矩形由 [PlayerPage] 用 `onGloballyPositioned` 量出来、再传上来。
+ */
+private data class GlowSpec(
+    val colors: List<Color>,
+    val mode: GlowMode,
+    val strength: Float,
+    /** 封面在整页坐标系（root）里的矩形 */
+    val cover: Rect,
+)
+
+/**
+ * 把封面的颜色往背景上晕开。
+ *
+ * 非径向的三种模式都是「横向取封面色 + 纵向淡出」，统一由 [buildGlowImage] 烘出来的
+ * 那张小位图拉伸绘制 —— 只算位置就够了，没有分段也就没有竖线。
+ * 径向模式本身是二维渐变，直接用 [Brush.radialGradient]。
+ *
+ * 画在 [drawBehind] 里 = 它在封面之下、也在歌名 / 进度条 / 按钮之下，
+ * 所以只有背景会被染色，任何文字和控件都不会被盖住。
+ */
+private fun DrawScope.drawGlow(spec: GlowSpec, image: ImageBitmap?) {
+    val colors = spec.colors
+    val mode = spec.mode
+    val strength = spec.strength
+    if (colors.isEmpty() || strength <= 0f) return
+    val w = spec.cover.width
+    val h = spec.cover.height
+    val cx = spec.cover.center.x
+    val cy = spec.cover.center.y
+
+    when (mode) {
+                    // ── 只从下边缘向下晕 ──
+                    GlowMode.BOTTOM -> drawGlowImage(
+                        image = image,
+                        top = cy - h / 2f + h * GLOW_TOP,
+                        height = h * GLOW_REACH
+                    )
+
+                    // ── 只从左右两侧向外晕 ──
+                    //
+                    // 横向**不做两端淡出**：颜色一路铺到屏幕左右边缘之外。
+                    // 早先这里给两端各留了一段渐变（屏幕边缘 0 → 封面边缘满色），
+                    // 结果颜色还没到屏幕边就淡没了，看着只是封面旁边「各自一条窄带」，
+                    // 完全不是「从封面往两侧延伸出去」的感觉。
+                    GlowMode.SIDES -> {
+                        val pad = h * GLOW_SIDE_PAD
+                        drawGlowImage(
+                            image = image,
+                            top = cy - h / 2f - pad,
+                            height = h + pad * 2f
+                        )
+                    }
+
+                    // ── 四周：从封面四条边向外晕开 ──
+                    GlowMode.AROUND -> {
+                        // 半径要够大，否则颜色到屏幕顶部就淡没了（顶栏那条看着像「没覆盖」）；
+                        // 但也不能一路糊到控制按钮，所以取 0.72 倍 ——
+                        // 顶部铺满、按钮附近正好淡到看不见。
+                        //
+                        // `coerceAtLeast` 是**保命的**：封面还没量到尺寸时（0×0）
+                        // 半径会算成 0，而 `RadialGradient` 对 0 半径直接抛
+                        // 「ending radius must be > 0」，异常发生在绘制阶段、一路冒到
+                        // 主线程 —— 实测崩过一次。这里夹一下，最坏也只是画不出颜色。
+                        val r = (minOf(w, h) * 0.5f + h * GLOW_REACH * 0.72f).coerceAtLeast(1f)
+                        // 内切圆之内保持满色 —— 紧贴封面四周的地方最浓
+                        val inner = (minOf(w, h) * 0.5f / r).coerceIn(0f, 0.95f)
+                        // 圆形对称的渐变只有一个「径向」，所以这里取中间那个取样色
+                        val c = glowTintAt(colors, 0.5f)
+                        translate(left = 0f, top = cy - r) {
+                            drawRect(
+                                brush = Brush.radialGradient(
+                                    0.00f to c.copy(alpha = strength),
+                                    inner to c.copy(alpha = strength),
+                                    1.00f to c.copy(alpha = 0f),
+                                    center = Offset(cx, r),
+                                    radius = r
+                                ),
+                                size = Size(size.width, r * 2f)
+                            )
+                        }
+                    }
+
+                    // ── 全屏：整页铺一层，从上到下越来越淡 ──
+                    //
+                    // 覆盖范围要盖过整块屏幕：上方留一屏多、下方留两屏，
+                    // 屏幕顶到屏幕底就都落在范围内了（超出屏幕的部分画了也看不见）。
+                    GlowMode.FULL -> drawGlowImage(
+                        image = image,
+                        top = cy - h / 2f - h * 1.2f,
+                        height = h * 3.4f
+                    )
+                }
+}
+
+/** 把位图按目标矩形拉伸绘制 —— 颜色和浓度都已经烘在位图里，一次就画完了 */
+private fun DrawScope.drawGlowImage(image: ImageBitmap?, top: Float, height: Float) {
+    val width = size.width
+    if (image == null || width <= 0f || height <= 0f) return
+    drawImage(
+        image = image,
+        srcOffset = IntOffset.Zero,
+        srcSize = IntSize(image.width, image.height),
+        dstOffset = IntOffset(0, top.roundToInt()),
+        dstSize = IntSize(width.roundToInt(), height.roundToInt())
+    )
+}
+
+/**
+ * 「封面晕染」设置面板 —— 双击封面打开。
+ *
+ * 和设置页里那一份是同一组选项（[GlowMode] + 浓度）。两处都保留是有意的：
+ * 在播放页看到颜色不对可以就地调，不用退出去翻设置再回来。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GlowSheet(
+    mode: GlowMode,
+    strength: Float,
+    onModeChange: (GlowMode) -> Unit,
+    onStrengthChange: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val skin = LocalSkin.current
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = skin.surface
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                "封面颜色晕染",
+                style = MaterialTheme.typography.titleMedium,
+                color = skin.text
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "把封面的颜色往背景上渗一点。以后想调，双击封面就行。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted
+            )
+
+            Spacer(Modifier.height(18.dp))
+            Text("包裹方式", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlowMode.entries.forEach { m ->
+                    val selected = m == mode
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .clickable { onModeChange(m) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = m.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(mode.hint, style = MaterialTheme.typography.labelSmall, color = skin.textDim)
+
+            Spacer(Modifier.height(18.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("浓度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text(
+                    text = "%.2f".format(strength),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.accent
+                )
+            }
+            Slider(
+                value = strength,
+                onValueChange = onStrengthChange,
+                valueRange = Prefs.MIN_GLOW_STRENGTH..Prefs.MAX_GLOW_STRENGTH,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
 
 /**
  * 单页播放器（自包含）：背景晕染、封面、文本、进度与控制。
@@ -403,13 +870,34 @@ private fun PlayerPage(
     /** 「歌词」那一行是否已展开成单行滚动歌词 */
     lyricsExpanded: Boolean,
     /** 展开 / 收起那一行（不切页、不改布局） */
-    onToggleLyrics: () -> Unit
+    onToggleLyrics: () -> Unit,
+    glowMode: GlowMode,
+    glowStrength: Float,
+    /** 双击封面 → 打开晕染设置面板 */
+    onOpenGlow: () -> Unit,
+    /** 把封面的位置量出来上报 —— 晕染画在整页背景层，需要知道封面画在哪 */
+    onCoverBounds: (Rect) -> Unit
 ) {
     val skin = LocalSkin.current
     val seed = song.title + song.artist
     val frac = if (durationMs > 0) {
         (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
     } else 0f
+
+    // 晕染用的三个色。tintOf 读的是 SnapshotStateMap，色卡算出来后这里会自动重组。
+    // 取不到（还没解码 / 封面本身就是纯黑白）时退回占位图的配色，
+    // 免得出现「有的歌有晕染、有的歌没有」的割裂感。
+    val coverKey = OnlineCover.keyOf(song.title, song.artist)
+    val tint = ArtworkLoader.tintOf(song.albumId, song.uri, coverKey)
+    val placeholderColors = remember(seed, skin.id) { skin.gradientFor(seed) }
+    val glowColors = remember(tint, placeholderColors) {
+        if (tint != null) {
+            listOf(Color(tint.left), Color(tint.center), Color(tint.right))
+        } else {
+            val c = placeholderColors
+            listOf(c.first(), c[c.size / 2], c.last())
+        }
+    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val boxW = maxWidth
@@ -420,20 +908,9 @@ private fun PlayerPage(
         val portraitSide = if (!isWide) (if (boxW < boxH) boxW else boxH) else 0.dp
         val landscapeSide = if (isWide) landscapeCoverSize(boxW, boxH) else 0.dp
 
-        // 背景只用一层渐变（drawBehind），不再叠整屏 alpha-cover + 整屏渐变两个 layer；
-        // 旧的 `alpha(<1)` 会强制创建一张全屏大小的离屏缓冲，3 页一起就是 3 张。
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            skin.bg.copy(alpha = 0.94f),
-                            skin.bg
-                        )
-                    )
-                )
-        )
+        // 这里原来有一层页面背景渐变。**删掉了**：它是不透明的，会把画在上一层
+        // （[FullPlayer] 最外那个 Box）的封面晕染整个盖住 —— 这是「顶栏一直没有颜色」
+        // 的另一半原因。页面底色现在由 [FullPlayer] 根 Box 的 `skin.bg` 提供。
 
         if (isWide) {
             // ===== 横屏 / 宽屏：左右双栏 =====
@@ -466,12 +943,14 @@ private fun PlayerPage(
                                 seed = seed,
                                 modifier = Modifier
                                     .size(landscapeSide)
-                                    .clip(RoundedCornerShape(16.dp)),
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) }
+                                    .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
                                 sourceUri = song.uri,
                                 songId = song.id,
-                                coverKey = OnlineCover.keyOf(song.title, song.artist)
+                                coverKey = coverKey
                             )
                         }
                     }
@@ -545,12 +1024,15 @@ private fun PlayerPage(
                                 seed = seed,
                                 modifier = Modifier
                                     .size(portraitSide)
-                                    .clip(RoundedCornerShape(16.dp)),
+                                    .clip(RoundedCornerShape(16.dp))
+                                    // 把封面在页面上占的位置量出来交给晕染层
+                                    .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) }
+                                    .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
                                 sourceUri = song.uri,
                                 songId = song.id,
-                                coverKey = OnlineCover.keyOf(song.title, song.artist)
+                                coverKey = coverKey
                             )
                         }
                     }

@@ -15,6 +15,7 @@ import com.sonance.player.data.Artist
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
+import com.sonance.player.data.GlowMode
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
@@ -556,6 +557,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     var coverCacheCount by mutableIntStateOf(0)
         private set
+
+    // ===== 播放页封面晕染 =====
+
+    var glowMode by mutableStateOf(GlowMode.fromId(prefs.glowMode))
+        private set
+
+    var glowStrength by mutableStateOf(prefs.glowStrength)
+        private set
+
+    fun changeGlowMode(mode: GlowMode) {
+        glowMode = mode
+        prefs.glowMode = mode.id
+    }
+
+    fun changeGlowStrength(v: Float) {
+        glowStrength = v
+        prefs.glowStrength = v
+    }
 
     fun changeOnlineCover(enabled: Boolean) {
         onlineCoverEnabled = enabled

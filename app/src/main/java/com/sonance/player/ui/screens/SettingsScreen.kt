@@ -28,6 +28,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -52,6 +53,7 @@ import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.SonanceSlider
+import com.sonance.player.data.GlowMode
 import com.sonance.player.data.Prefs
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.icon.SonanceIcons
@@ -606,6 +608,65 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
     LaunchedEffect(Unit) { vm.refreshCoverCacheStats() }
 
     SettingsSection(title = "封面") {
+        // ---- 播放页的颜色晕染 ----
+        Column(Modifier.padding(top = 4.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("播放页晕染", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text(
+                    text = "%.2f".format(vm.glowStrength),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.accent
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "把封面颜色渗一点到播放页背景上，颜色取自封面下边缘。" +
+                    "在播放页双击封面也能调。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlowMode.entries.forEach { m ->
+                    val selected = m == vm.glowMode
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .clickable { vm.changeGlowMode(m) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = m.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = vm.glowMode.hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+            Slider(
+                value = vm.glowStrength,
+                onValueChange = { vm.changeGlowStrength(it) },
+                valueRange = Prefs.MIN_GLOW_STRENGTH..Prefs.MAX_GLOW_STRENGTH,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+
         SettingsSwitchRow(
             title = "在线补全封面（iTunes Search API）",
             subtitle = "本地没有内嵌封面时，联网按「歌名 + 歌手」搜一张。默认关闭 —— " +

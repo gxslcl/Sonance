@@ -4,10 +4,12 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.core.graphics.ColorUtils
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.getValue
@@ -40,6 +42,13 @@ import kotlinx.coroutines.withContext
  * 注意只影响"新发起的加载"，不动已经拿到图的那些 —— 早先的实现在这里会把
  * 已加载的封面重新赋成 null，导致滚动时封面闪回占位图。
  */
+/**
+ * 封面下边缘的三个取样色，用来把封面的颜色淡淡地渗到背景上。
+ *
+ * 三个值都是不透明的 ARGB（透明度交给界面按档位控制）。
+ */
+data class CoverTint(val left: Int, val center: Int, val right: Int)
+
 object ArtworkLoader {
 
     /** 请求尺寸归一到几档，避免同一张专辑为每个像素尺寸都缓存一份 */
@@ -175,6 +184,124 @@ object ArtworkLoader {
 
     fun clearOnlineCovers() = onlineCovers.clear()
 
+    /* ============================================================
+     * 封面取色：把封面的颜色淡淡渗到背景上时用
+     * ============================================================ */
+
+    /** 取样边长。24 足够算出「这一段大概什么颜色」，再大只是白费 CPU */
+    private const val TINT_SAMPLE = 24
+
+    /**
+     * 按封面来源存的色卡。
+     *
+     * 用 [SnapshotStateMap] 而不是普通 map：色卡是异步解码时顺手算出来的，
+     * 界面读它要能自动重组（跟 [onlineCovers] 一个道理）。
+     *
+     * 键跟来源绑定 —— 本地封面按专辑共用（`a:<albumId>` / `u:<uri>`），
+     * 磁盘上下载的在线封面按歌（`c:<coverKey>`）。
+     */
+    private val tints: SnapshotStateMap<String, CoverTint> = mutableStateMapOf()
+
+    /** 界面同步读色卡；还没取到就是 null，此时界面退回皮肤占位色 */
+    fun tintOf(albumId: Long, sourceUri: Uri?, coverKey: String?): CoverTint? {
+        tints["t:" + missingKeyOf(albumId, sourceUri)]?.let { return it }
+        return if (coverKey != null) tints["t:c$coverKey"] else null
+    }
+
+    private fun rememberTint(key: String, bitmap: Bitmap) {
+        if (tints.containsKey(key)) return
+        val tint = extractTint(bitmap) ?: return
+        tints[key] = tint
+    }
+
+    /**
+     * 取封面**下边缘**左 / 中 / 右三段的平均色。
+     *
+     * 为什么不是整图主色：晕染只画在封面下方，用整图主色会和封面本身脱节 ——
+     * 上半是天空、下半是草地的封面，下方却晕出天空的蓝，看着就像贴上去的。
+     */
+    private fun extractTint(src: Bitmap): CoverTint? {
+        val small = runCatching {
+            Bitmap.createScaledBitmap(src, TINT_SAMPLE, TINT_SAMPLE, true)
+        }.getOrNull() ?: return null
+        val px = IntArray(TINT_SAMPLE * TINT_SAMPLE)
+        val got = runCatching {
+            small.getPixels(px, 0, TINT_SAMPLE, 0, 0, TINT_SAMPLE, TINT_SAMPLE)
+        }.isSuccess
+        if (src !== small) small.recycle()
+        if (!got) return null
+
+        // 只看下边缘：底部约 1/3 的高度
+        val y0 = TINT_SAMPLE * 2 / 3
+        val seg = TINT_SAMPLE / 3
+        var left = average(px, 0, seg, y0, strict = true)
+        var center = average(px, seg, seg * 2, y0, strict = true)
+        var right = average(px, seg * 2, TINT_SAMPLE, y0, strict = true)
+        // 严格取样（跳过近黑 / 近白）一段都没剩 —— 说明这张封面下半是整片黑或整片白，
+        // 黑白人像照片基本都是这种情况（人物衣服占满下半）。
+        // 这时退一步把全部像素算进来，至少取出**封面自己的灰**。
+        //
+        // 不能就这么放弃：放弃后会回落到皮肤的占位色，于是黑白封面会被染成
+        // 皮肤的青绿 —— 颜色完全是错的（用户就是这么发现问题的）。
+        if (left == null || center == null || right == null) {
+            left = left ?: average(px, 0, seg, y0, strict = false)
+            center = center ?: average(px, seg, seg * 2, y0, strict = false)
+            right = right ?: average(px, seg * 2, TINT_SAMPLE, y0, strict = false)
+        }
+        if (left == null || center == null || right == null) return null
+        return CoverTint(normalize(left), normalize(center), normalize(right))
+    }
+
+    /**
+     * 一段区域的平均色。
+     *
+     * [strict] = true 时跳过近黑 / 近白像素 —— 它们一多就会把平均色拖成脏灰；
+     * 但封面下半整片是黑时会被跳光，那时上层会用 `strict = false` 再取一次。
+     */
+    private fun average(px: IntArray, x0: Int, x1: Int, y0: Int, strict: Boolean): Int? {
+        var r = 0L
+        var g = 0L
+        var b = 0L
+        var n = 0
+        for (y in y0 until TINT_SAMPLE) {
+            for (x in x0 until x1) {
+                val c = px[y * TINT_SAMPLE + x]
+                if (Color.alpha(c) < 200) continue
+                val rr = Color.red(c)
+                val gg = Color.green(c)
+                val bb = Color.blue(c)
+                if (strict) {
+                    if (maxOf(rr, gg, bb) < 24) continue   // 近黑
+                    if (minOf(rr, gg, bb) > 232) continue  // 近白
+                }
+                r += rr
+                g += gg
+                b += bb
+                n++
+            }
+        }
+        if (n == 0) return null
+        return Color.rgb((r / n).toInt(), (g / n).toInt(), (b / n).toInt())
+    }
+
+    /**
+     * 把色夹到「能在背景上淡淡显出来」的范围：
+     * 太暗在深色背景上等于没画，太灰显脏，太亮刺眼。
+     */
+    private fun normalize(argb: Int): Int {
+        val hsl = FloatArray(3)
+        ColorUtils.RGBToHSL(Color.red(argb), Color.green(argb), Color.blue(argb), hsl)
+        // 纯灰（黑白封面）**不要**去提饱和度：灰的 hue 算出来是 0，也就是红，
+        // 一提就变成暗红 —— 封面明明是黑白的，背景却泛红，一眼就是错的。
+        // 这类封面保留它自己的灰，只把亮度抬到看得见的程度。
+        val gray = hsl[1] < 0.06f
+        if (!gray) hsl[1] = hsl[1].coerceIn(0.12f, 0.85f)
+        // 亮度下限 0.36：纯黑封面提上来是深灰，深色皮肤上也看得见；
+        // 上限 0.60：避免接近白色的封面色把背景洗成一片白。
+        hsl[2] = hsl[2].coerceIn(0.36f, 0.60f)
+        return ColorUtils.HSLToColor(hsl)
+    }
+
     /** 已确认没有封面的 albumId —— 上层据此决定要不要走在线补全 */
     fun isMissing(albumId: Long): Boolean =
         albumId <= 0 || synchronized(missing) { missing.contains("a:$albumId") }
@@ -297,6 +424,8 @@ object ArtworkLoader {
         // 本地拿到图 → 按**本地键**缓存（同专辑、同尺寸的歌共用一份）。
         // 这是"同专辑逐首重复探测 MediaStore"的修复点。
         if (bitmap != null) {
+            // 解码已经发生过了，顺手把色卡算出来 —— 不额外解码，也不额外读文件
+            rememberTint("t:$missKey", bitmap)
             val image = bitmap.asImageBitmap()
             cache.put(localKey, image)
             return image
@@ -313,6 +442,7 @@ object ArtworkLoader {
         }
 
         if (bitmap == null) return null
+        if (coverKey != null) rememberTint("t:c$coverKey", bitmap)
         val image = bitmap.asImageBitmap()
         cache.put(key, image)
         return image
