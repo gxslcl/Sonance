@@ -163,17 +163,40 @@ fun FullPlayer(
     val glowTint = glowSong?.let {
         ArtworkLoader.tintOf(it.albumId, it.uri, OnlineCover.keyOf(it.title, it.artist))
     }
-    val glowColors = remember(glowSong?.id, glowSong?.title, glowTint, skin.id) {
+    // artworkGoneVersion 也要进 key：它变化代表「又确认了一首歌没有封面」，
+    // 只有那时才该从「等真色」切到「用占位色兜底」。
+    val glowColors = remember(
+        glowSong?.id,
+        glowSong?.title,
+        glowTint,
+        skin.id,
+        ArtworkLoader.artworkGoneVersion
+    ) {
         val song = glowSong
-        if (song == null) {
-            emptyList()
-        } else if (glowTint != null) {
-            listOf(Color(glowTint.left), Color(glowTint.center), Color(glowTint.right))
-        } else {
-            // 还没取到色（或封面是纯黑纯白）：用占位图的配色兜底，
-            // 免得晕染在「有 / 没有」之间跳
-            val c = skin.gradientFor(song.title + song.artist)
-            listOf(c.first(), c[c.size / 2], c.last())
+        when {
+            song == null -> emptyList()
+
+            glowTint != null ->
+                listOf(Color(glowTint.left), Color(glowTint.center), Color(glowTint.right))
+
+            // 封面**确实没有**（本地探测过、磁盘上也没有下载封面）→ 用占位图配色兜底。
+            // 这类歌永远不会产生色卡，不给兜底的话它们就一直没有晕染。
+            ArtworkLoader.isArtworkGone(
+                song.albumId,
+                song.uri,
+                OnlineCover.keyOf(song.title, song.artist)
+            ) -> {
+                val c = skin.gradientFor(song.title + song.artist)
+                listOf(c.first(), c[c.size / 2], c.last())
+            }
+
+            // 封面**还在找**（探测中 / 正在解码 / 在线封面正在下载）→ 先不画。
+            //
+            // 这里以前是直接回落到占位色的，于是进入播放页 / 切歌时会出现
+            // 「先上一版跟封面无关的假颜色，真色到了再突变一次」——
+            // 看上去就是渐变闪了一下。宁可晚一两百毫秒出现
+            // （正好和封面图本身同时就位），也不要先给错的。
+            else -> emptyList()
         }
     }
     val glowSpec = coverBounds

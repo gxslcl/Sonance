@@ -13,6 +13,7 @@ import androidx.core.graphics.ColorUtils
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -121,6 +122,38 @@ object ArtworkLoader {
      */
     private val missing = HashSet<String>(256)
 
+    /**
+     * [missing] / [coverMiss] 的版本号 —— 也就是「又确认了一首歌没有封面」。
+     *
+     * 晕染层要用它区分两件完全不同的事：
+     * - 「封面还在找」（探测中 / 正在解码 / 在线封面正在下载）→ 先不要画，等真色；
+     * - 「封面确实没有」（见 [isArtworkGone]）→ 才回落到占位配色。
+     *
+     * 那两个字面集合是普通 Set、还是在 IO 线程写的，界面直接读建立不了依赖，
+     * 所以每次记一笔就 +1，界面把它放进 `remember` 的 key 里（见 `FullPlayer`）。
+     */
+    var artworkGoneVersion by mutableIntStateOf(0)
+        private set
+
+    /** 记一笔「这张也确认没有封面」。只有真的新增才推进版本号，避免无谓的重组 */
+    private fun markMissing(key: String) {
+        val added = synchronized(missing) { missing.add(key) }
+        if (added) artworkGoneVersion++
+    }
+
+    /**
+     * 封面是不是**确认彻底没有**了：本地探测过没有，磁盘缓存里也没有下载下来的封面。
+     *
+     * 别拿 [isMissing] 代替 —— 它的语义是「**本地**没有」（旧用途是决定要不要走在线补全，
+     * 还把「没有专辑 ID」也算进去）。磁盘上存在线封面时它会误报成「没有」，
+     * 于是晕染先套一层占位色、等磁盘封面解码完再突变，又变成闪一下。
+     */
+    fun isArtworkGone(albumId: Long, sourceUri: Uri?, coverKey: String?): Boolean {
+        if (!isMissingKey(missingKeyOf(albumId, sourceUri))) return false
+        if (coverKey == null) return true
+        return synchronized(coverMiss) { coverMiss.contains(coverKey) }
+    }
+
     private fun missingKeyOf(albumId: Long, sourceUri: Uri?): String =
         if (albumId > 0) "a:$albumId" else "u:${sourceUri?.toString() ?: "?"}"
 
@@ -133,10 +166,16 @@ object ArtworkLoader {
      */
     private val coverMiss = HashSet<String>(256)
 
+    private fun markCoverMiss(key: String) {
+        val added = synchronized(coverMiss) { coverMiss.add(key) }
+        if (added) artworkGoneVersion++
+    }
+
     /** 封面刚写入缓存后调用，让上面那条短路失效 */
     fun forgetCoverMiss(coverKey: String?) {
         if (coverKey == null) return
-        synchronized(coverMiss) { coverMiss.remove(coverKey) }
+        // 从「没有」变回「可能有」，晕染那边也要重新判断
+        if (synchronized(coverMiss) { coverMiss.remove(coverKey) }) artworkGoneVersion++
     }
 
     /**
@@ -418,7 +457,7 @@ object ArtworkLoader {
                 }
             }
 
-            if (bitmap == null) synchronized(missing) { missing.add(missKey) }
+            if (bitmap == null) markMissing(missKey)
         }
 
         // 本地拿到图 → 按**本地键**缓存（同专辑、同尺寸的歌共用一份）。
@@ -438,7 +477,7 @@ object ArtworkLoader {
         if (coverKey != null) {
             val hit = CoverCache.lookup(context, coverKey)
             if (hit is CoverCache.Lookup.Hit) bitmap = decodeSampled(hit.bytes, size)
-            if (bitmap == null) synchronized(coverMiss) { coverMiss.add(coverKey) }
+            if (bitmap == null) markCoverMiss(coverKey)
         }
 
         if (bitmap == null) return null
@@ -488,6 +527,7 @@ object ArtworkLoader {
         cache.evictAll()
         synchronized(missing) { missing.clear() }
         synchronized(coverMiss) { coverMiss.clear() }
+        artworkGoneVersion++
         onlineCovers.clear()
     }
 }
