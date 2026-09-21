@@ -83,7 +83,15 @@ class PlayerController(private val context: Context) {
         val index: Int,
         val autoplay: Boolean,
         /** 从第几毫秒开始播。重排队列（开关随机）时要保住当前进度，不能从头开始 */
-        val startPositionMs: Long = 0L
+        val startPositionMs: Long = 0L,
+        /**
+         * 是否触发 [onSongStarted]。
+         *
+         * 冷启动「恢复上次播放现场」时传 false —— 那只是把上次的歌摆回来，
+         * 不是用户又听了一遍。不拦的话每开一次 App 就给那首歌的播放次数 +1，
+         * 「播放最多」排序会被开机次数污染。
+         */
+        val notifyStart: Boolean = true
     )
 
     init {
@@ -177,11 +185,19 @@ class PlayerController(private val context: Context) {
 
         if (id > 0 && id != lastNotifiedId) {
             lastNotifiedId = id
-            onSongStarted?.invoke(id)
+            if (suppressNextStart) suppressNextStart = false else onSongStarted?.invoke(id)
         }
     }
 
     private var lastNotifiedId: Long = -1L
+
+    /**
+     * 下一次 [sync] 见到新歌时**不要**回调 [onSongStarted]，然后自动复位。
+     *
+     * 记成一次性标志而不是一直挂着：用户紧接着真的点了播放，
+     * 那次就该正常计数（[applyPlay] 会用新请求里的 notifyStart 覆盖它）。
+     */
+    private var suppressNextStart = false
 
     private fun refreshQueue(player: Player) {
         val count = runCatching { player.mediaItemCount }.getOrDefault(0)
@@ -263,9 +279,10 @@ class PlayerController(private val context: Context) {
         songs: List<Song>,
         index: Int,
         autoplay: Boolean = true,
-        startPositionMs: Long = 0L
+        startPositionMs: Long = 0L,
+        notifyStart: Boolean = true
     ) {
-        val req = PlayRequest(songs, index, autoplay, startPositionMs)
+        val req = PlayRequest(songs, index, autoplay, startPositionMs, notifyStart)
         val c = controller
         if (c == null) {
             pendingRequest = req
@@ -280,6 +297,7 @@ class PlayerController(private val context: Context) {
         if (items.isEmpty()) return
         val start = req.index.coerceIn(0, items.lastIndex)
         lastNotifiedId = -1L
+        suppressNextStart = !req.notifyStart
         c.setMediaItems(items, start, req.startPositionMs.coerceAtLeast(0L))
         c.prepare()
         if (req.autoplay) c.play() else c.pause()

@@ -57,6 +57,8 @@ import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SongRow
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 
 /* ============================================================
  * 歌曲列表骨架
@@ -93,8 +95,14 @@ fun SongList(
     // 「回到列表时滚到正在播放的歌」。
     // 已经在可视区里就不动 —— 用户自己滚到哪就是哪，别硬拽。
     LaunchedEffect(scrollToCurrentSignal) {
-        if (scrollToCurrentSignal <= 0 || currentId <= 0L) return@LaunchedEffect
-        val index = songs.indexOfFirst { it.id == currentId }
+        if (scrollToCurrentSignal <= 0) return@LaunchedEffect
+        // 播放器是**异步连上**的：冷启动恢复那次请求很可能赶在 mediaId 就位之前，
+        // 直接拿 currentId 会得到 -1 然后白跑一趟（而且请求已经消费掉了，不会再来）。
+        // 所以这里等一下，最多 3 秒；平时 currentId 已经有值，走的是上面那条快路径。
+        val targetId = if (currentId > 0L) currentId else withTimeoutOrNull(3_000L) {
+            vm.player.state.first { it.mediaId > 0L }.mediaId
+        } ?: return@LaunchedEffect
+        val index = songs.indexOfFirst { it.id == targetId }
         if (index < 0) return@LaunchedEffect
         val visible = listState.layoutInfo.visibleItemsInfo
         if (visible.any { it.index == index }) return@LaunchedEffect

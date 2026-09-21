@@ -609,6 +609,17 @@ private const val GLOW_REACH = 0.62f
 private const val GLOW_SIDE_PAD = 0.10f
 
 /**
+ * 「下方」模式里把整块渐变**再往上抬一点**，让它压住封面底边。
+ *
+ * 抬起来之后颜色像是「从封面底下渗出来」的，而不是在封面下方另外起一条；
+ * 峰值也会略微往封面背后挪，可见部分更贴合封面。
+ *
+ * 8dp（约 24px @3x）是实测的中间值：再往下（0dp）颜色和封面之间会显出脱节感，
+ * 再往上（>12dp）峰值基本躲进封面背后，可见的那一段就明显变淡了。
+ */
+private val GLOW_BOTTOM_LIFT = 8.dp
+
+/**
  * 颜色边界的过渡长度，按区域总长的**比例**算。
  *
  * 早先用的是固定的 14dp。抹掉硬边是够的，但放到「左右」这种整条色带上，
@@ -865,7 +876,7 @@ private fun DrawScope.drawGlow(
                     // ── 只从下边缘向下晕 ──
                     GlowMode.BOTTOM -> drawGlowImage(
                         image = image,
-                        top = cy - h / 2f + h * GLOW_TOP,
+                        top = cy - h / 2f + h * GLOW_TOP - GLOW_BOTTOM_LIFT.toPx(),
                         height = h * GLOW_REACH,
                         alpha = alpha
                     )

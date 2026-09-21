@@ -70,6 +70,28 @@ class Prefs(context: Context) {
         get() = sp.getLong(KEY_LAST_SONG, -1L)
         set(v) = sp.edit().putLong(KEY_LAST_SONG, v).apply()
 
+    // ===== 上次的播放现场（冷启动恢复用）=====
+
+    /**
+     * 上次的播放队列（歌曲 id，逗号分隔）。
+     *
+     * 存整个队列而不是只存一首：恢复之后「上一首 / 下一首 / 队列」都还能用 ——
+     * 只恢复一首的话队列里就孤零零一条，点下一首直接没反应。
+     */
+    var playQueueIds: String
+        get() = sp.getString(KEY_PLAY_QUEUE, null) ?: ""
+        set(v) = sp.edit().putString(KEY_PLAY_QUEUE, v).apply()
+
+    /** 上次播到队列里的第几首 */
+    var playQueueIndex: Int
+        get() = sp.getInt(KEY_PLAY_INDEX, 0)
+        set(v) = sp.edit().putInt(KEY_PLAY_INDEX, v).apply()
+
+    /** 上次离开时的播放进度（毫秒），下次接着听 */
+    var playPositionMs: Long
+        get() = sp.getLong(KEY_PLAY_POS, 0L)
+        set(v) = sp.edit().putLong(KEY_PLAY_POS, v).apply()
+
     var scanFilterShortAudio: Boolean
         get() = sp.getBoolean(KEY_FILTER_SHORT, true)
         set(v) = sp.edit().putBoolean(KEY_FILTER_SHORT, v).apply()
@@ -381,6 +403,9 @@ class Prefs(context: Context) {
         private const val KEY_FAV = "favorites"
         private const val KEY_RECENT = "recent"
         private const val KEY_LAST_SONG = "last_song"
+        private const val KEY_PLAY_QUEUE = "play_queue_ids"
+        private const val KEY_PLAY_INDEX = "play_queue_index"
+        private const val KEY_PLAY_POS = "play_position_ms"
         private const val KEY_COUNT = "play_count_"
         private const val KEY_FILTER_SHORT = "filter_short"
         private const val KEY_EXCLUDE_LOCKED = "scan_exclude_locked"

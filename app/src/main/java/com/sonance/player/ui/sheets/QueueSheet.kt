@@ -114,6 +114,24 @@ fun QueueSheet(
                 LaunchedEffect(listState) {
                     snapshotFlow { listState.isScrollInProgress }.collect { ArtworkLoader.paused = it }
                 }
+
+                // 打开队列时直接定位到正在播放的那一首。
+                //
+                // 用 scrollToItem 而不是 animateScrollToItem：面板刚弹出来，
+                // 这一下是「初始位置」，让用户看着列表滚过去反而像卡了一下。
+                // 首次组合时列表还没量过，visibleItemsInfo 是空的 —— 会正常走到滚动分支，
+                // LazyListState 会把这次滚动记下来、在第一轮 measure 时应用。
+                //
+                // 已经在可视区里就不动：播放中自动切歌时列表会跟着走（这是想要的），
+                // 但用户自己翻到别处、当前曲恰好还在可视区内时不该被拽走。
+                LaunchedEffect(state.queueIndex, queue.size) {
+                    if (queue.isEmpty()) return@LaunchedEffect
+                    val target = state.queueIndex.coerceIn(0, queue.lastIndex)
+                    val visible = listState.layoutInfo.visibleItemsInfo
+                    if (visible.any { it.index == target }) return@LaunchedEffect
+                    listState.scrollToItem(target)
+                }
+
                 val playAtI = remember { { i: Int -> onPlayAt(i) } }
                 val removeAtI = remember { { i: Int -> onRemoveAt(i) } }
                 LazyColumn(

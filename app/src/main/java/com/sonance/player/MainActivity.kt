@@ -5,25 +5,33 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.Composable
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.activity.viewModels
 import com.sonance.player.ui.SonanceRoot
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 提到 Activity 字段上，`onStop` 里才能拿到它。
+     *
+     * 和 Compose 里 `viewModel()` 取到的是**同一个实例**（同一个 ViewModelStore），
+     * 所以不会多造一个。
+     */
+    private val vm: SonanceViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestHighRefreshRate()
         enableEdgeToEdge()
         setContent {
-            SonanceEntry()
+            SonanceRoot(vm)
         }
     }
 
-    @Composable
-    private fun SonanceEntry() {
-        val vm: SonanceViewModel = viewModel()
-        SonanceRoot(vm)
+    override fun onStop() {
+        super.onStop()
+        // 离开界面时把「播放现场」写盘：下次冷启动恢复成暂停在同一首、同一个进度。
+        // 选 onStop 而不是定时写盘：这时进度已经稳定，写一次就够。
+        vm.persistPlayback()
     }
 
     /**

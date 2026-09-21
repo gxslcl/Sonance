@@ -18,6 +18,7 @@ import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
 import com.sonance.player.data.LyricsCache
@@ -148,12 +149,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         recentIds.withIndex().associate { (i, id) -> id to i }
     }
 
+    // ===== 播放现场：冷启动恢复 =====
+
+    /**
+     * 只恢复一次。扫描完成后再调一次，靠它避免把用户刚做的操作顶掉。
+     *
+     * ⚠️ 这两个字段**必须声明在 init 块之前**：Kotlin 的初始化按源码顺序执行，
+     * 写在 init 后面的话，init 里设好的值会被属性初始化 `= false` 覆盖回去 ——
+     * 结果是扫描完成后又恢复一遍（把用户正在听的东西顶掉），
+     * 而且列表定位也永远不会触发。
+     */
+    private var playbackRestored = false
+
+    /** 恢复完成、等播放器报出 mediaId 后要请求一次列表定位 */
+    private var pendingStartupScroll = false
+
     init {
         player.onSongStarted = { id ->
             prefs.pushRecent(id)
             prefs.bumpPlayCount(id)
             recentIds = prefs.recentIds()
             prefs.lastSongId = id
+            // 顺手把队列和序号存下来 —— 冷启动恢复要用，而 onStop 不一定每次都会走到
+            // （进程被系统直接回收时就不会）。此刻 refreshQueue 已经跑过，queueIds 是新的。
+            val st = player.state.value
+            if (st.queueIds.isNotEmpty()) {
+                prefs.playQueueIds = st.queueIds.joinToString(",")
+                prefs.playQueueIndex = st.queueIndex
+            }
+            prefs.playPositionMs = 0L
             // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
             // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
             songById(id)?.let {
@@ -178,6 +202,86 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     scanState = ScanState.READY
                 }
             }
+        }
+
+        // 曲库（缓存）就绪之后恢复上次的播放现场。
+        // 放在最后：它要按歌曲 id 去 songs 里查，曲库没加载出来时无从恢复。
+        restorePlaybackState()
+
+        // 恢复完成、播放器真正报出 mediaId 之后再请求列表定位。
+        // 不能恢复完直接 requestScrollToCurrent()：那一刻 mediaId 还是 -1，
+        // SongList 里那个 effect 会因为 `currentId <= 0` 提前 return，白请求一次。
+        viewModelScope.launch {
+            player.state.collect { st ->
+                if (pendingStartupScroll && st.mediaId > 0L) {
+                    pendingStartupScroll = false
+                    requestScrollToCurrent()
+                }
+            }
+        }
+    }
+
+    /**
+     * 把播放器摆回上次退出时的样子：同一个队列、同一首、同一个进度。
+     *
+     * **不自动播放** —— 冷启动就出声很吓人。恢复成「暂停在这首歌上」，按播放键才继续。
+     *
+     * 曲库还没加载出来时直接返回（没什么可恢复的）；[scan] 完成后会再调一次，
+     * 所以两个入口都调它，靠 [playbackRestored] 保证只做一次。
+     */
+    private fun restorePlaybackState() {
+        if (playbackRestored) return
+        if (songs.isEmpty()) return
+
+        val position = prefs.playPositionMs.coerceAtLeast(0L)
+        val map = songs.associateBy { it.id }
+
+        // 只保留还在曲库里的：重新扫描之后 id 会变，旧队列可能整条都失效。
+        // 这套「过滤 + 下标夹紧」的规则在 PlaybackRestore 里，有单测覆盖。
+        val resolved = PlaybackRestore.resolveIds(
+            savedIds = PlaybackRestore.parseIdList(prefs.playQueueIds),
+            savedIndex = prefs.playQueueIndex,
+            libraryIds = map.keys
+        )
+
+        // 队列整条失效就退一步：至少把「上次听的那一首」摆回来。
+        // 一首都找不回来说明这个用户还没放过歌（或曲库整个换了），那就什么都不做。
+        val queue = resolved?.first?.mapNotNull(map::get) ?: run {
+            val last = songById(prefs.lastSongId) ?: return
+            listOf(last)
+        }
+        val index = resolved?.second ?: 0
+
+        playbackRestored = true
+        pendingStartupScroll = true
+        // autoplay = false：冷启动就出声很吓人。摆成「暂停在这首歌上」，按播放键才继续。
+        // notifyStart = false：这只是把上次的歌摆回来，不该给播放次数 +1。
+        player.play(
+            songs = queue,
+            index = index,
+            autoplay = false,
+            startPositionMs = position,
+            notifyStart = false
+        )
+    }
+
+    /**
+     * 把当前播放现场写盘。由 `MainActivity.onStop()` 调用。
+     *
+     * 选这个时机而不是每 500ms 写一次：离开界面时进度已经稳定，
+     * 写一次就够；而播放中每帧写盘纯属浪费（SharedPreferences 每次都要重写整份 XML）。
+     */
+    fun persistPlayback() {
+        val st = player.state.value
+        // 什么都没加载时**一个字段都不要写** —— 否则「打开就立刻关掉」这种操作
+        // 会把上次存好的进度抹成 0（那一刻播放器还没连上，positionMs 是 0）。
+        if (st.mediaId > 0L) {
+            prefs.lastSongId = st.mediaId
+            prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
+        }
+        if (st.queueIds.isNotEmpty()) {
+            prefs.playQueueIds = st.queueIds.joinToString(",")
+            prefs.playQueueIndex = st.queueIndex
         }
     }
 
@@ -431,6 +535,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             scanState = ScanState.SCANNING
             runScan()
             scanState = ScanState.READY
+            // 没有歌曲缓存时（首次启动）init 里那次恢复会跳过，扫完再试一次
+            restorePlaybackState()
         }
     }
 
