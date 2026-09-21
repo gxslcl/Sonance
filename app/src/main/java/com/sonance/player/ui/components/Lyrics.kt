@@ -732,11 +732,100 @@ private fun FontSizeRow(
 }
 
 /* ============================================================
+ * 播放页主区域内的歌词（不是全屏歌词页）
+ * ============================================================ */
+
+/**
+ * 播放页主区域里的歌词 —— 就是主流播放器在播放页上放歌词的那种：
+ * 封面那一块直接换成歌词，多行居中，当前句高亮，随播放滚动，点一句跳到那一句。
+ *
+ * 与全屏歌词页共用 [LyricsRepository] 加载、共用 [SyncedLyrics] / [PlainLyrics] 渲染，
+ * 所以内嵌 / 缓存 / 在线三条来源、字号设置、简繁转换都保持一致；
+ * 全屏歌词页仍然保留（那里能看完整歌词、调字号、手动搜索）。
+ */
+@Composable
+fun InlineLyrics(
+    song: Song,
+    positionMs: Long,
+    prefs: Prefs,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+
+    var result by remember(song.id) { mutableStateOf<LyricsResult?>(null) }
+    var loading by remember(song.id) { mutableStateOf(true) }
+
+    val onlineEnabled = prefs.onlineLyricsEnabled
+    val apiBase = prefs.lyricsApiBase
+    val convertT2S = prefs.lyricsConvertToSimplified
+    val fontSize = prefs.lyricsFontSizeSp
+
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S) {
+        loading = true
+        result = LyricsRepository.load(
+            context = context,
+            songId = song.id,
+            uri = song.uri,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            onlineEnabled = onlineEnabled,
+            apiBase = apiBase,
+            convertToSimplified = convertT2S
+        )
+        loading = false
+    }
+
+    val lyrics = result?.lyrics
+
+    Box(modifier.fillMaxSize()) {
+        when {
+            loading -> Text(
+                "正在读取歌词…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = skin.textMuted,
+                modifier = Modifier.align(Alignment.Center)
+            )
+
+            lyrics == null -> Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    "这首歌还没有歌词",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = skin.textMuted
+                )
+                if (onlineEnabled) {
+                    Text(
+                        "打开歌词页可以按歌名搜索",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textDim
+                    )
+                }
+            }
+
+            lyrics is Lyrics.Synced -> SyncedLyrics(
+                lines = lyrics.lines,
+                positionMs = positionMs,
+                fontSizeSp = fontSize,
+                onSeek = onSeek
+            )
+
+            else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize)
+        }
+    }
+}
+
+/* ============================================================
  * 带时间轴：跟随播放高亮 + 自动居中
  * ============================================================ */
 
 @Composable
-private fun SyncedLyrics(
+internal fun SyncedLyrics(
     lines: List<LyricLine>,
     positionMs: Long,
     fontSizeSp: Int,
@@ -829,7 +918,7 @@ private fun SyncedLyrics(
  * ============================================================ */
 
 @Composable
-private fun PlainLyrics(lines: List<String>, fontSizeSp: Int) {
+internal fun PlainLyrics(lines: List<String>, fontSizeSp: Int) {
     val skin = LocalSkin.current
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

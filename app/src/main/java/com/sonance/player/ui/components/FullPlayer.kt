@@ -1,5 +1,10 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -440,18 +445,36 @@ private fun PlayerPage(
                 horizontalArrangement = Arrangement.spacedBy(40.dp)
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    CoverArt(
-                        albumId = song.albumId,
-                        seed = seed,
-                        modifier = Modifier
-                            .size(landscapeSide)
-                            .clip(RoundedCornerShape(16.dp)),
-                        cornerRadius = 16.dp,
-                        sizePx = 900,
-                        sourceUri = song.uri,
-                        songId = song.id,
-                        coverKey = OnlineCover.keyOf(song.title, song.artist)
-                    )
+                    // 主区域在「封面」与「歌词」之间切换。
+                    // 主流播放器就是这样：歌词占的就是封面那一块，而不是另开一整屏。
+                    AnimatedContent(
+                        targetState = lyricsExpanded,
+                        transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
+                        label = "coverOrLyrics"
+                    ) { expanded ->
+                        if (expanded) {
+                            InlineLyrics(
+                                song = song,
+                                positionMs = positionMs,
+                                prefs = prefs,
+                                onSeek = onSeek,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            CoverArt(
+                                albumId = song.albumId,
+                                seed = seed,
+                                modifier = Modifier
+                                    .size(landscapeSide)
+                                    .clip(RoundedCornerShape(16.dp)),
+                                cornerRadius = 16.dp,
+                                sizePx = 900,
+                                sourceUri = song.uri,
+                                songId = song.id,
+                                coverKey = OnlineCover.keyOf(song.title, song.artist)
+                            )
+                        }
+                    }
                 }
                 Column(
                     modifier = Modifier
@@ -461,17 +484,7 @@ private fun PlayerPage(
                 ) {
                     TrackText(song.title, song.artist, song.album)
                     Spacer(Modifier.height(12.dp))
-                    if (lyricsExpanded) {
-                        LyricsTickerRow(
-                            song = song,
-                            positionMs = positionMs,
-                            durationMs = durationMs,
-                            prefs = prefs,
-                            onClose = onToggleLyrics
-                        )
-                    } else {
-                        LyricsEntryButton(onClick = onToggleLyrics)
-                    }
+                    LyricsEntryButton(expanded = lyricsExpanded, onClick = onToggleLyrics)
                     Spacer(Modifier.height(18.dp))
                     ProgressBlock(frac, positionMs, durationMs, onSeek)
                     Spacer(Modifier.height(14.dp))
@@ -512,34 +525,41 @@ private fun PlayerPage(
                         .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
-                    CoverArt(
-                        albumId = song.albumId,
-                        seed = seed,
-                        modifier = Modifier
-                            .size(portraitSide)
-                            .clip(RoundedCornerShape(16.dp)),
-                        cornerRadius = 16.dp,
-                        sizePx = 900,
-                        sourceUri = song.uri,
-                        songId = song.id,
-                        coverKey = OnlineCover.keyOf(song.title, song.artist)
-                    )
+                    // 同上：歌词就在封面这一块里换出来
+                    AnimatedContent(
+                        targetState = lyricsExpanded,
+                        transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
+                        label = "coverOrLyrics"
+                    ) { expanded ->
+                        if (expanded) {
+                            InlineLyrics(
+                                song = song,
+                                positionMs = positionMs,
+                                prefs = prefs,
+                                onSeek = onSeek,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            CoverArt(
+                                albumId = song.albumId,
+                                seed = seed,
+                                modifier = Modifier
+                                    .size(portraitSide)
+                                    .clip(RoundedCornerShape(16.dp)),
+                                cornerRadius = 16.dp,
+                                sizePx = 900,
+                                sourceUri = song.uri,
+                                songId = song.id,
+                                coverKey = OnlineCover.keyOf(song.title, song.artist)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(10.dp))
                 TrackText(song.title, song.artist, song.album, centered = true)
                 Spacer(Modifier.height(12.dp))
-                if (lyricsExpanded) {
-                    LyricsTickerRow(
-                        song = song,
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        prefs = prefs,
-                        onClose = onToggleLyrics
-                    )
-                } else {
-                    LyricsEntryButton(onClick = onToggleLyrics)
-                }
+                LyricsEntryButton(expanded = lyricsExpanded, onClick = onToggleLyrics)
                 Spacer(Modifier.height(18.dp))
                 ProgressBlock(frac, positionMs, durationMs, onSeek)
                 Spacer(Modifier.height(16.dp))
@@ -683,31 +703,35 @@ private fun BottomRow(
 }
 
 /**
- * 「歌词」入口胶囊。
+ * 主区域「封面 / 歌词」的切换胶囊。
  *
  * 顶栏虽然有一个歌词图标按钮，但纯图标辨识度低、用户反馈找不到，
- * 所以在封面页的控制区给一个**带文字**的入口，点一下切到全屏歌词页。
+ * 所以控制区留一个**带文字**的入口。展开歌词后文案变成「封面」，点一下换回封面 ——
+ * 胶囊位置不变，所以来回切换时布局不跳。
+ *
+ * 要看完整的整页歌词（可调字号、点行跳转、手动搜索）仍然走全屏歌词页：
+ * 顶栏歌词图标，或者左右滑动。
  */
 @Composable
-private fun LyricsEntryButton(onClick: () -> Unit) {
+private fun LyricsEntryButton(expanded: Boolean, onClick: () -> Unit) {
     val skin = LocalSkin.current
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
-            .background(skin.surface2)
+            .background(if (expanded) skin.accentGlow else skin.surface2)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         androidx.compose.material3.Icon(
-            imageVector = SonanceIcons.Lyrics,
+            imageVector = if (expanded) SonanceIcons.Image else SonanceIcons.Lyrics,
             contentDescription = null,
             tint = skin.accent,
             modifier = Modifier.size(15.dp)
         )
         Text(
-            text = "歌词",
+            text = if (expanded) "封面" else "歌词",
             style = MaterialTheme.typography.labelMedium,
             color = skin.text
         )
