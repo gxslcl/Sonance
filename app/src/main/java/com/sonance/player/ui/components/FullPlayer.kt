@@ -1,6 +1,7 @@
 package com.sonance.player.ui.components
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -203,14 +204,45 @@ fun FullPlayer(
         ?.takeIf { glowColors.isNotEmpty() && it.width > 0f && it.height > 0f }
         ?.let { GlowSpec(colors = glowColors, mode = glowMode, strength = glowStrength, cover = it) }
 
+    // ── 换歌时的颜色过渡 ──
+    //
+    // 换歌时色卡是「整组替换」的，直接画的话背景会咔一下跳到新颜色；
+    // 取色没就绪时更是「旧色消失 → 空白 → 新色出现」跳三次。
+    // 用户反馈「切歌时渐变背景闪一下，体验很差」。
+    //
+    // 两层兜：
+    // 1. 取色没就绪时**沿用上一次的色卡**（target 不提供就不动），晕染不会中途消失；
+    // 2. 换色时走 450ms 的颜色过渡 —— 变化是连续的，不再是突变。
+    var lastGlowColors by remember { mutableStateOf<List<Color>?>(null) }
+    if (glowColors.isNotEmpty()) lastGlowColors = glowColors
+    val shownGlowColors = glowColors.ifEmpty { lastGlowColors.orEmpty() }
+
+    val glowColorSpec = tween<Color>(450)
+    val glowFallback = shownColorsGlowFallback(shownGlowColors)
+    val animGlow0 by animateColorAsState(
+        shownGlowColors.getOrElse(0) { glowFallback }, glowColorSpec, label = "glowLeft"
+    )
+    val animGlow1 by animateColorAsState(
+        shownGlowColors.getOrElse(1) { glowFallback }, glowColorSpec, label = "glowCenter"
+    )
+    val animGlow2 by animateColorAsState(
+        shownGlowColors.getOrElse(2) { glowFallback }, glowColorSpec, label = "glowRight"
+    )
+    val animatedGlowColors = remember(animGlow0, animGlow1, animGlow2) {
+        if (shownGlowColors.isEmpty()) emptyList() else listOf(animGlow0, animGlow1, animGlow2)
+    }
+
     // 晕染的二维渐变图（横向取封面色、纵向做淡出）。
     //
     // 以前这里是「横向切 32 段、每段画一条纵向渐变」。段与段之间会留下接缝：
     // 每段都是独立的 drawRect，交界处的像素会被两个矩形各画一次，
     // 于是屏幕上出现一排等距的竖线（32 段 → 1080 宽的手机上每 34px 一条）。
     // 一张小位图拉伸就能彻底避免 —— 横向是连续的，没有段就没有缝。
-    val glowImage = remember(glowColors, glowMode, glowStrength) {
-        buildGlowImage(glowColors, glowMode, glowStrength)
+    //
+    // 动画期间每帧重建一次（64×128 = 8192 像素，远低于一帧的预算），
+    // 动画结束 animXxx 稳定后就不再重建。
+    val glowImage = remember(animatedGlowColors, glowMode, glowStrength) {
+        buildGlowImage(animatedGlowColors, glowMode, glowStrength)
     }
 
     // 播放页的三层（封面 / 歌词 / 律动柱）做成**环形轮播**：
@@ -626,6 +658,10 @@ private fun buildGlowImage(
     bitmap.setPixels(px, 0, w, 0, 0, w, h)
     return bitmap.asImageBitmap()
 }
+
+/** 色卡不足三位时的补位色：拿最后一个可用色顶上；一个都没有时反正不会画，给透明即可 */
+private fun shownColorsGlowFallback(colors: List<Color>): Color =
+    colors.lastOrNull() ?: Color.Transparent
 
 /** 在封面的几个取样色之间按 [t]（0~1）插值 */
 private fun glowTintAt(colors: List<Color>, t: Float): Color {

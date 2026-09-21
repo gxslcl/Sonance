@@ -281,7 +281,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         AnimatedVisibility(
             visible = fullPlayerOpen,
             enter = slideInVertically { it },
-            exit = slideOutVertically { it },
+            // TEMP 调试：把退出动画放慢，方便抓中间帧（正常应立即恢复默认）
+            exit = slideOutVertically(animationSpec = androidx.compose.animation.core.tween(3000)) { it },
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(20f)
