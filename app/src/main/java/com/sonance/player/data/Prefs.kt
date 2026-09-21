@@ -122,11 +122,52 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_LYRICS_FONT, DEFAULT_LYRICS_FONT).coerceIn(14, 30)
         set(v) = sp.edit().putInt(KEY_LYRICS_FONT, v.coerceIn(14, 30)).apply()
 
+    // ===== 一次性迁移 =====
+
+    /**
+     * 把「默认值改了」这件事对**已经装过旧版本的用户**也生效。
+     *
+     * 只改 `getX()` 的默认值只对新装机有用：老用户的 SharedPreferences 里已经存了旧值，
+     * 默认值根本不会被读到。所以这里显式搬一次，用标志位保证只做一次 ——
+     * 之后用户在设置里怎么调，都不会被覆盖回来。
+     *
+     * 在 [com.sonance.player.SonanceApplication.onCreate] 里调用。
+     */
+    fun migrateOnce() {
+        val ed = sp.edit()
+
+        // 歌词字号：反馈偏小，整体抬 2sp。
+        // 没写过字号的吃新默认 20sp（旧默认 18）；写过的一律 +2（夹在 14~30）。
+        // 于是无论之前有没有手动调过，看到的都会比现在大 2。
+        if (!sp.getBoolean(KEY_LYRICS_FONT_BUMPED, false)) {
+            if (sp.contains(KEY_LYRICS_FONT)) {
+                val v = sp.getInt(KEY_LYRICS_FONT, DEFAULT_LYRICS_FONT)
+                ed.putInt(KEY_LYRICS_FONT, (v + 2).coerceIn(MIN_LYRICS_FONT, MAX_LYRICS_FONT))
+            }
+            ed.putBoolean(KEY_LYRICS_FONT_BUMPED, true)
+        }
+
+        // 歌词页背景：默认不再铺背景（模糊封面 / 渐变都不要）。
+        // 之前选过样式的用户也一并清成「关闭」。
+        if (!sp.getBoolean(KEY_GLASS_CLEARED, false)) {
+            if (sp.contains(KEY_GLASS_STYLE)) {
+                ed.putInt(KEY_GLASS_STYLE, GlassStyle.OFF.ordinal)
+            }
+            ed.putBoolean(KEY_GLASS_CLEARED, true)
+        }
+
+        ed.apply()
+    }
+
     // ===== 歌词页背景玻璃 =====
 
-    /** 玻璃样式：[GlassStyle] 的 ordinal */
+    /**
+     * 玻璃样式：[GlassStyle] 的 ordinal。
+     *
+     * 默认是**关闭**：歌词页不铺背景。想要的话在设置里打开（见 [migrateOnce]）。
+     */
     var glassStyle: Int
-        get() = sp.getInt(KEY_GLASS_STYLE, GlassStyle.NORMAL.ordinal)
+        get() = sp.getInt(KEY_GLASS_STYLE, GlassStyle.OFF.ordinal)
         set(v) = sp.edit().putInt(KEY_GLASS_STYLE, v).apply()
 
     /** 模糊半径 dp，0~80 */
@@ -308,6 +349,8 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_API = "lyrics_api_base"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
+        private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"
+        private const val KEY_GLASS_CLEARED = "glass_cleared"
         private const val KEY_GLASS_STYLE = "glass_style"
         private const val KEY_GLASS_BLUR = "glass_blur_dp"
         private const val KEY_GLASS_VIS = "glass_visibility"
@@ -317,7 +360,8 @@ class Prefs(context: Context) {
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_custom_bands"
 
-        const val DEFAULT_LYRICS_FONT = 18
+        /** 歌词字号默认值 20sp（旧版是 18sp，反馈偏小，见 [migrateOnce]） */
+        const val DEFAULT_LYRICS_FONT = 20
         const val MIN_LYRICS_FONT = 14
         const val MAX_LYRICS_FONT = 30
         private const val KEY_HIDDEN_IDS = "hidden_song_ids"

@@ -3,6 +3,7 @@ package com.sonance.player.ui.components
 import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +30,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,7 +76,10 @@ import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -105,6 +112,9 @@ fun LyricsOverlay(
     var showGlassRow by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
+
+    // 关闭图标默认不显示：轻点 / 长按歌词区才出现，之后自动收起
+    var showClose by remember { mutableStateOf(false) }
 
     // 背景玻璃：本地状态，改了立刻写回 prefs
     var glassStyle by remember(song.id) { mutableStateOf(GlassStyle.of(prefs.glassStyle)) }
@@ -144,6 +154,14 @@ fun LyricsOverlay(
     }
 
     val lyrics = result?.lyrics
+
+    // 关闭图标出现后停一会儿自动收起。
+    // key 就是 showClose：再次点击会把它置回 true，计时重新开始。
+    LaunchedEffect(showClose) {
+        if (!showClose) return@LaunchedEffect
+        delay(CLOSE_ICON_AUTO_HIDE_MS)
+        showClose = false
+    }
 
     Box(modifier.fillMaxSize().background(skin.bg)) {
 
@@ -205,13 +223,19 @@ fun LyricsOverlay(
                     iconSize = 19.dp,
                     tint = if (showFontRow) skin.accent else skin.textDim
                 )
-                IconAction(
-                    icon = SonanceIcons.Close,
-                    contentDescription = "关闭歌词",
-                    onClick = onClose,
-                    iconSize = 22.dp,
-                    tint = skin.text
-                )
+                AnimatedVisibility(
+                    visible = showClose,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    IconAction(
+                        icon = SonanceIcons.Close,
+                        contentDescription = "关闭歌词",
+                        onClick = onClose,
+                        iconSize = 22.dp,
+                        tint = skin.text
+                    )
+                }
             }
 
             // ---- 背景玻璃调节行（可折叠）----
@@ -263,7 +287,12 @@ fun LyricsOverlay(
             }
 
             // ---- 歌词主体 ----
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .pointerInput(Unit) { detectLyricsTapOrLongPress { showClose = true } }
+            ) {
                 when {
                     searching -> Text(
                         "正在按你填的信息搜索…",
@@ -359,6 +388,67 @@ fun LyricsOverlay(
 }
 
 /* ============================================================
+ * 关闭图标的唤出手势
+ * ============================================================ */
+
+/** 关闭图标出现后自动收起的等待时间 */
+private const val CLOSE_ICON_AUTO_HIDE_MS = 4_000L
+
+/** 按住多久算长按 */
+private const val LONG_PRESS_MS = 500L
+
+/**
+ * 「轻点」或「长按」歌词区才触发；滚动、拖动不触发。
+ *
+ * 关键是**只观察、不消费**（[PointerEventPass.Initial]）：歌词行自带 clickable（点一行跳到
+ * 那句），LazyColumn 自己要滚动 —— 父级一旦把 down 事件消费掉，这两者都会失效。
+ *
+ * 判据：按下后位移不超过 touch slop，且（很快抬起 = 轻点）或（按住 ≥ [LONG_PRESS_MS] = 长按）。
+ */
+private suspend fun PointerInputScope.detectLyricsTapOrLongPress(onTrigger: () -> Unit) = coroutineScope {
+    val slop = viewConfiguration.touchSlop
+    awaitPointerEventScope {
+        while (true) {
+            val down = awaitPointerEvent(PointerEventPass.Initial)
+                .changes.firstOrNull { it.pressed } ?: continue
+            val startX = down.position.x
+            val startY = down.position.y
+            var moved = false
+            var fired = false
+
+            // 长按得靠**另一个计时器**来发现：手指按住不动时系统不会再送事件过来，
+            // 上面那个 awaitPointerEvent 会一直挂着，等不到任何东西。
+            // 一旦位移超过 slop 或抬手，就把计时器取消。
+            val longPress = launch {
+                delay(LONG_PRESS_MS)
+                if (!moved && !fired) {
+                    fired = true
+                    onTrigger()
+                }
+            }
+
+            while (true) {
+                val change = awaitPointerEvent(PointerEventPass.Initial)
+                    .changes.firstOrNull { it.id == down.id }
+                // 手指抬起（或这根手指的事件没了）→ 结束这一轮
+                if (change == null || !change.pressed) break
+
+                if (abs(change.position.x - startX) > slop ||
+                    abs(change.position.y - startY) > slop
+                ) {
+                    moved = true
+                    longPress.cancel()
+                }
+            }
+            longPress.cancel()
+
+            // 抬起时位移够小、且长按没触发过 → 算一次轻点
+            if (!moved && !fired) onTrigger()
+        }
+    }
+}
+
+/* ============================================================
  * 毛玻璃背景
  * ============================================================ */
 
@@ -384,11 +474,7 @@ private fun GlassBackdrop(
     val context = LocalContext.current
 
     if (style == GlassStyle.OFF) {
-        Box(
-            modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(skin.bg, skin.surface, skin.bg)))
-        )
+        // 「关闭」就是真的什么都不画：歌词页只有纯背景色，连渐变也不留
         return
     }
 
