@@ -312,8 +312,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 eqEnabled = vm.eqEnabled,
                 glowMode = vm.glowMode,
                 glowStrength = vm.glowStrength,
+                glowTransition = vm.glowTransition,
+                glowFadeMs = vm.glowFadeMs,
                 onGlowModeChange = { vm.changeGlowMode(it) },
-                onGlowStrengthChange = { vm.changeGlowStrength(it) }
+                onGlowStrengthChange = { vm.changeGlowStrength(it) },
+                onGlowTransitionChange = { vm.changeGlowTransition(it) },
+                onGlowFadeMsChange = { vm.changeGlowFadeMs(it) }
             )
         }
 

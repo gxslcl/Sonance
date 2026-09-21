@@ -54,6 +54,7 @@ import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.data.GlowMode
+import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.Prefs
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.icon.SonanceIcons
@@ -63,6 +64,7 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import com.sonance.player.ui.components.GlassControls
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(
@@ -664,6 +666,60 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
                     .fillMaxWidth()
                     .padding(top = 6.dp)
             )
+
+            // ---- 换歌时的过渡方式 ----
+            Spacer(Modifier.height(14.dp))
+            Text("换歌过渡", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlowTransition.entries.forEach { t ->
+                    val selected = t == vm.glowTransition
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .clickable { vm.changeGlowTransition(t) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = t.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = vm.glowTransition.hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+
+            // 时长只在「渐变」下有意义 —— 跟手模式的时间由手指决定，没有可调的时长
+            if (vm.glowTransition == GlowTransition.FADE) {
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("渐变时长", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text(
+                        text = "${vm.glowFadeMs}ms",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.accent
+                    )
+                }
+                Slider(
+                    value = vm.glowFadeMs.toFloat(),
+                    onValueChange = { vm.changeGlowFadeMs(it.roundToInt()) },
+                    valueRange = Prefs.MIN_GLOW_FADE_MS.toFloat()..Prefs.MAX_GLOW_FADE_MS.toFloat(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             Spacer(Modifier.height(10.dp))
         }
 

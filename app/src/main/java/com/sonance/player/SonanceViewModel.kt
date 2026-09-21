@@ -16,6 +16,7 @@ import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.GlowMode
+import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
@@ -566,6 +567,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var glowStrength by mutableStateOf(prefs.glowStrength)
         private set
 
+    /** 换歌时颜色的过渡方式：跟手 / 渐变 */
+    var glowTransition by mutableStateOf(GlowTransition.fromId(prefs.glowTransition))
+        private set
+
+    /** 「渐变」模式的补间时长（毫秒） */
+    var glowFadeMs by mutableIntStateOf(prefs.glowFadeMs)
+        private set
+
     fun changeGlowMode(mode: GlowMode) {
         glowMode = mode
         prefs.glowMode = mode.id
@@ -574,6 +583,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeGlowStrength(v: Float) {
         glowStrength = v
         prefs.glowStrength = v
+    }
+
+    fun changeGlowTransition(t: GlowTransition) {
+        glowTransition = t
+        prefs.glowTransition = t.id
+    }
+
+    fun changeGlowFadeMs(ms: Int) {
+        glowFadeMs = ms
+        prefs.glowFadeMs = ms
     }
 
     fun changeOnlineCover(enabled: Boolean) {

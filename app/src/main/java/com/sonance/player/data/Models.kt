@@ -96,6 +96,35 @@ enum class GlowMode(val id: String, val label: String, val hint: String) {
     }
 }
 
+/**
+ * 换歌时晕染颜色的**过渡方式**。
+ *
+ * 两种都能消除「颜色直接跳变」，区别在于**什么时候换**：
+ */
+enum class GlowTransition(val id: String, val label: String, val hint: String) {
+
+    /**
+     * 跟手：颜色由上下滑动的**滚动位置**驱动。
+     *
+     * 手指滑到一半，颜色就混到一半；页面滑到位，颜色也正好到位。
+     * 按钮切歌走的是同一个分页动画，所以两种切歌方式自动一致。
+     * 因为颜色和页面位移是同一件事的两个投影，看起来最「实」。
+     */
+    SWIPE("swipe", "跟手", "颜色跟着上下滑动的位置走，和页面完全同步"),
+
+    /**
+     * 渐变：页面落定之后，颜色在设定时长内补间过去。
+     *
+     * 颜色变化发生在页面切换**之后**，和位移没有绑定关系；
+     * 好处是时长可调，慢一点更柔和。
+     */
+    FADE("fade", "渐变", "页面切完之后，颜色在设定时长内平滑过渡");
+
+    companion object {
+        fun fromId(id: String?): GlowTransition = entries.firstOrNull { it.id == id } ?: SWIPE
+    }
+}
+
 enum class LibraryTab(val id: String, val label: String) {
     SONGS("songs", "全部歌曲"),
     ALBUMS("albums", "专辑"),

@@ -29,6 +29,23 @@ class Prefs(context: Context) {
             .putFloat(KEY_GLOW_STRENGTH, v.coerceIn(MIN_GLOW_STRENGTH, MAX_GLOW_STRENGTH))
             .apply()
 
+    /** 换歌时颜色的过渡方式（见 [GlowTransition]）。默认「跟手」—— 和页面位移同步，观感最实 */
+    var glowTransition: String
+        get() = sp.getString(KEY_GLOW_TRANSITION, null) ?: GlowTransition.SWIPE.id
+        set(v) = sp.edit().putString(KEY_GLOW_TRANSITION, v).apply()
+
+    /**
+     * 「渐变」模式下的补间时长（毫秒）。只在 [glowTransition] 为 FADE 时有意义。
+     *
+     * 默认 420：再短（<250）看着还像硬切，再长（>900）会明显滞后于已经切过去的封面。
+     */
+    var glowFadeMs: Int
+        get() = sp.getInt(KEY_GLOW_FADE_MS, DEFAULT_GLOW_FADE_MS)
+            .coerceIn(MIN_GLOW_FADE_MS, MAX_GLOW_FADE_MS)
+        set(v) = sp.edit()
+            .putInt(KEY_GLOW_FADE_MS, v.coerceIn(MIN_GLOW_FADE_MS, MAX_GLOW_FADE_MS))
+            .apply()
+
     var skinId: String
         get() = sp.getString(KEY_SKIN, null) ?: "midnight_amber"
         set(v) = sp.edit().putString(KEY_SKIN, v).apply()
@@ -347,8 +364,15 @@ class Prefs(context: Context) {
         const val MAX_GLOW_STRENGTH = 0.95f
         const val DEFAULT_GLOW_STRENGTH = 0.60f
 
+        /** 「渐变」模式的补间时长范围（毫秒） */
+        const val MIN_GLOW_FADE_MS = 120
+        const val MAX_GLOW_FADE_MS = 1500
+        const val DEFAULT_GLOW_FADE_MS = 420
+
         private const val KEY_GLOW_MODE = "glow_mode"
         private const val KEY_GLOW_STRENGTH = "glow_strength"
+        private const val KEY_GLOW_TRANSITION = "glow_transition"
+        private const val KEY_GLOW_FADE_MS = "glow_fade_ms"
         private const val KEY_SKIN = "skin_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"

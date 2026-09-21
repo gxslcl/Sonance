@@ -80,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverTint
 import com.sonance.player.data.GlowMode
+import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
@@ -88,8 +89,10 @@ import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.playback.RepeatMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.Skin
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 /**
@@ -126,10 +129,18 @@ fun FullPlayer(
     glowMode: GlowMode = GlowMode.AROUND,
     /** 晕染浓度 */
     glowStrength: Float = 0.6f,
+    /** 换歌时颜色的过渡方式：跟手 / 渐变 */
+    glowTransition: GlowTransition = GlowTransition.SWIPE,
+    /** 「渐变」模式的补间时长（毫秒） */
+    glowFadeMs: Int = Prefs.DEFAULT_GLOW_FADE_MS,
     /** 双击封面那个面板改了包裹方式 */
     onGlowModeChange: (GlowMode) -> Unit = {},
     /** 双击封面那个面板改了浓度 */
     onGlowStrengthChange: (Float) -> Unit = {},
+    /** 双击封面那个面板改了过渡方式 */
+    onGlowTransitionChange: (GlowTransition) -> Unit = {},
+    /** 双击封面那个面板改了补间时长 */
+    onGlowFadeMsChange: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -161,96 +172,39 @@ fun FullPlayer(
     /** 封面在**本页坐标系**里的矩形 —— 由 PlayerPage 量出来上报，晕染靠它定位 */
     var coverBounds by remember { mutableStateOf<Rect?>(null) }
 
-    // 当前这首的晕染色卡。取色是异步算的，所以把 tint 也放进 remember 的 key：
-    // 只按 songId 缓存的话，第一帧拿到的「还没取到色」的兜底色会一直被记住。
-    val glowSong = queue.getOrNull(state.queueIndex)
-    val glowTint = glowSong?.let {
-        ArtworkLoader.tintOf(it.albumId, it.uri, OnlineCover.keyOf(it.title, it.artist))
-    }
+    // 歌曲分页器。**必须声明在晕染素材之前** —— 跟手模式要按它的滚动位置混合颜色。
+    val pagerState = rememberPagerState(
+        initialPage = state.queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+    ) { queue.size }
 
-    /**
-     * 这一帧算出来的目标色卡。
-     *
-     * 空列表表示「色卡还没算出来」（探测中 / 解码中 / 在线封面下载中），
-     * 而**不是**「这首歌没有封面」—— 后者会走 [ArtworkLoader.isArtworkGone] 分支
-     * 拿到皮肤占位色。两者要分开，因为前者的正确处理是「先沿用上一份」。
-     */
-    val targetGlowColors = remember(
-        glowSong?.id,
-        glowSong?.title,
-        glowTint,
-        skin.id,
-        ArtworkLoader.artworkGoneVersion
-    ) {
-        val song = glowSong
-        when {
-            song == null -> emptyList()
-
-            glowTint != null ->
-                listOf(Color(glowTint.left), Color(glowTint.center), Color(glowTint.right))
-
-            // 封面**确实没有**（本地探测过、磁盘上也没有下载封面）→ 用占位图配色兜底。
-            // 这类歌永远不会产生色卡，不给兜底的话它们就一直没有晕染。
-            ArtworkLoader.isArtworkGone(
-                song.albumId,
-                song.uri,
-                OnlineCover.keyOf(song.title, song.artist)
-            ) -> {
-                val c = skin.gradientFor(song.title + song.artist)
-                listOf(c.first(), c[c.size / 2], c.last())
-            }
-
-            // 封面**还在找** → 交给下面的「沿用上一份」处理，这里不给颜色。
-            //
-            // 这里以前是直接回落到占位色的，于是进入播放页 / 切歌时会出现
-            // 「先上一版跟封面无关的假颜色，真色到了再突变一次」。
-            // 中间试过「干脆不画」，但那样是「颜色整层消失 → 突然出现」，仍然是闪。
-            // 现在由 lastGlowColors 沿用上一份，颜色只会平滑地过渡过去。
-            else -> emptyList()
-        }
-    }
-
-    /**
-     * 色卡没算出来时沿用的「上一份」。
-     *
-     * 只在 [targetGlowColors] 非空时更新，所以它永远是一份**真实**的颜色，
-     * 不会把空值记进来 —— 这就是「切歌时颜色不会先消失再出现」的关键。
-     */
-    var lastGlowColors by remember { mutableStateOf<List<Color>>(emptyList()) }
-    LaunchedEffect(targetGlowColors) {
-        if (targetGlowColors.isNotEmpty()) lastGlowColors = targetGlowColors
-    }
-    val shownGlowColors = targetGlowColors.ifEmpty { lastGlowColors }
-
-    /**
-     * 三个色分别做补间，换歌时颜色是渐变过去的，不是硬切。
-     *
-     * 用 `animateColorAsState` 而不是自己拿 Animatable 管「两层位图交叉淡化」：
-     * 它内部是**从当前值开始**补间的，所以换歌那一帧不会先按新色满不透明度画一次。
-     * 自己管的话 `snapTo(0f)` 要等这一帧提交后才生效，反而会先闪一下新色再跳回来 ——
-     * 那正是要消掉的东西。
-     *
-     * 色卡还没算出来时 [shownGlowColors] 是空的，这里落到 `skin.bg`：
-     * 等于「画了但看不见」，不会先给一版和封面无关的假色。
-     */
-    val glowFallback = skin.bg
-    val glowC0 by animateColorAsState(shownGlowColors.getOrElse(0) { glowFallback }, glowFadeSpec, label = "glow0")
-    val glowC1 by animateColorAsState(shownGlowColors.getOrElse(1) { glowFallback }, glowFadeSpec, label = "glow1")
-    val glowC2 by animateColorAsState(shownGlowColors.getOrElse(2) { glowFallback }, glowFadeSpec, label = "glow2")
-    val glowColors = remember(glowC0, glowC1, glowC2) { listOf(glowC0, glowC1, glowC2) }
-
-    val glowSpec = coverBounds
-        ?.takeIf { it.width > 0f && it.height > 0f }
-        ?.let { GlowSpec(colors = glowColors, mode = glowMode, strength = glowStrength, cover = it) }
-
-    // 晕染的二维渐变图（横向取封面色、纵向做淡出）。
+    // ===== 晕染素材 =====
     //
-    // 以前这里是「横向切 32 段、每段画一条纵向渐变」。段与段之间会留下接缝：
-    // 每段都是独立的 drawRect，交界处的像素会被两个矩形各画一次，
-    // 于是屏幕上出现一排等距的竖线（32 段 → 1080 宽的手机上每 34px 一条）。
-    // 一张小位图拉伸就能彻底避免 —— 横向是连续的，没有段就没有缝。
-    val glowImage = remember(glowColors, glowMode, glowStrength) {
-        buildGlowImage(glowColors, glowMode, glowStrength)
+    // 两种过渡方式共用同一批「已经烘好的位图」，区别只在**什么时候换**：
+    // - SWIPE（跟手）：按分页器的滚动位置在相邻两页之间混合，颜色和页面位移同步；
+    // - FADE（渐变）：页面落定之后，用 animateColorAsState 在设定时长内补间。
+    val isSwipeGlow = glowTransition == GlowTransition.SWIPE
+
+    /**
+     * 这一帧要画的一到两层素材。
+     *
+     * SWIPE 下是 `[上一页, 当前页, 下一页]` 三份（按滚动位置取其中相邻的两份混合）；
+     * FADE 下只有当前这一首。
+     */
+    val glowFrames: List<GlowFrame> = if (isSwipeGlow) {
+        // currentPage 只在翻页那一刻变（一次滑动最多变一次），不会每帧重组
+        val page = pagerState.currentPage
+        val prev = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page - 1), skin), glowMode, glowStrength)
+        val cur = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page), skin), glowMode, glowStrength)
+        val next = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page + 1), skin), glowMode, glowStrength)
+        remember(prev, cur, next) { listOf(prev, cur, next) }
+    } else {
+        listOf(
+            rememberGlowFrame(
+                colors = rememberFadeGlowColors(queue, state.queueIndex, skin, glowFadeMs),
+                mode = glowMode,
+                strength = glowStrength
+            )
+        )
     }
 
     // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
@@ -289,10 +243,6 @@ fun FullPlayer(
         scope.launch { layerPager.animateScrollToPage(current + step) }
     }
 
-    val pagerState = rememberPagerState(
-        initialPage = state.queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
-    ) { queue.size }
-
     // 歌词 / 律动柱上按返回键 → 滑回封面层，而不是直接收起播放页。
     // 拖动中不接管，免得和手指的滑动打架。
     BackHandler(enabled = layer != PlayerLayer.COVER && !layerPager.isScrollInProgress) {
@@ -327,7 +277,8 @@ fun FullPlayer(
             // 晕染画在**整页背景层**：这一层天然包含顶栏和状态栏，颜色能一路覆盖上去。
             // （之前画在封面那一层，被分页器裁掉了顶栏部分，所以顶部一直缺一块。）
             .drawBehind {
-                val spec = glowSpec ?: return@drawBehind
+                val cover = coverBounds ?: return@drawBehind
+                if (cover.width <= 0f || cover.height <= 0f) return@drawBehind
                 // 必须裁到本 Box 的范围内。
                 //
                 // 晕染是**故意**溢出布局边界的：FULL 模式向上超出封面区 1.2 倍高度、
@@ -342,7 +293,31 @@ fun FullPlayer(
                 // 一个都没少。注意必须裁在这里（Box 自己身上、在 slide 变换之内），
                 // 裁在 AnimatedVisibility 的 modifier 上会因为顺序问题裁在变换之外，
                 // 滑出时照样能看见。
-                clipRect { drawGlow(spec, glowImage) }
+                clipRect {
+                    if (!isSwipeGlow) {
+                        // 渐变模式：只有一层，颜色已经在组合期补间过了
+                        drawGlow(glowFrames[0], cover, glowMode, glowStrength)
+                    } else {
+                        // 跟手模式：按分页器的滚动位置在相邻两页之间混合。
+                        //
+                        // pos 是连续的「第几页」（例如 3.4）。基准页必须用 floor 取，
+                        // **不能**用 offsetFraction 的符号判方向 —— 那个值在 currentPage
+                        // 翻页的一刻会变号，用符号判会在中点处跳一下
+                        // （3.4 和 3.6 会算成相反的混合比）。
+                        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
+                        val base = floor(pos).toInt()
+                        val t = (pos - base).coerceIn(0f, 1f)
+                        // glowFrames = [currentPage-1, currentPage, currentPage+1]
+                        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
+                        drawGlow(glowFrames[i], cover, glowMode, glowStrength, alpha = 1f - t)
+                        if (t > 0f) {
+                            // 相邻页色卡还没算出来时 drawGlow 会直接返回，
+                            // 于是画面变成「一层淡到 (1-t)」—— 平滑地淡下去，
+                            // 比"先按住不动、等色卡到了再跳一下"好。预取会把这个窗口压到很小。
+                            drawGlow(glowFrames[i + 1], cover, glowMode, glowStrength, alpha = t)
+                        }
+                    }
+                }
             }
     ) {
         val currentSong = queue.getOrNull(state.queueIndex)
@@ -530,9 +505,19 @@ fun FullPlayer(
                         // （beyondViewportPageCount = 1），那些页停在屏幕外，
                         // 它们的封面位置一旦参与上报，晕染就会被拽到屏幕外去 ——
                         // 表现是颜色突然消失、或者闪到别的位置。
-                        onCoverBounds = {
-                            if (isCurrent) {
-                                coverBounds = it.translate(-rootTopLeft.x, -rootTopLeft.y)
+                        onCoverBounds = { rect ->
+                            // 三个条件缺一不可：
+                            // - isCurrent：只有当前页的上报算数（相邻页停在屏幕外，
+                            //   它们的位置一旦参与上报，晕染会被拽到屏幕外去）；
+                            // - !isScrollInProgress：**滚动过程中不要更新**。
+                            //   那时上报的是"旧页正在滑走的位置"，晕染会跟着往上滑一整屏
+                            //   （≈2780px）再在落定时跳回来 —— 那个回跳比颜色跳变更显眼。
+                            //   而每一页的布局是同一套，静止时的矩形几乎相同
+                            //   （差别只来自歌名 1 行/2 行、有没有专辑名，几十像素量级），
+                            //   保持静止值反而没有跳变。晕染是跨度超过两个屏高的柔和渐变，
+                            //   这点偏差看不出来。
+                            if (isCurrent && !pagerState.isScrollInProgress) {
+                                coverBounds = rect.translate(-rootTopLeft.x, -rootTopLeft.y)
                             }
                         }
                     )
@@ -579,8 +564,12 @@ fun FullPlayer(
         GlowSheet(
             mode = glowMode,
             strength = glowStrength,
+            transition = glowTransition,
+            fadeMs = glowFadeMs,
             onModeChange = onGlowModeChange,
             onStrengthChange = onGlowStrengthChange,
+            onTransitionChange = onGlowTransitionChange,
+            onFadeMsChange = onGlowFadeMsChange,
             onDismiss = { showGlowSheet = false }
         )
     }
@@ -653,8 +642,13 @@ private const val GLOW_BITMAP_H = 128
  * 再短（<250ms）看着还是像硬切，再长（>700ms）会明显滞后于已经切过去的封面。
  * 用线性缓动 —— 颜色插值上加速/减速反而显得别扭。
  */
-private const val GLOW_FADE_MS = 420
-private val glowFadeSpec: AnimationSpec<Color> = tween(GLOW_FADE_MS, easing = LinearEasing)
+/**
+ * 「渐变」模式的补间时长**范围**。默认值与当前值都在 [Prefs] 里。
+ *
+ * 120ms 是下限：再短看着还是硬切；1500ms 是上限：再长会明显滞后于已经切过去的封面。
+ */
+private val GLOW_FADE_RANGE = Prefs.MIN_GLOW_FADE_MS..Prefs.MAX_GLOW_FADE_MS
+
 
 /**
  * 纵向浓度曲线：`v = 0` 是晕染区**靠封面的那一端**，`v = 1` 是远端。
@@ -713,6 +707,93 @@ private fun buildGlowImage(
     return bitmap.asImageBitmap()
 }
 
+/* ============================================================
+ * 晕染素材的取色与烘焙
+ * ============================================================ */
+
+/**
+ * 取某首歌的晕染色卡。
+ *
+ * **空列表表示「色卡还没算出来」**（探测中 / 解码中 / 在线封面下载中），
+ * 而**不是**「这首歌没有封面」—— 后者会走 [ArtworkLoader.isArtworkGone] 分支
+ * 拿到皮肤占位色。两者要分开，因为前者要由调用方决定是「沿用上一份」还是「先不画」。
+ */
+@Composable
+private fun rememberGlowColors(song: Song?, skin: Skin): List<Color> {
+    val coverKey = remember(song?.id, song?.title, song?.artist) {
+        song?.let { OnlineCover.keyOf(it.title, it.artist) }
+    }
+    // ⚠️ `tintOf` 必须在 remember **外面**读。
+    // 它读的是 SnapshotStateMap（色卡是异步算出来的）；放进 remember 块里的话，
+    // 色卡算好之后下面那几个 key 都没变、块不会重跑，拿到的就永远是"还没算好"。
+    val tint = song?.let { ArtworkLoader.tintOf(it.albumId, it.uri, coverKey) }
+    val goneVersion = ArtworkLoader.artworkGoneVersion
+
+    return remember(song?.id, song?.title, tint, skin.id, goneVersion) {
+        when {
+            song == null -> emptyList()
+
+            tint != null -> listOf(Color(tint.left), Color(tint.center), Color(tint.right))
+
+            // 封面**确实没有** → 用占位图配色兜底。
+            // 这类歌永远不会产生色卡，不给兜底的话它们就一直没有晕染。
+            ArtworkLoader.isArtworkGone(song.albumId, song.uri, coverKey) -> {
+                val c = skin.gradientFor(song.title + song.artist)
+                listOf(c.first(), c[c.size / 2], c.last())
+            }
+
+            else -> emptyList()
+        }
+    }
+}
+
+/**
+ * 把色卡烘成位图。只在 颜色 / 模式 / 浓度 变化时重建。
+ *
+ * 这里**不写提前 return**：`remember` 必须无条件调用，否则条件翻转时
+ * 组合的 group 结构会跟着变。空色卡交给 [buildGlowImage]（它对空列表直接返回 null），
+ * 画出来就是全透明。
+ */
+@Composable
+private fun rememberGlowFrame(colors: List<Color>, mode: GlowMode, strength: Float): GlowFrame =
+    remember(colors, mode, strength) {
+        GlowFrame(colors, buildGlowImage(colors, mode, strength))
+    }
+
+/**
+ * 「渐变」模式要显示的色卡：在当前这一首的色卡上做补间。
+ *
+ * 色卡没算出来时**沿用上一份**（只在非空时更新，所以它永远是一份真实颜色）。
+ * 这一条是「换歌时颜色不会先消失再突然出现」的关键 ——
+ * 早先的实现要么直接跳变，要么整层消失，两种都闪。
+ */
+@Composable
+private fun rememberFadeGlowColors(
+    queue: List<Song>,
+    index: Int,
+    skin: Skin,
+    fadeMs: Int
+): List<Color> {
+    val target = rememberGlowColors(queue.getOrNull(index), skin)
+    var lastColors by remember { mutableStateOf<List<Color>>(emptyList()) }
+    LaunchedEffect(target) {
+        if (target.isNotEmpty()) lastColors = target
+    }
+    val shown = target.ifEmpty { lastColors }
+
+    // 用 animateColorAsState 而不是自己拿 Animatable：它内部从**当前值**开始补间，
+    // 换歌那一帧不会先按新色满不透明度画一次（snapTo(0f) 要等当前帧提交后才生效）。
+    //
+    // 色卡还没算出来时 shown 是空的，落到 skin.bg —— 等于「画了但看不见」，
+    // 不会先给一版和封面无关的假色。
+    val fallback = skin.bg
+    val spec: AnimationSpec<Color> = tween(fadeMs.coerceIn(GLOW_FADE_RANGE), easing = LinearEasing)
+    val c0 by animateColorAsState(shown.getOrElse(0) { fallback }, spec, label = "glow0")
+    val c1 by animateColorAsState(shown.getOrElse(1) { fallback }, spec, label = "glow1")
+    val c2 by animateColorAsState(shown.getOrElse(2) { fallback }, spec, label = "glow2")
+    return remember(c0, c1, c2) { listOf(c0, c1, c2) }
+}
+
 /** 在封面的几个取样色之间按 [t]（0~1）插值 */
 private fun glowTintAt(colors: List<Color>, t: Float): Color {
     if (colors.size == 1) return colors[0]
@@ -748,20 +829,12 @@ private fun Modifier.onDoubleTapGlow(action: () -> Unit): Modifier {
 }
 
 /**
- * 晕染需要的全部参数。
+ * 一页的晕染素材：三个取样色 + **已经烘好**的渐变位图。
  *
- * 它画在**整页背景层**（[FullPlayer] 最外层那个 Box 上），而不是封面那一层：
- * 封面层在分页器内部，向上溢出到顶栏的那部分会被分页器裁掉，顶栏就永远缺一块颜色。
- * 代价是这一层不知道封面画在哪（竖屏居中、横屏在左栏），
- * 所以封面矩形由 [PlayerPage] 用 `onGloballyPositioned` 量出来、再传上来。
+ * 位图提前烘好是刻意的：换歌过渡时每帧只需要按不透明度把两张图叠起来，
+ * 不必在绘制阶段重新填 8192 个像素、也不必每帧新建 Bitmap。
  */
-private data class GlowSpec(
-    val colors: List<Color>,
-    val mode: GlowMode,
-    val strength: Float,
-    /** 封面在整页坐标系（root）里的矩形 */
-    val cover: Rect,
-)
+private data class GlowFrame(val colors: List<Color>, val image: ImageBitmap?)
 
 /**
  * 把封面的颜色往背景上晕开。
@@ -773,22 +846,28 @@ private data class GlowSpec(
  * 画在 [drawBehind] 里 = 它在封面之下、也在歌名 / 进度条 / 按钮之下，
  * 所以只有背景会被染色，任何文字和控件都不会被盖住。
  */
-private fun DrawScope.drawGlow(spec: GlowSpec, image: ImageBitmap?) {
-    val colors = spec.colors
-    val mode = spec.mode
-    val strength = spec.strength
-    if (colors.isEmpty() || strength <= 0f) return
-    val w = spec.cover.width
-    val h = spec.cover.height
-    val cx = spec.cover.center.x
-    val cy = spec.cover.center.y
+private fun DrawScope.drawGlow(
+    frame: GlowFrame,
+    cover: Rect,
+    mode: GlowMode,
+    strength: Float,
+    alpha: Float = 1f
+) {
+    val colors = frame.colors
+    val image = frame.image
+    if (colors.isEmpty() || strength <= 0f || alpha <= 0f) return
+    val w = cover.width
+    val h = cover.height
+    val cx = cover.center.x
+    val cy = cover.center.y
 
     when (mode) {
                     // ── 只从下边缘向下晕 ──
                     GlowMode.BOTTOM -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f + h * GLOW_TOP,
-                        height = h * GLOW_REACH
+                        height = h * GLOW_REACH,
+                        alpha = alpha
                     )
 
                     // ── 只从左右两侧向外晕 ──
@@ -802,7 +881,8 @@ private fun DrawScope.drawGlow(spec: GlowSpec, image: ImageBitmap?) {
                         drawGlowImage(
                             image = image,
                             top = cy - h / 2f - pad,
-                            height = h + pad * 2f
+                            height = h + pad * 2f,
+                            alpha = alpha
                         )
                     }
 
@@ -824,8 +904,8 @@ private fun DrawScope.drawGlow(spec: GlowSpec, image: ImageBitmap?) {
                         translate(left = 0f, top = cy - r) {
                             drawRect(
                                 brush = Brush.radialGradient(
-                                    0.00f to c.copy(alpha = strength),
-                                    inner to c.copy(alpha = strength),
+                                    0.00f to c.copy(alpha = strength * alpha),
+                                    inner to c.copy(alpha = strength * alpha),
                                     1.00f to c.copy(alpha = 0f),
                                     center = Offset(cx, r),
                                     radius = r
@@ -842,37 +922,57 @@ private fun DrawScope.drawGlow(spec: GlowSpec, image: ImageBitmap?) {
                     GlowMode.FULL -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f - h * 1.2f,
-                        height = h * 3.4f
+                        height = h * 3.4f,
+                        alpha = alpha
                     )
                 }
 }
 
-/** 把位图按目标矩形拉伸绘制 —— 颜色和浓度都已经烘在位图里，一次就画完了 */
-private fun DrawScope.drawGlowImage(image: ImageBitmap?, top: Float, height: Float) {
+/**
+ * 把位图按目标矩形拉伸绘制 —— 颜色和浓度都已经烘在位图里，一次就画完了。
+ *
+ * [alpha] 是给「跟手」模式做跨页交叉淡化用的整体不透明度。
+ *
+ * ⚠️ 两层各按 `t` / `1-t` 叠加，严格来说不是数学上等价的交叉淡化：
+ * src-over 两次之后，过渡中点会比两端淡大约 14%（因为底色透出来了一部分）。
+ * 但端点（t=0 / t=1）是精确的，中间只是一个平滑的轻微变淡，看不出台阶，
+ * 而换来的是「零每帧分配」—— 不值得为这点差异去每帧重烘位图。
+ */
+private fun DrawScope.drawGlowImage(
+    image: ImageBitmap?,
+    top: Float,
+    height: Float,
+    alpha: Float = 1f
+) {
     val width = size.width
-    if (image == null || width <= 0f || height <= 0f) return
+    if (image == null || width <= 0f || height <= 0f || alpha <= 0f) return
     drawImage(
         image = image,
         srcOffset = IntOffset.Zero,
         srcSize = IntSize(image.width, image.height),
         dstOffset = IntOffset(0, top.roundToInt()),
-        dstSize = IntSize(width.roundToInt(), height.roundToInt())
+        dstSize = IntSize(width.roundToInt(), height.roundToInt()),
+        alpha = alpha
     )
 }
 
 /**
  * 「封面晕染」设置面板 —— 双击封面打开。
  *
- * 和设置页里那一份是同一组选项（[GlowMode] + 浓度）。两处都保留是有意的：
- * 在播放页看到颜色不对可以就地调，不用退出去翻设置再回来。
+ * 和设置页里那一份是同一组选项（包裹方式 / 浓度 / 过渡方式 / 补间时长）。
+ * 两处都保留是有意的：在播放页看到颜色不对可以就地调，不用退出去翻设置再回来。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GlowSheet(
     mode: GlowMode,
     strength: Float,
+    transition: GlowTransition,
+    fadeMs: Int,
     onModeChange: (GlowMode) -> Unit,
     onStrengthChange: (Float) -> Unit,
+    onTransitionChange: (GlowTransition) -> Unit,
+    onFadeMsChange: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -944,6 +1044,55 @@ private fun GlowSheet(
                 valueRange = Prefs.MIN_GLOW_STRENGTH..Prefs.MAX_GLOW_STRENGTH,
                 modifier = Modifier.fillMaxWidth()
             )
+
+            Spacer(Modifier.height(18.dp))
+            Text("换歌过渡", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlowTransition.entries.forEach { t ->
+                    val selected = t == transition
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .clickable { onTransitionChange(t) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = t.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(transition.hint, style = MaterialTheme.typography.labelSmall, color = skin.textDim)
+
+            // 时长只在「渐变」下有意义：跟手模式的时间由手指决定，没有可调的时长
+            if (transition == GlowTransition.FADE) {
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("渐变时长", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text(
+                        text = "${fadeMs}ms",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.accent
+                    )
+                }
+                Slider(
+                    value = fadeMs.toFloat(),
+                    onValueChange = { onFadeMsChange(it.roundToInt()) },
+                    valueRange = Prefs.MIN_GLOW_FADE_MS.toFloat()..Prefs.MAX_GLOW_FADE_MS.toFloat(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }
