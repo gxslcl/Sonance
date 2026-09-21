@@ -59,6 +59,10 @@ import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.first
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.font.FontWeight
+import com.sonance.player.ui.components.IconAction
+import com.sonance.player.ui.components.MenuRow
 
 /* ============================================================
  * 歌曲列表骨架
@@ -139,14 +143,27 @@ fun SongList(
 }
 
 @Composable
+/**
+ * 列表头部的快捷播放。
+ *
+ * 「播放全部」**保留文字** —— 它是这一页的主操作，光一个 ▶ 图标会让人先犹豫一下。
+ * 「随机播放」收成图标：它是次要操作，而且播放条上本来就有随机开关兜底，
+ * 认不出来也不至于没路走。这样两个按钮才和分类 chips 挤得进同一行。
+ */
 private fun QuickActions(
     songs: List<Song>,
     vm: SonanceViewModel,
     modifier: Modifier = Modifier
 ) {
-    Row(modifier, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         PillButton(label = "播放全部", onClick = { vm.playAll(songs) })
-        PillButton(label = "随机播放", onClick = { vm.playAll(songs, shuffled = true) }, filled = false)
+        IconAction(
+            icon = SonanceIcons.Shuffle,
+            contentDescription = "随机播放全部",
+            onClick = { vm.playAll(songs, shuffled = true) },
+            iconSize = 20.dp,
+            tint = LocalSkin.current.textDim
+        )
     }
 }
 
@@ -164,6 +181,7 @@ fun SongsScreen(
 ) {
     var mode by rememberSaveable { mutableStateOf(0) }
     val dense = LocalDenseLayout.current
+    val skin = LocalSkin.current
 
     val list = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, mode) {
         if (mode == 1) vm.recentSongs() else vm.visibleSongs()
@@ -177,25 +195,69 @@ fun SongsScreen(
             sortField = vm.sortField,
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
-            viewMode = if (mode == 0) vm.viewMode else null,
-            onViewMode = { vm.changeViewMode(it) },
             modifier = Modifier.padding(
                 horizontal = 16.dp,
                 vertical = if (dense) 4.dp else 10.dp
             ),
-            chips = { m ->
-                ChipsRow(
-                    chips = listOf(
-                        "全部歌曲" to (mode == 0),
-                        "最近播放" to (mode == 1),
-                        "文件夹" to (mode == 2)
-                    ),
-                    onSelect = { mode = it },
-                    modifier = m
-                )
+
+            // 第二行左侧 = **上下文槽位**：
+            // 平时是分类切换；搜索时换成"找到 N 首"。
+            // 搜索的时候本来也不会去切分类，让位给结果统计不损失任何操作 ——
+            // 而结果数量是**新信息**（曲库总数已经在顶栏了），该出现。
+            leading = { m ->
+                if (vm.searchQuery.isNotBlank()) {
+                    Text(
+                        text = "找到 ${list.size} 首 · ${formatDuration(list.sumOf { it.durationMs })}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.textDim,
+                        maxLines = 1,
+                        modifier = m
+                    )
+                } else {
+                    ChipsRow(
+                        // 文件夹模式下把「文件夹」露出来当选中项 ——
+                        // 它平时收在 ⁝ 菜单里，但当前就在这个模式时必须能看见、能点回去
+                        chips = if (mode == 2) {
+                            listOf(
+                                "全部歌曲" to false,
+                                "最近播放" to false,
+                                "文件夹" to true
+                            )
+                        } else {
+                            listOf("全部歌曲" to (mode == 0), "最近播放" to (mode == 1))
+                        },
+                        onSelect = { mode = it },
+                        modifier = m
+                    )
+                }
             },
-            leadingText = if (mode == 2) "${folders.size} 个文件夹"
-            else "${list.size} 首 · ${formatDuration(list.sumOf { it.durationMs })}",
+
+            // ⁝ 菜单：收纳被移出主行的两件事。文件夹模式下视图切换不适用（文件夹恒为网格），
+            // 菜单里就没东西可放了，这时整个按钮一起收起。
+            overflow = if (mode == 2) {
+                null
+            } else {
+                {
+                    MenuRow(
+                        icon = SonanceIcons.ListView,
+                        label = "列表视图",
+                        selected = vm.viewMode == ViewMode.LIST
+                    ) { vm.changeViewMode(ViewMode.LIST) }
+                    MenuRow(
+                        icon = SonanceIcons.GridView,
+                        label = "网格视图",
+                        selected = vm.viewMode == ViewMode.GRID
+                    ) { vm.changeViewMode(ViewMode.GRID) }
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    MenuRow(
+                        icon = SonanceIcons.Folder,
+                        label = "文件夹",
+                        selected = false
+                    ) { mode = 2 }
+                }
+            },
+
             actions = if (mode != 2 && list.isNotEmpty()) {
                 { m -> QuickActions(songs = list, vm = vm, modifier = m) }
             } else null
@@ -320,7 +382,6 @@ fun AlbumsScreen(
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            leadingText = "${albums.size} 张专辑 · ${vm.songs.size} 首",
             actions = if (vm.songs.isNotEmpty()) {
                 { m ->
                     PillButton(
@@ -372,7 +433,6 @@ fun ArtistsScreen(
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            leadingText = "${artists.size} 位艺术家"
         )
         Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
         if (vm.scanState == ScanState.SCANNING && vm.songs.isEmpty()) {
@@ -424,7 +484,6 @@ fun FoldersScreen(
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            leadingText = "${folders.size} 个文件夹",
             actions = {
                 PillButton(
                     label = if (vm.scanState == ScanState.SCANNING) "扫描中…" else "重新扫描",
@@ -483,7 +542,6 @@ fun RecentScreen(
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            leadingText = "${list.size} 首",
             actions = if (list.isNotEmpty()) {
                 { m ->
                     Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -524,7 +582,6 @@ fun FavoritesScreen(
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            leadingText = "${list.size} 首 · ${formatDuration(list.sumOf { it.durationMs })}",
             actions = if (list.isNotEmpty()) {
                 { m -> QuickActions(songs = list, vm = vm, modifier = m) }
             } else null
@@ -620,7 +677,6 @@ fun SongCollectionScreen(
                 sortAscending = vm.sortAscending,
                 onSort = vm::changeSort,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-                leadingText = subtitle,
                 actions = { m -> QuickActions(songs = songs, vm = vm, modifier = m) }
             )
         }

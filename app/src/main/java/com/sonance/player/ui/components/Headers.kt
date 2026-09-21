@@ -37,6 +37,10 @@ import com.sonance.player.data.SortField
 import com.sonance.player.data.ViewMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.shape.CircleShape
 
 @Composable
 fun SearchField(
@@ -96,43 +100,6 @@ fun SearchField(
 }
 
 @Composable
-fun ViewToggle(
-    mode: ViewMode,
-    onChange: (ViewMode) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val skin = LocalSkin.current
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(9.dp))
-            .background(skin.surface)
-            .border(1.dp, skin.border, RoundedCornerShape(9.dp))
-            .padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        listOf(ViewMode.LIST to SonanceIcons.ListView, ViewMode.GRID to SonanceIcons.GridView)
-            .forEach { (m, icon) ->
-                val selected = mode == m
-                Box(
-                    Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(if (selected) skin.surface3 else Color.Transparent)
-                        .clickable { onChange(m) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = if (m == ViewMode.LIST) "列表视图" else "网格视图",
-                        tint = if (selected) skin.accent else skin.textMuted,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-    }
-}
-
-@Composable
 fun SortButton(
     field: SortField,
     ascending: Boolean,
@@ -188,7 +155,7 @@ fun ChipsRow(
     modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -198,7 +165,96 @@ fun ChipsRow(
     }
 }
 
-/** 顶部工具行：搜索 + 视图切换 + 排序 + 快捷筛选/操作 */
+/**
+ * ⁝ 溢出菜单按钮。
+ *
+ * 收纳那些"不常用但必须有入口"的东西（视图切换、文件夹），
+ * 让主行只留高频控件。以后要加功能直接往 [content] 里塞，头部不会再变高。
+ */
+@Composable
+fun DotsMenuButton(content: @Composable ColumnScope.() -> Unit) {
+    val skin = LocalSkin.current
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(if (open) skin.accentGlow else Color.Transparent)
+                .border(1.dp, if (open) Color.Transparent else skin.border2, CircleShape)
+                .clickable { open = true },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = SonanceIcons.MoreVertical,
+                contentDescription = "更多",
+                tint = if (open) skin.accent else skin.textDim,
+                modifier = Modifier.size(17.dp)
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }, content = content)
+    }
+}
+
+/** 菜单里的一行：图标 + 文字 +（选中时）右侧对勾 */
+@Composable
+fun MenuRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = label,
+                color = if (selected) skin.accent else skin.text
+            )
+        },
+        leadingIcon = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (selected) skin.accent else skin.textDim,
+                modifier = Modifier.size(17.dp)
+            )
+        },
+        trailingIcon = if (selected) {
+            {
+                Icon(
+                    imageVector = SonanceIcons.Check,
+                    contentDescription = null,
+                    tint = skin.accent,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        } else null,
+        onClick = onClick
+    )
+}
+
+/**
+ * 列表头部：**两行**。
+ *
+ * ```
+ * [🔍 搜索框 (weight 1)] [⇅ 排序]
+ * [分类 / 结果统计] [⁝]          [播放全部] [🔀]
+ * ```
+ *
+ * 设计上的三个约定：
+ *
+ * 1. **统计信息不在这里** —— 它并进了顶栏标题行（[AppTopBar] 的 `subtitleInline`）。
+ *    之前顶栏副标题和这里的 `leadingText` 是同一份内容，同一屏出现两次，
+ *    搜索时两个数字还会打架（一个是曲库总数、一个是筛选后数量）。
+ * 2. **视图切换收进 [overflow] 菜单** —— 它一天改不了一次，却占着搜索框旁边
+ *    近 18% 的宽度；让给搜索框更值。
+ * 3. **第二行左侧是"上下文槽位"** —— 调用方决定放什么：平时放分类切换，
+ *    搜索时换成"找到 N 首"。搜索时本来也不会去切分类，让位不损失任何操作。
+ *
+ * 第二行左侧带 `weight(1f)` + 横向滚动：Compose 的 Row 会**先量非加权子项**，
+ * 所以右侧的播放按钮永远不会被挤掉；左侧在窄屏上可以滑动，而不是被裁掉。
+ */
 @Composable
 fun ListHeader(
     query: String,
@@ -207,19 +263,20 @@ fun ListHeader(
     sortAscending: Boolean,
     onSort: (SortField) -> Unit,
     modifier: Modifier = Modifier,
-    viewMode: ViewMode? = null,
-    onViewMode: ((ViewMode) -> Unit)? = null,
-    chips: @Composable ((Modifier) -> Unit)? = null,
-    leadingText: String? = null,
-    actions: @Composable ((Modifier) -> Unit)? = null
+    /** 第二行左侧：分类切换 / 搜索时的结果统计 */
+    leading: @Composable ((Modifier) -> Unit)? = null,
+    /** 第二行右侧：播放全部 / 随机 / 重新扫描 等 */
+    actions: @Composable ((Modifier) -> Unit)? = null,
+    /** ⁝ 溢出菜单的内容。传 null 就不显示这个按钮 */
+    overflow: (@Composable ColumnScope.() -> Unit)? = null
 ) {
-    val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
 
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(if (dense) 8.dp else 12.dp)
     ) {
+        // ---- 行 1：搜索 + 排序 ----
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -231,48 +288,28 @@ fun ListHeader(
                 modifier = Modifier.weight(1f),
                 height = if (dense) 38.dp else 44.dp
             )
-            if (viewMode != null && onViewMode != null) {
-                ViewToggle(mode = viewMode, onChange = onViewMode)
-            }
             SortButton(field = sortField, ascending = sortAscending, onSelect = onSort)
         }
 
-        if (dense) {
-            // 矮屏：筛选 chips 与统计/操作合并到同一行
+        // ---- 行 2：上下文槽位 + ⁝ + 播放操作 ----
+        if (leading != null || actions != null || overflow != null) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                chips?.invoke(Modifier.weight(1f, fill = false))
-                if (leadingText != null) {
-                    Text(
-                        text = leadingText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = skin.textMuted,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f)
-                    )
-                } else {
-                    Spacer(Modifier.weight(1f))
-                }
-                actions?.invoke(Modifier)
-            }
-        } else {
-            chips?.invoke(Modifier.fillMaxWidth())
-            if (leadingText != null || actions != null) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = leadingText.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = skin.textMuted,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f)
-                    )
-                    actions?.invoke(Modifier)
+                    leading?.invoke(Modifier)
+                    overflow?.let { DotsMenuButton(content = it) }
+                }
+                if (actions != null) {
+                    Spacer(Modifier.width(8.dp))
+                    actions(Modifier)
                 }
             }
         }

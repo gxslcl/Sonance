@@ -402,6 +402,9 @@ private fun CompactLayout(
             AppTopBar(
                 title = detail?.let { detailTitle(vm, it) } ?: vm.tab.label,
                 subtitle = detail?.let { detailSubtitle(vm, it) } ?: tabSubtitle(vm),
+                // 列表页把统计并进标题行（省一整行）；详情页标题可能是长专辑名，
+                // 挤一行会把标题截没，所以保持两行
+                subtitleInline = detail == null,
                 modifier = Modifier.statusBarsPadding(),
                 onBack = detail?.let { { onCloseDetail() } },
                 actions = {
@@ -500,6 +503,9 @@ private fun MediumLayout(
                 AppTopBar(
                     title = detail?.let { detailTitle(vm, it) } ?: vm.tab.label,
                     subtitle = detail?.let { detailSubtitle(vm, it) } ?: tabSubtitle(vm),
+                    // 列表页把统计并进标题行（省一整行）；详情页标题可能是长专辑名，
+                    // 挤一行会把标题截没，所以保持两行
+                    subtitleInline = detail == null,
                     modifier = Modifier.statusBarsPadding(),
                     onBack = detail?.let { { onCloseDetail() } },
                     actions = {
@@ -587,6 +593,9 @@ private fun ExpandedLayout(
                     AppTopBar(
                         title = detail?.let { detailTitle(vm, it) } ?: vm.tab.label,
                         subtitle = detail?.let { detailSubtitle(vm, it) } ?: tabSubtitle(vm),
+                        // 列表页把统计并进标题行（省一整行）；详情页标题可能是长专辑名，
+                        // 挤一行会把标题截没，所以保持两行
+                        subtitleInline = detail == null,
                         onBack = detail?.let { { onCloseDetail() } },
                         actions = {
                             IconAction(
@@ -760,7 +769,8 @@ private fun ScreenBody(
 
 private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
     LibraryTab.SONGS -> "共 ${vm.songs.size} 首 · ${formatDuration(vm.totalDurationMs)}"
-    LibraryTab.ALBUMS -> "共 ${vm.albums.size} 张专辑"
+    // 曲目数原来挂在 ListHeader 的统计行上，那行删掉之后并进这里，信息不丢
+    LibraryTab.ALBUMS -> "共 ${vm.albums.size} 张专辑 · ${vm.songs.size} 首"
     LibraryTab.ARTISTS -> "共 ${vm.artists.size} 位艺术家"
     LibraryTab.FOLDERS -> "共 ${vm.folders.size} 个文件夹"
     LibraryTab.RECENT -> "最近听过 ${vm.recentIds.size} 首"

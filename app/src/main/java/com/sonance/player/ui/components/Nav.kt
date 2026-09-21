@@ -346,6 +346,16 @@ fun AppTopBar(
     subtitle: String? = null,
     modifier: Modifier = Modifier,
     onBack: (() -> Unit)? = null,
+    /**
+     * 把副标题并到标题**同一行**（`全部歌曲 · 共 315 首 · 21:19:12`）。
+     *
+     * 列表页开这个：标题是固定的 tab 名（最多 5 个字），和副标题同行放得下，
+     * 而且能省掉一整行 —— 之前副标题独占一行，列表被白白压掉 20dp 左右。
+     *
+     * 详情页（专辑 / 艺术家 / 文件夹）**不要开**：那里的标题是专辑名，
+     * 可能很长，和副标题挤一行会把标题截得只剩几个字。
+     */
+    subtitleInline: Boolean = false,
     actions: @Composable (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
@@ -383,23 +393,55 @@ fun AppTopBar(
             }
         }
         Spacer(Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                color = skin.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (subtitle != null && !dense) {
+        if (subtitleInline && subtitle != null) {
+            // 标题 + 副标题同一行。用基线对齐，两种字号看起来才是在一条线上。
+            // 标题 `weight(1f, fill = false)`：空间不够时先压缩标题（省略号），
+            // 副标题（信息量更大）保持完整。
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.Bottom
+            ) {
                 Text(
-                    text = subtitle,
+                    text = title,
+                    style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = skin.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .alignByBaseline()
+                )
+                Text(
+                    text = "· $subtitle",
                     style = MaterialTheme.typography.labelSmall,
                     color = skin.textMuted,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(start = 7.dp)
+                        .alignByBaseline()
+                )
+            }
+        } else {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = skin.text,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (subtitle != null && !dense) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
         actions?.invoke()
