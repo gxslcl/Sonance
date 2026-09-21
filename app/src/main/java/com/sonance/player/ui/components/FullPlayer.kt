@@ -66,6 +66,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -907,6 +908,8 @@ private fun PlayerPage(
         // 封面尺寸在外层一次算好，少一轮 measure。
         val portraitSide = if (!isWide) (if (boxW < boxH) boxW else boxH) else 0.dp
         val landscapeSide = if (isWide) landscapeCoverSize(boxW, boxH) else 0.dp
+        // onGloballyPositioned 报的是像素，横屏推封面矩形时要用来算边长
+        val landscapeSidePx = with(LocalDensity.current) { landscapeSide.toPx() }
 
         // 这里原来有一层页面背景渐变。**删掉了**：它是不透明的，会把画在上一层
         // （[FullPlayer] 最外那个 Box）的封面晕染整个盖住 —— 这是「顶栏一直没有颜色」
@@ -921,7 +924,32 @@ private fun PlayerPage(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(40.dp)
             ) {
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 晕染要的是「封面实际占的那块矩形」，这里从**左栏**推出来，
+                        // 而不是去量封面本身 —— 封面在歌词态根本不在组合里，
+                        // 量它的话一进播放页就是歌词态时永远拿不到值，切回封面才
+                        // 第一次测到，晕染就「闪」出来（用户反馈的现象）。
+                        //
+                        // 横屏封面是定边长的正方形、在左栏里垂直居中（靠 Row 的
+                        // verticalAlignment），所以「左栏中心 + landscapeSide」就是它。
+                        // 不能直接报左栏矩形：歌词态的 InlineLyrics(fillMaxSize)
+                        // 会把左栏撑到全高，矩形跟着变，切换时同样会跳。
+                        .onGloballyPositioned { coords ->
+                            val center = coords.boundsInRoot().center
+                            onCoverBounds(
+                                Rect(
+                                    offset = Offset(
+                                        center.x - landscapeSidePx / 2f,
+                                        center.y - landscapeSidePx / 2f
+                                    ),
+                                    size = Size(landscapeSidePx, landscapeSidePx)
+                                )
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
                     // 主区域在「封面」与「歌词」之间切换。
                     // 主流播放器就是这样：歌词占的就是封面那一块，而不是另开一整屏。
                     AnimatedContent(
@@ -944,7 +972,7 @@ private fun PlayerPage(
                                 modifier = Modifier
                                     .size(landscapeSide)
                                     .clip(RoundedCornerShape(16.dp))
-                                    .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) }
+                                    // 位置由左栏那一层上报（见上面的注释）
                                     .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
@@ -1001,7 +1029,15 @@ private fun PlayerPage(
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        // 晕染要的封面矩形从**主区域**量，而不是量封面本身 ——
+                        // 封面在歌词态根本不在组合里，量它的话一进播放页就是歌词态时
+                        // 永远拿不到值，切回封面才第一次测到，晕染就「闪」出来
+                        // （用户反馈的现象）。
+                        //
+                        // 竖屏这里可以直接报主区域矩形：封面被分页内容的
+                        // min constraints 撑满了这一块，两者是同一个矩形。
+                        .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) },
                     contentAlignment = Alignment.Center
                 ) {
                     // 同上：歌词就在封面这一块里换出来
@@ -1025,8 +1061,8 @@ private fun PlayerPage(
                                 modifier = Modifier
                                     .size(portraitSide)
                                     .clip(RoundedCornerShape(16.dp))
-                                    // 把封面在页面上占的位置量出来交给晕染层
-                                    .onGloballyPositioned { onCoverBounds(it.boundsInRoot()) }
+                                    // 位置由主区域那一层上报（见上面的注释）——
+                                    // 挂在这里的话歌词态就断了
                                     .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
