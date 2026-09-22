@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * 在线音源的纯逻辑。
  *
- * 重点覆盖三件**一旦错了会静默出错**的事：
+ * 重点覆盖四件**一旦错了会静默出错**的事：
  *
  * 1. **在线歌 id 恒为负** —— 本地统计（最近播放 / 播放次数 / 上次播放）和收藏
  *    全靠「负数 = 在线」来挡掉在线歌。哪天真出现了非负值，那些账就会悄悄被污染，
@@ -16,6 +16,8 @@ import org.junit.Test
  * 2. **`fee` → 可播** 的映射 —— 判断反了的话，用户点免费歌被拦、点会员歌报错。
  * 3. **缩略图 URL** —— 拼错了图床会忽略参数、原样返回 1.9 MB 的原图，
  *    界面照常显示，只是每次搜索偷偷跑掉几十 MB 流量。
+ * 4. **在线歌映射的淘汰规则** —— 淘汰多了会让队列页凭空少几首，
+ *    淘汰少了就是无上限增长。
  */
 class OnlineMusicTest {
 
@@ -215,6 +217,59 @@ class OnlineMusicTest {
         assertTrue(id < 0L)
         assertTrue(id != 0L)
     }
+
+    // ===== 在线歌映射的淘汰规则 =====
+
+    @Test
+    fun `队列里的在线歌一定要保留`() {
+        // 漏了它们，队列页会凭空少几首 —— 用户看到的是"我明明加进去了怎么没了"
+        val inQueue = remoteSongId("netease", "999")
+        val keep = onlineSongIdsToKeep(
+            resultIds = listOf(remoteSongId("netease", "1")),
+            queueIds = listOf(inQueue, 123L),
+            currentMediaId = remoteSongId("netease", "1")
+        )
+        assertTrue("队列里的在线歌必须保留", inQueue in keep)
+        assertTrue("队列里的本地歌也顺带保留，无害", 123L in keep)
+    }
+
+    @Test
+    fun `正在播的那首即使不在队列里也要保留`() {
+        // 用户可能刚把它从队列里删掉，但音频还在放 —— 那时播放页仍要能查到它
+        val playing = remoteSongId("netease", "555")
+        val keep = onlineSongIdsToKeep(
+            resultIds = emptyList(),
+            queueIds = emptyList(),
+            currentMediaId = playing
+        )
+        assertTrue(playing in keep)
+    }
+
+    @Test
+    fun `搜索结果的 id 全部保留`() {
+        val results = (1..30).map { remoteSongId("netease", it.toString()) }
+        val keep = onlineSongIdsToKeep(results, emptyList(), 0L)
+        for (id in results) assertTrue(id in keep)
+    }
+
+    @Test
+    fun `没有在播的歌时不会塞进哨兵 0`() {
+        // 0 是"没有歌曲"的哨兵，混进保留集毫无意义
+        val keep = onlineSongIdsToKeep(emptyList(), emptyList(), 0L)
+        assertTrue(keep.isEmpty())
+    }
+
+    @Test
+    fun `过期的在线歌不在保留集里`() {
+        val stale = remoteSongId("netease", "old")
+        val keep = onlineSongIdsToKeep(
+            resultIds = listOf(remoteSongId("netease", "new")),
+            queueIds = listOf(7L),
+            currentMediaId = 7L
+        )
+        assertFalse("上一轮搜索的歌应该被淘汰掉", stale in keep)
+    }
+
 
     // ===== 音源清单 =====
 

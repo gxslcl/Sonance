@@ -29,10 +29,17 @@ interface OnlineSource {
     /**
      * 搜索。
      *
-     * **失败一律返回空列表、不抛异常** —— 调用方（UI）不用写 try，
-     * 网络问题表现为"没结果"，不会把界面搞崩。
+     * **不抛异常**（网络问题不该把界面搞崩），但要区分两种"没结果"：
+     *
+     * | 返回 | 含义 | UI 该说 |
+     * |---|---|---|
+     * | `null` | 请求失败（超时 / 非 2xx / 响应看不懂） | 「搜索失败，检查一下网络」 |
+     * | 空列表 | 请求成功、确实没这首歌 | 「没搜到「X」」 |
+     *
+     * 混成一种的话，断网时用户会看到「没搜到「周杰伦」」—— 那是会让人以为
+     * 搜索坏了的说法。这套约定和 [OnlineCover.search] 一致。
      */
-    suspend fun search(context: Context, query: String, limit: Int, offset: Int): List<RemoteTrack>
+    suspend fun search(context: Context, query: String, limit: Int, offset: Int): List<RemoteTrack>?
 
     /** 这首歌的播放地址。注意：地址可能带签名会过期，**每次播放都要重新取** */
     fun streamUri(track: RemoteTrack): Uri
@@ -125,6 +132,32 @@ fun remoteSongId(source: String, remoteId: String): Long {
  * 把 SharedPreferences 撑大，而且**永远清不掉**（用户看不到它们，自然也不会去清）。
  */
 fun isRemoteSongId(id: Long): Boolean = id < 0
+
+/**
+ * 在线歌映射该保留哪些 id —— 用来淘汰用不上的条目。
+ *
+ * 三类**必须**留：
+ *
+ * | 类别 | 为什么 |
+ * |---|---|
+ * | 这次搜索的结果 | 列表要显示 |
+ * | 播放队列里的 | 队列页 / 播放页 / 收藏判断要按 id 反查；漏了队列页会凭空少几首 |
+ * | 正在播的那首 | 它可能刚被移出队列但还在放 |
+ *
+ * 抽成纯函数是为了可测：[SonanceViewModel] 要 `Application`，JVM 单测里起不来。
+ */
+fun onlineSongIdsToKeep(
+    resultIds: List<Long>,
+    queueIds: List<Long>,
+    currentMediaId: Long
+): Set<Long> {
+    val keep = HashSet<Long>(resultIds.size + queueIds.size + 1)
+    keep.addAll(resultIds)
+    keep.addAll(queueIds)
+    // 0 是"没有歌曲"的哨兵，别把它塞进保留集
+    if (currentMediaId != 0L) keep.add(currentMediaId)
+    return keep
+}
 
 /** 音源清单。加新音源只要在这里登记 */
 object OnlineSources {
@@ -227,16 +260,20 @@ object NeteaseSource : OnlineSource {
         query: String,
         limit: Int,
         offset: Int
-    ): List<RemoteTrack> = withContext(Dispatchers.IO) {
+    ): List<RemoteTrack>? = withContext(Dispatchers.IO) {
         val kw = query.trim()
         if (kw.isEmpty()) return@withContext emptyList()
 
         val url = "$BASE/api/search/get?s=${enc(kw)}&type=1&limit=$limit&offset=$offset"
-        val body = get(url) ?: return@withContext emptyList()
+        // null = 请求失败（不是"没搜到"），见接口上的说明
+        val body = get(url) ?: return@withContext null
 
+        // 搜不到时接口返回的是 `{"result":{"songCount":0,"songs":[]}}` ——
+        // `songs` 是个空数组而不是缺失，所以能走到这里；真拿不到这个字段
+        // 说明响应形态变了，按失败处理比按"没结果"处理更诚实。
         val songs = runCatching {
             JSONObject(body).optJSONObject("result")?.optJSONArray("songs")
-        }.getOrNull() ?: return@withContext emptyList()
+        }.getOrNull() ?: return@withContext null
 
         val list = ArrayList<RemoteTrack>(songs.length())
         for (i in 0 until songs.length()) {

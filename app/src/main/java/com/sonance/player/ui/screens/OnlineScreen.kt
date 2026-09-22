@@ -154,7 +154,10 @@ fun OnlineScreen(
             } else {
                 CountLabel("音源 · ${src.label}", Modifier.weight(1f))
             }
-            if (vm.onlineResults.isNotEmpty()) {
+            if (vm.onlineSearching) {
+                // 搜索中就别显示旧的统计了 —— 那个数字马上会变，看着像卡住了
+                CountLabel("搜索中…")
+            } else if (vm.onlineResults.isNotEmpty()) {
                 val playable = vm.onlineResults.count { it.playable }
                 CountLabel("可播 $playable / ${vm.onlineResults.size}")
             }
@@ -163,19 +166,10 @@ fun OnlineScreen(
         // ---- 正文 ----
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                vm.onlineSearching -> LoadingState(
-                    title = "正在搜索…",
-                    subtitle = "音源：${src.label}"
-                )
-
-                vm.onlineResults.isEmpty() -> EmptyState(
-                    icon = SonanceIcons.Search,
-                    title = if (vm.onlineSearchedFor.isEmpty()) "搜点什么" else "没有结果",
-                    subtitle = vm.onlineNotice
-                        ?: "输入歌名、歌手或专辑名，停一下就会自动搜索。"
-                )
-
-                else -> LazyColumn(
+                // ★ 有结果就**先显示着**，不要换成转圈。
+                // 输入即搜索是"每停一次手就搜一次"，把列表换成 spinner 会一直闪；
+                // 加载状态改由上面的「搜索中…」提示，列表本身保持稳定。
+                vm.onlineResults.isNotEmpty() -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 10.dp,
@@ -210,6 +204,24 @@ fun OnlineScreen(
                         )
                     }
                 }
+
+                // 还没有任何结果时才有必要转圈（第一次搜索）
+                vm.onlineSearching -> LoadingState(
+                    title = "正在搜索…",
+                    subtitle = "音源：${src.label}"
+                )
+
+                else -> EmptyState(
+                    icon = SonanceIcons.Search,
+                    // 三种"没结果"要分清楚：还没搜 / 搜失败 / 真的没有
+                    title = when {
+                        vm.onlineSearchedFor.isEmpty() -> "搜点什么"
+                        vm.onlineSearchFailed -> "搜索失败"
+                        else -> "没有结果"
+                    },
+                    subtitle = vm.onlineNotice
+                        ?: "输入歌名、歌手或专辑名，停一下就会自动搜索。"
+                )
             }
         }
     }

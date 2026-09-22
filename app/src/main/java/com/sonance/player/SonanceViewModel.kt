@@ -23,6 +23,7 @@ import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.isRemoteSongId
+import com.sonance.player.data.onlineSongIdsToKeep
 import com.sonance.player.data.remoteSongId
 import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
@@ -1078,6 +1079,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /**
+     * 上一次搜索是**失败**（超时 / 断网）还是**确实没搜到**。
+     *
+     * 两者都是"结果为空"，但对用户的含义完全不同：断网时显示「没有结果」，
+     * 用户会以为这首歌真的不存在。空态标题必须分开。
+     */
+    var onlineSearchFailed by mutableStateOf(false)
+        private set
+
+    /**
      * 在线歌的 id → [Song]。
      *
      * 为什么必须留着：播放队列、队列页、播放页、收藏判断全都按 id 查 [songMap]，
@@ -1109,13 +1119,28 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         clearOnlineSearch()
     }
 
+    /** 正在跑的那次搜索。新的一次会取消它，理由见 [searchOnline] */
+    private var onlineSearchJob: Job? = null
+
+    /**
+     * 搜索的代号。
+     *
+     * 取消一个协程时，它的 `finally` **仍然会执行** —— 而且是在新任务已经跑起来
+     * 之后才执行。所以只靠 cancel 挡不住"旧任务把新任务的转圈状态抹掉"，
+     * 需要一个"我还是当前那次吗"的判据。
+     */
+    private var onlineSearchToken = 0
+
     /**
      * 搜索。
      *
-     * 音源实现**不抛异常**（失败返回空列表），所以这里不需要 try；
-     * 但要区分"没搜到"和"搜不动"，否则用户分不清是自己打错字还是网络断了 ——
-     * 靠"结果为空且当时没有信号"是猜不准的，所以让音源在失败时给出信号：
-     * 这里用「空结果」一律按"没搜到"呈现，同时把网络异常的情况写进日志。
+     * ## 为什么要能取消
+     *
+     * 用户敲字是有节奏的：输入「周杰」停一下、又补个「伦」。两次请求都会发出去，
+     * 而**先发的那个不保证先回来**（服务端快慢、网络抖动）。慢的那个晚到就会
+     * 覆盖掉新结果 —— 用户看到的是「周杰」的结果，输入框里却写着「周杰伦」。
+     *
+     * 取消之后协程不会 resume 到赋值那几行，旧结果自然进不来。
      */
     fun searchOnline(query: String = onlineQuery) {
         val src = onlineSource ?: run {
@@ -1128,27 +1153,82 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         onlineQuery = query
-        viewModelScope.launch {
+
+        onlineSearchJob?.cancel()
+        val token = ++onlineSearchToken
+        onlineSearchJob = viewModelScope.launch {
             onlineSearching = true
             onlineNotice = null
-            val app = getApplication<Application>()
-            val list = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
+            try {
+                val app = getApplication<Application>()
+                val list = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
 
-            // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
-            val songs = list.map { src.toSong(it) }
-            songs.forEach { onlineSongMap[it.id] = it }
-            if (songs.isNotEmpty()) onlineRevision++
+                // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
+                val songs = list.orEmpty().map { src.toSong(it) }
+                // 新增和淘汰都要推进版本号 —— 它是 SonanceRoot 里 songMap 的 remember key，
+                // 漏了"新增"这一半的话，搜出来的歌在队列页里会查不到
+                var changed = false
+                songs.forEach { if (onlineSongMap.put(it.id, it) == null) changed = true }
+                changed = pruneOnlineSongs(songs.map { it.id }) || changed
+                if (changed) onlineRevision++
 
-            onlineResults = list
-            onlineSearchedFor = kw
-            onlineSearching = false
-            onlineNotice = if (list.isEmpty()) "没搜到「$kw」，换个写法或换首歌试试" else null
+                onlineResults = list.orEmpty()
+                onlineSearchedFor = kw
+                onlineSearchFailed = list == null
+                // 失败和"没搜到"要分开说：断网时显示「没搜到「周杰伦」」
+                // 会让用户以为搜索坏了（音源用 null 表示失败）
+                onlineNotice = when {
+                    list == null -> "搜索失败，检查一下网络或稍后再试"
+                    list.isEmpty() -> "没搜到「$kw」，换个写法或换首歌试试"
+                    else -> null
+                }
+            } finally {
+                // 只有"我还是当前那次"才允许收掉转圈
+                if (token == onlineSearchToken) onlineSearching = false
+            }
         }
     }
 
+    /**
+     * 把不再需要的在线歌从 [onlineSongMap] 里清掉。
+     *
+     * 只留「这次搜索的结果」和「还在播放队列里的」：
+     * 前者是列表要显示的，后者是队列页 / 播放页 / 收藏判断要反查的。
+     *
+     * 不清理的话，用户搜 N 次就攒下 N×30 首、永不释放。单首不大，
+     * 但没有理由让它无限长 —— 和 `onlineCovers` 加 120 上限是同一个考虑。
+     *
+     * @return 有没有真的删掉东西（调用方据此决定要不要推进版本号）
+     */
+    private fun pruneOnlineSongs(keepFromResults: List<Long>): Boolean {
+        val st = player.state.value
+        val keep = onlineSongIdsToKeep(keepFromResults, st.queueIds, st.mediaId)
+
+        var removed = false
+        val it = onlineSongMap.keys.iterator()
+        while (it.hasNext()) {
+            if (it.next() !in keep) {
+                it.remove()
+                removed = true
+            }
+        }
+        return removed
+    }
+
+    /**
+     * 清空搜索页。
+     *
+     * 必须**取消在途的那次搜索**：用户清空输入框之后，先前那次请求还会回来，
+     * 把结果重新填进一个空搜索框 —— 看起来就是"清不掉"。
+     * 递增 token 是为了让那次任务在 `finally` 里认不出自己（它不该再动状态）。
+     */
     fun clearOnlineSearch() {
+        onlineSearchJob?.cancel()
+        onlineSearchJob = null
+        onlineSearchToken++
         onlineResults = emptyList()
         onlineSearchedFor = ""
+        onlineSearchFailed = false
         onlineNotice = null
         onlineSearching = false
         onlineQuery = ""
