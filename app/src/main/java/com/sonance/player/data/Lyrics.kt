@@ -56,7 +56,11 @@ object LyricsRepository {
         album: String = "",
         onlineEnabled: Boolean = false,
         apiBase: String = "",
-        convertToSimplified: Boolean = true
+        convertToSimplified: Boolean = true,
+        /** 这首歌的时长（毫秒）。**匹配网易云时必须用** —— 见 [NeteaseMatch] 的说明 */
+        durationMs: Long = 0L,
+        /** 是否允许用网易云兜底（用户开了「网易云补全」才为 true） */
+        neteaseEnabled: Boolean = false
     ): LyricsResult {
         // 缓存键带服务地址：换了歌词源就自然走新命名空间，不会读到旧源的结果
         val cacheKey = LyricsCache.keyOf(title, artist, apiBase) ?: "id:$songId"
@@ -94,13 +98,26 @@ object LyricsRepository {
 
             // ---- 3) 在线（用户开启时才走，一次只请求这一首）----
             if (source == null && onlineEnabled && apiBase.isNotBlank()) {
-                val online = OnlineLyrics.fetch(apiBase, title, artist, album)
+                // 先问 LrcAPI
+                var online = OnlineLyrics.fetch(apiBase, title, artist, album)
+
+                // 没拿到就用网易云兜底（用户开了「网易云补全」时）。
+                // 两个源互补：实测 LrcAPI 偶发没有的歌，网易云那边是有的。
+                //
+                // 匹配带**时长校验**很关键 —— 网易云搜"晴天"第一条是「晴天(深情版)」，
+                // 直接取第一条会拿到完全不同版本的歌词、时间轴整体错位。
+                if (online.isNullOrBlank() && neteaseEnabled) {
+                    online = NeteaseSource.findTrackFor(title, artist, durationMs)
+                        ?.let { NeteaseSource.lyrics(it.remoteId) }
+                }
+
                 if (!online.isNullOrBlank()) {
                     text = online
                     source = LyricsSource.ONLINE
                 }
                 // 不管有没有拿到都落盘：拿到存歌词，没拿到存空文件当哨兵，
-                // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）
+                // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）。
+                // ⚠️ 必须**两个源都试完**才写哨兵 —— 提前写会把网易云那条路也短路掉。
                 LyricsCache.store(context, cacheKey, text)
             }
 

@@ -35,9 +35,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
@@ -193,6 +196,7 @@ private fun PermissionScreen(onGrant: () -> Unit, onRescan: () -> Unit) {
  * 自适应外壳
  * ============================================================ */
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     val skin = LocalSkin.current
@@ -206,6 +210,32 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     var eqOpen by remember { mutableStateOf(false) }
     var sleepOpen by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Detail?>(null) }
+
+    /**
+     * 收掉输入法焦点。
+     *
+     * ## 为什么必须显式清，而不是靠层级盖住
+     *
+     * 输入法的**光标手柄**（那个蓝色水滴）是系统级 `PopupWindow`，
+     * 挂在 Window 上、**不在 Compose 的层级里** —— 播放页用 `zIndex(20f)` 盖上来
+     * 也压不住它，于是搜索框的光标会飘在播放页封面上面（用户截图报的就是这个）。
+     *
+     * Compose 里没有任何"层级"手段能治它，唯一的办法是让输入框**失去焦点**，
+     * 手柄自己就会收起来。
+     *
+     * 顺带也把键盘收掉 —— 切页面时键盘还杵在那里同样是这类问题。
+     */
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val dismissInput: () -> Unit = {
+        focusManager.clearFocus(force = true)
+        keyboard?.hide()
+    }
+
+    // 切 tab / 进详情页时也收一下：这两种操作都会把当前页面换掉，
+    // 留着输入焦点就会出现"键盘浮在另一个页面上"
+    LaunchedEffect(vm.tab) { dismissInput() }
+    LaunchedEffect(detail) { dismissInput() }
 
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
     BackHandler(enabled = !fullPlayerOpen && detail != null) { detail = null }
@@ -252,7 +282,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 currentSongTitle = currentSong?.title,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
-                onOpenFullPlayer = { fullPlayerOpen = true },
+                // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
+                onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer
             )
@@ -263,7 +294,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
-                onOpenFullPlayer = { fullPlayerOpen = true },
+                // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
+                onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer
             )
@@ -274,7 +306,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
-                onOpenFullPlayer = { fullPlayerOpen = true },
+                // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
+                onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer
             )

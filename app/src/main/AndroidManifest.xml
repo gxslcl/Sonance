@@ -8,6 +8,16 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!--
+      「播放并下载」在 **Android 9 及以下**需要它才能写进公开音乐目录。
+      Android 10（API 29）起走 MediaStore 插入自己的媒体文件，
+      **完全不需要权限**，所以这里用 maxSdkVersion 把范围限死 ——
+      新系统上它连声明都不会生效，用户不会看到这条权限。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- 音频可视化：读取本应用音频会话的频谱（Visualizer 不需要录音权限） -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 

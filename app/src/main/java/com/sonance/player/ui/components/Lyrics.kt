@@ -132,12 +132,15 @@ fun LyricsOverlay(
 
     val onlineEnabled = prefs.onlineLyricsEnabled
     val apiBase = prefs.lyricsApiBase
+    // 网易云兜底：LrcAPI 没拿到时再问它一次
+    val neteaseFill = prefs.neteaseFillEnabled
 
     // 字号 / 简体开关在页面内可调，用本地状态驱动重组；换歌时回到全局设置值
     var fontSize by remember(song.id) { mutableIntStateOf(prefs.lyricsFontSizeSp) }
     var convertT2S by remember(song.id) { mutableStateOf(prefs.lyricsConvertToSimplified) }
 
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S) {
+    // 开关进 key：用户在设置里打开「网易云补全」后回到歌词页要能立刻生效
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
         loading = true
         result = LyricsRepository.load(
             context = context,
@@ -148,7 +151,10 @@ fun LyricsOverlay(
             album = song.album,
             onlineEnabled = onlineEnabled,
             apiBase = apiBase,
-            convertToSimplified = convertT2S
+            convertToSimplified = convertT2S,
+            // 匹配网易云要靠时长排除同名翻唱 / Live 版
+            durationMs = song.durationMs,
+            neteaseEnabled = neteaseFill
         )
         loading = false
     }
@@ -690,8 +696,9 @@ fun InlineLyrics(
     val apiBase = prefs.lyricsApiBase
     val convertT2S = prefs.lyricsConvertToSimplified
     val fontSize = prefs.lyricsFontSizeSp
+    val neteaseFill = prefs.neteaseFillEnabled
 
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S) {
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
         loading = true
         result = LyricsRepository.load(
             context = context,
@@ -702,7 +709,9 @@ fun InlineLyrics(
             album = song.album,
             onlineEnabled = onlineEnabled,
             apiBase = apiBase,
-            convertToSimplified = convertT2S
+            convertToSimplified = convertT2S,
+            durationMs = song.durationMs,
+            neteaseEnabled = neteaseFill
         )
         loading = false
     }

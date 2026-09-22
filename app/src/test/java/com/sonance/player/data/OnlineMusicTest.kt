@@ -201,14 +201,12 @@ class OnlineMusicTest {
             override val id = "plain"
             override val label = "示例音源"
             override suspend fun search(
-                context: android.content.Context,
                 query: String,
                 limit: Int,
                 offset: Int
             ): RemoteSearchPage? = RemoteSearchPage(emptyList(), 0)
 
-            override fun streamUri(track: RemoteTrack) =
-                android.net.Uri.parse("https://example.com/a.mp3")
+            override fun streamUrl(remoteId: String) = "https://example.com/a.mp3"
         }
         val url = "https://example.com/a.jpg"
         assertEquals(url, plain.thumbUrl(url, 200))

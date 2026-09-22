@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
@@ -727,7 +728,9 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
         SettingsSwitchRow(
             title = "在线补全封面（iTunes Search API）",
             subtitle = "本地没有内嵌封面时，联网按「歌名 + 歌手」搜一张。默认关闭 —— " +
-                "打开后播放到无封面的歌才会查一次；只发送歌名/歌手/专辑，不发送文件或路径。",
+                "打开后播放到无封面的歌才会查一次；只发送歌名/歌手/专辑，不发送文件或路径。\n" +
+                "华语歌建议同时打开「在线音乐 → 用网易云补全本地歌」，iTunes 对华语曲库" +
+                "覆盖差、还容易返回同名翻唱的封面。",
             checked = vm.onlineCoverEnabled,
             onCheckedChange = { vm.changeOnlineCover(it) }
         )
@@ -787,6 +790,56 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
             onCheckedChange = { vm.changeOnlineMusic(it) }
         )
 
+        // 这个开关**不受上面那个影响** —— 它管的是本地歌的封面 / 歌词补全，
+        // 和"要不要能搜歌、放歌"是两件事
+        SettingsSwitchRow(
+            title = "用网易云补全本地歌",
+            subtitle = "本地曲库的封面 / 歌词取不到时，改用网易云再找一次。默认关闭。\n" +
+                "它比现有的两个源命中率高：匹配时**带时长校验**，能避开同名翻唱和 Live 版" +
+                "（iTunes 只按歌名歌手搜，容易贴错封面）；歌词还带中文翻译。\n" +
+                "华语歌会优先问网易云，西洋歌优先问 iTunes，先有结果的先用。",
+            checked = vm.neteaseFillEnabled,
+            onCheckedChange = { vm.changeNeteaseFill(it) }
+        )
+
+        // ===== 播放并下载 =====
+        SettingsSwitchRow(
+            title = "播放并下载",
+            subtitle = "播放在线歌时自动存一份到本地。默认关闭。\n" +
+                "存的是**正在播的那条流**（标准音质），不是官方下载接口的高音质版本 —— " +
+                "那些端点要登录 + 会员，这里刻意不碰。\n" +
+                "存下的文件会写标签（歌名 / 歌手 / 专辑 / 封面），" +
+                "放在「${OnlineDownloader.FOLDER_NAME}」文件夹里 —— " +
+                "重新扫描后「文件夹」页会有这个分类。",
+            checked = vm.onlineDownloadEnabled,
+            onCheckedChange = { vm.changeOnlineDownload(it) }
+        )
+
+        if (vm.onlineDownloadEnabled) {
+            Column(Modifier.padding(top = 10.dp, bottom = 4.dp)) {
+                SettingsSwitchRow(
+                    title = "只在 Wi-Fi 下下载",
+                    subtitle = "默认开启 —— 不然在移动网络下随便听几张专辑就悄悄吃掉几百 MB。"
+                        + "\n判断不出网络类型时会跳过，不会赌一把。",
+                    checked = vm.onlineDownloadWifiOnly,
+                    onCheckedChange = { vm.changeDownloadWifiOnly(it) }
+                )
+                Text(
+                    "已下载 ${vm.downloadedCount} 首",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    // 明确告诉用户"文件在哪、我们不删" —— 一个播放器批量删用户文件
+                    // 是很越界的事，这里只提供清记录
+                    "文件在系统音乐目录的「${OnlineDownloader.FOLDER_NAME}」里，本应用不会删除它们。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textDim
+                )
+            }
+        }
+
         if (vm.onlineMusicEnabled) {
             Column(Modifier.padding(top = 14.dp)) {
                 Text(
@@ -826,9 +879,11 @@ private fun onlineNotice(vm: SonanceViewModel): String {
         if (vm.onlineLyricsEnabled) add("在线歌词")
         if (vm.onlineCoverEnabled) add("在线封面")
         if (vm.onlineMusicEnabled) add("在线音乐")
+        if (vm.neteaseFillEnabled) add("网易云补全")
     }
     return if (on.isEmpty()) {
-        "联网只在你手动开启「在线歌词」「在线封面」「在线音乐」后才会发生，当前处于完全离线状态。"
+        "联网只在你手动开启「在线歌词」「在线封面」「在线音乐」「网易云补全」后才会发生，" +
+            "当前处于完全离线状态。"
     } else {
         "⚠️ 你已开启「${on.joinToString("」「")}」，相关功能会联网。" +
             "搜索只发送你输入的关键词，不发送任何本地路径或文件。"

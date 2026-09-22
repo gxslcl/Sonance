@@ -426,12 +426,9 @@ fun FullPlayer(
                         iconSize = 20.dp,
                         tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
                     )
-                    IconAction(
-                        icon = SonanceIcons.Queue,
-                        contentDescription = "播放队列",
-                        onClick = onOpenQueue,
-                        iconSize = 20.dp
-                    )
+                    // 顶栏这里原来还有一个「播放队列」图标，已去掉（用户要求）——
+                    // 队列入口在下面的控制行上（原来"循环模式"按钮那个位置），
+                    // 同一屏出现两个一模一样的按钮没有意义。
                 }
 
                 // 标题独立居中于整条栏，不受左右图标数量影响

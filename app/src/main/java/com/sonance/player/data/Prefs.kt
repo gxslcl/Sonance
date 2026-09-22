@@ -310,6 +310,60 @@ class Prefs(context: Context) {
             ?: OnlineSources.all.firstOrNull()?.id.orEmpty()
         set(v) = sp.edit().putString(KEY_ONLINE_SOURCE, v).apply()
 
+    /**
+     * 用网易云补全**本地歌**的封面与歌词。**默认关闭**。
+     *
+     * 为什么需要它：本地曲库的封面和歌词经常取不到 —— 内嵌标签缺失、
+     * iTunes 对华语曲库覆盖差（还经常返回同名翻唱的封面）、LrcAPI 偶发没有。
+     * 网易云那边命中率高得多，而且歌词**免登录、带翻译**。
+     *
+     * 和「在线封面」「在线歌词」是并列的第三个联网开关，同样是默认关。
+     */
+    var neteaseFillEnabled: Boolean
+        get() = sp.getBoolean(KEY_NETEASE_FILL, false)
+        set(v) = sp.edit().putBoolean(KEY_NETEASE_FILL, v).apply()
+
+    // ===== 播放并下载 =====
+
+    /**
+     * 播放在线歌时自动存一份到本地。**默认关闭**。
+     *
+     * 存的是**正在播的那条流**（标准音质），不是官方下载接口给的高音质版本 ——
+     * 这是刻意的：不去碰那些需要登录 / 会员的下载端点。
+     */
+    var onlineDownloadEnabled: Boolean
+        get() = sp.getBoolean(KEY_DL_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_DL_ENABLED, v).apply()
+
+    /**
+     * 只在 Wi-Fi 下下载。**默认开** ——
+     * 不然在移动网络下随便听几张专辑就悄悄吃掉几百 MB。
+     */
+    var onlineDownloadWifiOnly: Boolean
+        get() = sp.getBoolean(KEY_DL_WIFI_ONLY, true)
+        set(v) = sp.edit().putBoolean(KEY_DL_WIFI_ONLY, v).apply()
+
+    /**
+     * 已下载过的歌，键是 `音源:远端id`（见 `downloadKeyOf`）。
+     *
+     * 用这个而不是"文件在不在"来判断重复：文件可能被用户删掉、也可能被移走，
+     * 而这两个字段就在 `Song` 里，判断成本几乎为零。
+     */
+    fun downloadedKeys(): MutableSet<String> =
+        (sp.getStringSet(KEY_DL_KEYS, emptySet()) ?: emptySet()).toMutableSet()
+
+    fun markDownloaded(key: String) {
+        val set = downloadedKeys()
+        if (set.add(key)) sp.edit().putStringSet(KEY_DL_KEYS, set).apply()
+    }
+
+    fun forgetDownloaded(key: String) {
+        val set = downloadedKeys()
+        if (set.remove(key)) sp.edit().putStringSet(KEY_DL_KEYS, set).apply()
+    }
+
+    fun clearDownloadedKeys() = sp.edit().remove(KEY_DL_KEYS).apply()
+
 
     // ===== 均衡器 =====
 
@@ -488,6 +542,10 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_API = "lyrics_api_base"
         private const val KEY_ONLINE_MUSIC = "online_music_enabled"
         private const val KEY_ONLINE_SOURCE = "online_music_source"
+        private const val KEY_NETEASE_FILL = "netease_fill_enabled"
+        private const val KEY_DL_ENABLED = "online_download_enabled"
+        private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
+        private const val KEY_DL_KEYS = "online_download_keys"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
         private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"

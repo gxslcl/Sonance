@@ -19,9 +19,12 @@ import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.OnlineDownloader
+import com.sonance.player.data.NeteaseSource
 import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
+import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
 import com.sonance.player.data.onlineSongIdsToKeep
 import com.sonance.player.data.remoteSongId
@@ -203,6 +206,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             songById(id)?.let {
                 player.refreshCurrentArtwork(it)
                 ensureCover(it)
+                // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
+                maybeDownload(it)
             }
         }
 
@@ -786,9 +791,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     CoverCache.Lookup.Unknown -> Unit
                 }
 
-                val url = prefs.pinnedCoverUrl(song.id)
-                    ?: OnlineCover.search(song.title, song.artist, song.album, 1)
-                        ?.firstOrNull()?.fullUrl
+                val url = findCoverUrl(song)
                 if (url.isNullOrBlank()) {
                     // 记一个"确认没有"，下次同一首不再打接口
                     CoverCache.store(app, key, null)
@@ -813,6 +816,37 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /**
+     * 给一首**本地歌**找封面地址。
+     *
+     * 两个源互补，都试一遍、谁先给结果用谁：
+     * - **iTunes**（[OnlineCover]）：西洋曲库覆盖好、免 key
+     * - **网易云**（[NeteaseSource]）：东亚曲库覆盖好，而且匹配**带时长校验**
+     *   （iTunes 那边只按歌名歌手搜，容易返回同名翻唱的封面）
+     *
+     * 顺序按语种定：标题或歌手里有中日韩字符就先问网易云。
+     * 实测华语歌问 iTunes 经常返回**同名翻唱**的封面 —— 那比"没有封面"更糟，
+     * 因为用户很难发现是错的。
+     *
+     * 用户手动钉过封面就直接用，不再联网。
+     */
+    private suspend fun findCoverUrl(song: Song): String? {
+        prefs.pinnedCoverUrl(song.id)?.let { return it }
+
+        val neteaseFirst = neteaseFillEnabled && hasCjkText(song.title, song.artist)
+        val first = if (neteaseFirst) neteaseCoverUrl(song) else itunesCoverUrl(song)
+        if (!first.isNullOrBlank()) return first
+        // 没开这个开关就只问 iTunes（保持原来的行为）
+        if (!neteaseFillEnabled) return null
+        return if (neteaseFirst) itunesCoverUrl(song) else neteaseCoverUrl(song)
+    }
+
+    private suspend fun itunesCoverUrl(song: Song): String? =
+        OnlineCover.search(song.title, song.artist, song.album, 1)?.firstOrNull()?.fullUrl
+
+    private suspend fun neteaseCoverUrl(song: Song): String? =
+        NeteaseSource.findTrackFor(song.title, song.artist, song.durationMs)?.coverUrl
 
     /**
      * 在线歌的封面：把音源给的地址下载下来，按 [OnlineCover.keyOf] 落盘。
@@ -1083,6 +1117,149 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineSourceId by mutableStateOf(prefs.onlineSourceId)
         private set
 
+    /**
+     * 用网易云补全**本地歌**的封面与歌词。默认关闭。
+     *
+     * 和「在线封面」「在线歌词」并列的第三个联网开关，同样是默认关。
+     */
+    var neteaseFillEnabled by mutableStateOf(prefs.neteaseFillEnabled)
+        private set
+
+    fun changeNeteaseFill(enabled: Boolean) {
+        neteaseFillEnabled = enabled
+        prefs.neteaseFillEnabled = enabled
+        showToast(
+            if (enabled) "已开启网易云补全（会联网补封面与歌词）"
+            else "已关闭网易云补全"
+        )
+    }
+
+    // ===== 播放并下载 =====
+
+    var onlineDownloadEnabled by mutableStateOf(prefs.onlineDownloadEnabled)
+        private set
+
+    var onlineDownloadWifiOnly by mutableStateOf(prefs.onlineDownloadWifiOnly)
+        private set
+
+    /** 已下载的条数（设置页显示用）。文件本身在系统音乐目录里，由用户自己管理 */
+    var downloadedCount by mutableIntStateOf(prefs.downloadedKeys().size)
+        private set
+
+    /** 正在跑的下载。同时只允许一个 —— 并发下载会和播放抢带宽 */
+    private var downloadJob: Job? = null
+
+    fun changeOnlineDownload(enabled: Boolean) {
+        onlineDownloadEnabled = enabled
+        prefs.onlineDownloadEnabled = enabled
+        showToast(
+            if (enabled) {
+                "已开启播放并下载 · 存到「${OnlineDownloader.FOLDER_NAME}」文件夹"
+            } else {
+                "已关闭播放并下载"
+            }
+        )
+    }
+
+    fun changeDownloadWifiOnly(wifiOnly: Boolean) {
+        onlineDownloadWifiOnly = wifiOnly
+        prefs.onlineDownloadWifiOnly = wifiOnly
+    }
+
+    /**
+     * 清掉下载记录（**不删文件**）。
+     *
+     * 刻意只清记录：文件在公开音乐目录里，是用户自己的东西，
+     * 一个播放器不该去批量删用户的文件。清掉记录之后重播会再存一份。
+     */
+    fun clearDownloadRecords() {
+        prefs.clearDownloadedKeys()
+        downloadedCount = 0
+        showToast("已清除下载记录（文件未删除）")
+    }
+
+    /**
+     * 播放到一首在线歌时调用：确认用户真的在听，然后存一份到本地。
+     *
+     * 存的是**正在播的那条流**（标准音质），不是官方下载接口的高音质版本 ——
+     * 那些端点要登录 + 会员，这里刻意不碰。
+     */
+    private fun maybeDownload(song: Song) {
+        if (!onlineDownloadEnabled) return
+        if (song.isLocal) return
+        val src = OnlineSources.byId(song.source) ?: return
+        val remoteId = song.remoteId ?: return
+        val key = OnlineDownloader.downloadKeyOf(song.source, remoteId) ?: return
+        if (key in prefs.downloadedKeys()) return
+        // 上一首还没下完就跳过这一首。用队列会更"完整"，但并发下载会和播放抢带宽，
+        // 而这首歌下次再播还会触发 —— 不值得为它引入一个队列
+        if (downloadJob?.isActive == true) return
+
+        downloadJob = viewModelScope.launch {
+            // ★ 先等一会儿再下。
+            //
+            // 用户连点十几首跳着听的时候，一开播就下会把每一首都存下来
+            // （实测一首 4.3 MB，十几首就是 50 MB+）。等够 [DOWNLOAD_ARM_DELAY_MS]
+            // 说明他确实在听这一首。
+            delay(DOWNLOAD_ARM_DELAY_MS)
+
+            // 等待期间可能已经切歌 / 关掉开关了
+            if (player.state.value.mediaId != song.id) return@launch
+            if (!onlineDownloadEnabled) return@launch
+
+            val app = getApplication<Application>()
+            // 只在 Wi-Fi 下下载：判断不出来时**跳过**而不是赌一把
+            if (onlineDownloadWifiOnly && !OnlineDownloader.isOnUnmeteredNetwork(app)) {
+                android.util.Log.i("SonanceDownload", "非 Wi-Fi，跳过「${song.title}」")
+                return@launch
+            }
+
+            val outcome = OnlineDownloader.download(
+                context = app,
+                source = song.source,
+                remoteId = remoteId,
+                title = song.title,
+                artist = song.artist,
+                album = song.album,
+                streamUrl = src.streamUrl(remoteId),
+                coverBytes = coverBytesForTag(song)
+            )
+            when (outcome) {
+                is OnlineDownloader.Outcome.Saved -> {
+                    prefs.markDownloaded(key)
+                    downloadedCount = prefs.downloadedKeys().size
+                    showToast("已存到「${OnlineDownloader.FOLDER_NAME}」")
+                }
+                // 会员歌 / 版权下架：静默跳过。它本来也播不了，
+                // 弹一句"下载失败"只会让用户以为哪里坏了
+                OnlineDownloader.Outcome.Unavailable -> Unit
+                OnlineDownloader.Outcome.Failed -> showToast("「${song.title}」保存失败")
+                OnlineDownloader.Outcome.Skipped -> Unit
+            }
+        }
+    }
+
+    /**
+     * 给 ID3 标签准备封面字节。
+     *
+     * 优先用**已经落盘的那张** —— `ensureOnlineSongCover` 通常已经在下载了，
+     * 没必要为写标签再拉一次。真没有再按在线歌自带的地址取，
+     * 取到顺手写进 [CoverCache]，这样封面补全那边也不会重复下载。
+     */
+    private suspend fun coverBytesForTag(song: Song): ByteArray? {
+        val key = OnlineCover.keyOf(song.title, song.artist) ?: return null
+        val app = getApplication<Application>()
+        return withContext(Dispatchers.IO) {
+            when (val hit = CoverCache.lookup(app, key)) {
+                is CoverCache.Lookup.Hit -> hit.bytes
+                else -> {
+                    val url = song.coverUrl ?: return@withContext null
+                    OnlineCover.downloadBytes(url)?.also { CoverCache.store(app, key, it) }
+                }
+            }
+        }
+    }
+
     /** 当前音源。清单里没有（比如配置被改坏）时返回 null，UI 按"不可用"处理 */
     val onlineSource: OnlineSource? get() = OnlineSources.byId(onlineSourceId)
 
@@ -1218,7 +1395,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             onlineNotice = null
             try {
                 val app = getApplication<Application>()
-                val page = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
+                val page = withContext(Dispatchers.IO) { src.search(kw, ONLINE_PAGE_SIZE, 0) }
                 val tracks = page?.tracks.orEmpty()
 
                 // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
@@ -1271,7 +1448,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val app = getApplication<Application>()
                 val page = withContext(Dispatchers.IO) {
-                    src.search(app, kw, ONLINE_PAGE_SIZE, offset)
+                    src.search(kw, ONLINE_PAGE_SIZE, offset)
                 }
                 // 期间换了搜索词 / 清空了：这一页已经不属于当前列表，丢掉
                 if (token != onlineSearchToken) return@launch
@@ -1815,5 +1992,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 没有上限就会一直往下翻、一直打接口。300 条对一个"搜首歌来听"的场景绰绰有余。
          */
         private const val MAX_ONLINE_RESULTS = 300
+
+        /**
+         * 开始播放后**多久**才真正触发下载。
+         *
+         * 用来把"跳着听"和"真在听"区分开：用户翻歌单时每首都只播两三秒，
+         * 等够 8 秒说明他确实在听这一首。太短会把翻过的歌全存下来，太长则要等半天。
+         */
+        private const val DOWNLOAD_ARM_DELAY_MS = 8_000L
     }
 }

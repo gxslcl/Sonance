@@ -1,6 +1,5 @@
 package com.sonance.player.data
 
-import android.content.Context
 import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -44,11 +43,30 @@ interface OnlineSource {
      * 分页要判断"后面还有没有"，而**不能**用"这一页返回满了吗"来猜 ——
      * 实测网易云在 `offset` 超过总数时会**绕回第一页**（返回和 offset=0 完全相同的
      * 一批），于是"满页"永远成立，翻页会一直翻下去。必须拿接口报的总数来算。
+     *
+     * ## 为什么没有 `context` 参数
+     *
+     * 原来签名里有，但**没有任何实现用到它**（当时的想法是"以后可能有音源需要
+     * 缓存目录"）。而它正好挡住了真实网络测试：JVM 单测里造不出 `Context`
+     * （`isReturnDefaultValues` 下所有 framework 方法都返回默认值），
+     * 于是整个音源层无法做集成测试。真有音源需要 Context，让它自己在构造器里持有。
      */
-    suspend fun search(context: Context, query: String, limit: Int, offset: Int): RemoteSearchPage?
+    suspend fun search(query: String, limit: Int, offset: Int): RemoteSearchPage?
 
-    /** 这首歌的播放地址。注意：地址可能带签名会过期，**每次播放都要重新取** */
-    fun streamUri(track: RemoteTrack): Uri
+    /**
+     * 这首歌的取流地址。
+     *
+     * 返回 **String** 而不是 `Uri`：播放和下载共用同一个地址，而下载走
+     * `HttpURLConnection`（要字符串）。统一成字符串之后，
+     * 音源的地址拼装逻辑就**可以在 JVM 单测里直接验**（`Uri.parse` 在单测里是桩，
+     * 返回 null，包成 Uri 反而测不了）。
+     *
+     * ⚠️ 地址带签名会过期，**每次播放/下载都要重新取**。
+     */
+    fun streamUrl(remoteId: String): String
+
+    /** [streamUrl] 的 Uri 包装，给播放器用 */
+    fun streamUri(track: RemoteTrack): Uri = Uri.parse(streamUrl(track.remoteId))
 
     /**
      * 列表缩略图地址。
@@ -326,8 +344,8 @@ object NeteaseSource : OnlineSource {
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    override fun streamUri(track: RemoteTrack): Uri =
-        Uri.parse("$BASE/song/media/outer/url?id=${track.remoteId}.mp3")
+    override fun streamUrl(remoteId: String): String =
+        "$BASE/song/media/outer/url?id=$remoteId.mp3"
 
     /**
      * 网易云图床认 `?param=宽y高` 这个约定，会**真的缩放**再返回。
@@ -346,7 +364,6 @@ object NeteaseSource : OnlineSource {
     }
 
     override suspend fun search(
-        context: Context,
         query: String,
         limit: Int,
         offset: Int
@@ -418,6 +435,79 @@ object NeteaseSource : OnlineSource {
             }
         }.getOrDefault(emptyMap())
     }
+
+    // ===== 给**本地歌**补封面 / 歌词 =====
+
+    /**
+     * 给一首本地歌找它在网易云上的对应条目。
+     *
+     * 本地曲库的封面和歌词经常取不到（内嵌标签缺失、iTunes 对华语歌命中率低、
+     * LrcAPI 偶发没有），网易云这边命中率高得多，所以拿它当兜底来源。
+     *
+     * **不能直接用搜索结果第一条** —— 实测搜 `500 Miles The Proclaimers`，
+     * 第一条是个同名翻唱（时长对不上、歌词为空）；搜 `晴天` 第一条是「晴天(深情版)」。
+     * 打分挑选的逻辑在 [NeteaseMatch]（纯函数，有单测）。
+     *
+     * 返回的 [RemoteTrack] 里 `coverUrl` **已经填好**了 —— [search] 内部会批量补封面，
+     * 所以拿到匹配就等于同时拿到了封面地址，不用再打一次详情接口。
+     */
+    suspend fun findTrackFor(
+        title: String,
+        artist: String,
+        durationMs: Long
+    ): RemoteTrack? {
+        if (title.isBlank()) return null
+        // 搜索词只带歌名 + 歌手。**不加专辑名** —— 本地专辑标签常和线上对不上
+        // （"未知专辑"、合集名、本地化过的译名），带上只会缩窄命中范围。
+        val kw = listOf(title, artist)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        val page = search(kw, MATCH_LIMIT, 0) ?: return null
+        return NeteaseMatch.pickBest(page.tracks, title, artist, durationMs)
+    }
+
+    /**
+     * 取歌词。
+     *
+     * `lv=-1` 拿**行级**原文、`tv=-1` 附带翻译 —— 实测两者都**免登录、不校验签名**，
+     * 连会员歌（`fee=1`）的歌词也能拿到（歌词不受会员限制）。
+     *
+     * ⚠️ 别用 `lv=1`：实测它给的是**逐字时间轴**（每个字一个时间戳），
+     * 和译文的行级时间戳完全对不上，合并翻译会整段错位。
+     *
+     * @param withTranslation 有翻译时把译文并到同一行（见 [mergeTranslation]）
+     * @return LRC 文本；**没有歌词时返回 null**（接口用空字符串表示"确认没有"）
+     */
+    suspend fun lyrics(remoteId: String, withTranslation: Boolean = true): String? =
+        withContext(Dispatchers.IO) {
+            val tv = if (withTranslation) -1 else 0
+            val body = get("$BASE/api/song/lyric?id=$remoteId&lv=-1&kv=1&tv=$tv")
+                ?: return@withContext null
+            val json = runCatching { JSONObject(body) }.getOrNull() ?: return@withContext null
+
+            // 没有歌词时接口返回的是 `"lrc":{"version":1,"lyric":""}` ——
+            // 空字符串就是"确认没有"，据此返回 null，调用方好写 KnownMiss 哨兵
+            val raw = json.optJSONObject("lrc")?.optString("lyric").orEmpty()
+            // 先摘掉制作人员名单，再合并翻译（名单行没有对应译文，留着只会占头几行）
+            val lrc = stripCreditLines(raw)
+            if (lrc.isBlank()) return@withContext null
+            if (!withTranslation) return@withContext lrc
+
+            val tlrc = json.optJSONObject("tlyric")?.optString("lyric").orEmpty()
+            if (tlrc.isBlank()) lrc else mergeTranslation(lrc, tlrc)
+        }
+
+    /**
+     * 匹配时取多少条候选。
+     *
+     * 10 条是权衡：够覆盖"同名不同版本"的几种情况（原唱 / Live / 翻唱 / 伴奏），
+     * 而每条的封面缩略图又要多一次批量请求 —— 再多不划算。
+     *
+     * 直接写在 object 里，**不能包在 companion object 里** ——
+     * `NeteaseSource` 本身已经是 `object`，再套一层 companion 编译不过。
+     */
+    private const val MATCH_LIMIT = 10
 
     private fun joinNames(arr: JSONArray?): String {
         if (arr == null) return ""
