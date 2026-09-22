@@ -145,6 +145,43 @@ class Prefs(context: Context) {
         get() = sp.getFloat(KEY_VIZ_BARW, 0.62f)
         set(v) = sp.edit().putFloat(KEY_VIZ_BARW, v.coerceIn(0.25f, 1f)).apply()
 
+    // ===== 律动柱物理手感（见 playback/VizPhysics）=====
+
+    /**
+     * 上升系数：**每 1/60 秒**逼近目标的比例。
+     *
+     * 语义定在 60fps 基准上是为了和面板上的数字直觉一致；执行时按 dt 换算，
+     * 所以 120Hz 下的实际手感是同一个。
+     */
+    var vizAttack: Float
+        get() = sp.getFloat(KEY_VIZ_ATTACK, 0.62f).coerceIn(0.15f, 0.95f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_ATTACK, v.coerceIn(0.15f, 0.95f)).apply()
+
+    /** 空气阻尼系数（1/秒）。越大下落越"黏"，自由落体感越弱 */
+    var vizDecayDamping: Float
+        get() = sp.getFloat(KEY_VIZ_DAMPING, 3.4f).coerceIn(0.5f, 8f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_DAMPING, v.coerceIn(0.5f, 8f)).apply()
+
+    /** 重力加速度（单位/秒²）。越大落得越快 */
+    var vizGravity: Float
+        get() = sp.getFloat(KEY_VIZ_GRAVITY, 6.5f).coerceIn(1f, 15f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_GRAVITY, v.coerceIn(1f, 15f)).apply()
+
+    /** 峰值悬停时长，单位是 **60fps 基准的帧数**（内部换算成秒，保证帧率无关） */
+    var vizPeakHoldTicks: Int
+        get() = sp.getInt(KEY_VIZ_PEAK_HOLD, 22).coerceIn(0, 90)
+        set(v) = sp.edit().putInt(KEY_VIZ_PEAK_HOLD, v.coerceIn(0, 90)).apply()
+
+    /** 是否画峰值条 */
+    var vizShowPeak: Boolean
+        get() = sp.getBoolean(KEY_VIZ_PEAK, true)
+        set(v) = sp.edit().putBoolean(KEY_VIZ_PEAK, v).apply()
+
+    /** EMA 平滑系数 0..1。越小越平滑但越迟钝，低于 0.3 会明显削弱打击感 */
+    var vizEmaAlpha: Float
+        get() = sp.getFloat(KEY_VIZ_EMA, 0.55f).coerceIn(0.1f, 1f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_EMA, v.coerceIn(0.1f, 1f)).apply()
+
     /** 在律动柱左下角显示实时帧率（排查性能用） */
     var vizShowFps: Boolean
         get() = sp.getBoolean(KEY_VIZ_FPS, false)
@@ -419,6 +456,12 @@ class Prefs(context: Context) {
         private const val KEY_VIZ_COLOR = "viz_color_index"
         private const val KEY_VIZ_BARW = "viz_bar_width"
         private const val KEY_VIZ_FPS = "viz_show_fps"
+        private const val KEY_VIZ_ATTACK = "viz_attack"
+        private const val KEY_VIZ_DAMPING = "viz_decay_damping"
+        private const val KEY_VIZ_GRAVITY = "viz_gravity"
+        private const val KEY_VIZ_PEAK_HOLD = "viz_peak_hold_ticks"
+        private const val KEY_VIZ_PEAK = "viz_show_peak"
+        private const val KEY_VIZ_EMA = "viz_ema_alpha"
         private const val KEY_ONLINE_LYRICS = "online_lyrics_enabled"
         private const val KEY_LYRICS_API = "lyrics_api_base"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"

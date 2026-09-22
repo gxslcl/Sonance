@@ -78,6 +78,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.sin
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.SolidColor
+import com.sonance.player.playback.VizPhysics
+import kotlin.math.roundToInt
 
 /** 可视化样式 */
 enum class VizStyle(val label: String) { BARS("直立柱"), MIRROR("镜像柱"), WAVE("波形") }
@@ -132,6 +136,14 @@ fun VisualizerOverlay(
     var colorIndex by remember { mutableStateOf(prefs.vizColorIndex) }
     var barWidth by remember { mutableStateOf(prefs.vizBarWidth) }
 
+    // ===== 物理手感参数（全部可在设置面板里调，见 VizPhysics）=====
+    var attack by remember { mutableStateOf(prefs.vizAttack) }
+    var decayDamping by remember { mutableStateOf(prefs.vizDecayDamping) }
+    var gravity by remember { mutableStateOf(prefs.vizGravity) }
+    var peakHoldTicks by remember { mutableStateOf(prefs.vizPeakHoldTicks) }
+    var showPeak by remember { mutableStateOf(prefs.vizShowPeak) }
+    var emaAlpha by remember { mutableStateOf(prefs.vizEmaAlpha) }
+
     // 选定配色；「跟随皮肤」时用皮肤强调色
     val vizColor = VizColor.entries.getOrNull(colorIndex) ?: VizColor.SKIN
     val barColor = if (vizColor.isSkin) skin.accent else Color(vizColor.main)
@@ -165,6 +177,12 @@ fun VisualizerOverlay(
             sensitivity = sensitivity,
             showFps = showFps,
             barWidthRatio = barWidth,
+            attack = attack,
+            decayDamping = decayDamping,
+            gravity = gravity,
+            peakHoldTicks = peakHoldTicks,
+            showPeak = showPeak,
+            emaAlpha = emaAlpha,
             color = barColor,
             colorDim = barColorDim,
             modifier = Modifier.fillMaxSize()
@@ -352,6 +370,36 @@ fun VisualizerOverlay(
                     barWidth = it
                     prefs.vizBarWidth = it
                 },
+                attack = attack,
+                decayDamping = decayDamping,
+                gravity = gravity,
+                peakHoldTicks = peakHoldTicks,
+                showPeak = showPeak,
+                emaAlpha = emaAlpha,
+                onAttack = {
+                    attack = it
+                    prefs.vizAttack = it
+                },
+                onDecayDamping = {
+                    decayDamping = it
+                    prefs.vizDecayDamping = it
+                },
+                onGravity = {
+                    gravity = it
+                    prefs.vizGravity = it
+                },
+                onPeakHoldTicks = {
+                    peakHoldTicks = it
+                    prefs.vizPeakHoldTicks = it
+                },
+                onShowPeak = {
+                    showPeak = it
+                    prefs.vizShowPeak = it
+                },
+                onEmaAlpha = {
+                    emaAlpha = it
+                    prefs.vizEmaAlpha = it
+                },
                 onDismiss = { settingsOpen = false }
             )
         }
@@ -373,6 +421,18 @@ private fun VisualizerCanvas(
     sensitivity: Float,
     showFps: Boolean,
     barWidthRatio: Float,
+    /** 上升系数（每 1/60 秒逼近目标的比例） */
+    attack: Float,
+    /** 空气阻尼系数（1/秒） */
+    decayDamping: Float,
+    /** 重力加速度（单位/秒²） */
+    gravity: Float,
+    /** 峰值悬停时长（60fps 基准的帧数） */
+    peakHoldTicks: Int,
+    /** 是否画峰值条 */
+    showPeak: Boolean,
+    /** EMA 平滑系数 */
+    emaAlpha: Float,
     color: Color,
     colorDim: Color,
     modifier: Modifier = Modifier
@@ -386,16 +446,88 @@ private fun VisualizerCanvas(
      */
     val frameTick = remember { mutableLongStateOf(0L) }
 
-    // 显示值：绘制阶段往 viz.levels（FFT 目标值）插值，把 20~40Hz 的数据画成连续运动
-    val display = remember(viz) { FloatArray(viz.bars) }
-
     // 帧率统计
     val framesInWindow = remember { intArrayOf(0) }
     var fps by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
+    /** 物理状态机。柱数变了要重建（和 viz 同一个 key） */
+    val physics = remember(viz) {
+        VizPhysics(
+            bars = viz.bars,
+            attackFactor = attack,
+            decayDamping = decayDamping,
+            gravity = gravity,
+            peakHoldTicks = peakHoldTicks,
+            peakEnabled = showPeak
+        )
+    }
+
+    // 设置面板改了参数 → 实时同步进物理。
+    // 用 SideEffect 而不是重建对象：重建会丢掉当前的运动状态，柱子会瞬间归零。
+    SideEffect {
+        physics.attackFactor = attack
+        physics.decayDamping = decayDamping
+        physics.gravity = gravity
+        physics.peakHoldTicks = peakHoldTicks
+        physics.peakEnabled = showPeak
+        viz.emaAlpha = emaAlpha
+    }
+
+    /** 物理的输入：目标高度。live 时是 FFT 结果，否则是程序化回退动画 */
+    val targets = remember(viz) { FloatArray(viz.bars) }
+
+    /**
+     * ★ 帧回调：**采样与渲染解耦**，物理迭代由它驱动。
+     *
+     * `withFrameNanos` 底层就是 `Choreographer.postFrameCallback`
+     * （Compose 的 `AndroidUiFrameClock` 封装了它），而且协程取消时自动摘除回调 ——
+     * 比裸用 Choreographer 少一份"忘记 removeFrameCallback"的风险。
+     *
+     * ## 为什么物理必须放在这里，而不是 onDrawBehind 里
+     *
+     * 1. **掉帧不能丢物理**。放在绘制阶段的话，某一帧被跳过（滚动、卡顿）就少迭代一次，
+     *    按帧衰减的模型下柱子会一顿一顿的。放这里之后，掉帧只是让下一帧的 dt 变大，
+     *    物理照样按真实时间推进。
+     * 2. **按 dt 积分才能帧率无关**。这里传的是**真实经过的秒数**，
+     *    所以 60Hz 和 120Hz 迭代同样时长会得到同样的结果（见 VizPhysics 的注释）。
+     *
+     * 采样侧（FFT）在 `Dispatchers.Default` 上跑、由音频缓冲驱动（20~40Hz），
+     * 和这条 60/120Hz 的渲染循环完全独立 —— 两者只通过 `viz.levels` 这个数组交换数据。
+     */
+    LaunchedEffect(physics, live, isPlaying) {
+        var lastNanos = 0L
         while (true) {
             withFrameNanos { nanos ->
+                val dt = if (lastNanos == 0L) {
+                    1f / 60f
+                } else {
+                    ((nanos - lastNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                }
+                lastNanos = nanos
+
+                val n = viz.bars
+                if (live) {
+                    val lv = viz.levels
+                    var i = 0
+                    while (i < n) {
+                        targets[i] = if (i < lv.size) lv[i] else 0f
+                        i++
+                    }
+                } else {
+                    // 回退动画也过物理 —— 取不到频谱时的观感和真实数据一致，
+                    // 而不是另外一套生硬的动画
+                    val phase = (nanos % FALLBACK_PERIOD_NS) / FALLBACK_PERIOD_NS.toFloat() * TWO_PI
+                    var i = 0
+                    while (i < n) {
+                        targets[i] = if (isPlaying) proceduralAmp(i, n, phase) else 0.06f
+                        i++
+                    }
+                }
+
+                physics.step(targets, dt)
+
+                // ★ 唯一的重绘触发点。frameTick 在 onDrawBehind 里被读，
+                // 所以写它只让这一层重绘、不触发重组。
                 frameTick.longValue = nanos
                 framesInWindow[0]++
             }
@@ -479,6 +611,11 @@ private fun VisualizerCanvas(
             val mirrorDownPath = Path()
             val reflectPath = Path()
 
+            // 峰值条：一个合批 Path + 一把实心笔 + 厚度（都在这里分配一次）
+            val peakPath = Path()
+            val peakBrush = SolidColor(color.copy(alpha = 0.9f))
+            val peakH = 2.5.dp.toPx()
+
             // ---- 波形用的 Path / Stroke：复用 ----
             val waveCy = h * 0.5f
             val waveMax = h * 0.25f
@@ -490,21 +627,14 @@ private fun VisualizerCanvas(
                 // ★ 无条件读帧时钟：这是画布每帧失效的唯一保证，不要挪进任何分支
                 val tick = frameTick.longValue
 
-                val levels = viz.levels
-                val count = levels.size
-
-                // 按帧插值：快起慢落。FFT 只更新 20~40Hz，靠这一步补出连续运动。
-                var j = 0
-                while (j < n) {
-                    val target = if (j < count) levels[j] else 0f
-                    val cur = display[j]
-                    display[j] = if (target > cur) {
-                        cur + (target - cur) * 0.62f      // 起：跟得紧
-                    } else {
-                        cur + (target - cur) * 0.13f      // 落：慢慢回
-                    }
-                    j++
-                }
+                // 物理已经在帧回调里推进完了（见上面那条 LaunchedEffect），
+                // 这里**只读结果**，不做任何计算。
+                //
+                // 老实现在这里做插值：`display[j] = cur + (target-cur) * 0.62f / 0.13f`。
+                // 那两个系数是**按帧**的，所以 120Hz 屏上的衰减速度是 60Hz 的两倍 ——
+                // 这正是"机械抽搐"的来源之一。整段删掉，改成读 physics.pos。
+                val display = physics.pos
+                val peakPos = if (showPeak) physics.peak else null
 
                 val phase = if (live) {
                     0f
@@ -526,19 +656,9 @@ private fun VisualizerCanvas(
 
                         var i = 0
                         while (i < n) {
-                            val nx = (i + 0.5f) / n
-                            val amp = when {
-                                live -> display[i]
-                                isPlaying -> {
-                                    val t = phase * (1f + nx * 1.7f) + nx * 9.5f
-                                    val a = 0.5f + 0.5f * sin(t)
-                                    val b = 0.5f + 0.5f * sin(t * 0.43f + 1.3f)
-                                    val env = 0.28f + 0.72f * sin(PI.toFloat() * nx)
-                                    (a * 0.62f + b * 0.38f) * env
-                                }
-
-                                else -> 0.06f
-                            }
+                            // 目标值（真实频谱 / 回退动画）已经在帧回调里被物理消化成 pos[]，
+                            // 这里直接读 —— 绘制阶段保持纯读、零计算
+                            val amp = display[i]
 
                             val bh = (maxH * amp).coerceAtLeast(1.5f)
                             val x = i * slot + gap / 2f
@@ -562,6 +682,23 @@ private fun VisualizerCanvas(
                         drawPath(barPath, upBrush)
                         if (isMirror) drawPath(mirrorDownPath, downBrush)
                         else if (mirror) drawPath(reflectPath, reflectBrush)
+
+                        // ★ 峰值条：和柱子一样合批成一个 Path，一次 drawPath。
+                        // 位置来自 VizPhysics.peak —— 它会在顶部悬停一小会儿再加速落下。
+                        if (peakPos != null) {
+                            peakPath.reset()
+                            var k = 0
+                            while (k < n) {
+                                val ph = maxH * peakPos[k]
+                                // 太矮的不画，免得在底部堆一层糊在一起的小方块
+                                if (ph > peakH * 2f) {
+                                    val x = k * slot + gap / 2f
+                                    peakPath.addRect(Rect(x, base - ph - peakH, x + barW, base - ph))
+                                }
+                                k++
+                            }
+                            drawPath(peakPath, peakBrush)
+                        }
                     }
                 }
             }
@@ -581,6 +718,25 @@ private fun VisualizerCanvas(
             )
         }
     }
+}
+
+/**
+ * 取不到真实频谱时的程序化回退动画。
+ *
+ * 抽成独立函数是因为它现在被**物理循环**调用（用来生成"目标值"），
+ * 而不是在绘制里直接算高度 —— 这样回退动画也走同一套物理，
+ * 观感和真实数据一致，而不是另外一套生硬的动画。
+ *
+ * 纯函数、零分配，可以安全地在每帧对每根柱子调用。
+ */
+private fun proceduralAmp(i: Int, n: Int, phase: Float): Float {
+    val nx = (i + 0.5f) / n
+    val t = phase * (1f + nx * 1.7f) + nx * 9.5f
+    val a = 0.5f + 0.5f * sin(t)
+    val b = 0.5f + 0.5f * sin(t * 0.43f + 1.3f)
+    // 两头低、中间高的包络，看起来像一段乐句
+    val env = 0.28f + 0.72f * sin(PI.toFloat() * nx)
+    return (a * 0.62f + b * 0.38f) * env
 }
 
 private fun DrawScope.drawWave(
@@ -649,6 +805,18 @@ private fun VizSettingsPanel(
     onShowFps: (Boolean) -> Unit,
     onColor: (Int) -> Unit,
     onBarWidth: (Float) -> Unit,
+    attack: Float,
+    decayDamping: Float,
+    gravity: Float,
+    peakHoldTicks: Int,
+    showPeak: Boolean,
+    emaAlpha: Float,
+    onAttack: (Float) -> Unit,
+    onDecayDamping: (Float) -> Unit,
+    onGravity: (Float) -> Unit,
+    onPeakHoldTicks: (Int) -> Unit,
+    onShowPeak: (Boolean) -> Unit,
+    onEmaAlpha: (Float) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -715,6 +883,81 @@ Column(
                     thumbSize = 11.dp,
                     alwaysShowThumb = true
                 )
+            }
+
+            // ---- 物理手感 ----
+            //
+            // 这几个参数决定"柱子怎么动"：上升多快、下落多黏、有没有重力感、
+            // 峰值悬停多久。全部按 dt 积分，所以 60Hz 和 120Hz 屏上观感一致。
+            Text(
+                "物理手感",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.accent
+            )
+            PhysSlider(
+                label = "响应（上升快慢）",
+                valueText = "%.2f".format(attack),
+                value = (attack - 0.15f) / 0.8f
+            ) { onAttack(0.15f + it * 0.8f) }
+            PhysSlider(
+                label = "阻尼（下落变黏）",
+                valueText = "%.1f".format(decayDamping),
+                value = (decayDamping - 0.5f) / 7.5f
+            ) { onDecayDamping(0.5f + it * 7.5f) }
+            PhysSlider(
+                label = "重力（下落加速）",
+                valueText = "%.1f".format(gravity),
+                value = (gravity - 1f) / 14f
+            ) { onGravity(1f + it * 14f) }
+            PhysSlider(
+                label = "峰值悬停",
+                valueText = if (peakHoldTicks == 0) {
+                    "关"
+                } else {
+                    "$peakHoldTicks 帧 · %.2fs".format(peakHoldTicks / 60f)
+                },
+                value = peakHoldTicks / 90f
+            ) { onPeakHoldTicks((it * 90f).roundToInt().coerceIn(0, 90)) }
+            PhysSlider(
+                label = "平滑（滤抖动）",
+                valueText = "%.2f".format(emaAlpha),
+                value = (emaAlpha - 0.1f) / 0.9f
+            ) { onEmaAlpha(0.1f + it * 0.9f) }
+
+            // 峰值条开关
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        "显示峰值条",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.textMuted
+                    )
+                    Text(
+                        "柱子顶部短暂悬停的小横条",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textDim
+                    )
+                }
+                Box(
+                    Modifier
+                        .size(width = 42.dp, height = 24.dp)
+                        .clip(CircleShape)
+                        .background(if (showPeak) skin.accent else skin.surface3)
+                        .clickable { onShowPeak(!showPeak) },
+                    contentAlignment = if (showPeak) Alignment.CenterEnd else Alignment.CenterStart
+                ) {
+                    Box(
+                        Modifier
+                            .padding(horizontal = 3.dp)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(if (showPeak) skin.onAccent else skin.textDim)
+                    )
+                }
             }
 
             // ---- 柱子颜色 ----
@@ -857,6 +1100,32 @@ Column(
                 }
             }
         }
+    }
+}
+
+/** 物理手感的一行滑杆：左边名字、右边数值、下面滑杆 */
+@Composable
+private fun PhysSlider(
+    label: String,
+    valueText: String,
+    /** 归一化到 0..1 的位置 */
+    value: Float,
+    onChange: (Float) -> Unit
+) {
+    val skin = LocalSkin.current
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Text(valueText, style = MaterialTheme.typography.labelMedium, color = skin.accent)
+        }
+        SonanceSlider(
+            value = value.coerceIn(0f, 1f),
+            onValueChange = onChange,
+            modifier = Modifier.fillMaxWidth(),
+            trackHeight = 3.dp,
+            thumbSize = 11.dp,
+            alwaysShowThumb = true
+        )
     }
 }
 

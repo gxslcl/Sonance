@@ -337,7 +337,10 @@ class PlayerController(private val context: Context) {
     fun next() {
         val c = controller ?: return
         lastNotifiedId = -1L
-        if (c.hasNext()) c.seekToNext() else c.seekToDefaultPosition(0)
+        // hasNextMediaItem() 与已废弃的 hasNext() 语义相同：只看时间轴有没有下一项，
+        // **不考虑** repeat/shuffle。这里只是判"能不能往后跳"，所以用它没问题；
+        // 真正决定跳去哪首的仍然是 seekToNext()（它才读 repeat + shuffle）。
+        if (c.hasNextMediaItem()) c.seekToNext() else c.seekToDefaultPosition(0)
         if (!c.isPlaying) c.play()
     }
 

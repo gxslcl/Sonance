@@ -34,6 +34,23 @@ class AudioVisualizer(barCount: Int) {
     private val rawBands = FloatArray(bars)
 
     /**
+     * EMA 平滑后的频段能量。
+     *
+     * 放在 AGC **之前**：AGC 会做逐频段归一化，先滤掉噪声再归一化，
+     * 峰值追踪才不会被单个毛刺顶高 —— 那会让后面几帧整根柱子集体变矮，
+     * 看起来像"抽了一下"。
+     */
+    private val emaBands = FloatArray(bars)
+
+    /**
+     * EMA 系数 0..1：越小越平滑、但越迟钝。
+     *
+     * 0.55 只滤掉 FFT 的逐帧抖动，不会明显拖慢打击感。
+     * 低于 0.3 时上升会肉眼可见地变钝（打击感丢失）。
+     */
+    var emaAlpha: Float = 0.55f
+
+    /**
      * 每根柱子自己的历史峰值，缓慢衰减。
      *
      * 音乐的能量天然集中在低频，所以左边几根柱子总是跳得最凶、右边几乎不动 ——
@@ -182,11 +199,19 @@ class AudioVisualizer(barCount: Int) {
         return true
     }
 
-    /** 没有真实数据时让柱子自然落下 */
+    /**
+     * 没有真实数据时把**目标值**拉向 0。
+     *
+     * 注意它现在只影响目标值 —— 柱子实际怎么落由 `VizPhysics` 按 dt 积分决定，
+     * 所以暂停时柱子会走一次自然的自由落体，而不是这里硬压下去。
+     * 这里的系数只决定"目标多快归零"，0.86 在 250Hz 轮询下约 30ms 归零，
+     * 快到不参与观感，所以保持按次衰减、不改成按时间。
+     */
     fun decayToZero() {
         var i = 0
         while (i < levels.size) {
             levels[i] *= 0.86f
+            emaBands[i] *= 0.86f
             i++
         }
     }
@@ -221,7 +246,14 @@ class AudioVisualizer(barCount: Int) {
             var v = ln(1f + avg) / maxLog * gain
             if (v > 1f) v = 1f
             if (!active) v = 0f
-            rawBands[b] = v
+
+            // ★ EMA 平滑：消掉 FFT 逐帧的抖动噪点。
+            // 它只影响"目标值"的平滑度；柱子本身的运动由 VizPhysics 负责，
+            // 那里是按 dt 积分的，所以这一步不会引入帧率依赖
+            // （poll 的调用频率跟着音频缓冲走，与屏幕刷新率无关）。
+            val a = emaAlpha
+            emaBands[b] += (v - emaBands[b]) * a
+            rawBands[b] = emaBands[b]
             b++
         }
         applyAutoGain(rawBands, bandPeak, levels)
