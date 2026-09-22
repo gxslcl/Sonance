@@ -564,7 +564,8 @@ fun RecentScreen(
     modifier: Modifier = Modifier
 ) {
     val dense = LocalDenseLayout.current
-    val list = remember(vm.songs, vm.recentIds) { vm.recentSongs() }
+    // 依赖 recentEntries 而不是 recentIds —— 最近播放现在也含在线歌
+    val list = remember(vm.songs, vm.recentEntries) { vm.recentSongs() }
     Column(modifier.fillMaxSize()) {
         ListHeader(
             query = vm.searchQuery,

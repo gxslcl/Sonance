@@ -158,6 +158,135 @@ data class RemoteTrack(
 )
 
 /**
+ * 在线歌的**可持久化**形态。
+ *
+ * 为什么不直接把 [Song] 存下来：
+ * - [Song.uri] 是**带签名、会过期**的播放地址，存了也是废数据；
+ * - [Song.id] 是从 (音源, 远端 id) 哈希出来的，随时能重算，不必存；
+ * - [Song] 里带 `android.net.Uri`，而 JVM 单测里 `Uri.parse` 是返回 null 的桩 ——
+ *   存它，这套"存了什么、恢复了什么"的规则就测不了。
+ *
+ * 所以只留"足够把这首歌重新找回来"的最小信息。恢复走 [toSong]，
+ * 播放地址**当场重新取** —— 正好也符合音源"地址会过期"的约定。
+ */
+data class StoredOnlineSong(
+    val source: String,
+    val remoteId: String,
+    val title: String,
+    val artist: String,
+    val album: String,
+    val durationMs: Long,
+    val coverUrl: String?,
+    val playable: Boolean,
+    val vip: Boolean
+) {
+    /** 变回搜索结果，好复用 [OnlineSource.toSong] 拼出完整 [Song] */
+    fun toTrack(): RemoteTrack = RemoteTrack(
+        remoteId = remoteId,
+        title = title,
+        artist = artist,
+        album = album,
+        durationMs = durationMs,
+        coverUrl = coverUrl,
+        playable = playable,
+        vip = vip
+    )
+
+    /** 恢复成能播的 [Song]。音源不在清单里（配置被改坏）时返回 null */
+    fun toSong(): Song? = OnlineSources.byId(source)?.toSong(toTrack())
+
+    /**
+     * 它对应的 [Song.id]，和播放时用的是同一个值 ——
+     * 「正在播的是不是这一首」这类判断靠它对上。
+     */
+    fun songId(): Long = remoteSongId(source, remoteId)
+}
+
+/** 搜索结果 → 存档（列表里点播放时用，[RemoteTrack] 的信息最全） */
+fun RemoteTrack.toStored(source: String): StoredOnlineSong = StoredOnlineSong(
+    source = source,
+    remoteId = remoteId,
+    title = title,
+    artist = artist,
+    album = album,
+    durationMs = durationMs,
+    coverUrl = coverUrl,
+    playable = playable,
+    vip = vip
+)
+
+/**
+ * 正在播的 [Song] → 存档。本地歌返回 null。
+ *
+ * `playable` 写 true、`vip` 写 false：**能播起来本身就说明它可播**，
+ * 而这两个字段只在列表展示时有用（打徽标 / 过滤），存档是用来恢复播放和
+ * 记「最近播放」的，用不上精确值。
+ */
+fun Song.toStoredOrNull(): StoredOnlineSong? {
+    val rid = remoteId ?: return null
+    if (isLocal) return null
+    return StoredOnlineSong(source, rid, title, artist, album, durationMs, coverUrl, true, false)
+}
+
+/** 存档 → JSON */
+fun storedOnlineSongToJson(s: StoredOnlineSong): JSONObject = JSONObject().apply {
+    put("source", s.source)
+    put("remoteId", s.remoteId)
+    put("title", s.title)
+    put("artist", s.artist)
+    put("album", s.album)
+    put("durationMs", s.durationMs)
+    if (s.coverUrl != null) put("coverUrl", s.coverUrl)
+    put("playable", s.playable)
+    put("vip", s.vip)
+}
+
+/**
+ * JSON → 存档。字段缺失 / 类型不对就返回 null。
+ *
+ * 这是从 SharedPreferences 读回来的东西，版本升级、手改配置都可能留下脏数据，
+ * 不值得为它崩一次 —— 丢一条记录比整个界面挂掉好。
+ */
+fun storedOnlineSongFromJson(o: JSONObject): StoredOnlineSong? {
+    val source = o.optString("source")
+    val remoteId = o.optString("remoteId")
+    // 这两个是"把歌找回来"的最小凭据，缺一个就等于这条废了
+    if (source.isBlank() || remoteId.isBlank()) return null
+    return StoredOnlineSong(
+        source = source,
+        remoteId = remoteId,
+        title = o.optString("title"),
+        artist = o.optString("artist"),
+        album = o.optString("album"),
+        durationMs = o.optLong("durationMs"),
+        coverUrl = o.optString("coverUrl").takeIf { it.isNotBlank() },
+        playable = o.optBoolean("playable", true),
+        vip = o.optBoolean("vip", false)
+    )
+}
+
+/** 一批存档 → JSON 数组 */
+fun storedOnlineSongsToJson(list: List<StoredOnlineSong>): String {
+    val arr = org.json.JSONArray()
+    list.forEach { arr.put(storedOnlineSongToJson(it)) }
+    return arr.toString()
+}
+
+/** JSON 数组 → 一批存档。坏条目跳过 */
+fun storedOnlineSongsFromJson(raw: String?): List<StoredOnlineSong> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        val arr = org.json.JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                storedOnlineSongFromJson(o)?.let { add(it) }
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+/**
  * 在线歌在本地用的 id。
  *
  * ## 为什么不用 `String.hashCode()`

@@ -1,8 +1,15 @@
 package com.sonance.player.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -802,8 +809,30 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
             onCheckedChange = { vm.changeNeteaseFill(it) }
         )
 
-        // ===== 播放并下载 =====
-        SettingsSwitchRow(
+    // ===== 播放并下载 =====
+
+    /**
+     * Android 9 及以下写公开音乐目录需要 `WRITE_EXTERNAL_STORAGE`。
+     *
+     * manifest 里已经用 `maxSdkVersion="28"` 声明了，但**运行时还得请求** ——
+     * 光声明不请求的话，老系统上写入会失败、而调用方只看到"打不开输出流"，
+     * 表现为"下载了但一直失败"，很难查。
+     *
+     * Android 10 起走 MediaStore 插入自己的媒体文件，不需要任何权限，
+     * 所以这里只在 SDK <= 28 时才请求。
+     */
+    val context = LocalContext.current
+    val storageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            vm.changeOnlineDownload(true)
+        } else {
+            vm.showToast("需要存储权限才能保存下载的文件")
+        }
+    }
+
+    SettingsSwitchRow(
             title = "播放并下载",
             subtitle = "播放在线歌时自动存一份到本地。默认关闭。\n" +
                 "存的是**正在播的那条流**（标准音质），不是官方下载接口的高音质版本 —— " +
@@ -812,7 +841,18 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
                 "放在「${OnlineDownloader.FOLDER_NAME}」文件夹里 —— " +
                 "重新扫描后「文件夹」页会有这个分类。",
             checked = vm.onlineDownloadEnabled,
-            onCheckedChange = { vm.changeOnlineDownload(it) }
+            onCheckedChange = { on ->
+                if (on && Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                    ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    // 先拿到权限再开开关 —— 否则开关亮着但每次都失败
+                    storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                } else {
+                    vm.changeOnlineDownload(on)
+                }
+            }
         )
 
         if (vm.onlineDownloadEnabled) {

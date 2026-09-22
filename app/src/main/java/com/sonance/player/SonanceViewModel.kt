@@ -26,6 +26,12 @@ import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
+import org.json.JSONObject
+import com.sonance.player.data.storedOnlineSongFromJson
+import com.sonance.player.data.storedOnlineSongToJson
+import com.sonance.player.data.storedOnlineSongsFromJson
+import com.sonance.player.data.storedOnlineSongsToJson
+import com.sonance.player.data.toStoredOrNull
 import com.sonance.player.data.onlineSongIdsToKeep
 import com.sonance.player.data.remoteSongId
 import com.sonance.player.data.PlaybackRestore
@@ -151,6 +157,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var recentIds by mutableStateOf(prefs.recentIds())
         private set
 
+    /**
+     * 最近播放的完整条目，**含在线歌**。
+     *
+     * [recentIds] 只留本地 id（它给曲库排序用），列表显示要用这个 ——
+     * 在线歌不在本地曲库里，靠 id 是反查不到的。
+     */
+    var recentEntries by mutableStateOf(prefs.recentEntries())
+        private set
+
     // ===== 提示 =====
     var toastMessage by mutableStateOf<String?>(null)
         private set
@@ -185,20 +200,46 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // （「清空最近播放」按钮是给本地歌用的，没人会想到它被在线歌撑大了）。
             // 播放次数同理：只在「播放最多」排序里被读，在线歌根本不参与排序。
             if (!isRemoteSongId(id)) {
-                prefs.pushRecent(id)
+                prefs.pushRecentLocal(id)
                 prefs.bumpPlayCount(id)
                 recentIds = prefs.recentIds()
                 prefs.lastSongId = id
+                prefs.lastPlayedOnline = false
+                // 现在播的是本地歌，在线那套存档就用不上了 ——
+                // 不清的话恢复时会读到一份过期的在线现场，走错分支
+                prefs.lastOnlineSongJson = null
+                prefs.onlineQueueJson = null
+            } else {
+                // 在线歌**也要进最近播放**。
+                //
+                // 必须存完整信息而不是只存 id：在线歌的 id 是哈希出来的负数，
+                // 冷启动后本地曲库里查不到任何歌，只存 id 会留下一条
+                // "看得见、点不开、还删不掉"的幽灵记录。
+                songById(id)?.toStoredOrNull()?.let { stored ->
+                    prefs.pushRecentOnline(stored)
+                    prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
+                    prefs.lastPlayedOnline = true
+                }
             }
+            recentEntries = prefs.recentEntries()
             // 顺手把队列和序号存下来 —— 冷启动恢复要用，而 onStop 不一定每次都会走到
             // （进程被系统直接回收时就不会）。此刻 refreshQueue 已经跑过，queueIds 是新的。
             //
-            // 这里**照存**在线歌的负数 id：恢复时 PlaybackRestore 会按「还在不在曲库里」
-            // 把它们滤掉，正是想要的行为（播放地址是临时的，本来也没法原样恢复）。
+            // 在线队列**不能**只存负数 id：恢复时 PlaybackRestore 按「在不在本地曲库里」
+            // 过滤，那些 id 会被整条滤掉（那是给本地歌设计的规则，在线歌本来就不在曲库里）。
+            // 所以在线队列每首都存成"能重新找回来"的形态，恢复时重新取播放地址。
             val st = player.state.value
             if (st.queueIds.isNotEmpty()) {
-                prefs.playQueueIds = st.queueIds.joinToString(",")
-                prefs.playQueueIndex = st.queueIndex
+                if (isRemoteSongId(st.mediaId)) {
+                    val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
+                    if (stored.isNotEmpty()) {
+                        prefs.onlineQueueJson = storedOnlineSongsToJson(stored)
+                        prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
+                    }
+                } else {
+                    prefs.playQueueIds = st.queueIds.joinToString(",")
+                    prefs.playQueueIndex = st.queueIndex
+                }
             }
             prefs.playPositionMs = 0L
             // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
@@ -257,8 +298,47 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 曲库还没加载出来时直接返回（没什么可恢复的）；[scan] 完成后会再调一次，
      * 所以两个入口都调它，靠 [playbackRestored] 保证只做一次。
      */
+    /**
+     * 恢复**在线**播放现场 —— 上次退出时正在播的是在线歌。
+     *
+     * @return 成功返回 true；失败（存档没了 / 音源下线了）返回 false，
+     *         让调用方接着走本地恢复那条路。
+     *
+     * 播放地址是**当场重新取**的：存档里只有"音源 + 远端 id"这类能把歌找回来的
+     * 信息，没有地址本身 —— 地址带签名会过期（见 [OnlineSource.streamUrl] 的说明）。
+     */
+    private fun restoreOnlinePlayback(): Boolean {
+        val queue = storedOnlineSongsFromJson(prefs.onlineQueueJson).mapNotNull { it.toSong() }
+        val last = prefs.lastOnlineSongJson
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?.let { storedOnlineSongFromJson(it) }
+            ?.toSong()
+        // 队列整条恢复不出来就退一步：至少把"上次听的那一首"摆回来
+        val list = queue.ifEmpty { listOfNotNull(last) }
+        if (list.isEmpty()) return false
+
+        playbackRestored = true
+        pendingStartupScroll = true
+        // autoplay=false：冷启动就出声很吓人，摆成"暂停在这首歌"等用户按播放。
+        // notifyStart=false：这只是把上次的歌摆回来，不该给播放次数 +1。
+        player.play(
+            songs = list,
+            index = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex),
+            autoplay = false,
+            startPositionMs = 0L,
+            notifyStart = false
+        )
+        return true
+    }
+
     private fun restorePlaybackState() {
         if (playbackRestored) return
+
+        // 上次播的是在线歌 → 先走在线恢复。它**不依赖本地曲库** ——
+        // 在线歌的 id 是负数，按"在不在曲库里"过滤会把它们整条滤掉，
+        // 那是给本地歌设计的规则。
+        if (prefs.lastPlayedOnline && restoreOnlinePlayback()) return
+
         if (songs.isEmpty()) return
 
         val position = prefs.playPositionMs.coerceAtLeast(0L)
@@ -275,7 +355,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 队列整条失效就退一步：至少把「上次听的那一首」摆回来。
         // 一首都找不回来说明这个用户还没放过歌（或曲库整个换了），那就什么都不做。
         val queue = resolved?.first?.mapNotNull(map::get) ?: run {
-            val last = songById(prefs.lastSongId) ?: return
+            // 只查本地曲库（[map]），**不要**用 [songById]。
+            //
+            // 这里是**本地**播放现场的恢复（在线歌走上面那条路），而 [songById]
+            // 查不到时会去翻 `onlineSongMap` —— 那个 map 声明在类的后半部分，
+            // ViewModel 构造期间（init 里就会走到这儿）它**还没初始化**，
+            // 一访问就是 NPE，表现是应用一启动就崩、直接退到桌面。
+            val last = map[prefs.lastSongId] ?: return
             listOf(last)
         }
         val index = resolved?.second ?: 0
@@ -303,18 +389,40 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val st = player.state.value
         // 什么都没加载时**一个字段都不要写** —— 否则「打开就立刻关掉」这种操作
         // 会把上次存好的进度抹成 0（那一刻播放器还没连上，positionMs 是 0）。
-        //
-        // `> 0` 这个判据**顺带**把在线歌（负数 id）也挡掉了，这是想要的：
-        // 它们的播放地址是临时的、重启后要重新解析，`PlaybackRestore` 也按
-        // "还在不在本地曲库里"把它们滤掉。所以**别**把它改成 `!= 0` ——
-        // 那样只会让"上次播放"指向一首冷启动后根本找不回来的歌。
         if (st.mediaId > 0L) {
             prefs.lastSongId = st.mediaId
             prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
+            prefs.lastPlayedOnline = false
+            // 现在播的是本地歌，在线那套存档就用不上了 ——
+            // 不清的话恢复时会读到一份过期的在线现场，走错分支
+            prefs.lastOnlineSongJson = null
+            prefs.onlineQueueJson = null
+        } else if (isRemoteSongId(st.mediaId)) {
+            // 在线歌。
+            //
+            // 以前这里靠 `> 0` 把在线歌整个挡掉了（注释还写着"这是想要的"）——
+            // 结果就是回到软件时 `lastSongId` 仍指向**上一次的本地歌**，
+            // 播放页摆的是本地歌，在线歌看着像凭空消失了一样。
+            //
+            // 现在存"能重新找回来"的信息（音源 + 远端 id + 展示字段），并记下
+            // "最后播的是在线歌"。**地址不存** —— 它带签名会过期，恢复时当场重新取。
+            songById(st.mediaId)?.toStoredOrNull()?.let {
+                prefs.lastOnlineSongJson = storedOnlineSongToJson(it).toString()
+                prefs.lastPlayedOnline = true
+            }
+            prefs.playPositionMs = 0L
         }
         if (st.queueIds.isNotEmpty()) {
-            prefs.playQueueIds = st.queueIds.joinToString(",")
-            prefs.playQueueIndex = st.queueIndex
+            if (isRemoteSongId(st.mediaId)) {
+                val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
+                if (stored.isNotEmpty()) {
+                    prefs.onlineQueueJson = storedOnlineSongsToJson(stored)
+                    prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
+                }
+            } else {
+                prefs.playQueueIds = st.queueIds.joinToString(",")
+                prefs.playQueueIndex = st.queueIndex
+            }
         }
     }
 
@@ -474,8 +582,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 行为 =====
 
-    private suspend fun runScan(): ScanOutcome {
-        ArtworkLoader.clear()
+    /**
+     * @param clearArtwork 是否清掉封面缓存。
+     *
+     * 正常扫描要清（歌曲可能被删了、封面可能变了）；**下载之后的重扫不要清** ——
+     * 下载只是新增文件，已有封面依然有效，清了会让正在播放的封面闪一下
+     * （用户边听边下载时特别明显）。
+     */
+    private suspend fun runScan(clearArtwork: Boolean = true): ScanOutcome {
+        if (clearArtwork) ArtworkLoader.clear()
         val outcome = repo.scan(filterShortAudio, currentScanFilters())
         applyScanOutcome(outcome)
         // 把结果落到 Prefs，下次冷启动直接用、不再扫 MediaStore
@@ -570,6 +685,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             scanState = ScanState.READY
             // 没有歌曲缓存时（首次启动）init 里那次恢复会跳过，扫完再试一次
             restorePlaybackState()
+        }
+    }
+
+    /**
+     * 下载成功之后把新文件并进曲库。**必须做** ——
+     *
+     * 应用的曲库是缓存的，不重扫的话「文件夹」页永远不会出现下载目录那个分类，
+     * 而那正是用户要的（"下载之后的歌曲在文件夹里面有一个独立的分类"）。
+     *
+     * 和 [scan] 的两点区别：
+     * - **不清封面缓存**（见 [runScan] 的参数说明）—— 正在播的封面不该闪
+     * - **不做播放现场恢复** —— 那会把正在播的队列重新排一遍
+     */
+    fun rescanAfterDownload() {
+        viewModelScope.launch {
+            scanState = ScanState.SCANNING
+            runScan(clearArtwork = false)
+            scanState = ScanState.READY
         }
     }
 
@@ -1093,6 +1226,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun clearRecent() {
         prefs.clearRecent()
         recentIds = emptyList()
+        recentEntries = emptyList()
         showToast("已清空最近播放")
     }
 
@@ -1229,6 +1363,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     prefs.markDownloaded(key)
                     downloadedCount = prefs.downloadedKeys().size
                     showToast("已存到「${OnlineDownloader.FOLDER_NAME}」")
+                    // 立刻并进曲库，否则「文件夹」页看不到这个分类
+                    rescanAfterDownload()
                 }
                 // 会员歌 / 版权下架：静默跳过。它本来也播不了，
                 // 弹一句"下载失败"只会让用户以为哪里坏了
@@ -1271,6 +1407,32 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     var onlineResults by mutableStateOf<List<RemoteTrack>>(emptyList())
         private set
+
+    /**
+     * 列表里把「播不了的」过滤掉（VIP / 需购买）。默认开。
+     *
+     * 只影响显示，[onlineResults] 本身不变。
+     */
+    var onlineHideUnplayable by mutableStateOf(prefs.onlineHideUnplayable)
+        private set
+
+    fun changeOnlineHideUnplayable(v: Boolean) {
+        onlineHideUnplayable = v
+        prefs.onlineHideUnplayable = v
+    }
+
+    /**
+     * 列表要显示的曲目，带**在 [onlineResults] 里的原始下标**。
+     *
+     * 必须带下标：过滤之后下标就错位了，直接用过滤后列表的下标点播放会播成另一首。
+     * 播放队列也是按 [onlineResults] 建的，两边要对得上。
+     */
+    val visibleOnlineResults: List<Pair<Int, RemoteTrack>>
+        get() = if (onlineHideUnplayable) {
+            onlineResults.withIndex().filter { it.value.playable }.map { it.index to it.value }
+        } else {
+            onlineResults.mapIndexed { i, t -> i to t }
+        }
 
     var onlineSearching by mutableStateOf(false)
         private set
@@ -1611,8 +1773,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         MediaRepository.sortSongs(songs, sortField, sortAscending, songStats())
 
     fun recentSongs(): List<Song> {
-        val order = recentIds.withIndex().associate { (i, id) -> id to i }
-        return songs.filter { order.containsKey(it.id) }.sortedBy { order[it.id] }
+        // 本地歌按 id 反查曲库；在线歌用存档重建（播放地址当场重新取）。
+        //
+        // [recentEntries] 自己是"最新在前"的顺序，不用再排一遍。
+        // 以前这里只看 [recentIds]（本地 id），在线歌就永远进不来。
+        return recentEntries.mapNotNull { entry ->
+            if (entry.isOnline) entry.online?.toSong()
+            else songs.firstOrNull { it.id == entry.localId }
+        }
     }
 
     fun favoriteSongs(): List<Song> {

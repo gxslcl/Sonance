@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,10 +38,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.OnlineSources
@@ -148,18 +152,29 @@ fun OnlineScreen(
 
     Column(modifier.fillMaxSize()) {
 
-        // ---- 搜索框 ----
-        SearchField(
-            value = vm.onlineQuery,
-            onValueChange = { vm.onlineQuery = it },
-            placeholder = "搜索在线歌曲",
+        // ---- 搜索框 + 「只看可播」开关 ----
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .padding(top = if (dense) 4.dp else 10.dp),
-            height = if (dense) 38.dp else 44.dp,
-            onSearch = { vm.searchOnline() }
-        )
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SearchField(
+                value = vm.onlineQuery,
+                onValueChange = { vm.onlineQuery = it },
+                placeholder = "搜索在线歌曲",
+                modifier = Modifier.weight(1f),
+                height = if (dense) 38.dp else 44.dp,
+                onSearch = { vm.searchOnline() }
+            )
+            Spacer(Modifier.width(10.dp))
+            PlayableFilterToggle(
+                checked = vm.onlineHideUnplayable,
+                onCheckedChange = { vm.changeOnlineHideUnplayable(it) },
+                height = if (dense) 38.dp else 44.dp
+            )
+        }
 
         // ---- 音源切换 + 结果统计 ----
         Row(
@@ -190,10 +205,17 @@ fun OnlineScreen(
         // ---- 正文 ----
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
+                // 有结果、但开关把能播的都过滤掉了 —— 说明白，别显示成一个空列表
+                vm.onlineResults.isNotEmpty() && vm.visibleOnlineResults.isEmpty() -> EmptyState(
+                    icon = SonanceIcons.Search,
+                    title = "这 ${vm.onlineResults.size} 首都播不了",
+                    subtitle = "都是会员 / 需购买的歌。关掉搜索框右边的开关能看到完整列表。"
+                )
+
                 // ★ 有结果就**先显示着**，不要换成转圈。
                 // 输入即搜索是"每停一次手就搜一次"，把列表换成 spinner 会一直闪；
                 // 加载状态改由上面的「搜索中…」提示，列表本身保持稳定。
-                vm.onlineResults.isNotEmpty() -> LazyColumn(
+                vm.visibleOnlineResults.isNotEmpty() -> LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
@@ -205,14 +227,17 @@ fun OnlineScreen(
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     itemsIndexed(
-                        items = vm.onlineResults,
+                        items = vm.visibleOnlineResults,
                         // remoteId 在单个音源内唯一，正好当 key
-                        key = { _, t -> t.remoteId }
-                    ) { index, track ->
+                        key = { _, pair -> pair.second.remoteId }
+                    ) { _, pair ->
+                        // first 是**原始下标**，播放队列按 onlineResults 建的，必须用它对上
+                        val (index, track) = pair
                         val songId = remoteSongId(src.id, track.remoteId)
                         OnlineTrackRow(
                             track = track,
                             thumbUrl = vm.onlineThumbUrl(track, THUMB_PX),
+                            sourceLabel = src.label,
                             isCurrent = playerState.mediaId == songId,
                             isPlaying = playerState.isPlaying,
                             onClick = { vm.playOnline(index) }
@@ -307,6 +332,8 @@ fun OnlineScreen(
 private fun OnlineTrackRow(
     track: RemoteTrack,
     thumbUrl: String?,
+    /** 音源显示名。小字标出来，让"这首歌是从哪来的"看得见 */
+    sourceLabel: String,
     isCurrent: Boolean,
     isPlaying: Boolean,
     onClick: () -> Unit
@@ -399,6 +426,20 @@ private fun OnlineTrackRow(
                             .alpha(rowAlpha)
                     )
                 }
+                // 来源。不设 weight —— 让它保持固有宽度，歌名/专辑过长时先被压缩的是它们
+                Text(
+                    " · ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textDim,
+                    modifier = Modifier.alpha(rowAlpha)
+                )
+                Text(
+                    text = sourceLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textDim,
+                    maxLines = 1,
+                    modifier = Modifier.alpha(rowAlpha)
+                )
             }
         }
 
@@ -435,6 +476,47 @@ private fun VipBadge() {
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = skin.accent
+        )
+    }
+}
+
+/**
+ * 「只看可播」开关。
+ *
+ * 用 Switch 而不是图标按钮：这是**真的过滤**（列表会少掉几行），
+ * 开关能一眼看出当前是开是关；图标按钮看不出状态，容易让人以为没生效。
+ *
+ * 缩到 0.72 是为了和 44dp 的搜索框持平 —— Material 默认的 Switch 比它高，
+ * 原样放进去会顶出搜索框那一行。
+ */
+@Composable
+private fun PlayableFilterToggle(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    height: Dp
+) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = Modifier
+            .height(height)
+            .clip(RoundedCornerShape(height / 2))
+            .background(if (checked) skin.accentGlow else skin.surface3)
+            .padding(horizontal = 7.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.scale(0.72f),
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = skin.accent,
+                checkedTrackColor = skin.accentDim,
+                uncheckedThumbColor = skin.textDim,
+                uncheckedTrackColor = skin.surface3,
+                uncheckedBorderColor = Color.Transparent,
+                disabledCheckedThumbColor = skin.accent,
+                disabledUncheckedThumbColor = skin.textDim
+            )
         )
     }
 }

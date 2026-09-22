@@ -813,7 +813,9 @@ private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
     LibraryTab.ALBUMS -> "共 ${vm.albums.size} 张专辑 · ${vm.songs.size} 首"
     LibraryTab.ARTISTS -> "共 ${vm.artists.size} 位艺术家"
     LibraryTab.FOLDERS -> "共 ${vm.folders.size} 个文件夹"
-    LibraryTab.RECENT -> "最近听过 ${vm.recentIds.size} 首"
+    // 用 recentEntries 而不是 recentIds —— 在线歌不在 recentIds 里，
+    // 用它会让"最近听过 N 首"比列表里实际少几首
+    LibraryTab.RECENT -> "最近听过 ${vm.recentEntries.size} 首"
     LibraryTab.ONLINE -> if (vm.onlineMusicEnabled) "搜索并播放网络歌曲" else "未开启 · 点击开启"
     LibraryTab.FAVORITES -> "已收藏 ${vm.favorites.size} 首"
     LibraryTab.SETTINGS -> vm.skin.name

@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.sonance.player.playback.EqPreset
 import com.sonance.player.ui.theme.GlassStyle
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** 轻量持久化：收藏、最近播放、皮肤、排序、视图模式 */
 class Prefs(context: Context) {
@@ -311,6 +313,21 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString(KEY_ONLINE_SOURCE, v).apply()
 
     /**
+     * 在线搜索结果里，把**播不了的**过滤掉。**默认打开**。
+     *
+     * 默认开，是因为会员歌点了只会失败：它的外链 302 到一张 HTML 下载页，
+     * ExoPlayer 解析不了、报的是"容器不受支持"，用户会误以为是自己文件格式的问题。
+     *
+     * 想看完整列表（比如只是确认这首歌存不存在）可以关掉 —— 那时不可播的
+     * 仍然会打上徽标，不会让人误点。
+     *
+     * 只影响**显示**，不影响结果集本身、也不影响分页条数。
+     */
+    var onlineHideUnplayable: Boolean
+        get() = sp.getBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, true)
+        set(v) = sp.edit().putBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, v).apply()
+
+    /**
      * 用网易云补全**本地歌**的封面与歌词。**默认关闭**。
      *
      * 为什么需要它：本地曲库的封面和歌词经常取不到 —— 内嵌标签缺失、
@@ -448,19 +465,133 @@ class Prefs(context: Context) {
     }
 
     // ===== 最近播放（有序，最新在前）=====
-    fun recentIds(limit: Int = 200): List<Long> =
-        (sp.getString(KEY_RECENT, "") ?: "").split(",")
+
+    /**
+     * 「最近播放」里的一条。
+     *
+     * 在线歌**必须带完整信息**（[StoredOnlineSong]），不能只存 id ——
+     * 在线歌的 id 是从 (音源, 远端 id) 哈希出来的负数，冷启动后本地曲库里
+     * 查不到任何歌；只存 id 会得到一条"看得见、点不开、还删不掉"的幽灵记录。
+     */
+    data class RecentEntry(
+        /** 本地歌的 id；在线歌为 0 */
+        val localId: Long = 0L,
+        /** 在线歌的完整信息；本地歌为 null */
+        val online: StoredOnlineSong? = null,
+        /** 记进来的时间。列表顺序本身就是时间顺序，这个字段供将来按时间筛选用 */
+        val at: Long = 0L
+    ) {
+        val isOnline: Boolean get() = online != null
+
+        fun toJson(): JSONObject = JSONObject().apply {
+            if (online != null) {
+                put("online", storedOnlineSongToJson(online))
+            } else {
+                put("localId", localId)
+            }
+            put("at", at)
+        }
+    }
+
+    private fun recentEntryFromJson(o: JSONObject): RecentEntry? {
+        val onlineJson = o.optJSONObject("online")
+        if (onlineJson != null) {
+            val song = storedOnlineSongFromJson(onlineJson) ?: return null
+            return RecentEntry(online = song, at = o.optLong("at"))
+        }
+        val id = o.optLong("localId", 0L)
+        if (id <= 0L) return null
+        return RecentEntry(localId = id, at = o.optLong("at"))
+    }
+
+    /** 两条记录指的是不是同一首歌（用于去重） */
+    private fun isSameEntry(a: RecentEntry, b: RecentEntry): Boolean = when {
+        a.isOnline && b.isOnline -> a.online?.songId() == b.online?.songId()
+        !a.isOnline && !b.isOnline -> a.localId == b.localId
+        else -> false
+    }
+
+    /**
+     * 最近播放的完整条目（**含在线歌**），最新在前。
+     *
+     * 存储升级过一次：以前这个键存的是「逗号分隔的本地歌曲 id」。
+     * 所以读到旧格式要能接着用（解析不出来就退回旧格式），
+     * 否则用户一升级「最近播放」就整个空了。
+     */
+    fun recentEntries(): List<RecentEntry> {
+        val raw = sp.getString(KEY_RECENT, null)
+        if (raw.isNullOrBlank()) return emptyList()
+        if (raw.trimStart().startsWith("[")) {
+            return runCatching {
+                val arr = JSONArray(raw)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        recentEntryFromJson(o)?.let { add(it) }
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+        // 旧格式：逗号分隔的本地 id
+        return raw.split(",")
             .mapNotNull { it.trim().toLongOrNull() }
+            .map { RecentEntry(localId = it) }
+    }
+
+    /** 本地歌曲 id 列表（不含在线歌）。给「按最近播放排序」用 —— 在线歌不参与曲库排序 */
+    fun recentIds(limit: Int = 200): List<Long> =
+        recentEntries().mapNotNull { if (it.isOnline) null else it.localId.takeIf { id -> id > 0L } }
             .take(limit)
 
-    fun pushRecent(id: Long) {
-        val list = recentIds().toMutableList()
-        list.remove(id)
-        list.add(0, id)
-        sp.edit().putString(KEY_RECENT, list.take(200).joinToString(",")).apply()
+    fun pushRecentLocal(id: Long) =
+        pushRecent(RecentEntry(localId = id, at = System.currentTimeMillis()))
+
+    /** 在线歌进最近播放。带完整信息，冷启动才查得到 */
+    fun pushRecentOnline(song: StoredOnlineSong) =
+        pushRecent(RecentEntry(online = song, at = System.currentTimeMillis()))
+
+    private fun pushRecent(entry: RecentEntry) {
+        val list = recentEntries().toMutableList()
+        list.removeAll { isSameEntry(it, entry) }
+        list.add(0, entry)
+        val arr = JSONArray()
+        list.take(RECENT_LIMIT).forEach { arr.put(it.toJson()) }
+        sp.edit().putString(KEY_RECENT, arr.toString()).apply()
     }
 
     fun clearRecent() = sp.edit().remove(KEY_RECENT).apply()
+
+    // ===== 在线播放现场（冷启动恢复用）=====
+
+    /**
+     * 上次播的在线歌（[StoredOnlineSong] 的 JSON）。null = 上次播的是本地歌 / 没播过。
+     *
+     * 为什么在线歌也得存：它们的 id 是**负数**，而恢复逻辑按"在不在本地曲库里"
+     * 过滤，负数 id 会被整条滤掉 —— 于是回到软件，播放页摆的是**上一次的本地歌**，
+     * 在线歌看着就像"消失了一样"。
+     */
+    var lastOnlineSongJson: String?
+        get() = sp.getString(KEY_ONLINE_LAST, null)
+        set(v) = sp.edit().putString(KEY_ONLINE_LAST, v).apply()
+
+    /** 上次播的在线队列（[StoredOnlineSong] 的 JSON 数组） */
+    var onlineQueueJson: String?
+        get() = sp.getString(KEY_ONLINE_QUEUE, null)
+        set(v) = sp.edit().putString(KEY_ONLINE_QUEUE, v).apply()
+
+    var onlineQueueIndex: Int
+        get() = sp.getInt(KEY_ONLINE_QUEUE_INDEX, 0)
+        set(v) = sp.edit().putInt(KEY_ONLINE_QUEUE_INDEX, v).apply()
+
+    /**
+     * 最后一次播的是**在线歌**还是本地歌。
+     *
+     * 恢复时两条路都要走，得有个字段说清楚该走哪条 ——
+     * 只看"有没有 lastSongId"不行：那个字段永远指向上次播的**本地**歌。
+     */
+    var lastPlayedOnline: Boolean
+        get() = sp.getBoolean(KEY_LAST_PLAYED_ONLINE, false)
+        set(v) = sp.edit().putBoolean(KEY_LAST_PLAYED_ONLINE, v).apply()
 
     // ===== 播放统计 =====
     fun playCount(id: Long): Int = sp.getInt("$KEY_COUNT$id", 0)
@@ -515,6 +646,13 @@ class Prefs(context: Context) {
         private const val KEY_TAB = "last_tab"
         private const val KEY_FAV = "favorites"
         private const val KEY_RECENT = "recent"
+        private const val KEY_ONLINE_LAST = "online_last_song"
+        private const val KEY_ONLINE_QUEUE = "online_queue"
+        private const val KEY_ONLINE_QUEUE_INDEX = "online_queue_index"
+        private const val KEY_LAST_PLAYED_ONLINE = "last_played_online"
+
+        /** 最近播放保留多少条。再往上翻既没人看，也会把 SharedPreferences 撑大 */
+        private const val RECENT_LIMIT = 200
         private const val KEY_LAST_SONG = "last_song"
         private const val KEY_PLAY_QUEUE = "play_queue_ids"
         private const val KEY_PLAY_INDEX = "play_queue_index"
@@ -542,6 +680,7 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_API = "lyrics_api_base"
         private const val KEY_ONLINE_MUSIC = "online_music_enabled"
         private const val KEY_ONLINE_SOURCE = "online_music_source"
+        private const val KEY_ONLINE_HIDE_UNPLAYABLE = "online_hide_unplayable"
         private const val KEY_NETEASE_FILL = "netease_fill_enabled"
         private const val KEY_DL_ENABLED = "online_download_enabled"
         private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
