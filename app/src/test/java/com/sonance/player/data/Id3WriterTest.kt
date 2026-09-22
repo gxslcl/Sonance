@@ -40,6 +40,37 @@ class Id3WriterTest {
     }
 
     @Test
+    fun `歌词写进去之后 AudioTags 能读出来`() {
+        // 同样用项目自己的解析器当裁判（AudioTags 支持 USLT，见它的格式表）
+        val lrc = "[00:01.00]第一行\n[00:05.50]第二行\n[00:09.00]END"
+        val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", lyrics = lrc)
+        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(tagged(tag))))
+    }
+
+    @Test
+    fun `封面和歌词可以同时存在且互不干扰`() {
+        val lrc = "[00:02.00]词"
+        val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", cover, "image/jpeg", lyrics = lrc)
+        val file = tagged(tag)
+        assertArrayEquals(cover, AudioTags.coverArtFrom(ByteArrayInputStream(file)))
+        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(file)))
+    }
+
+    @Test
+    fun `歌词为空时不写 USLT 帧`() {
+        val file = tagged(Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", lyrics = "   "))
+        assertEquals(null, AudioTags.lyricsFrom(ByteArrayInputStream(file)))
+    }
+
+    @Test
+    fun `歌词里的换行和方括号原样保留`() {
+        // LRC 的时间戳是给播放器做滚动高亮用的，一个字符都不能动
+        val lrc = "[offset:+500]\n[00:00.00]\n[00:01.234][00:03.456]重复句"
+        val tag = Id3Writer.buildTag("A", "B", "C", lyrics = lrc)
+        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(tagged(tag))))
+    }
+
+    @Test
     fun `没有封面时不写 APIC，解析器返回 null`() {
         val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", cover = null)
         assertTrue(tag.isNotEmpty())

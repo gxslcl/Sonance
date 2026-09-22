@@ -24,6 +24,7 @@ import com.sonance.player.data.NeteaseSource
 import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
+import com.sonance.player.data.ResolvedQueue
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
 import org.json.JSONObject
@@ -1348,6 +1349,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
+            // 歌词：顺手取一份写进文件。
+            //
+            // 只在用户开了「在线歌词」时才取 —— 那是"允许联网取词"的总开关，
+            // 下载路径不该绕开它。取到了既写进 ID3（USLT 帧），也顺带落进歌词缓存，
+            // 于是这首歌在应用里第一次打开歌词页就是现成的，不用再联网。
+            val lyricsText = if (onlineLyricsEnabled) {
+                runCatching {
+                    LyricsRepository.textForTag(
+                        context = app,
+                        title = song.title,
+                        artist = song.artist,
+                        album = song.album,
+                        durationMs = song.durationMs,
+                        apiBase = lyricsApiBase,
+                        neteaseEnabled = neteaseFillEnabled
+                    )
+                }.getOrNull()
+            } else {
+                null
+            }
+
             val outcome = OnlineDownloader.download(
                 context = app,
                 source = song.source,
@@ -1356,7 +1378,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 artist = song.artist,
                 album = song.album,
                 streamUrl = src.streamUrl(remoteId),
-                coverBytes = coverBytesForTag(song)
+                coverBytes = coverBytesForTag(song),
+                lyrics = lyricsText
             )
             when (outcome) {
                 is OnlineDownloader.Outcome.Saved -> {
@@ -2011,11 +2034,60 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 队列、队列页、播放页都靠它按 id 反查。在线歌不在 [songs] 里，
      * 不并进来的话：播在线歌时队列页会是空的、播放页拿不到歌名歌手、
      * 封面也换不了。
+     *
+     * ⚠️ 三个来源缺一不可，尤其是第三项 [recentEntries] 里的**在线存档**：
+     * [onlineSongMap] 是纯内存的（本次会话搜到过才在），进程重启就空了，
+     * 但队列和最近播放里还留着那些负数 id。少了存档这一路，那些 id 会解析成
+     * null —— 而下游是按**列表下标**取歌的（`queue[index]`），
+     * 一个 null 被丢掉，后面的下标就全体前移一位：
+     * 表现就是「播放条明明是这首、进播放页却是另一首」（用户报的 bug）。
      */
     fun songMap(): Map<Long, Song> {
         val base = songs.associateBy { it.id }
-        if (onlineSongMap.isEmpty()) return base
-        return base + onlineSongMap
+        if (onlineSongMap.isEmpty() && recentEntries.isEmpty()) return base
+        val online = HashMap<Long, Song>(onlineSongMap.size + recentEntries.size)
+        online.putAll(onlineSongMap)
+        // 存档只补缺：本次搜到的结果信息更新（地址是刚取的）
+        recentEntries.forEach { e ->
+            val s = e.online?.toSong() ?: return@forEach
+            online.putIfAbsent(s.id, s)
+        }
+        if (online.isEmpty()) return base
+        return base + online
+    }
+
+    /**
+     * 播放器队列 → 界面用的 [Song] 列表，**并给出当前曲在结果里的真实下标**。
+     *
+     * ## 为什么不直接用 `queueIds.mapNotNull { songMap[it] }`
+     *
+     * 那样写等于允许"悄悄少掉几条"。而队列的消费方（播放页分页器、队列面板、
+     * 上一首/下一首）拿到的都是**下标**，少一条就全体错位：显示的、点的、删的
+     * 会一起偏 —— 这类错误不报异常、不打日志，表面只是"串了一首"，极难查。
+     *
+     * 下标对齐的规则本体在 [PlaybackRestore.alignIndices]（纯函数、有单测），
+     * 这里只负责把原始下标换成 [Song]。
+     *
+     * @param current 当前正在播的那首（调用方已按 mediaId 查好）。它解析不出来时
+     *   （例如文件已被删除但播放器还停在它上面），单独补在最前面，保证播放页
+     *   显示的仍然是"正在播的这首"，而不是队列里恰好排第一的另一首。
+     */
+    fun resolveQueue(ids: List<Long>, index: Int, current: Song?): ResolvedQueue {
+        val map = songMap()
+        val (kept, mapped) = PlaybackRestore.alignIndices(ids, index) { map[it] != null }
+        val songs = ArrayList<Song>(kept.size + 1)
+        val src = ArrayList<Int>(kept.size + 1)
+        kept.forEach { i ->
+            songs += map.getValue(ids[i])
+            src += i
+        }
+        var at = mapped
+        if (at < 0 && current != null) {
+            songs.add(0, current)
+            src.add(0, index)
+            at = 0
+        }
+        return ResolvedQueue(songs, at.coerceAtLeast(0), src)
     }
 
     // ===== 随机播放 =====
@@ -2026,10 +2098,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var preShuffleOrder: List<Song>? = null
 
-    /** 当前播放队列（按播放器里的顺序还原成 Song 列表） */
-    private fun currentQueue(): List<Song> {
-        val map = songMap()
-        return player.state.value.queueIds.mapNotNull { map[it] }
+    /**
+     * 当前播放队列（按播放器里的顺序还原成 Song 列表）。
+     *
+     * 用 [resolveQueue] 而不是 `mapNotNull`：**下标和列表必须成套拿**。
+     * 单独拿列表、再用播放器的原始下标去取，队列里有解析不出来的条目时
+     * 取到的就是另一首 —— 下面 [toggleShuffle] 要把"当前这首"挪到队首，
+     * 取错了就是把别的歌当成了当前曲。
+     */
+    private fun currentQueue(): ResolvedQueue {
+        val st = player.state.value
+        return resolveQueue(st.queueIds, st.queueIndex, songById(st.mediaId))
     }
 
     /**
@@ -2051,10 +2130,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleShuffle(quiet: Boolean = false) {
         val st = player.state.value
         if (!st.shuffle) {
-            val q = currentQueue()
+            val resolved = currentQueue()
+            val q = resolved.songs
             if (q.size > 1) {
                 preShuffleOrder = q
-                val cur = q.getOrNull(st.queueIndex)
+                // 用**解析后**的下标取当前曲（见 currentQueue 的说明）
+                val cur = q.getOrNull(resolved.index)
                 val rest = q.filter { it.id != cur?.id }.shuffled()
                 val shuffled = if (cur != null) listOf(cur) + rest else rest
                 player.toggleShuffle()

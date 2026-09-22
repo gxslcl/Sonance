@@ -189,6 +189,16 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_VIZ_FPS, false)
         set(v) = sp.edit().putBoolean(KEY_VIZ_FPS, v).apply()
 
+    /**
+     * 律动柱页面在歌名上方显示 3 行歌词。
+     *
+     * 默认**开**：那块本来就是空白，歌词填进去既有信息量又不挡可视化的主体
+     * （只占 3 行，落在那条底部压暗的带子里）。没有歌词时不显示，不会留一行占位文字。
+     */
+    var vizShowLyrics: Boolean
+        get() = sp.getBoolean(KEY_VIZ_LYRICS, true)
+        set(v) = sp.edit().putBoolean(KEY_VIZ_LYRICS, v).apply()
+
     // ===== 在线歌词 =====
 
     /**
@@ -670,6 +680,7 @@ class Prefs(context: Context) {
         private const val KEY_VIZ_COLOR = "viz_color_index"
         private const val KEY_VIZ_BARW = "viz_bar_width"
         private const val KEY_VIZ_FPS = "viz_show_fps"
+        private const val KEY_VIZ_LYRICS = "viz_show_lyrics"
         private const val KEY_VIZ_ATTACK = "viz_attack"
         private const val KEY_VIZ_DAMPING = "viz_decay_damping"
         private const val KEY_VIZ_GRAVITY = "viz_gravity"

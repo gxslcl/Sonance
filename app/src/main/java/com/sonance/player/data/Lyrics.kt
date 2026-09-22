@@ -171,9 +171,48 @@ object LyricsRepository {
         result
     }
 
+    /**
+     * 取一首歌的**在线歌词原文**，给「写进音乐文件」用。
+     *
+     * 和 [load] 的差别只有一处：**不读内嵌、不读本地文件**。调用它的场合是
+     * 「播放并下载」刚下完一首在线歌 —— 那一刻文件还没落盘，而
+     * `AudioTags.readLyrics(uri)` 会去开那个 http 地址（网易云的取流地址），
+     * 白等一次超时。
+     *
+     * 命中/未命中都写缓存（和 [load] 一致）：命中的结果是"下载完就能立刻看到歌词"，
+     * 未命中写的哨兵则保证下次不会为同一首歌反复打接口。
+     *
+     * @return LRC 原文；拿不到返回 null。**不做繁简转换** —— 写进文件的是原始文本，
+     *   转换只影响展示（用户关掉开关后应该看到原文）。
+     */
+    suspend fun textForTag(
+        context: Context,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Long,
+        apiBase: String,
+        neteaseEnabled: Boolean
+    ): String? = withContext(Dispatchers.IO) {
+        val key = LyricsCache.keyOf(title, artist, apiBase) ?: return@withContext null
+        when (val hit = LyricsCache.lookup(context, key)) {
+            is LyricsCache.Lookup.Hit -> return@withContext hit.text.takeIf { it.isNotBlank() }
+            // 之前查过、确认没有 → 不再打接口（避免被限流）
+            LyricsCache.Lookup.KnownMiss -> return@withContext null
+            LyricsCache.Lookup.Unknown -> Unit
+        }
+        var text = if (apiBase.isNotBlank()) OnlineLyrics.fetch(apiBase, title, artist, album) else null
+        if (text.isNullOrBlank() && neteaseEnabled) {
+            text = NeteaseSource.findTrackFor(title, artist, durationMs)
+                ?.let { NeteaseSource.lyrics(it.remoteId) }
+        }
+        // 两个源都试完才写哨兵 —— 提前写会把网易云那条路一起短路掉（同 [load]）
+        LyricsCache.store(context, key, text)
+        text?.takeIf { it.isNotBlank() }
+    }
+
     /** 忘掉这一首的在线歌词缓存（拿到错误歌词后先清掉，再重新搜） */
-    fun forget(context: Context, title: String, artist: String, apiBase: String) {
-        val key = LyricsCache.keyOf(title, artist, apiBase) ?: return
+    fun forget(context: Context, title: String, artist: String, apiBase: String) {        val key = LyricsCache.keyOf(title, artist, apiBase) ?: return
         cache.remove(key)
         LyricsCache.remove(context, key)
     }

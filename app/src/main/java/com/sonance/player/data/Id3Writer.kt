@@ -46,15 +46,17 @@ internal object Id3Writer {
      * 组装一个完整的 ID3v2.3 标签（含 10 字节头）。
      *
      * @param cover 封面原始字节（可以是 JPEG 或 PNG）。传 null 就不写 APIC 帧
+     * @param lyrics 歌词文本（LRC 原样存）。传 null / 空白就不写 USLT 帧
      */
     internal fun buildTag(
         title: String,
         artist: String,
         album: String,
         cover: ByteArray? = null,
-        coverMime: String? = null
+        coverMime: String? = null,
+        lyrics: String? = null
     ): ByteArray {
-        val frames = ArrayList<ByteArray>(4)
+        val frames = ArrayList<ByteArray>(5)
         if (title.isNotBlank()) frames += textFrame("TIT2", title)
         if (artist.isNotBlank()) frames += textFrame("TPE1", artist)
         if (album.isNotBlank()) frames += textFrame("TALB", album)
@@ -63,6 +65,9 @@ internal object Id3Writer {
         if (cover != null && cover.isNotEmpty()) {
             frames += apicFrame(cover, coverMime?.takeIf { it.isNotBlank() } ?: DEFAULT_MIME)
         }
+        // 歌词同理：空字符串不写帧。歌词文本按**原样**存（LRC 的时间轴要留着，
+        // 播放器就是靠 `[mm:ss.xx]` 做滚动高亮的）
+        if (!lyrics.isNullOrBlank()) frames += lyricsFrame(lyrics)
 
         val bodySize = frames.sumOf { it.size }
         val out = ByteArray(10 + bodySize)
@@ -149,6 +154,40 @@ internal object Id3Writer {
 
     /** 文本帧：编码字节 + BOM + UTF-16LE */
     private fun textFrame(id: String, text: String): ByteArray = frame(id, utf16(text))
+
+    /**
+     * USLT（非同步歌词）帧：
+     * `编码(1) + 语言(3, ASCII) + 描述(按编码, 以 \0 结尾) + 歌词正文(按编码)`
+     *
+     * 三个决定：
+     * - **正文原样存 LRC**（`[mm:ss.xx]词`）。放纯文本的话时间轴就丢了，
+     *   Poweramp / Musicolet / foobar2000 这些读 USLT 的播放器都是自己解析 LRC
+     *   来做滚动高亮的，必须把标签留着。
+     * - **描述留空**（只写 BOM + 结束符）。写"歌词"这类描述，有些解析器会把它
+     *   连同正文一起显示出来。
+     * - **语言用 `XXX`**（ISO-639-2 里的"未定义"）。用 `chi` 之类的具体值并不更准，
+     *   中文歌里夹英文、纯英文歌都会对不上。
+     */
+    private fun lyricsFrame(lyrics: String): ByteArray {
+        // 正文用 UTF-16LE + BOM（和文本帧同一种编码，中文才不会是问号）
+        val body = lyrics.toByteArray(Charsets.UTF_16LE)
+        val payload = ByteArray(1 + 3 + 4 + 2 + body.size)
+        var p = 0
+        payload[p++] = ENC_UTF16_BOM
+        payload[p++] = 'X'.code.toByte()
+        payload[p++] = 'X'.code.toByte()
+        payload[p++] = 'X'.code.toByte()
+        // 空描述：BOM + UTF-16 的结束符（两个 0 字节）
+        payload[p++] = 0xFF.toByte()
+        payload[p++] = 0xFE.toByte()
+        payload[p++] = 0x00
+        payload[p++] = 0x00
+        // 正文自己的 BOM
+        payload[p++] = 0xFF.toByte()
+        payload[p++] = 0xFE.toByte()
+        body.copyInto(payload, p)
+        return frame("USLT", payload)
+    }
 
     /**
      * APIC 帧：

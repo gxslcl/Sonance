@@ -103,7 +103,14 @@ import kotlin.math.roundToInt
 @Composable
 fun FullPlayer(
     state: PlayerUiState,
+    /**
+     * 播放队列。**必须和 [queueIndex] 配套使用** ——
+     * 这份列表是"解析后"的（解析不出来的条目会被跳过），
+     * 所以它的下标和播放器里的下标不是一回事，别拿 [PlayerUiState.queueIndex] 去索引它。
+     */
     queue: List<Song>,
+    /** 当前曲在 [queue] 里的下标（见 [ResolvedQueue.index]） */
+    queueIndex: Int,
     favorites: Set<Long>,
     onClose: () -> Unit,
     onPlayAt: (Int) -> Unit,
@@ -177,7 +184,7 @@ fun FullPlayer(
 
     // 歌曲分页器。**必须声明在晕染素材之前** —— 跟手模式要按它的滚动位置混合颜色。
     val pagerState = rememberPagerState(
-        initialPage = state.queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+        initialPage = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
     ) { queue.size }
 
     // ===== 晕染素材 =====
@@ -203,7 +210,7 @@ fun FullPlayer(
     } else {
         listOf(
             rememberGlowFrame(
-                colors = rememberFadeGlowColors(queue, state.queueIndex, skin, glowFadeMs),
+                colors = rememberFadeGlowColors(queue, queueIndex, skin, glowFadeMs),
                 mode = glowMode,
                 strength = glowStrength
             )
@@ -212,9 +219,9 @@ fun FullPlayer(
 
     // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
     // 只取前后各一首 —— 队列可能有几千首，不能遍历。
-    LaunchedEffect(state.queueIndex, queue.size) {
+    LaunchedEffect(queueIndex, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
-        val idx = state.queueIndex
+        val idx = queueIndex
         listOfNotNull(queue.getOrNull(idx + 1), queue.getOrNull(idx - 1)).forEach { s ->
             ArtworkLoader.prefetchTint(
                 context = context,
@@ -253,19 +260,19 @@ fun FullPlayer(
     }
 
     // 分页器 → 播放器：只在页面「落定」后切歌，避免滑动过程中反复触发。
-    // 用 rememberUpdatedState 读取最新 queueIndex，否则快照流里会捕获到旧值。
-    val latestState by rememberUpdatedState(state)
+    // 用 rememberUpdatedState 读取最新下标，否则快照流里会捕获到旧值。
+    val latestIndex by rememberUpdatedState(queueIndex)
     LaunchedEffect(pagerState, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
         snapshotFlow { pagerState.settledPage }.collect { page ->
-            if (page != latestState.queueIndex) onPlayAt(page)
+            if (page != latestIndex) onPlayAt(page)
         }
     }
 
     // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列时把页面跟过去。
-    LaunchedEffect(state.queueIndex, queue.size) {
+    LaunchedEffect(queueIndex, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
-        val target = state.queueIndex.coerceIn(0, queue.lastIndex)
+        val target = queueIndex.coerceIn(0, queue.lastIndex)
         if (pagerState.settledPage != target && !pagerState.isScrollInProgress) {
             pagerState.animateScrollToPage(target)
         }
@@ -323,7 +330,7 @@ fun FullPlayer(
                 }
             }
     ) {
-        val currentSong = queue.getOrNull(state.queueIndex)
+        val currentSong = queue.getOrNull(queueIndex)
 
         // 三层横向轮播。这里用 HorizontalPager 而不是 AnimatedContent：
         // 内容会**跟着手指走**、松手回弹到最近一层，这才是轮播该有的手感；
@@ -473,7 +480,7 @@ fun FullPlayer(
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
                     val song = queue.getOrNull(page) ?: return@VerticalPager
-                    val isCurrent = page == state.queueIndex
+                    val isCurrent = page == queueIndex
                     // 每一页都裁到自己的范围 —— **包括当前页**。
                     //
                     // 早先这里给当前页留了豁免（不裁），理由是「晕染画在封面层、

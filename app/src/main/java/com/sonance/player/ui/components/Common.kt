@@ -101,21 +101,20 @@ fun CoverArt(
         mutableStateOf(ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey))
     }
 
-    LaunchedEffect(albumId, sizePx, sourceUri, coverKey, ArtworkLoader.paused) {
-        // 缓存命中：同步取，不走协程，也不再受 paused 影响
-        ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey)?.let {
-            bitmap = it
-            return@LaunchedEffect
-        }
-        // 滚动暂停期间只跳过"需要新解码"的，不动已有的图。
-        // 之前这里会走到 load() 拿回 null 再赋给 bitmap，等于把已经加载好的封面
-        // 抹掉、退回占位图 —— 滚动时封面会"闪一下"。
-        if (ArtworkLoader.paused) return@LaunchedEffect
-        bitmap = if (albumId > 0 || sourceUri != null || coverKey != null) {
-            ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)
-        } else {
-            null
-        }
+    LaunchedEffect(albumId, sizePx, sourceUri, coverKey) {
+        // ⚠️ 这里**不读** ArtworkLoader.paused。
+        //
+        // 以前的写法是"滚动中直接 return"，结果封面只能等手停下来才开工 ——
+        // 用户看到的就是「快速滑动时没有封面，停下 0.5~1 秒才出来」。
+        // 现在滚动照常加载，只在 [ArtworkLoader] 内部把并发压低（见 scrollGate），
+        // 于是封面往往在手指还没停就已经就位了。
+        //
+        // 也因此不需要再把 paused 放进 key（那是为了让"被跳过的行"在滚动结束后
+        // 补一次加载）；这个 effect 现在一次跑到底。
+        if (albumId <= 0 && sourceUri == null && coverKey == null) return@LaunchedEffect
+        // 拿不到就保持现状（占位图），**不要**把它赋成 null ——
+        // 那会把首帧 peek 到的、或已经加载好的封面抹掉。
+        ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)?.let { bitmap = it }
     }
 
     // 读 SnapshotStateMap：在线封面补进来时这里会自动重组

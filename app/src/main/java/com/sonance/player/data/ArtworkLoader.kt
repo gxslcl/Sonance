@@ -195,17 +195,31 @@ object ArtworkLoader {
      * 同时进行的解码任务上限。
      *
      * 原来只有 2 —— 一屏十来行封面要排 5~6 批，每批都要等一轮 MediaStore IPC，
-     * 加起来就是肉眼可见的一两秒。取 6：一屏的量基本能一波跑完，
-     * 而 256px 的 RGB_565 缩略图每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
+     * 加起来就是肉眼可见的一两秒。后来放到 6，一屏的量基本能一波跑完。
+     *
+     * 现在放到 8：滚动期间**也**允许加载（见 [load] 里对 [paused] 的用法），
+     * 并发里有一部分会被"滑过去又没停住"的行占着。256px 的 RGB_565 缩略图
+     * 每张约 128KB，8 张同时在解也就 1MB 上下，内存无压力。
      */
-    private val decodeGate = Semaphore(permits = 6)
+    private val decodeGate = Semaphore(permits = 8)
 
     /**
-     * 列表 / 网格滚动中：跳过**新发起**的加载。
+     * **滚动期间**的额外并发上限。
      *
-     * 必须是 Compose 的 [mutableStateOf] 而不是普通字段 ——
-     * `CoverArt` 把它当 `LaunchedEffect` 的 key 用，普通字段不参与快照系统，
-     * 变化不会重启 effect，滚动停止后那些被跳过的行就永远不补图了。
+     * 滚动时允许加载，是为了让封面在手指停下之前就开始出来（原来是一停手才开工，
+     * 于是"停下来 0.5~1 秒才显示"）。但滚动期间没必要开到 8 ——
+     * 那时发起的加载有一部分是给"滑过去就没停住"的行做的，开到满会跟滑动动效抢 IO。
+     *
+     * 两个信号量是**套用**的（先拿大闸、滚动中再拿小闸），不是二选一：
+     * 静止时只有大闸生效，滚动中才叠加限制。
+     */
+    private val scrollGate = Semaphore(permits = 2)
+
+    /**
+     * 列表 / 网格**是否正在滚动**。
+     *
+     * 语义已经改过：以前它是"滚动中就完全不加载"，这会让封面只能等手停下来才开工；
+     * 现在它只用来**降并发**（见 [scrollGate]）。用例见 `CoverArt`。
      */
     var paused: Boolean by mutableStateOf(false)
 
@@ -467,8 +481,6 @@ object ArtworkLoader {
         // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
         cache.get(localKey)?.let { return it }
         cache.get(key)?.let { return it }
-        // 滚动中跳过新发起的加载
-        if (paused) return null
 
         // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
@@ -480,7 +492,14 @@ object ArtworkLoader {
             decodeGate.withPermit {
                 cache.get(localKey)?.let { return@withPermit it }
                 cache.get(key)?.let { return@withPermit it }
-                decode(context, albumId, size, key, localKey, sourceUri, coverKey)
+                // 滚动中：叠加一层更严的名额限制，而不是像以前那样整个跳过。
+                // 跳过等于"手不停就不开工"，封面只能等停下来才解码 —— 那正是
+                // 「快速滑动时没封面、停下 0.5~1 秒才出来」的原因。
+                if (paused) {
+                    scrollGate.withPermit { decode(context, albumId, size, key, localKey, sourceUri, coverKey) }
+                } else {
+                    decode(context, albumId, size, key, localKey, sourceUri, coverKey)
+                }
             }
         }
     }

@@ -43,8 +43,42 @@ object PlaybackRestore {
         savedIndex: Int,
         libraryIds: Set<Long>
     ): Pair<List<Long>, Int>? {
-        val queue = savedIds.filter { it in libraryIds }
-        if (queue.isEmpty()) return null
-        return queue to savedIndex.coerceIn(0, queue.lastIndex)
+        val (kept, mapped) = alignIndices(savedIds, savedIndex) { it in libraryIds }
+        if (kept.isEmpty()) return null
+        val queue = kept.map { savedIds[it] }
+        // 存档里那首**还在** → 用它对齐后的真实位置（这时可能和原下标不同，
+        // 因为前面被丢掉的歌会让它前移）。它自己也没了 → 保留旧的"夹紧"行为，
+        // 至少不会因为下标越界而崩。
+        val index = if (mapped >= 0) mapped else savedIndex.coerceIn(0, queue.lastIndex)
+        return queue to index
+    }
+
+    /**
+     * 按条件过滤一个 id 序列，**同时把下标一起对齐**。
+     *
+     * ## 为什么必须一起做
+     *
+     * 凡是"过滤掉一些 id、但下游仍然按下标取歌"的地方，只过滤不重映射下标，
+     * 就会静默串歌：显示的是 `queue[index]`，而 index 还是过滤前的那个数 ——
+     * 少掉一条，后面全体前移一位。这类错误不报异常、不打日志，
+     * 表面现象只是"播放条是这首、进去却是另一首"，极难定位。
+     *
+     * 冷启动恢复现场、播放页的队列、队列面板都吃这条规则，所以抽在这里共用。
+     *
+     * @param ids     原始 id 序列（顺序即队列顺序）
+     * @param index   关心它在过滤后的位置的那个下标（通常是"当前播到第几首"）
+     * @param keep    这个 id 是否保留
+     * @return first = 保留项在**原始序列里的下标**（升序，可直接拿去取歌）；
+     *         second = `ids[index]` 在保留后的下标，**它自己没被保留时为 -1**
+     */
+    fun alignIndices(ids: List<Long>, index: Int, keep: (Long) -> Boolean): Pair<List<Int>, Int> {
+        val kept = ArrayList<Int>(ids.size)
+        var mapped = -1
+        ids.forEachIndexed { i, id ->
+            if (!keep(id)) return@forEachIndexed
+            if (i == index) mapped = kept.size
+            kept += i
+        }
+        return kept to mapped
     }
 }

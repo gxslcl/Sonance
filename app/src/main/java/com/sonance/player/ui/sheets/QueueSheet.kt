@@ -43,6 +43,8 @@ import com.sonance.player.ui.theme.LocalSkin
 @Composable
 fun QueueSheet(
     queue: List<Song>,
+    /** 当前曲在 [queue] 里的下标。**不能拿 state.queueIndex 直接用** —— 见 [ResolvedQueue] */
+    queueIndex: Int,
     state: PlayerUiState,
     onDismiss: () -> Unit,
     onPlayAt: (Int) -> Unit,
@@ -90,7 +92,7 @@ fun QueueSheet(
                         color = skin.text
                     )
                     Text(
-                        "${queue.size} 首 · 第 ${(state.queueIndex + 1).coerceAtLeast(1)} 首",
+                        "${queue.size} 首 · 第 ${(queueIndex + 1).coerceAtLeast(1)} 首",
                         style = MaterialTheme.typography.labelSmall,
                         color = skin.textMuted
                     )
@@ -124,9 +126,9 @@ fun QueueSheet(
                 //
                 // 已经在可视区里就不动：播放中自动切歌时列表会跟着走（这是想要的），
                 // 但用户自己翻到别处、当前曲恰好还在可视区内时不该被拽走。
-                LaunchedEffect(state.queueIndex, queue.size) {
+                LaunchedEffect(queueIndex, queue.size) {
                     if (queue.isEmpty()) return@LaunchedEffect
-                    val target = state.queueIndex.coerceIn(0, queue.lastIndex)
+                    val target = queueIndex.coerceIn(0, queue.lastIndex)
                     val visible = listState.layoutInfo.visibleItemsInfo
                     if (visible.any { it.index == target }) return@LaunchedEffect
                     listState.scrollToItem(target)
@@ -145,7 +147,7 @@ fun QueueSheet(
                         QueueSongRow(
                             song = song,
                             index = index,
-                            isCurrent = state.queueIndex == index,
+                            isCurrent = queueIndex == index,
                             isPlaying = state.isPlaying,
                             onClick = { playAtI(index) },
                             onRemove = { removeAtI(index) }

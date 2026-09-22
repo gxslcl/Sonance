@@ -132,6 +132,7 @@ fun VisualizerOverlay(
     var mirror by remember { mutableStateOf(prefs.vizMirror) }
     var settingsOpen by remember { mutableStateOf(false) }
     var showFps by remember { mutableStateOf(prefs.vizShowFps) }
+    var showLyrics by remember { mutableStateOf(prefs.vizShowLyrics) }
     var colorIndex by remember { mutableStateOf(prefs.vizColorIndex) }
     var barWidth by remember { mutableStateOf(prefs.vizBarWidth) }
 
@@ -257,6 +258,19 @@ fun VisualizerOverlay(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            // 歌名上方那块留白：默认填 3 行歌词（当前句 + 前后各一句）。
+            // 没有同步歌词时 [LyricStrip] 会自己什么都不画，不占高度、不留占位文字。
+            if (showLyrics) {
+                LyricStrip(
+                    song = song,
+                    positionMs = positionMs,
+                    prefs = prefs,
+                    // 比歌词页小 5sp：这条只占屏幕底部那条压暗的带子，
+                    // 太大反而会把律动柱主体压掉一块。
+                    fontSizeSp = (prefs.lyricsFontSizeSp - 5).coerceIn(11, 24),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             Text(
                 text = song.title,
                 style = MaterialTheme.typography.headlineMedium,
@@ -334,6 +348,7 @@ fun VisualizerOverlay(
                 sensitivity = sensitivity,
                 mirror = mirror,
                 showFps = showFps,
+                showLyrics = showLyrics,
                 colorIndex = colorIndex,
                 barWidth = barWidth,
                 accentPreview = barColor,
@@ -356,6 +371,10 @@ fun VisualizerOverlay(
                 onShowFps = {
                     showFps = it
                     prefs.vizShowFps = it
+                },
+                onShowLyrics = {
+                    showLyrics = it
+                    prefs.vizShowLyrics = it
                 },
                 onColor = {
                     colorIndex = it
@@ -790,6 +809,8 @@ private fun VizSettingsPanel(
     sensitivity: Float,
     mirror: Boolean,
     showFps: Boolean,
+    /** 歌名上方是否显示 3 行歌词（律动柱页面里那块留白） */
+    showLyrics: Boolean,
     colorIndex: Int,
     barWidth: Float,
     accentPreview: Color,
@@ -798,6 +819,7 @@ private fun VizSettingsPanel(
     onSensitivity: (Float) -> Unit,
     onMirror: (Boolean) -> Unit,
     onShowFps: (Boolean) -> Unit,
+    onShowLyrics: (Boolean) -> Unit,
     onColor: (Int) -> Unit,
     onBarWidth: (Float) -> Unit,
     attack: Float,
@@ -1091,6 +1113,42 @@ Column(
                             .size(18.dp)
                             .clip(CircleShape)
                             .background(if (showFps) skin.onAccent else skin.textDim)
+                    )
+                }
+            }
+
+            // 歌名上方的 3 行歌词（这一页本来就空着那条带子）
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        "显示歌词",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.textMuted
+                    )
+                    Text(
+                        "歌名上方显示 3 行（当前句 + 前后各一句）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textDim
+                    )
+                }
+                Box(
+                    Modifier
+                        .size(width = 42.dp, height = 24.dp)
+                        .clip(CircleShape)
+                        .background(if (showLyrics) skin.accent else skin.surface3)
+                        .clickable { onShowLyrics(!showLyrics) },
+                    contentAlignment = if (showLyrics) Alignment.CenterEnd else Alignment.CenterStart
+                ) {
+                    Box(
+                        Modifier
+                            .padding(horizontal = 3.dp)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(if (showLyrics) skin.onAccent else skin.textDim)
                     )
                 }
             }
