@@ -84,7 +84,12 @@ fun rememberRemoteCover(url: String?, sizePx: Int = OnlineCover.THUMB_PX): Image
 @Composable
 fun CoverPickerDialog(vm: SonanceViewModel) {
     val songId = vm.coverTargetSongId
-    if (songId <= 0L) return
+    // 判据是 `== 0` 而不是 `<= 0`：在线歌的 id 是**负数**。
+    // 写成 `<= 0` 的话，在线歌点「手动搜索封面」会静默无反应 ——
+    // 对话框根本不渲染，也没有任何提示，看起来像按钮坏了。
+    // 在线歌换封面是有意义的（音源给的封面经常是错版本），
+    // 换完落进 CoverCache，键就是 `OnlineCover.keyOf(title, artist)`，和自动补图同一个。
+    if (songId == 0L) return
     val song = vm.songById(songId) ?: return
 
     val skin = LocalSkin.current

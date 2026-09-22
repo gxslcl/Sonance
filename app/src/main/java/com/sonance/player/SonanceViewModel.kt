@@ -229,6 +229,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 恢复完成、播放器真正报出 mediaId 之后再请求列表定位。
         // 不能恢复完直接 requestScrollToCurrent()：那一刻 mediaId 还是 -1，
         // SongList 里那个 effect 会因为 `currentId <= 0` 提前 return，白请求一次。
+        //
+        // `> 0` 也顺带排除了在线歌（负数 id）—— 这是对的：它们不在本地曲库列表里，
+        // 没有"滚到那一行"可言。
         viewModelScope.launch {
             player.state.collect { st ->
                 if (pendingStartupScroll && st.mediaId > 0L) {
@@ -293,6 +296,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val st = player.state.value
         // 什么都没加载时**一个字段都不要写** —— 否则「打开就立刻关掉」这种操作
         // 会把上次存好的进度抹成 0（那一刻播放器还没连上，positionMs 是 0）。
+        //
+        // `> 0` 这个判据**顺带**把在线歌（负数 id）也挡掉了，这是想要的：
+        // 它们的播放地址是临时的、重启后要重新解析，`PlaybackRestore` 也按
+        // "还在不在本地曲库里"把它们滤掉。所以**别**把它改成 `!= 0` ——
+        // 那样只会让"上次播放"指向一首冷启动后根本找不回来的歌。
         if (st.mediaId > 0L) {
             prefs.lastSongId = st.mediaId
             prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
@@ -676,8 +684,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var coverNotice by mutableStateOf<String?>(null)
         private set
 
-    /** 正在手动选封面的歌曲 */
-    var coverTargetSongId by mutableLongStateOf(-1L)
+    /**
+     * 正在手动选封面的歌曲；**0 表示没有**。
+     *
+     * ⚠️ 哨兵必须是 0，不能沿用 `-1L`：本地歌 id 为正、在线歌 id 为负
+     * （`remoteSongId` 的值域是 `[-2147483648, -1]`），而哈希恰好为 0 时
+     * 在线歌的 id **就是 -1** —— 用 -1 当哨兵会和真实歌曲撞上，
+     * 表现是"关掉选封面对话框之后它自己又弹出来了"。
+     * 0 在这个项目里一直是「没有歌曲」的保留值，用它才安全。
+     */
+    var coverTargetSongId by mutableLongStateOf(0L)
         private set
 
     var coverCacheCount by mutableIntStateOf(0)
@@ -863,7 +879,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) {
                 song?.let { CoverCache.store(app, OnlineCover.keyOf(it.title, it.artist), raw) }
             }
-            prefs.pinCoverUrl(songId, candidate.fullUrl)
+            // 只有本地歌才记「用户钉过这张封面」。
+            //
+            // 在线歌的补图走 ensureOnlineSongCover，它只认音源给的地址、**不读这个 pin** ——
+            // 写了也永远不会被读，只是往 SharedPreferences 里堆垃圾（每首一个 key）。
+            // 手选的封面本身已经落进 CoverCache，在线歌下次播放照样会用上。
+            if (!isRemoteSongId(songId)) prefs.pinCoverUrl(songId, candidate.fullUrl)
             val bmp = OnlineCover.decode(raw, OnlineCover.FULL_PX)
             ArtworkLoader.putOnline(songId, bmp?.asImageBitmap())
             coverTried.add(songId)
@@ -874,7 +895,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
             coverSearching = false
             coverResults = emptyList()
-            coverTargetSongId = -1L
+            coverTargetSongId = 0L
             refreshCoverCacheStats()
             showToast("封面已更新")
         }
@@ -906,7 +927,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeCoverPicker() {
-        coverTargetSongId = -1L
+        coverTargetSongId = 0L
         coverResults = emptyList()
         coverNotice = null
     }

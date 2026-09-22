@@ -46,12 +46,37 @@ class OnlineMusicTest {
     }
 
     @Test
-    fun `在线歌 id 永远不是 0`() {
-        // 0 在上层被当作"没有歌曲"的哨兵（比如 PlayerUiState.mediaId 的默认值）
-        val samples = (0..500).map { "netease" to it.toString() }
+    fun `在线歌 id 避开 0 和 -1 两个哨兵值`() {
+        // 0 是「没有歌曲」的保留值（PlayerUiState.mediaId 的默认值之一、
+        // coverTargetSongId 的「已关闭」值），撞上会让"没有歌曲"被误判成
+        // "正在播这首歌" —— 比如关掉选封面对话框之后它自己又弹出来。
+        val samples = (0..500).map { "netease" to it.toString() } +
+            listOf("" to "", "netease" to "", "a" to "b")
         for ((source, remoteId) in samples) {
-            assertTrue(remoteSongId(source, remoteId) != 0L)
+            val id = remoteSongId(source, remoteId)
+            assertTrue("remoteSongId($source, $remoteId) = $id 不能是 0", id != 0L)
+            assertTrue("remoteSongId($source, $remoteId) = $id 不能是 -1", id != -1L)
         }
+    }
+
+    @Test
+    fun `id 落在安全区间内不会溢出`() {
+        // 实现是「取 62 位再 +2 取负」，必须确认极端值也不越界
+        for (s in listOf("", "a", "netease", "很长的音源名字")) {
+            for (r in listOf("", "1", "0", "9999999999", "很长的远端 id")) {
+                val id = remoteSongId(s, r)
+                assertTrue(id <= -2L)
+                assertTrue(id > Long.MIN_VALUE + 1)
+            }
+        }
+    }
+
+    @Test
+    fun `source 与 remoteId 之间不会串位`() {
+        // 拼 key 时必须带分隔符，否则 ("ab","c") 和 ("a","bc") 会算成同一首
+        assertTrue(
+            remoteSongId("ab", "c") != remoteSongId("a", "bc")
+        )
     }
 
     @Test
@@ -77,6 +102,19 @@ class OnlineMusicTest {
     fun `不同歌曲的 id 不同`() {
         val ids = listOf("1", "2", "3", "186016", "2652820720").map { remoteSongId("netease", it) }
         assertEquals(ids.size, ids.toSet().size)
+    }
+
+    @Test
+    fun `一万首不同的歌一个都不撞车`() {
+        // 这条就是「为什么不用 String.hashCode()」的验收标准：
+        // 32 位哈希在这个规模下约有 1% 的撞车概率（生日问题），
+        // 撞了会静默地"点 A 播成 B"。62 位的 FNV-1a 应该一个都不撞。
+        val seen = HashSet<Long>(16_384)
+        for (i in 0 until 10_000) {
+            val id = remoteSongId("netease", "song-$i")
+            assertTrue("第 $i 首撞车了（id=$id）", seen.add(id))
+        }
+        assertEquals(10_000, seen.size)
     }
 
     @Test
@@ -216,6 +254,46 @@ class OnlineMusicTest {
         assertTrue(isRemoteSongId(id))
         assertTrue(id < 0L)
         assertTrue(id != 0L)
+    }
+
+    // ===== isRemoteUrl：把远程地址挡在本地封面探测之外 =====
+
+    @Test
+    fun `http 与 https 都算远程`() {
+        assertTrue(isRemoteUrl("http://m701.music.126.net/a.mp3"))
+        assertTrue(isRemoteUrl("https://music.163.com/song/media/outer/url?id=1.mp3"))
+        // 大小写不敏感：URI scheme 本身不区分大小写
+        assertTrue(isRemoteUrl("HTTP://example.com/a.mp3"))
+        assertTrue(isRemoteUrl("Https://example.com/a.mp3"))
+    }
+
+    @Test
+    fun `本地地址不算远程`() {
+        // 这几种都必须继续走本地封面探测，误判的话内嵌封面会整体失效
+        assertFalse(isRemoteUrl("content://media/external/audio/media/123"))
+        assertFalse(isRemoteUrl("file:///storage/emulated/0/Music/a.mp3"))
+        assertFalse(isRemoteUrl("/storage/emulated/0/Music/a.mp3"))
+    }
+
+    @Test
+    fun `空地址不算远程`() {
+        assertFalse(isRemoteUrl(null))
+        assertFalse(isRemoteUrl(""))
+        assertFalse(isRemoteUrl("   "))
+    }
+
+    @Test
+    fun `不会把 http 开头的本地文件名误判成远程`() {
+        // 边界：只有真正的 scheme 才算，`httpfoo:` 不是 http
+        assertFalse(isRemoteUrl("httpfoo://example.com/a"))
+    }
+
+    @Test
+    fun `isRemoteUri 只测得了 null 这一种情况`() {
+        // `Uri` 在 JVM 单测里造不出来（parse / EMPTY / fromFile 全是 null，
+        // 构造器又是 private），所以只能钉住"空值不误判"这条。
+        // 非空的分支由 isRemoteUrl 的用例覆盖 —— isRemoteUri 只是它的 Uri 包装。
+        assertFalse(isRemoteUri(null))
     }
 
     // ===== 在线歌映射的淘汰规则 =====

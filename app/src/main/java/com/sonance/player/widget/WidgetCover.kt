@@ -17,6 +17,7 @@ import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import com.sonance.player.data.CoverCache
+import com.sonance.player.data.isRemoteUrl
 
 /**
  * 给桌面小组件准备封面位图。
@@ -71,8 +72,14 @@ internal object WidgetCover {
         }
 
         // 3) 文件内嵌封面
+        //
+        // ⚠️ 必须排除 http(s)：在线歌的 sourceUri 是**取流地址**，而
+        // `MediaMetadataRetriever.setDataSource(url)` 会真的把整个音频流拉下来
+        // 再找内嵌图 —— 一首歌几十 MB、十几秒。小组件的 onUpdate 只有约 10 秒
+        // 预算，超了会被系统判 ANR（而且是在小组件宿主进程里崩，很难查）。
+        // 在线歌的封面走上面第 1 步（下载落盘的那张）。
         val uriStr = snap.sourceUri
-        if (!uriStr.isNullOrBlank()) {
+        if (!uriStr.isNullOrBlank() && !isRemoteUrl(uriStr)) {
             fromEmbedded(uriStr, targetPx)?.let { return it }
         }
         return null

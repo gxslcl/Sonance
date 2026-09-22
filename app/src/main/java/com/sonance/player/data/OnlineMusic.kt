@@ -113,13 +113,49 @@ data class RemoteTrack(
 /**
  * 在线歌在本地用的 id。
  *
- * 压成**负数**：MediaStore 给的 id 全是正数，这样两者永远不会撞。
- * 也永远不会返回 0（0 被上层当作"没有歌曲"的哨兵）。
+ * ## 为什么不用 `String.hashCode()`
+ *
+ * `hashCode()` 只有 **32 位**，几千首歌就有约 1% 的撞车概率（生日问题：
+ * `1 - exp(-N²/2³³)`，N=10000 时约 1.2%）。撞了之后的症状是**静默的**：
+ * `onlineSongMap` 里后一首覆盖前一首，用户点 A 会播成 B，而且只在
+ * 特定的两首歌之间出现，几乎不可能复现。
+ *
+ * 这里用 **FNV-1a 64 位**，把概率压到可忽略。顺带还消掉了原实现里
+ * `"$source:$remoteId"` 的字符串拼接 —— 这个函数在搜索列表的每行每次重组
+ * 都会被调用，是无谓的分配。
+ *
+ * ## 为什么结果必须落在特定的负数区间
+ *
+ * - **恒为负**：MediaStore 的 id 恒为正，「符号」就是本地/在线的判据
+ *   （见 [isRemoteSongId]），本地统计和收藏靠它挡掉在线歌。
+ * - **不是 0**：0 在这个项目里是「没有歌曲」的保留值。
+ * - **不是 -1**：`PlayerUiState.mediaId` 和几个对话框的默认值都用它当哨兵，
+ *   撞上会让「没有歌曲」被误判成「正在播这首歌」。
+ *
+ * 所以先取 62 位，再整体挪到 `[-2⁶² - 1, -2]`。
  */
 fun remoteSongId(source: String, remoteId: String): Long {
-    val h = (source + ":" + remoteId).hashCode().toLong() and 0x7FFFFFFFL
-    return -h - 1L
+    var h = FNV_OFFSET_BASIS
+    for (c in source) {
+        h = (h xor c.code.toLong()) * FNV_PRIME
+    }
+    h = (h xor SEPARATOR) * FNV_PRIME
+    for (c in remoteId) {
+        h = (h xor c.code.toLong()) * FNV_PRIME
+    }
+    // 取 62 位：留出余量，`+2` 之后不会溢出 Long
+    val mag = h and 0x3FFFFFFFFFFFFFFFL
+    return -(mag + 2L)
 }
+
+/** FNV-1a 64 位偏移基数 */
+private const val FNV_OFFSET_BASIS = -0x340d631b7bdddcdbL
+
+/** FNV-1a 64 位质数 */
+private const val FNV_PRIME = 0x100000001b3L
+
+/** 拼 source 和 remoteId 时的分隔符，避免 ("ab","c") 和 ("a","bc") 撞上 */
+private const val SEPARATOR = 0x3AL // ':'
 
 /**
  * 这个 id 是不是在线歌。
@@ -132,6 +168,31 @@ fun remoteSongId(source: String, remoteId: String): Long {
  * 把 SharedPreferences 撑大，而且**永远清不掉**（用户看不到它们，自然也不会去清）。
  */
 fun isRemoteSongId(id: Long): Boolean = id < 0
+
+/**
+ * 这个地址是不是**远程**的（在线歌的取流 URL）。
+ *
+ * 本地封面探测必须把这类地址挡在外面 —— `MediaMetadataRetriever.setDataSource(url)`
+ * 和 `ContentResolver.loadThumbnail(httpUri)` 都会**真的把整个音频流拉下来**
+ * 再去找内嵌图：一首歌几十 MB、耗时十几秒。
+ *
+ * 两处消费方都靠它：
+ *
+ * | 谁 | 不挡会怎样 |
+ * |---|---|
+ * | `ArtworkLoader` | 占着解码许可（只有 2 个）十几秒 → 整条封面流水线堵死，表现是"封面都不出来了" |
+ * | `WidgetCover` | 撑爆小组件 `onUpdate` 约 10 秒的预算 → 被系统判 ANR |
+ *
+ * 在线歌的封面本来就走 `coverKey` → 磁盘缓存那条路，不需要探测流本身。
+ */
+fun isRemoteUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    return url.startsWith("http://", ignoreCase = true) ||
+        url.startsWith("https://", ignoreCase = true)
+}
+
+/** [isRemoteUrl] 的 Uri 版本 */
+fun isRemoteUri(uri: Uri?): Boolean = isRemoteUrl(uri?.toString())
 
 /**
  * 在线歌映射该保留哪些 id —— 用来淘汰用不上的条目。

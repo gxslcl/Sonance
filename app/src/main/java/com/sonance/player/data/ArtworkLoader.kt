@@ -65,17 +65,10 @@ object ArtworkLoader {
     /**
      * 是不是**远程**地址（在线歌的取流 URL）。
      *
-     * 必须把这类地址挡在本地封面探测之外 —— 对 `http(s)://` 调
-     * `loadThumbnail` 会抛异常（被 `runCatching` 吞掉，还好），但
-     * [readEmbeddedPicture] 里的 `MediaMetadataRetriever` 会**真的去把整个
-     * 音频流拉下来**再找内嵌图：一首歌几十 MB、耗时十几秒，而
-     * [decodeGate] 只有两个许可 —— 两首在线歌就能把整条封面流水线堵死，
-     * 表现是「播了在线歌之后所有封面都不出来了」。
-     *
-     * 在线歌的封面本来就走 `coverKey` → 磁盘缓存那条路，不需要探测流本身。
+     * 判据在 [isRemoteUri] 里（和桌面小组件共用一份），这里保留这个名字只是
+     * 让调用点读起来像一句话。为什么要挡、不挡会怎样，见 [isRemoteUrl] 的说明。
      */
-    private fun Uri.isRemote(): Boolean =
-        scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)
+    private fun Uri.isRemote(): Boolean = isRemoteUri(this)
 
     /**
      * 缓存键 = 专辑 id + 尺寸档位（专辑未知时再带上 URI 指纹）。
@@ -229,11 +222,24 @@ object ArtworkLoader {
     fun legacyAlbumArtUri(albumId: Long): Uri =
         ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId)
 
-    /** 取在线补的封面。在 Composition 里读会自动订阅变化 */
-    fun online(songId: Long): ImageBitmap? = if (songId > 0) onlineCovers[songId] else null
+    /**
+     * 取在线补的封面。在 Composition 里读会自动订阅变化。
+     *
+     * ⚠️ 判据必须是 `!= 0`，**不能写成 `> 0`** ——
+     * 在线歌的 id 是**负数**（见 `com.sonance.player.data.remoteSongId`）。
+     * 写成 `> 0` 的后果不是"少一张封面"这么简单：
+     * ① [putOnline] 存不进去；② 这里连 `SnapshotStateMap` 都**不读**，
+     * 于是组合不会订阅它 —— [com.sonance.player.ui.components.CoverArt] 的
+     * `LaunchedEffect` 依赖的 key 又都不变，封面下载完之后**界面不会刷新**。
+     * 表现是"在线歌的封面要滚走再滚回来才出现"，而日志里一切正常。
+     *
+     * 0 是"没有歌曲"的哨兵，只有它该短路。
+     */
+    fun online(songId: Long): ImageBitmap? = if (songId != 0L) onlineCovers[songId] else null
 
     fun putOnline(songId: Long, bitmap: ImageBitmap?) {
-        if (songId <= 0) return
+        // 同 [online]：在线歌是负数 id，不能按 `<= 0` 挡掉
+        if (songId == 0L) return
         onlineCovers[songId] = bitmap
         // 简单按插入顺序淘汰：超过上限就丢掉最早的一批
         if (onlineCovers.size > MAX_ONLINE) {
