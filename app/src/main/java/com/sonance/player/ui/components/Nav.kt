@@ -45,6 +45,9 @@ private val navEntries = listOf(
     NavEntry(LibraryTab.ARTISTS, SonanceIcons.Users, 0),
     NavEntry(LibraryTab.FOLDERS, SonanceIcons.Folder, 0),
     NavEntry(LibraryTab.RECENT, SonanceIcons.Clock, 1),
+    // 在线音乐放在「播放列表」这一组，不放进「资料库」——
+    // 上面那组全是本机上的东西，混一个要联网的进来会让人误会
+    NavEntry(LibraryTab.ONLINE, SonanceIcons.Search, 1),
     NavEntry(LibraryTab.FAVORITES, SonanceIcons.Heart, 1),
     NavEntry(LibraryTab.SETTINGS, SonanceIcons.Palette, 2)
 )
@@ -296,6 +299,7 @@ fun AppBottomBar(
         LibraryTab.ALBUMS to SonanceIcons.Album,
         LibraryTab.ARTISTS to SonanceIcons.Users,
         LibraryTab.RECENT to SonanceIcons.Clock,
+        LibraryTab.ONLINE to SonanceIcons.Search,
         LibraryTab.FAVORITES to SonanceIcons.Heart,
         LibraryTab.SETTINGS to SonanceIcons.Palette
     )

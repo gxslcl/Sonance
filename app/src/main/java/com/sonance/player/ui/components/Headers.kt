@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -30,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -48,7 +51,14 @@ fun SearchField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String = "搜索歌曲、专辑或艺术家",
-    height: Dp = 44.dp
+    height: Dp = 44.dp,
+    /**
+     * 键盘右下角键的动作。传了它才会把软键盘的回车换成「搜索」。
+     *
+     * 本地曲库搜索是**随输入即时过滤**的，不需要这个动作（所以默认 null，
+     * 保持回车换行的原样行为）；在线搜索要走网络，用户按一下回车才是明确意图。
+     */
+    onSearch: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     Row(
@@ -83,6 +93,16 @@ fun SearchField(
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = skin.text),
                 cursorBrush = SolidColor(skin.accent),
+                keyboardOptions = if (onSearch != null) {
+                    KeyboardOptions(imeAction = ImeAction.Search)
+                } else {
+                    KeyboardOptions.Default
+                },
+                keyboardActions = if (onSearch != null) {
+                    KeyboardActions(onSearch = { onSearch() })
+                } else {
+                    KeyboardActions.Default
+                },
                 modifier = Modifier.fillMaxWidth()
             )
         }

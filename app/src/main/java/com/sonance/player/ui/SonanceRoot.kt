@@ -65,6 +65,7 @@ import com.sonance.player.ui.screens.AlbumsScreen
 import com.sonance.player.ui.screens.ArtistsScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
+import com.sonance.player.ui.screens.OnlineScreen
 import com.sonance.player.ui.screens.RecentScreen
 import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
@@ -221,7 +222,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     val dense = configuration.screenHeightDp < 520
 
-    val songMap = remember(vm.songs) { vm.songMap() }
+    // onlineRevision 是必须的 key：在线歌不在 vm.songs 里，搜一次之后
+    // 队列页 / 播放页要按 id 反查它们，映射必须重建。
+    val songMap = remember(vm.songs, vm.onlineRevision) { vm.songMap() }
     val queue = remember(playerState.queueIds, songMap) {
         playerState.queueIds.mapNotNull { songMap[it] }
     }
@@ -408,7 +411,12 @@ private fun CompactLayout(
                 modifier = Modifier.statusBarsPadding(),
                 onBack = detail?.let { { onCloseDetail() } },
                 actions = {
-                    if (detail == null && vm.tab != LibraryTab.SETTINGS) {
+                    // 「重新扫描」只对本地曲库有意义。在线页上摆一个会让人以为
+                    // 它是"重新搜索" —— 而那是搜索框自己的事。
+                    if (detail == null &&
+                        vm.tab != LibraryTab.SETTINGS &&
+                        vm.tab != LibraryTab.ONLINE
+                    ) {
                         IconAction(
                             icon = SonanceIcons.Refresh,
                             contentDescription = "重新扫描",
@@ -754,6 +762,8 @@ private fun ScreenBody(
 
         LibraryTab.RECENT -> RecentScreen(vm = vm, playerState = playerState)
 
+        LibraryTab.ONLINE -> OnlineScreen(vm = vm, playerState = playerState)
+
         LibraryTab.FAVORITES -> FavoritesScreen(vm = vm, playerState = playerState)
 
         LibraryTab.SETTINGS -> SettingsScreen(
@@ -774,6 +784,7 @@ private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
     LibraryTab.ARTISTS -> "共 ${vm.artists.size} 位艺术家"
     LibraryTab.FOLDERS -> "共 ${vm.folders.size} 个文件夹"
     LibraryTab.RECENT -> "最近听过 ${vm.recentIds.size} 首"
+    LibraryTab.ONLINE -> if (vm.onlineMusicEnabled) "搜索并播放网络歌曲" else "未开启 · 点击开启"
     LibraryTab.FAVORITES -> "已收藏 ${vm.favorites.size} 首"
     LibraryTab.SETTINGS -> vm.skin.name
 }

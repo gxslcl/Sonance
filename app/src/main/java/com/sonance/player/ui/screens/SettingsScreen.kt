@@ -50,8 +50,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
+import com.sonance.player.ui.components.ChipsRow
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
@@ -199,6 +201,9 @@ fun SettingsScreen(
         // ===== 封面 =====
         CoverSettingsSection(vm = vm)
 
+        // ===== 在线音乐 =====
+        OnlineMusicSettingsSection(vm = vm)
+
         // ===== 关于 =====
         SettingsSection(title = "关于") {
             Column(Modifier.padding(vertical = 6.dp)) {
@@ -206,13 +211,9 @@ fun SettingsScreen(
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "版本 1.0.0 · 播放、封面、歌词全部本地解析，不上传任何数据。\n" +
-                        if (vm.onlineLyricsEnabled) {
-                            "⚠️ 你已开启「在线歌词」：本地找不到歌词时会向歌词接口发一次请求（只带歌名/歌手/专辑，不带任何本地路径或文件）。"
-                        } else {
-                            "联网仅在你手动开启「在线歌词」后才会发生，当前处于完全离线状态。"
-                        },
+                        onlineNotice(vm),
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (vm.onlineLyricsEnabled) skin.accent else skin.textMuted
+                    color = if (vm.onlineLyricsEnabled || vm.onlineMusicEnabled) skin.accent else skin.textMuted
                 )
             }
         }
@@ -767,6 +768,71 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
         )
     }
     // 手动选封面的对话框统一在 SonanceRoot 里渲染，这里只放入口按钮
+}
+
+/* ============================================================
+ * 在线音乐
+ * ============================================================ */
+
+@Composable
+private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+
+    SettingsSection(title = "在线音乐") {
+        SettingsSwitchRow(
+            title = "在线搜索与播放",
+            subtitle = "开启后可以在「在线音乐」页搜索并播放网络歌曲。默认关闭 —— " +
+                "打开后搜索词会发到音源，播放时从音源的 CDN 拉音频流。",
+            checked = vm.onlineMusicEnabled,
+            onCheckedChange = { vm.changeOnlineMusic(it) }
+        )
+
+        if (vm.onlineMusicEnabled) {
+            Column(Modifier.padding(top = 14.dp)) {
+                Text(
+                    "音源",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.textMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                ChipsRow(
+                    chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
+                    onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) }
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "• 能播的是音源上免费开放的曲目；标 VIP 的需要会员，取流接口拿不到地址\n" +
+                    "• 搜索只发送你输入的关键词，不发送任何本地路径或文件\n" +
+                    "• 在线歌不进本地曲库，也不会写进「最近播放」「播放次数」\n" +
+                    "• 队列里的在线歌在重启后不会恢复（播放地址是临时的，要重新解析）",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+        }
+    }
+}
+
+/**
+ * 「关于」里那句联网状态说明。
+ *
+ * 必须把三个开关都算上。原来只判断在线歌词 —— 加了在线音乐之后，
+ * 一个开着在线音乐、关着在线歌词的用户会看到「当前处于完全离线状态」，
+ * 那是句明显的假话。
+ */
+private fun onlineNotice(vm: SonanceViewModel): String {
+    val on = buildList {
+        if (vm.onlineLyricsEnabled) add("在线歌词")
+        if (vm.onlineCoverEnabled) add("在线封面")
+        if (vm.onlineMusicEnabled) add("在线音乐")
+    }
+    return if (on.isEmpty()) {
+        "联网只在你手动开启「在线歌词」「在线封面」「在线音乐」后才会发生，当前处于完全离线状态。"
+    } else {
+        "⚠️ 你已开启「${on.joinToString("」「")}」，相关功能会联网。" +
+            "搜索只发送你输入的关键词，不发送任何本地路径或文件。"
+    }
 }
 
 /* ============================================================

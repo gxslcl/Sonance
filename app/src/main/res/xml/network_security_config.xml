@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只为一件事存在：让在线音频的 CDN 能用明文 HTTP 下载。
+
+  ## 为什么需要它
+
+  从 Android 9（API 28）起，明文 HTTP **默认被系统禁止**
+  （`usesCleartextTraffic` 的默认值变成 false）。而在线音源的取流接口是这样的：
+
+      https://music.163.com/song/media/outer/url?id=X.mp3
+        └─ 302 ─→ http://m701.music.126.net/....mp3   ← 明文 http
+
+  不放行的话，重定向那一步会直接失败，错误码是
+  `ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED` —— 表现是"所有在线歌都播不了"，
+  而且从错误码上完全看不出是协议问题。
+
+  ## 为什么不用 android:usesCleartextTraffic="true"
+
+  那个开关是**全局**的，等于给整个应用（含以后新增的任何请求）开明文。
+  这里只放行音频 CDN 那几个域，其余一律维持系统的默认禁止 ——
+  歌词、封面、搜索接口全是 https，不需要任何例外。
+
+  ## 域名的选择
+
+  `music.126.net` 带子域，覆盖 `m701.music.126.net` / `m801.music.126.net`
+  这些按节点编号的下载机（实测重定向目标就在这个域下）。
+  刻意**不**写成整个 `126.net` —— 那是网易的全部业务域，
+  没必要为了听歌把它们全放进明文白名单。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">music.126.net</domain>
+    </domain-config>
+</network-security-config>

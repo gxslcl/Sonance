@@ -7,10 +7,13 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.sonance.player.MainActivity
@@ -49,6 +52,7 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setRenderersFactory(TapRenderersFactory(this, audioSink))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource()))
             .build()
 
         val sessionActivity = PendingIntent.getActivity(
@@ -64,6 +68,56 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         player.addListener(widgetSync)
+    }
+
+    /**
+     * 播放用的数据源。**本地和在线共用这一套**，所以每一项都得兼顾两边。
+     *
+     * ## 为什么必须自己建：跨协议重定向
+     *
+     * ExoPlayer 默认的 `DefaultHttpDataSource` 把
+     * [DefaultHttpDataSource.Factory.setAllowCrossProtocolRedirects] 设成 **false** ——
+     * 也就是**禁止 https → http 的跳转**（防降级攻击）。
+     *
+     * 而在线音源的取流接口恰好就是这种形态：
+     * ```
+     * https://music.163.com/song/media/outer/url?id=X.mp3
+     *   └─ 302 ─→ http://m701.music.126.net/....mp3   ← 明文 http
+     * ```
+     * 用默认配置的话，这一步会被直接拒掉，表现为「所有在线歌都播不了」，
+     * 而且错误码是重定向相关的，很难一眼看出是协议问题。
+     *
+     * ## 其它几项
+     *
+     * - **UA 必须像浏览器**：取流接口靠 UA 区分"网页播放器"和"脚本"，
+     *   拿 ExoPlayer 的默认 UA 去要，偶尔会拿到一个 HTML 页面而不是 302。
+     * - **超时放宽**：在线流要过 CDN，8 秒对某些节点不够；本地文件不受影响
+     *   （本地走的是 `DefaultDataSource` 的 file/content 分支，根本不看这两个值）。
+     */
+    private fun onlineDataSource(): DefaultDataSource.Factory {
+        val http = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setUserAgent(ONLINE_UA)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+            // 只声明 `Accept`。刻意**不**设 `Accept-Encoding` ——
+            // 自己写死编码的话，遇到 CDN 回一个我们解不开的格式就整首歌拉不到；
+            // 交给 HttpURLConnection 默认协商 gzip 更稳。
+            .setDefaultRequestProperties(mapOf("Accept" to "*/*"))
+
+        return DefaultDataSource.Factory(this, http)
+    }
+
+    private companion object {
+        /**
+         * 带浏览器 UA 去请求在线音源。
+         *
+         * 不带的话取流接口偶尔会返回一个 HTML 页面而不是 302 —— 这是它区分
+         * "网页播放器"和"脚本"的方式，不是必须登录。
+         */
+        const val ONLINE_UA =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 
     /**

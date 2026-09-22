@@ -24,9 +24,33 @@ data class Song(
     val displayName: String,
     val sizeBytes: Long,
     val dateAddedSec: Long,
-    val track: Int
+    val track: Int,
+    /**
+     * 音源标识。[LOCAL_SOURCE] 是本地文件；其余是在线音源（见 [OnlineSource.id]）。
+     *
+     * 给默认值是为了**零回归**：本地歌的所有构造点、JSON 编解码、排序分组
+     * 全都不用改，行为和以前一模一样。
+     */
+    val source: String = LOCAL_SOURCE,
+    /** 音源侧的 id（在线歌才有）。本地歌为 null */
+    val remoteId: String? = null,
+    /**
+     * 音源直接给的封面地址（在线歌才有）。
+     *
+     * 本地歌为 null —— 它们的封面走 MediaStore / 内嵌 / 在线补全那条链路。
+     * 在线歌**自带**封面地址，不该再去 iTunes 猜一次（猜中的概率还很低，
+     * 因为在线歌的歌名经常带「(Live)」「feat. xxx」这类后缀）。
+     */
+    val coverUrl: String? = null
 ) {
     val durationText: String get() = formatDuration(durationMs)
+
+    /** 是不是本地文件。用它来决定要不要走「最近播放 / 播放次数 / 封面补全」这些本地逻辑 */
+    val isLocal: Boolean get() = source == LOCAL_SOURCE
+
+    companion object {
+        const val LOCAL_SOURCE = "local"
+    }
 }
 
 /** 专辑聚合 */
@@ -131,15 +155,16 @@ enum class LibraryTab(val id: String, val label: String) {
     ARTISTS("artists", "艺术家"),
     FOLDERS("folders", "文件夹"),
     RECENT("recent", "最近播放"),
+    ONLINE("online", "在线音乐"),
     FAVORITES("favorites", "我的收藏"),
     SETTINGS("settings", "皮肤与设置");
 
     companion object {
-        /** 手机底部导航（4 项）。设置不放这里 —— 走右上角齿轮。 */
-        val bottomBar = listOf(SONGS, ALBUMS, ARTISTS, FAVORITES)
+        /** 手机底部导航（5 项）。设置不放这里 —— 走右上角齿轮。 */
+        val bottomBar = listOf(SONGS, ALBUMS, ARTISTS, ONLINE, FAVORITES)
 
         /** 侧边导航（完整） */
-        val rail = listOf(SONGS, ALBUMS, ARTISTS, FOLDERS, RECENT, FAVORITES, SETTINGS)
+        val rail = listOf(SONGS, ALBUMS, ARTISTS, FOLDERS, RECENT, ONLINE, FAVORITES, SETTINGS)
 
         fun fromId(id: String?): LibraryTab = entries.firstOrNull { it.id == id } ?: SONGS
     }

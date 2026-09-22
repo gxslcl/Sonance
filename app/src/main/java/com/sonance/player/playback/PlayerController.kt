@@ -236,10 +236,40 @@ class PlayerController(private val context: Context) {
             .onFailure { android.util.Log.w("SonanceCover", "刷新通知栏封面失败: ${it.message}") }
     }
 
+    /**
+     * 当前这首是不是**在线流**（而不是本地文件）。
+     *
+     * 判据是 MediaItem 的 URI scheme，不是 `Song.source` —— 这里只有
+     * `MediaController`，拿不到 [Song]。scheme 判据反而更可靠：它描述的是
+     * "这一份数据实际从哪来"，而 `source` 是"这首歌属于哪个音源"，
+     * 两者在将来支持"在线歌缓存到本地后播放"时就会分叉。
+     */
+    private fun isCurrentStream(): Boolean {
+        val scheme = controller?.currentMediaItem
+            ?.localConfiguration?.uri?.scheme
+            ?: return false
+        return scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)
+    }
+
     /** 把 ExoPlayer 的错误码翻译成用户能看懂的一句话 */
     private fun describeError(error: PlaybackException): String {
         val title = _state.value.title
         val prefix = if (title.isNotBlank()) "「$title」" else "这首歌"
+
+        // 在线流要单独解释。
+        //
+        // 会员歌的取流接口不是返回 403，而是 302 到一张**下载页 HTML** ——
+        // ExoPlayer 解析不出来，报的是「容器不受支持」。照搬那句话用户会以为
+        // 是文件格式问题，跑去设置里翻「格式与兼容性」，其实只是没会员。
+        if (isCurrentStream()) {
+            return when (error.errorCode) {
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+                PlaybackException.ERROR_CODE_IO_UNSPECIFIED -> "${prefix}连不上音源，检查一下网络"
+
+                else -> "${prefix}拿不到播放地址，可能是会员歌或版权已下架"
+            }
+        }
 
         val reason = when (error.errorCode) {
             PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "找不到文件，可能已被移动或删除"

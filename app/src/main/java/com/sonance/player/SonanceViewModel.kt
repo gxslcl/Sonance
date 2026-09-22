@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
@@ -18,6 +19,11 @@ import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.OnlineSource
+import com.sonance.player.data.OnlineSources
+import com.sonance.player.data.RemoteTrack
+import com.sonance.player.data.isRemoteSongId
+import com.sonance.player.data.remoteSongId
 import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
@@ -166,12 +172,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         player.onSongStarted = { id ->
-            prefs.pushRecent(id)
-            prefs.bumpPlayCount(id)
-            recentIds = prefs.recentIds()
-            prefs.lastSongId = id
+            // 在线歌不进本地记账。
+            //
+            // 它们的 id 是负数、冷启动后查不到任何歌，记进「最近播放」会让顶栏的
+            // 「最近听过 N 首」虚高，而且那些条目**用户永远看不到也清不掉**
+            // （「清空最近播放」按钮是给本地歌用的，没人会想到它被在线歌撑大了）。
+            // 播放次数同理：只在「播放最多」排序里被读，在线歌根本不参与排序。
+            if (!isRemoteSongId(id)) {
+                prefs.pushRecent(id)
+                prefs.bumpPlayCount(id)
+                recentIds = prefs.recentIds()
+                prefs.lastSongId = id
+            }
             // 顺手把队列和序号存下来 —— 冷启动恢复要用，而 onStop 不一定每次都会走到
             // （进程被系统直接回收时就不会）。此刻 refreshQueue 已经跑过，queueIds 是新的。
+            //
+            // 这里**照存**在线歌的负数 id：恢复时 PlaybackRestore 会按「还在不在曲库里」
+            // 把它们滤掉，正是想要的行为（播放地址是临时的，本来也没法原样恢复）。
             val st = player.state.value
             if (st.queueIds.isNotEmpty()) {
                 prefs.playQueueIds = st.queueIds.joinToString(",")
@@ -716,6 +733,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 3. 这次会话已经试过这首 → 直接返回
      */
     fun ensureCover(song: Song) {
+        // 在线歌走另一条路：它**自带**封面地址，不需要"本地探测 + 联网猜"那一套，
+        // 也不该受「在线封面」开关约束 —— 这首歌本来就在联网播。
+        if (!song.isLocal) {
+            ensureOnlineSongCover(song)
+            return
+        }
         if (!onlineCoverEnabled) return
         if (song.id <= 0) return
         if (ArtworkLoader.onlineCovers.containsKey(song.id)) return
@@ -766,6 +789,45 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 // 通知栏 / 锁屏的 artworkUri 也要跟着换成刚下载的这张
                 player.refreshCurrentArtwork(song)
             }
+        }
+    }
+
+    /**
+     * 在线歌的封面：把音源给的地址下载下来，按 [OnlineCover.keyOf] 落盘。
+     *
+     * 落盘而不是只放内存，是为了让**所有**已有的封面消费方自动生效 ——
+     * 列表行、迷你条、播放页、桌面小组件、通知栏读的都是
+     * `ArtworkLoader.load(..., coverKey = OnlineCover.keyOf(title, artist))`，
+     * 只要这个 key 在磁盘缓存里有货，它们全都不用改。
+     *
+     * 下载的是**原图**（不带 `?param=`）：这里是要拿去铺满播放页的大图，
+     * 而缩略图那条路是搜索列表专用的，两者不要互相污染。
+     */
+    private fun ensureOnlineSongCover(song: Song) {
+        val url = song.coverUrl
+        if (url.isNullOrBlank()) return
+        if (!coverTried.add(song.id)) return
+        val key = OnlineCover.keyOf(song.title, song.artist) ?: return
+
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val raw = withContext(Dispatchers.IO) {
+                when (CoverCache.lookup(app, key)) {
+                    // 之前下载过：什么都不用做，CoverArt 会从磁盘缓存读到它
+                    is CoverCache.Lookup.Hit -> return@withContext null
+                    // 之前确认过没有：这次会话不再试（避免反复打同一个死链）
+                    CoverCache.Lookup.KnownMiss -> return@withContext null
+                    CoverCache.Lookup.Unknown -> Unit
+                }
+                OnlineCover.downloadBytes(url)?.also { CoverCache.store(app, key, it) }
+            }
+            if (raw == null) return@launch
+
+            // 刚写盘 → 让「磁盘里也没有」那条短路失效（列表 200px 和播放页 900px
+            // 是两个缓存键，不失效的话另一档本次会话里会一直以为没封面）
+            ArtworkLoader.forgetCoverMiss(key)
+            ArtworkLoader.putOnline(song.id, OnlineCover.decode(raw, OnlineCover.FULL_PX)?.asImageBitmap())
+            player.refreshCurrentArtwork(song)
         }
     }
 
@@ -949,6 +1011,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleFavorite(id: Long): Boolean {
+        // 在线歌不能收藏。
+        //
+        // 「收藏」只存一个 id，而在线歌的 id 是**由 (音源, 远端 id) 哈希出来的**：
+        // 收藏页要靠 id 反查 [songMap] 才能显示，而冷启动后 onlineSongMap 是空的 ——
+        // 于是收藏页会永久少掉这一首，计数却还多着，用户找不到也删不掉。
+        //
+        // 要真正支持得把歌名/歌手/音源/远端 id 一起持久化（等于做一套"在线歌单"），
+        // 那是另一个功能。这里先明确拒绝，不制造查不到的幽灵数据。
+        if (isRemoteSongId(id)) {
+            showToast("在线歌不能收藏")
+            return false
+        }
         val liked = prefs.toggleFavorite(id)
         favorites = prefs.favorites
         showToast(if (liked) "已添加到收藏" else "已取消收藏")
@@ -971,6 +1045,145 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ===== 在线音乐 =====
+    //
+    // 和在线歌词 / 在线封面同一个原则：**默认关闭，联网要用户显式打开**。
+    // 关掉时这一页只有一个开启入口，一个网络请求都不发。
+
+    var onlineMusicEnabled by mutableStateOf(prefs.onlineMusicEnabled)
+        private set
+
+    var onlineSourceId by mutableStateOf(prefs.onlineSourceId)
+        private set
+
+    /** 当前音源。清单里没有（比如配置被改坏）时返回 null，UI 按"不可用"处理 */
+    val onlineSource: OnlineSource? get() = OnlineSources.byId(onlineSourceId)
+
+    /** 搜索框里的词（受控，输入时就在更新） */
+    var onlineQuery by mutableStateOf("")
+
+    /** 当前这一页搜索结果。**包含不可播的** —— 标出来比静默过滤诚实 */
+    var onlineResults by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var onlineSearching by mutableStateOf(false)
+        private set
+
+    /** 搜索失败 / 无结果的提示语，null 表示正常 */
+    var onlineNotice by mutableStateOf<String?>(null)
+        private set
+
+    /** 这一页结果是用哪个词搜出来的（空态文案要用，不能读 onlineQuery —— 用户可能已经改了） */
+    var onlineSearchedFor by mutableStateOf("")
+        private set
+
+    /**
+     * 在线歌的 id → [Song]。
+     *
+     * 为什么必须留着：播放队列、队列页、播放页、收藏判断全都按 id 查 [songMap]，
+     * 而在线歌不在本地曲库里。**只增不减** —— 用户搜了新的词之后，
+     * 上一轮搜索留在队列里的歌还得能查到，不然队列页会凭空少几首。
+     *
+     * 用 SnapshotStateMap 是为了让组合能观察到它（配合 [onlineRevision]）。
+     */
+    private val onlineSongMap = mutableStateMapOf<Long, Song>()
+
+    /** 在线歌集合的版本号。`remember` 需要一个不可变的 key，而 map 本身是可变的 */
+    var onlineRevision by mutableIntStateOf(0)
+        private set
+
+    fun changeOnlineMusic(enabled: Boolean) {
+        onlineMusicEnabled = enabled
+        prefs.onlineMusicEnabled = enabled
+        if (!enabled) clearOnlineSearch()
+        showToast(
+            if (enabled) "已开启在线音乐（会联网搜索与播放）"
+            else "已关闭在线音乐（不再联网）"
+        )
+    }
+
+    fun changeOnlineSource(id: String) {
+        onlineSourceId = id
+        prefs.onlineSourceId = id
+        // 换音源之后旧结果没意义了（id 是各音源自己的命名空间）
+        clearOnlineSearch()
+    }
+
+    /**
+     * 搜索。
+     *
+     * 音源实现**不抛异常**（失败返回空列表），所以这里不需要 try；
+     * 但要区分"没搜到"和"搜不动"，否则用户分不清是自己打错字还是网络断了 ——
+     * 靠"结果为空且当时没有信号"是猜不准的，所以让音源在失败时给出信号：
+     * 这里用「空结果」一律按"没搜到"呈现，同时把网络异常的情况写进日志。
+     */
+    fun searchOnline(query: String = onlineQuery) {
+        val src = onlineSource ?: run {
+            onlineNotice = "音源不可用"
+            return
+        }
+        val kw = query.trim()
+        if (kw.isEmpty()) {
+            clearOnlineSearch()
+            return
+        }
+        onlineQuery = query
+        viewModelScope.launch {
+            onlineSearching = true
+            onlineNotice = null
+            val app = getApplication<Application>()
+            val list = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
+
+            // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
+            val songs = list.map { src.toSong(it) }
+            songs.forEach { onlineSongMap[it.id] = it }
+            if (songs.isNotEmpty()) onlineRevision++
+
+            onlineResults = list
+            onlineSearchedFor = kw
+            onlineSearching = false
+            onlineNotice = if (list.isEmpty()) "没搜到「$kw」，换个写法或换首歌试试" else null
+        }
+    }
+
+    fun clearOnlineSearch() {
+        onlineResults = emptyList()
+        onlineSearchedFor = ""
+        onlineNotice = null
+        onlineSearching = false
+        onlineQuery = ""
+    }
+
+    /**
+     * 播放搜索结果里的第 [index] 首。
+     *
+     * 队列只放**能播的**：把 VIP 歌也塞进队列的话，自动续播到它就会卡住报错，
+     * 用户还以为播放器坏了。所以不可播的当场给提示，不进队列。
+     */
+    fun playOnline(index: Int) {
+        val src = onlineSource ?: return
+        val track = onlineResults.getOrNull(index) ?: return
+        if (!track.playable) {
+            showToast("「${track.title}」需要会员，拿不到播放地址")
+            return
+        }
+        val playable = onlineResults.filter { it.playable }
+        // 复用映射里已经建好的 Song，避免同一首歌算出两个实例。
+        // 下标**在过滤之后**再算：mapNotNull 理论上可能丢条目（比如音源被换掉、
+        // 映射里还没这一首），先取下标再过滤的话队列和下标就会错位 —— 表现是
+        // "点了 A 却播了 B"，而且只在边界情况下出现，很难复现。
+        val songs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
+        val at = songs.indexOfFirst { it.remoteId == track.remoteId }
+        if (at < 0) return
+        player.play(songs, at)
+    }
+
+    /** 在线歌的缩略图地址（列表用）。没有音源或没有封面时返回 null */
+    fun onlineThumbUrl(track: RemoteTrack, px: Int): String? {
+        val url = track.coverUrl ?: return null
+        return onlineSource?.thumbUrl(url, px)
+    }
+
     // ===== 派生数据 =====
 
     fun visibleSongs(): List<Song> {
@@ -988,7 +1201,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
 
-    fun songById(id: Long): Song? = songs.firstOrNull { it.id == id }
+    fun songById(id: Long): Song? = songs.firstOrNull { it.id == id } ?: onlineSongMap[id]
 
     fun albumById(albumId: Long): Album? = albums.firstOrNull { it.albumId == albumId }
 
@@ -1205,7 +1418,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         sleepAnchorSongId = -1L
     }
 
-    fun songMap(): Map<Long, Song> = songs.associateBy { it.id }
+    /**
+     * id → Song 的全量索引，**含在线歌**。
+     *
+     * 队列、队列页、播放页都靠它按 id 反查。在线歌不在 [songs] 里，
+     * 不并进来的话：播在线歌时队列页会是空的、播放页拿不到歌名歌手、
+     * 封面也换不了。
+     */
+    fun songMap(): Map<Long, Song> {
+        val base = songs.associateBy { it.id }
+        if (onlineSongMap.isEmpty()) return base
+        return base + onlineSongMap
+    }
 
     // ===== 随机播放 =====
 
@@ -1294,4 +1518,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // 供 UI 计算总时长
     val totalDurationMs: Long get() = songs.sumOf { it.durationMs }
     val totalSizeBytes: Long get() = songs.sumOf { it.sizeBytes }
+
+    companion object {
+        /**
+         * 一次搜索要多少条。
+         *
+         * 30 条是权衡：一屏能滚出十来条、够翻两页，而封面缩略图按每张 ~100KB 算
+         * 也就 3MB —— 再多就要等明显的一下了。真要做翻页得给音源加 offset 语义，
+         * 现在各家的 offset 含义并不一致，不值得为它复杂化。
+         */
+        private const val ONLINE_PAGE_SIZE = 30
+    }
 }

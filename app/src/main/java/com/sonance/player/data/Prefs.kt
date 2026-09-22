@@ -288,6 +288,28 @@ class Prefs(context: Context) {
         else sp.edit().putString("$KEY_COVER_PIN$songId", url).apply()
     }
 
+    // ===== 在线音乐（默认关闭，与在线歌词 / 在线封面同一原则）=====
+
+    /**
+     * 是否启用在线音源（搜索 + 播放）。**默认关闭**。
+     *
+     * 关掉时「在线音乐」页只显示一个开启入口，**不发任何网络请求**。
+     * 和在线歌词、在线封面保持一致的原则：联网必须由用户显式打开。
+     */
+    var onlineMusicEnabled: Boolean
+        get() = sp.getBoolean(KEY_ONLINE_MUSIC, false)
+        set(v) = sp.edit().putBoolean(KEY_ONLINE_MUSIC, v).apply()
+
+    /**
+     * 选中的音源 id（见 [OnlineSources]）。
+     *
+     * 存字符串而不是下标：以后音源清单增删时，下标会串位，字符串不会。
+     */
+    var onlineSourceId: String
+        get() = sp.getString(KEY_ONLINE_SOURCE, null)
+            ?: OnlineSources.all.firstOrNull()?.id.orEmpty()
+        set(v) = sp.edit().putString(KEY_ONLINE_SOURCE, v).apply()
+
 
     // ===== 均衡器 =====
 
@@ -464,6 +486,8 @@ class Prefs(context: Context) {
         private const val KEY_VIZ_EMA = "viz_ema_alpha"
         private const val KEY_ONLINE_LYRICS = "online_lyrics_enabled"
         private const val KEY_LYRICS_API = "lyrics_api_base"
+        private const val KEY_ONLINE_MUSIC = "online_music_enabled"
+        private const val KEY_ONLINE_SOURCE = "online_music_source"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
         private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"

@@ -63,6 +63,21 @@ object ArtworkLoader {
     }
 
     /**
+     * 是不是**远程**地址（在线歌的取流 URL）。
+     *
+     * 必须把这类地址挡在本地封面探测之外 —— 对 `http(s)://` 调
+     * `loadThumbnail` 会抛异常（被 `runCatching` 吞掉，还好），但
+     * [readEmbeddedPicture] 里的 `MediaMetadataRetriever` 会**真的去把整个
+     * 音频流拉下来**再找内嵌图：一首歌几十 MB、耗时十几秒，而
+     * [decodeGate] 只有两个许可 —— 两首在线歌就能把整条封面流水线堵死，
+     * 表现是「播了在线歌之后所有封面都不出来了」。
+     *
+     * 在线歌的封面本来就走 `coverKey` → 磁盘缓存那条路，不需要探测流本身。
+     */
+    private fun Uri.isRemote(): Boolean =
+        scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)
+
+    /**
      * 缓存键 = 专辑 id + 尺寸档位（专辑未知时再带上 URI 指纹）。
      *
      * **尺寸必须进键**：列表要 200px 缩略图、播放页要 900px 大图，
@@ -498,7 +513,7 @@ object ArtworkLoader {
                 }
             }
 
-            if (bitmap == null && sourceUri != null) {
+            if (bitmap == null && sourceUri != null && !sourceUri.isRemote()) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     bitmap = runCatching {
                         context.contentResolver.loadThumbnail(sourceUri, Size(size, size), null)
