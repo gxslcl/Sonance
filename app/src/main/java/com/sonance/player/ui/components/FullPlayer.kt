@@ -86,7 +86,7 @@ import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
-import com.sonance.player.playback.RepeatMode
+import com.sonance.player.playback.PlayMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
@@ -108,11 +108,14 @@ fun FullPlayer(
     onClose: () -> Unit,
     onPlayAt: (Int) -> Unit,
     onToggleFavorite: (Long) -> Unit,
-    onShuffle: () -> Unit,
+    /**
+     * 三态播放模式切换（随机 → 列表循环 → 单曲循环）。
+     * 原来是 onShuffle + onRepeat 两个按钮，用户要求合并成一个。
+     */
+    onCyclePlayMode: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
-    onRepeat: () -> Unit,
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
@@ -370,8 +373,15 @@ fun FullPlayer(
                 ) {
                     IconAction(
                         icon = SonanceIcons.ChevronDown,
-                        contentDescription = "收起",
-                        onClick = onClose,
+                        // 在歌词 / 律动柱层上先"退一层"回封面，而不是直接收起整个播放页。
+                        //
+                        // 这两个页面自己的关闭按钮已经去掉了（用户要求精简顶栏），
+                        // 只剩系统返回键的话可发现性太差 —— 用户会以为"进得去出不来"。
+                        // 向下箭头本来就表示"退一层"，语义正好。
+                        contentDescription = if (layer == PlayerLayer.COVER) "收起" else "返回封面",
+                        onClick = {
+                            if (layer == PlayerLayer.COVER) onClose() else goToLayer(PlayerLayer.COVER)
+                        },
                         iconSize = 22.dp
                     )
                     // 睡眠定时器：放在左侧第二格。
@@ -399,19 +409,23 @@ fun FullPlayer(
                     )
                     IconAction(
                         icon = SonanceIcons.Equalizer,
-                    contentDescription = if (layer == PlayerLayer.VISUALIZER) "关闭律动柱" else "显示律动柱",
-                    onClick = {
-                        goToLayer(
-                            if (layer == PlayerLayer.VISUALIZER) {
-                                PlayerLayer.COVER
-                            } else {
-                                PlayerLayer.VISUALIZER
-                            }
-                        )
-                    },
-                    iconSize = 20.dp,
-                    tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
-                )
+                        contentDescription = if (layer == PlayerLayer.VISUALIZER) {
+                            "关闭律动柱"
+                        } else {
+                            "显示律动柱"
+                        },
+                        onClick = {
+                            goToLayer(
+                                if (layer == PlayerLayer.VISUALIZER) {
+                                    PlayerLayer.COVER
+                                } else {
+                                    PlayerLayer.VISUALIZER
+                                }
+                            )
+                        },
+                        iconSize = 20.dp,
+                        tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
+                    )
                     IconAction(
                         icon = SonanceIcons.Queue,
                         contentDescription = "播放队列",
@@ -480,15 +494,18 @@ fun FullPlayer(
                         positionMs = if (isCurrent) state.positionMs else 0L,
                         durationMs = if (isCurrent && state.durationMs > 0) state.durationMs else song.durationMs,
                         isPlaying = if (isCurrent) state.isPlaying else false,
-                        shuffle = if (isCurrent) state.shuffle else false,
-                        repeat = if (isCurrent) state.repeat else RepeatMode.OFF,
+                        playMode = if (isCurrent) {
+                            PlayMode.of(state.shuffle, state.repeat)
+                        } else {
+                            // 非当前页给中性档，免得翻页时看到"随机"亮着
+                            PlayMode.REPEAT_ALL
+                        },
                         volume = if (isCurrent) state.volume else 1f,
                         onToggleFavorite = { onToggleFavorite(song.id) },
-                        onShuffle = onShuffle,
+                        onCyclePlayMode = onCyclePlayMode,
                         onPrev = onPrev,
                         onPlayPause = onPlayPause,
                         onNext = onNext,
-                        onRepeat = onRepeat,
                         onSeek = onSeek,
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
@@ -528,13 +545,14 @@ fun FullPlayer(
         }
 
         // ===== 第 1 层：歌词 =====
+        // 不收 onClose 了：歌词页的关闭按钮已去掉（用户要求），
+        // 退出靠左右滑动切层或系统返回键（上面有 BackHandler）。
         1 -> if (currentSong != null) {
             LyricsOverlay(
                 song = currentSong,
                 positionMs = state.positionMs,
                 prefs = prefs,
                 onSeek = onSeek,
-                onClose = { goToLayer(PlayerLayer.COVER) },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -551,7 +569,6 @@ fun FullPlayer(
                     currentSong.durationMs
                 },
                 prefs = prefs,
-                onClose = { goToLayer(PlayerLayer.COVER) },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -1119,15 +1136,14 @@ private fun PlayerPage(
     positionMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
-    shuffle: Boolean,
-    repeat: RepeatMode,
+    /** 三态播放模式。非当前页传列表循环（中性档），避免"翻到下一页看到随机亮着" */
+    playMode: PlayMode,
     volume: Float,
     onToggleFavorite: () -> Unit,
-    onShuffle: () -> Unit,
+    onCyclePlayMode: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
-    onRepeat: () -> Unit,
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
     onOpenQueue: () -> Unit,
@@ -1257,13 +1273,14 @@ private fun PlayerPage(
                     Spacer(Modifier.height(14.dp))
                     TransportControls(
                         isPlaying = isPlaying,
-                        shuffle = shuffle,
-                        repeat = repeat,
-                        onShuffle = onShuffle,
+                        playMode = playMode,
+                        onCyclePlayMode = onCyclePlayMode,
                         onPrev = onPrev,
                         onPlayPause = onPlayPause,
                         onNext = onNext,
-                        onRepeat = onRepeat,
+                        // 队列入口就放在这里 —— 原来这个位置是"循环模式"按钮，
+                        // 循环和随机合并之后空出来的槽位正好给它
+                        onOpenQueue = onOpenQueue,
                         ctrlSize = 40.dp,
                         ctrlIcon = 20.dp,
                         playSize = 60.dp,
@@ -1274,7 +1291,7 @@ private fun PlayerPage(
                     Spacer(Modifier.height(16.dp))
                     BottomRow(
                         isFavorite, volume, onToggleFavorite, onVolume,
-                        onOpenQueue, onOpenCover, onOpenEqualizer, eqEnabled
+                        onOpenCover, onOpenEqualizer, eqEnabled
                     )
                 }
             }
@@ -1343,13 +1360,13 @@ private fun PlayerPage(
                 Spacer(Modifier.height(16.dp))
                 TransportControls(
                     isPlaying = isPlaying,
-                    shuffle = shuffle,
-                    repeat = repeat,
-                    onShuffle = onShuffle,
+                    playMode = playMode,
+                    onCyclePlayMode = onCyclePlayMode,
                     onPrev = onPrev,
                     onPlayPause = onPlayPause,
                     onNext = onNext,
-                    onRepeat = onRepeat,
+                    // 见竖屏那边的说明：这个槽位原来放"循环模式"，现在给队列
+                    onOpenQueue = onOpenQueue,
                     ctrlSize = 44.dp,
                     ctrlIcon = 22.dp,
                     playSize = 64.dp,
@@ -1359,7 +1376,7 @@ private fun PlayerPage(
                 Spacer(Modifier.height(14.dp))
                 BottomRow(
                     isFavorite, volume, onToggleFavorite, onVolume,
-                    onOpenQueue, onOpenCover, onOpenEqualizer, eqEnabled
+                    onOpenCover, onOpenEqualizer, eqEnabled
                 )
                 // 距底部 20dp（再叠加系统导航栏安全区）
                 Spacer(Modifier.height(BottomGap))
@@ -1438,7 +1455,6 @@ private fun BottomRow(
     volume: Float,
     onFavorite: () -> Unit,
     onVolume: (Float) -> Unit,
-    onOpenQueue: () -> Unit,
     onOpenCover: () -> Unit,
     onOpenEqualizer: () -> Unit,
     eqEnabled: Boolean

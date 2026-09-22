@@ -122,7 +122,6 @@ fun VisualizerOverlay(
     positionMs: Long,
     durationMs: Long,
     prefs: Prefs,
-    onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -213,7 +212,11 @@ fun VisualizerOverlay(
                 )
         )
 
-        // ===== 右上角：设置齿轮 + 关闭 =====
+        // ===== 右上角：设置齿轮 =====
+        //
+        // **关闭按钮去掉了**（用户要求）：收起播放页可以左右滑动切层、
+        // 也可以按系统返回键（[FullPlayer] 里有 BackHandler 把非封面层退回封面层），
+        // 顶栏没必要再占一格。
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -227,14 +230,6 @@ fun VisualizerOverlay(
                 onClick = { settingsOpen = true },
                 iconSize = 20.dp,
                 tint = if (settingsOpen) skin.accent else skin.textDim
-            )
-            Spacer(Modifier.width(2.dp))
-            IconAction(
-                icon = SonanceIcons.Close,
-                contentDescription = "关闭律动柱",
-                onClick = onClose,
-                iconSize = 22.dp,
-                tint = skin.text
             )
         }
 

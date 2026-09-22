@@ -205,13 +205,69 @@ class OnlineMusicTest {
                 query: String,
                 limit: Int,
                 offset: Int
-            ): List<RemoteTrack> = emptyList()
+            ): RemoteSearchPage? = RemoteSearchPage(emptyList(), 0)
 
             override fun streamUri(track: RemoteTrack) =
                 android.net.Uri.parse("https://example.com/a.mp3")
         }
         val url = "https://example.com/a.jpg"
         assertEquals(url, plain.thumbUrl(url, 200))
+    }
+
+    // ===== 分页：靠总数判断，不靠"这页满没满" =====
+
+    private fun page(count: Int, total: Int) = RemoteSearchPage(
+        tracks = (0 until count).map {
+            RemoteTrack("$it", "t$it", "a", "al", 1000L, null, true, false)
+        },
+        total = total
+    )
+
+    @Test
+    fun `总数没到就还有下一页`() {
+        val p = page(count = 30, total = 270)
+        assertTrue(p.hasMore(offset = 0, limit = 30))
+        assertTrue(p.hasMore(offset = 210, limit = 30))
+    }
+
+    @Test
+    fun `刚好取完总数时没有下一页`() {
+        // 240 + 30 == 270，正好取完
+        val p = page(count = 30, total = 270)
+        assertFalse(p.hasMore(offset = 240, limit = 30))
+    }
+
+    @Test
+    fun `offset 超过总数时判定为到底`() {
+        // ★ 这条是整块分页的关键。
+        //
+        // 实测网易云在 offset 超过总数时**绕回第一页**（offset=300 和 offset=0
+        // 返回完全相同的 30 条）。如果拿"这一页返回满了吗"当判据，
+        // hasMore 永远成立，翻页会一直翻下去、一直打接口。
+        // 必须用接口报的总数来算。
+        val p = page(count = 30, total = 270)
+        assertFalse("越界绕回的满页不能被当成'还有下一页'", p.hasMore(offset = 300, limit = 30))
+        assertFalse(p.hasMore(offset = 270, limit = 30))
+    }
+
+    @Test
+    fun `最后一页不满也算到底`() {
+        val p = page(count = 10, total = 100)
+        assertFalse(p.hasMore(offset = 90, limit = 30))
+    }
+
+    @Test
+    fun `音源没报总数时退回保守猜测`() {
+        // total = -1 表示音源没给这个字段。这时只能按"满页就继续"猜 ——
+        // 有上限兜底（ViewModel 里的 MAX_ONLINE_RESULTS），不会无限翻
+        assertTrue(page(count = 30, total = -1).hasMore(offset = 0, limit = 30))
+        assertFalse(page(count = 5, total = -1).hasMore(offset = 0, limit = 30))
+    }
+
+    @Test
+    fun `空结果没有下一页`() {
+        assertFalse(page(count = 0, total = 0).hasMore(offset = 0, limit = 30))
+        assertFalse(page(count = 0, total = -1).hasMore(offset = 0, limit = 30))
     }
 
     // ===== toSong：字段映射 =====

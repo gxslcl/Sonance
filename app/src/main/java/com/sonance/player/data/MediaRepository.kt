@@ -311,6 +311,27 @@ class MediaRepository(private val context: Context) {
                     it.folderName.lowercase().contains(q)
             }
         }
+
+        /**
+         * 「点某首歌播放」时**进队列**的列表。
+         *
+         * 搜索是**找入口**，不是"我要只听这几首" —— 拿筛选后的列表当队列的话，
+         * 用户搜一首歌点播放，队列里就只剩搜索结果（搜索只命中一首时就只剩那一首），
+         * 播完就没了。用户报的就是这个（"点击播放就默认只把这首歌放入播放列表"）。
+         *
+         * 不搜索时列表本身就是完整曲库，直接用它，行为不变。
+         *
+         * 抽成**泛型**纯函数是为了可测：[SongsScreen] 要 `SonanceViewModel`，
+         * JVM 单测里起不来；而 `Song` 又带 `android.net.Uri`、在 JVM 上构造不出来
+         * （`Uri.parse` 是返回 null 的桩）。这个函数只做"用哪个列表"的选择、
+         * 跟元素类型无关，所以泛型化没有任何代价 —— 和 [findDuplicatesIn] 同一个做法。
+         *
+         * @param display  列表当前显示的歌（可能被搜索筛过）
+         * @param library  完整曲库（已排序、已排除隐藏项）
+         * @param searching 当前是否在搜索
+         */
+        fun <T> playQueue(display: List<T>, library: List<T>, searching: Boolean): List<T> =
+            if (searching) library else display
     }
 }
 

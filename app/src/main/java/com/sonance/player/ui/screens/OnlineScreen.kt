@@ -18,16 +18,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -55,6 +59,7 @@ import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
 /**
  * 在线音乐：搜索 + 播放。
@@ -122,6 +127,25 @@ fun OnlineScreen(
         if (vm.onlineQuery.trim() == q) vm.searchOnline(q)
     }
 
+    // ---- 滚到底自动加载下一页 ----
+    //
+    // 判据是"最后一个可见项已经进入倒数第 3 个" —— 留 3 行余量，
+    // 等真的滑到最后一行才请求的话，用户会看到明显的一段空白等待。
+    val listState = rememberLazyListState()
+    val nearBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 3
+        }
+    }
+    // key 带上结果条数：翻完一页之后如果用户还停在底部，要能再触发一次
+    // （只用 `LaunchedEffect(nearBottom)` 的话，nearBottom 一直是 true 就不会重跑）
+    LaunchedEffect(listState, vm.onlineResults.size, vm.onlineHasMore) {
+        snapshotFlow { nearBottom }.first { it }
+        vm.loadMoreOnline()
+    }
+
     Column(modifier.fillMaxSize()) {
 
         // ---- 搜索框 ----
@@ -170,6 +194,7 @@ fun OnlineScreen(
                 // 输入即搜索是"每停一次手就搜一次"，把列表换成 spinner 会一直闪；
                 // 加载状态改由上面的「搜索中…」提示，列表本身保持稳定。
                 vm.onlineResults.isNotEmpty() -> LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 10.dp,
@@ -194,14 +219,58 @@ fun OnlineScreen(
                         )
                     }
 
-                    // 尾巴上把规则说清楚，省得用户以为是坏了
+                    // ---- 页脚：翻页状态 + 使用说明 ----
                     item {
-                        Text(
-                            text = "标 VIP 的歌需要会员，取流接口拿不到播放地址。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = skin.textMuted,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 14.dp)
-                        )
+                        Column(Modifier.fillMaxWidth()) {
+                            when {
+                                vm.onlineLoadingMore -> Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 16.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = skin.accent,
+                                        trackColor = skin.surface3,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+
+                                // 失败给一个可点的重试：网络抖一下不该让用户重新搜一遍
+                                vm.onlineLoadMoreFailed -> Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { vm.retryLoadMoreOnline() }
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "加载失败，点击重试",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = skin.accent
+                                    )
+                                }
+
+                                !vm.onlineHasMore -> Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 14.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CountLabel("没有更多了 · 共 ${vm.onlineResults.size} 首")
+                                }
+                            }
+
+                            // 把规则说清楚，省得用户以为是坏了
+                            Text(
+                                text = "标 VIP 的歌需要会员，取流接口拿不到播放地址。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = skin.textMuted,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                            )
+                        }
                     }
                 }
 

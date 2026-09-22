@@ -38,6 +38,7 @@ import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.Album
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.MediaRepository
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.ViewMode
@@ -77,7 +78,15 @@ fun SongList(
     compact: Boolean = false,
     showIndex: Boolean = true,
     contentPadding: PaddingValues? = null,
-    scrollToCurrentSignal: Int = 0
+    scrollToCurrentSignal: Int = 0,
+    /**
+     * 点某首歌时**进队列**的列表，默认就是 [songs]（列表即上下文）。
+     *
+     * 「全部歌曲」页搜索时要传**未筛选的曲库**：搜索只是找入口，不是
+     * "我要只听这几首"。用筛选后的列表当队列的话，搜一首歌点播放就只剩搜索结果，
+     * 播完就没了。专辑 / 艺术家 / 文件夹 / 收藏这些页不传，保持"列表即上下文"。
+     */
+    queueSongs: List<Song> = songs
 ) {
     val dense = LocalDenseLayout.current
     val padding = contentPadding ?: PaddingValues(
@@ -116,7 +125,10 @@ fun SongList(
     // 把捕获了 unstable 值（vm / List<Song>）的回调包到 remember 里，让回调实例稳定；
     // items 块里再传出去的 lambda 只捕获稳定值，编译器就能 memoize，
     // SongRow 的 onClick / onToggleFavorite / onPlayNext 跨帧保持同一实例 → 真正能 skip。
-    val playFromSongs = remember(vm, songs) { { song: Song -> vm.playFrom(songs, song) } }
+    //
+    // 注意捕获的是 [queueSongs] 而不是 [songs]：显示用筛选后的列表，
+    // 进队列用完整列表，两者在搜索时不一样。
+    val playFromSongs = remember(vm, queueSongs) { { song: Song -> vm.playFrom(queueSongs, song) } }
     val toggleFav = remember(vm) { { id: Long -> vm.toggleFavorite(id) } }
     val playNextSong = remember(vm) { { song: Song -> vm.playNext(song) } }
 
@@ -185,6 +197,24 @@ fun SongsScreen(
 
     val list = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, mode) {
         if (mode == 1) vm.recentSongs() else vm.visibleSongs()
+    }
+
+    // 点某首歌时**进队列**的列表。
+    //
+    // 搜索时传完整曲库而不是搜索结果：搜索是"找入口"，不是"我要只听这几首"。
+    // 用筛选后的列表当队列的话，搜一首歌点播放，队列里就只剩搜索结果（命中一首
+    // 时就只剩那一首），播完就没了 —— 用户要的是"从这首开始，接着放整个曲库"。
+    //
+    // 「最近播放」模式（mode == 1）不换：那里的上下文本来就是"最近听过的一批"。
+    // 规则本体在 MediaRepository.playQueue，有单测覆盖。
+    val playQueue = remember(list, vm.searchQuery, mode) {
+        MediaRepository.playQueue(
+            display = list,
+            library = vm.librarySongs(),
+            // 最近播放模式不套这条规则：它的列表不受搜索词影响，
+            // 而且"最近听过的一批"本身就是有意义的播放上下文
+            searching = vm.searchQuery.isNotBlank() && mode != 1
+        )
     }
     val folders = vm.folders
 
@@ -315,7 +345,8 @@ fun SongsScreen(
                 songs = list,
                 vm = vm,
                 playerState = playerState,
-                scrollToCurrentSignal = vm.scrollToCurrentSignal
+                scrollToCurrentSignal = vm.scrollToCurrentSignal,
+                queueSongs = playQueue
             )
         }
     }

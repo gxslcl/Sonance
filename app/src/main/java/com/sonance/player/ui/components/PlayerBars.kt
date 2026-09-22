@@ -37,8 +37,8 @@ import androidx.compose.ui.unit.dp
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
+import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerUiState
-import com.sonance.player.playback.RepeatMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 
@@ -49,14 +49,23 @@ import com.sonance.player.ui.theme.LocalSkin
 @Composable
 fun TransportControls(
     isPlaying: Boolean,
-    shuffle: Boolean,
-    repeat: RepeatMode,
-    onShuffle: () -> Unit,
+    /**
+     * 三态播放模式。**不再是两个独立开关**（随机 / 循环）——
+     * 它们能组合出"随机 + 单曲循环"这种自相矛盾的状态，见 [PlayMode] 的说明。
+     */
+    playMode: PlayMode,
+    onCyclePlayMode: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
-    onRepeat: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 传了就在最后多一个「播放队列」按钮。
+     *
+     * 播放页要它（用户要求把队列入口放在控制行上）；底栏和正在播放面板里
+     * 本来就有队列入口，传 null 免得同一屏出现两个一样的按钮。
+     */
+    onOpenQueue: (() -> Unit)? = null,
     ctrlSize: Dp = 36.dp,
     ctrlIcon: Dp = 18.dp,
     playSize: Dp = 52.dp,
@@ -69,12 +78,18 @@ fun TransportControls(
         horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally)
     ) {
         CtrlButton(
-            icon = SonanceIcons.Shuffle,
-            contentDescription = "随机播放",
-            onClick = onShuffle,
+            icon = when (playMode) {
+                PlayMode.SHUFFLE -> SonanceIcons.Shuffle
+                PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
+                PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
+            },
+            contentDescription = playMode.label,
+            onClick = onCyclePlayMode,
             size = ctrlSize,
             iconSize = ctrlIcon,
-            active = shuffle
+            // 列表循环是"默认档"，不高亮；随机 / 单曲循环是用户特意选的，给强调色。
+            // 全亮的话这个按钮永远带色，就看不出"我改过设置"了。
+            active = playMode != PlayMode.REPEAT_ALL
         )
         CtrlButton(
             icon = SonanceIcons.Prev,
@@ -96,14 +111,15 @@ fun TransportControls(
             size = ctrlSize,
             iconSize = ctrlIcon
         )
-        CtrlButton(
-            icon = if (repeat == RepeatMode.ONE) SonanceIcons.RepeatOne else SonanceIcons.Repeat,
-            contentDescription = "循环模式",
-            onClick = onRepeat,
-            size = ctrlSize,
-            iconSize = ctrlIcon,
-            active = repeat != RepeatMode.OFF
-        )
+        if (onOpenQueue != null) {
+            CtrlButton(
+                icon = SonanceIcons.Queue,
+                contentDescription = "播放队列",
+                onClick = onOpenQueue,
+                size = ctrlSize,
+                iconSize = ctrlIcon
+            )
+        }
     }
 }
 
@@ -225,11 +241,11 @@ fun PlayerBar(
     state: PlayerUiState,
     song: Song?,
     onOpen: () -> Unit,
-    onShuffle: () -> Unit,
+    /** 三态播放模式切换（随机 / 列表循环 / 单曲循环）。原来是 onShuffle + onRepeat 两个 */
+    onCyclePlayMode: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
-    onRepeat: () -> Unit,
     onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onOpenQueue: () -> Unit,
@@ -298,13 +314,12 @@ fun PlayerBar(
         ) {
             TransportControls(
                 isPlaying = state.isPlaying,
-                shuffle = state.shuffle,
-                repeat = state.repeat,
-                onShuffle = onShuffle,
+                playMode = PlayMode.of(state.shuffle, state.repeat),
+                onCyclePlayMode = onCyclePlayMode,
                 onPrev = onPrev,
                 onPlayPause = onPlayPause,
                 onNext = onNext,
-                onRepeat = onRepeat,
+                // 这一行右侧本来就有队列图标，这里不重复放
                 ctrlSize = 30.dp,
                 ctrlIcon = 15.dp,
                 playSize = 36.dp,
@@ -367,11 +382,11 @@ private fun TimeLabel(text: String) {
 fun NowPlayingPanel(
     state: PlayerUiState,
     song: Song?,
-    onShuffle: () -> Unit,
+    /** 三态播放模式切换（随机 / 列表循环 / 单曲循环）。原来是 onShuffle + onRepeat 两个 */
+    onCyclePlayMode: () -> Unit,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
-    onRepeat: () -> Unit,
     onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onOpenQueue: () -> Unit,
@@ -493,13 +508,12 @@ fun NowPlayingPanel(
 
         TransportControls(
             isPlaying = state.isPlaying,
-            shuffle = state.shuffle,
-            repeat = state.repeat,
-            onShuffle = onShuffle,
+            playMode = PlayMode.of(state.shuffle, state.repeat),
+            onCyclePlayMode = onCyclePlayMode,
             onPrev = onPrev,
             onPlayPause = onPlayPause,
-            onNext = onNext,
-            onRepeat = onRepeat
+            onNext = onNext
+            // 下面那行已经有队列图标了，这里不重复放
         )
 
         Spacer(Modifier.height(18.dp))

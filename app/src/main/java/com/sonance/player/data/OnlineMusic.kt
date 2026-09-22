@@ -38,8 +38,14 @@ interface OnlineSource {
      *
      * 混成一种的话，断网时用户会看到「没搜到「周杰伦」」—— 那是会让人以为
      * 搜索坏了的说法。这套约定和 [OnlineCover.search] 一致。
+     *
+     * ## 为什么要连总数一起返回
+     *
+     * 分页要判断"后面还有没有"，而**不能**用"这一页返回满了吗"来猜 ——
+     * 实测网易云在 `offset` 超过总数时会**绕回第一页**（返回和 offset=0 完全相同的
+     * 一批），于是"满页"永远成立，翻页会一直翻下去。必须拿接口报的总数来算。
      */
-    suspend fun search(context: Context, query: String, limit: Int, offset: Int): List<RemoteTrack>?
+    suspend fun search(context: Context, query: String, limit: Int, offset: Int): RemoteSearchPage?
 
     /** 这首歌的播放地址。注意：地址可能带签名会过期，**每次播放都要重新取** */
     fun streamUri(track: RemoteTrack): Uri
@@ -88,6 +94,29 @@ interface OnlineSource {
  * 单测里所有拿 `Uri` 的途径都返回 null。详见 `OnlineMusicTest` 里的说明。）
  */
 internal const val REMOTE_ALBUM_ID = -1L
+
+/**
+ * 一次搜索请求的结果。
+ *
+ * [total] 是音源报的**总条数**，分页要靠它判断"后面还有没有"。
+ * 拿不到时给 -1，调用方按"不知道"处理（只翻到上限为止）。
+ */
+data class RemoteSearchPage(
+    val tracks: List<RemoteTrack>,
+    /** 总条数；-1 表示音源没报 */
+    val total: Int = -1
+) {
+    /**
+     * 从 [offset] 起取了这一页之后，后面还有没有。
+     *
+     * **不能用 `tracks.size >= limit` 来猜**：实测网易云在 offset 超过总数时
+     * 会绕回第一页返回满页，"满页"永远成立，翻页就停不下来了。
+     */
+    fun hasMore(offset: Int, limit: Int): Boolean = when {
+        total < 0 -> tracks.size >= limit      // 音源没报总数：退回保守的猜测
+        else -> offset + tracks.size < total
+    }
+}
 
 /** 搜索结果里的一首歌（还没变成播放队列里的 [Song]） */
 data class RemoteTrack(
@@ -321,9 +350,9 @@ object NeteaseSource : OnlineSource {
         query: String,
         limit: Int,
         offset: Int
-    ): List<RemoteTrack>? = withContext(Dispatchers.IO) {
+    ): RemoteSearchPage? = withContext(Dispatchers.IO) {
         val kw = query.trim()
-        if (kw.isEmpty()) return@withContext emptyList()
+        if (kw.isEmpty()) return@withContext RemoteSearchPage(emptyList(), 0)
 
         val url = "$BASE/api/search/get?s=${enc(kw)}&type=1&limit=$limit&offset=$offset"
         // null = 请求失败（不是"没搜到"），见接口上的说明
@@ -332,9 +361,11 @@ object NeteaseSource : OnlineSource {
         // 搜不到时接口返回的是 `{"result":{"songCount":0,"songs":[]}}` ——
         // `songs` 是个空数组而不是缺失，所以能走到这里；真拿不到这个字段
         // 说明响应形态变了，按失败处理比按"没结果"处理更诚实。
-        val songs = runCatching {
-            JSONObject(body).optJSONObject("result")?.optJSONArray("songs")
-        }.getOrNull() ?: return@withContext null
+        val result = runCatching { JSONObject(body).optJSONObject("result") }.getOrNull()
+            ?: return@withContext null
+        val songs = result.optJSONArray("songs") ?: return@withContext null
+        // 总条数：分页靠它判断"后面还有没有"。拿不到给 -1，调用方按"不知道"处理
+        val total = if (result.has("songCount")) result.optInt("songCount", -1) else -1
 
         val list = ArrayList<RemoteTrack>(songs.length())
         for (i in 0 until songs.length()) {
@@ -356,16 +387,17 @@ object NeteaseSource : OnlineSource {
                 vip = neteaseVip(fee)
             )
         }
-        if (list.isEmpty()) return@withContext emptyList()
+        if (list.isEmpty()) return@withContext RemoteSearchPage(emptyList(), total)
 
         // 批量补封面：搜索接口只给 picId，而封面 URL 的前半段是加密串、推不出来，
         // 必须问一次详情接口。一次请求带上所有 id，不逐个查。
         val covers = fetchCovers(list.map { it.remoteId })
-        if (covers.isEmpty()) {
+        val filled = if (covers.isEmpty()) {
             list
         } else {
             list.map { if (covers[it.remoteId] != null) it.copy(coverUrl = covers[it.remoteId]) else it }
         }
+        RemoteSearchPage(filled, total)
     }
 
     /** `/api/song/detail` 批量取封面。失败返回空 map，不影响搜索结果 */

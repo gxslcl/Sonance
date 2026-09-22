@@ -30,6 +30,44 @@ import kotlinx.coroutines.launch
 enum class RepeatMode { OFF, ALL, ONE }
 
 /**
+ * 播放模式：**三态互斥**，用一个按钮循环切换。
+ *
+ * ## 为什么不直接用 `shuffle: Boolean` + [RepeatMode]
+ *
+ * 那两个是独立开关，能组合出 6 种状态（包括"随机 + 单曲循环"这种自相矛盾的：
+ * 队列已经打乱了，"单曲"到底单曲哪一首？）。而用户心智里只有三种：
+ * 随机放 / 顺序循环放 / 单曲反复放。合并成一个按钮之后语义明确，
+ * 也不会出现"两个都亮着，不知道哪个生效"。
+ */
+enum class PlayMode(val label: String) {
+    SHUFFLE("随机播放"),
+    REPEAT_ALL("列表循环"),
+    REPEAT_ONE("单曲循环");
+
+    /** 下一个模式。按钮点一下就取它 */
+    fun next(): PlayMode = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        /**
+         * 从底层两个标志推出当前模式。
+         *
+         * **`shuffle` 优先**：它开着的时候 repeat 是 ALL 还是 OFF 对用户没区别
+         * （队列已经被打乱了），都算"随机播放"。
+         *
+         * ⚠️ `shuffle=false + repeat=OFF`（App 的初始状态）**归到列表循环** ——
+         * 三态里没有"放完就停"这一档，把它单列出来就变成四态了。
+         * 代价是首次点击之前，按钮显示"列表循环"而实际放完会停；
+         * 点一下（进入下一态再回来）就真的变成列表循环。
+         */
+        fun of(shuffle: Boolean, repeat: RepeatMode): PlayMode = when {
+            shuffle -> SHUFFLE
+            repeat == RepeatMode.ONE -> REPEAT_ONE
+            else -> REPEAT_ALL
+        }
+    }
+}
+
+/**
  * UI 侧播放状态快照。
  *
  * 标 [Immutable]：`queueIds` 是 `List`（接口类型，Compose 默认推断为 unstable），
@@ -183,7 +221,15 @@ class PlayerController(private val context: Context) {
 
         if (queueChanged) refreshQueue(player)
 
-        if (id > 0 && id != lastNotifiedId) {
+        // ⚠️ 判据是 `id != 0L`，**不能写 `id > 0`** ——
+        // 在线歌的 mediaId 是负数（见 `data/remoteSongId`），写成 `> 0` 的话
+        // [onSongStarted] 对在线歌**永远不会触发**。它的下游挂着：
+        //   · `ensureCover` → 在线歌的封面下载 → 表现就是"在线歌没有封面"
+        //   · 队列 / 进度的持久化
+        // 而且失败是静默的：播放、切歌、进度全都正常，只有封面和统计不见。
+        //
+        // 0 是"没有歌曲"的哨兵，只有它该短路。
+        if (id != 0L && id != lastNotifiedId) {
             lastNotifiedId = id
             if (suppressNextStart) suppressNextStart = false else onSongStarted?.invoke(id)
         }
@@ -417,12 +463,19 @@ class PlayerController(private val context: Context) {
         sync(c, null)
     }
 
-    fun cycleRepeat() {
+    /**
+     * 直接指定循环模式。
+     *
+     * 三态播放模式（[PlayMode]）切换时用它。原来这里还有一个 `cycleRepeat()`
+     * 做 OFF→ALL→ONE 转一圈，三态合并之后没有调用方了，已删除 ——
+     * 它那种"转一圈"的语义和 [PlayMode] 的三态不是一回事，留着只会让人误用。
+     */
+    fun setRepeat(mode: RepeatMode) {
         val c = controller ?: return
-        c.repeatMode = when (c.repeatMode) {
-            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-            else -> Player.REPEAT_MODE_OFF
+        c.repeatMode = when (mode) {
+            RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+            RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+            RepeatMode.ONE -> Player.REPEAT_MODE_ONE
         }
         sync(c, null)
     }

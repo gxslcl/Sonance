@@ -52,7 +52,9 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqBus
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerController
+import com.sonance.player.playback.RepeatMode
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
@@ -757,6 +759,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (!onlineCoverEnabled) return
+        // 走到这里一定是本地歌（上面已经分流出在线歌了），id 恒为正。
+        // 保留这个判断只是防脏数据 —— **别**把它挪到上面那个分流之前，
+        // 那样在线歌会被整段挡掉、连自带封面的下载都不会发生。
         if (song.id <= 0) return
         if (ArtworkLoader.onlineCovers.containsKey(song.id)) return
         if (!coverTried.add(song.id)) return
@@ -1084,12 +1089,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 搜索框里的词（受控，输入时就在更新） */
     var onlineQuery by mutableStateOf("")
 
-    /** 当前这一页搜索结果。**包含不可播的** —— 标出来比静默过滤诚实 */
+    /**
+     * 当前搜索结果（**已累积多页**）。**包含不可播的** —— 标出来比静默过滤诚实
+     */
     var onlineResults by mutableStateOf<List<RemoteTrack>>(emptyList())
         private set
 
     var onlineSearching by mutableStateOf(false)
         private set
+
+    /** 后面还有没有下一页。列表滚到底时据此决定要不要继续请求 */
+    var onlineHasMore by mutableStateOf(false)
+        private set
+
+    /** 正在加载下一页（和 [onlineSearching] 分开：前者是"换搜索词"，后者是"往下翻"） */
+    var onlineLoadingMore by mutableStateOf(false)
+        private set
+
+    /** 加载下一页失败了。UI 显示可点击重试的页脚 —— 网络抖一下不该让用户重新搜一遍 */
+    var onlineLoadMoreFailed by mutableStateOf(false)
+        private set
+
+    /**
+     * 已经取回多少条。
+     *
+     * 直接当下一页的 `offset` 用。**不能用 `onlineResults.size`** ——
+     * 追加时会按 `remoteId` 去重，去掉重复之后 size 会小于服务端已返回的条数，
+     * 于是 offset 偏小、下一页会重复请求同一段（然后又被去重掉，永远翻不到底）。
+     */
+    private var onlineLoadedCount = 0
 
     /** 搜索失败 / 无结果的提示语，null 表示正常 */
     var onlineNotice by mutableStateOf<String?>(null)
@@ -1143,6 +1171,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 正在跑的那次搜索。新的一次会取消它，理由见 [searchOnline] */
     private var onlineSearchJob: Job? = null
 
+    /** 正在跑的"加载下一页"。和搜索分开存，取消时两个都要取消 */
+    private var onlineLoadMoreJob: Job? = null
+
     /**
      * 搜索的代号。
      *
@@ -1153,7 +1184,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var onlineSearchToken = 0
 
     /**
-     * 搜索。
+     * 搜索（第一页）。
      *
      * ## 为什么要能取消
      *
@@ -1162,6 +1193,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 覆盖掉新结果 —— 用户看到的是「周杰」的结果，输入框里却写着「周杰伦」。
      *
      * 取消之后协程不会 resume 到赋值那几行，旧结果自然进不来。
+     *
+     * ## 分页
+     *
+     * 一次取 [ONLINE_PAGE_SIZE] 条，滚到底再取下一页（[loadMoreOnline]）。
+     * 这里每次都**从头开始**：换搜索词之后旧结果作废，累积条数也要归零。
      */
     fun searchOnline(query: String = onlineQuery) {
         val src = onlineSource ?: run {
@@ -1175,32 +1211,33 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         onlineQuery = query
 
-        onlineSearchJob?.cancel()
+        cancelOnlineRequests()
         val token = ++onlineSearchToken
         onlineSearchJob = viewModelScope.launch {
             onlineSearching = true
             onlineNotice = null
             try {
                 val app = getApplication<Application>()
-                val list = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
+                val page = withContext(Dispatchers.IO) { src.search(app, kw, ONLINE_PAGE_SIZE, 0) }
+                val tracks = page?.tracks.orEmpty()
 
                 // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
-                val songs = list.orEmpty().map { src.toSong(it) }
-                // 新增和淘汰都要推进版本号 —— 它是 SonanceRoot 里 songMap 的 remember key，
-                // 漏了"新增"这一半的话，搜出来的歌在队列页里会查不到
-                var changed = false
-                songs.forEach { if (onlineSongMap.put(it.id, it) == null) changed = true }
-                changed = pruneOnlineSongs(songs.map { it.id }) || changed
-                if (changed) onlineRevision++
+                commitOnlinePage(src, tracks)
 
-                onlineResults = list.orEmpty()
+                onlineResults = tracks
+                onlineLoadedCount = tracks.size
                 onlineSearchedFor = kw
-                onlineSearchFailed = list == null
+                onlineSearchFailed = page == null
+                // 用音源报的**总数**判断，不能用"这页满没满"（见 RemoteSearchPage 的说明）
+                onlineHasMore = page != null &&
+                    page.hasMore(offset = 0, limit = ONLINE_PAGE_SIZE) &&
+                    tracks.size < MAX_ONLINE_RESULTS
+                onlineLoadMoreFailed = false
                 // 失败和"没搜到"要分开说：断网时显示「没搜到「周杰伦」」
                 // 会让用户以为搜索坏了（音源用 null 表示失败）
                 onlineNotice = when {
-                    list == null -> "搜索失败，检查一下网络或稍后再试"
-                    list.isEmpty() -> "没搜到「$kw」，换个写法或换首歌试试"
+                    page == null -> "搜索失败，检查一下网络或稍后再试"
+                    tracks.isEmpty() -> "没搜到「$kw」，换个写法或换首歌试试"
                     else -> null
                 }
             } finally {
@@ -1208,6 +1245,95 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (token == onlineSearchToken) onlineSearching = false
             }
         }
+    }
+
+    /**
+     * 加载下一页。
+     *
+     * 由列表滚到底触发（见 `OnlineScreen`）。四种情况下直接返回，不重复请求：
+     * 没开、正在搜、正在翻、已经到底。
+     *
+     * **失败不清空已有结果** —— 翻页失败只该让页脚显示"点击重试"，
+     * 把用户已经翻到的内容清掉是最糟的处理。
+     */
+    fun loadMoreOnline() {
+        val src = onlineSource ?: return
+        if (!onlineMusicEnabled) return
+        if (onlineSearching || onlineLoadingMore || !onlineHasMore) return
+        val kw = onlineSearchedFor
+        if (kw.isEmpty()) return
+
+        val token = onlineSearchToken
+        val offset = onlineLoadedCount
+        onlineLoadMoreJob = viewModelScope.launch {
+            onlineLoadingMore = true
+            onlineLoadMoreFailed = false
+            try {
+                val app = getApplication<Application>()
+                val page = withContext(Dispatchers.IO) {
+                    src.search(app, kw, ONLINE_PAGE_SIZE, offset)
+                }
+                // 期间换了搜索词 / 清空了：这一页已经不属于当前列表，丢掉
+                if (token != onlineSearchToken) return@launch
+
+                if (page == null) {
+                    onlineLoadMoreFailed = true
+                    return@launch
+                }
+                val tracks = page.tracks
+                if (tracks.isEmpty()) {
+                    onlineHasMore = false
+                    return@launch
+                }
+
+                // 按 remoteId 去重：服务端的 offset 在结果变动时可能给出重叠的一段。
+                // 网易云在 offset 超过总数时还会**绕回第一页**，那时整页都会被去重掉 ——
+                // 下面的 hasMore 用总数算，所以不会因此反复请求。
+                val seen = onlineResults.mapTo(HashSet(onlineResults.size * 2)) { it.remoteId }
+                val fresh = tracks.filter { it.remoteId !in seen }
+
+                commitOnlinePage(src, fresh)
+                onlineResults = onlineResults + fresh
+                // offset 按**服务端返回的条数**推进，不是按去重后的
+                onlineLoadedCount = offset + tracks.size
+                // 总数说了算；另外卡一个上限兜底 —— 万一音源报的总数虚高，
+                // 也不会一直翻下去（MAX_ONLINE_RESULTS 说明见常量处）
+                onlineHasMore = page.hasMore(offset, ONLINE_PAGE_SIZE) &&
+                    onlineLoadedCount < MAX_ONLINE_RESULTS
+            } finally {
+                if (token == onlineSearchToken) onlineLoadingMore = false
+            }
+        }
+    }
+
+    /** 重试加载下一页（页脚点一下） */
+    fun retryLoadMoreOnline() {
+        onlineLoadMoreFailed = false
+        loadMoreOnline()
+    }
+
+    /**
+     * 把一页结果并进 [onlineSongMap]。
+     *
+     * 新增和淘汰都要推进 [onlineRevision] —— 它是 `SonanceRoot` 里 `songMap` 的
+     * remember key，漏了"新增"这一半的话，搜出来的歌在队列页里会查不到。
+     */
+    private fun commitOnlinePage(src: OnlineSource, page: List<RemoteTrack>) {
+        if (page.isEmpty()) return
+        val songs = page.map { src.toSong(it) }
+        var changed = false
+        songs.forEach { if (onlineSongMap.put(it.id, it) == null) changed = true }
+        // 淘汰时要连**累积的全部结果**一起算保留集，不能只看这一页
+        val allIds = onlineResults.map { remoteSongId(src.id, it.remoteId) } + songs.map { it.id }
+        changed = pruneOnlineSongs(allIds) || changed
+        if (changed) onlineRevision++
+    }
+
+    private fun cancelOnlineRequests() {
+        onlineSearchJob?.cancel()
+        onlineSearchJob = null
+        onlineLoadMoreJob?.cancel()
+        onlineLoadMoreJob = null
     }
 
     /**
@@ -1239,15 +1365,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 清空搜索页。
      *
-     * 必须**取消在途的那次搜索**：用户清空输入框之后，先前那次请求还会回来，
+     * 必须**取消在途的请求**：用户清空输入框之后，先前那次请求还会回来，
      * 把结果重新填进一个空搜索框 —— 看起来就是"清不掉"。
      * 递增 token 是为了让那次任务在 `finally` 里认不出自己（它不该再动状态）。
      */
     fun clearOnlineSearch() {
-        onlineSearchJob?.cancel()
-        onlineSearchJob = null
+        cancelOnlineRequests()
         onlineSearchToken++
         onlineResults = emptyList()
+        onlineLoadedCount = 0
+        onlineHasMore = false
+        onlineLoadingMore = false
+        onlineLoadMoreFailed = false
         onlineSearchedFor = ""
         onlineSearchFailed = false
         onlineNotice = null
@@ -1291,6 +1420,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val searched = MediaRepository.search(songs, searchQuery)
         return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
+
+    /**
+     * 完整曲库（已排序、已排除隐藏项），**不受搜索词影响**。
+     *
+     * 给「点某首歌播放」用。搜索是**找入口**，不是"我要只听这几首" ——
+     * 拿筛选后的列表当队列的话，用户搜一首歌点播放，队列里就只剩搜索结果，
+     * 播完就没了（而且搜索命中一首时队列里就只有那一首）。
+     *
+     * `songs` 本身已经是"扫描时 + 读缓存时"过滤过隐藏项的列表，这里不用再过滤。
+     */
+    fun librarySongs(): List<Song> =
+        MediaRepository.sortSongs(songs, sortField, sortAscending, songStats())
 
     fun recentSongs(): List<Song> {
         val order = recentIds.withIndex().associate { (i, id) -> id to i }
@@ -1558,7 +1699,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 上下滑动、上一首/下一首、自动续播、队列页显示，全都走同一份随机序。
      * 关闭时用 [preShuffleOrder] 还原原顺序，并把播放位置停在当前这首歌上。
      */
-    fun toggleShuffle() {
+    /**
+     * @param quiet 不弹提示。三态切换（[cyclePlayMode]）内部调它时要传 true ——
+     *   否则会先闪一下"随机播放已开启"再被"列表循环"顶掉，看着像抖了一下。
+     */
+    fun toggleShuffle(quiet: Boolean = false) {
         val st = player.state.value
         if (!st.shuffle) {
             val q = currentQueue()
@@ -1570,7 +1715,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 player.toggleShuffle()
                 // 保住进度：重排队列不等于重头播
                 player.play(shuffled, 0, autoplay = st.isPlaying, startPositionMs = st.positionMs)
-                showToast("随机播放已开启")
+                if (!quiet) showToast("随机播放已开启")
                 return
             }
         } else {
@@ -1580,12 +1725,45 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 player.toggleShuffle()
                 player.play(orig, idx, autoplay = st.isPlaying, startPositionMs = st.positionMs)
                 preShuffleOrder = null
-                showToast("随机播放已关闭")
+                if (!quiet) showToast("随机播放已关闭")
                 return
             }
         }
         // 队列只有一首 / 没有记录过原顺序：只切标志
         player.toggleShuffle()
+    }
+
+    /**
+     * 三态播放模式：**随机 → 列表循环 → 单曲循环 → 随机**。
+     *
+     * 播放页那个按钮点一下就调它。
+     *
+     * 底层要同时动两个标志（`shuffleModeEnabled` + `repeatMode`），
+     * 这里按目标状态一次性设好，而不是"先关一个再开另一个" ——
+     * 中间态会短暂出现"随机 + 单曲循环"这种矛盾组合，播放器可能刚好在那一瞬
+     * 决定下一首放什么。
+     */
+    fun cyclePlayMode() {
+        val st = player.state.value
+        val next = PlayMode.of(st.shuffle, st.repeat).next()
+        when (next) {
+            PlayMode.SHUFFLE -> {
+                // 随机也要能一直放下去，所以 repeat 设成 ALL 而不是 OFF
+                if (!st.shuffle) toggleShuffle(quiet = true)
+                player.setRepeat(RepeatMode.ALL)
+            }
+
+            PlayMode.REPEAT_ALL -> {
+                if (st.shuffle) toggleShuffle(quiet = true)
+                player.setRepeat(RepeatMode.ALL)
+            }
+
+            PlayMode.REPEAT_ONE -> {
+                if (st.shuffle) toggleShuffle(quiet = true)
+                player.setRepeat(RepeatMode.ONE)
+            }
+        }
+        showToast(next.label)
     }
 
     // ===== 播放入口 =====
@@ -1625,9 +1803,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 一次搜索要多少条。
          *
          * 30 条是权衡：一屏能滚出十来条、够翻两页，而封面缩略图按每张 ~100KB 算
-         * 也就 3MB —— 再多就要等明显的一下了。真要做翻页得给音源加 offset 语义，
-         * 现在各家的 offset 含义并不一致，不值得为它复杂化。
+         * 也就 3MB —— 再多就要等明显的一下了。
          */
         private const val ONLINE_PAGE_SIZE = 30
+
+        /**
+         * 一次搜索**最多翻到多少条**，10 页。
+         *
+         * 兜底用。正常情况下 `RemoteSearchPage.hasMore` 靠音源报的总数就能准确停下；
+         * 但那是第三方未公开接口，万一哪天总数报虚了（报 5000 实际只给得到 200），
+         * 没有上限就会一直往下翻、一直打接口。300 条对一个"搜首歌来听"的场景绰绰有余。
+         */
+        private const val MAX_ONLINE_RESULTS = 300
     }
 }
