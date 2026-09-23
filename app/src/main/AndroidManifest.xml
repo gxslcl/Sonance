@@ -157,6 +157,18 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_minimal_info" />
         </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetLarge"
+            android:exported="false"
+            android:label="@string/widget_label_large">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_large_info" />
+        </receiver>
     <!-- ===== 应用图标变体：同一 MainActivity 的多个别名，运行时只启用一个 ===== -->
         <!-- 原版 · Sonance -->
         <activity-alias

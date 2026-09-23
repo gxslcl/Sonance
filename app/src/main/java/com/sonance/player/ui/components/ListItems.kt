@@ -60,6 +60,11 @@ fun SongRow(
     compact: Boolean = false,
     showAlbum: Boolean = true,
     showIndex: Boolean = true,
+    /**
+     * 从列表移除这一首。**传 null 就不显示这一项** —— 在线搜索结果之类的
+     * 列表里没有"曲库"这个概念，摆一个"从列表移除"只会让人以为能删远程数据。
+     */
+    onRemoveFromLibrary: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
@@ -182,6 +187,15 @@ fun SongRow(
                     text = { Text(if (isFavorite) "取消收藏" else "添加到收藏", color = skin.text) },
                     onClick = { menuOpen = false; onToggleFavorite() }
                 )
+                if (onRemoveFromLibrary != null) {
+                    DropdownMenuItem(
+                        // 把「不删文件」写进标题里：这是菜单里最容易让人犹豫的一项，
+                        // 不说清楚的话用户根本不敢点。这个版本的 Material3 的
+                        // DropdownMenuItem 没有 supportingText，只能并进一行。
+                        text = { Text("从列表移除（不删文件）", color = skin.text) },
+                        onClick = { menuOpen = false; onRemoveFromLibrary() }
+                    )
+                }
             }
         }
 

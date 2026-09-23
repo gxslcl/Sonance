@@ -58,6 +58,18 @@ internal enum class WidgetStyle(
     MINIMAL(
         SonanceWidgetMinimal::class.java, R.layout.widget_minimal, R.string.widget_label_minimal,
         showCover = false, showPrevNext = false, showOpen = false, coverPx = 0
+    ),
+
+    /**
+     * 大幅卡片 5x2。
+     *
+     * 5 格宽才放得下"封面和信息并排"：2x2 那种竖排在这个尺寸上会留出大片空白，
+     * 而 4x1 又太扁放不下封面。封面边长给到 320px —— 它在这一套里是主体，
+     * 比 CARD（288）还大一号。
+     */
+    LARGE(
+        SonanceWidgetLarge::class.java, R.layout.widget_large, R.string.widget_label_large,
+        showCover = true, showPrevNext = true, showOpen = true, coverPx = 320
     );
 }
 
@@ -127,6 +139,9 @@ class SonanceWidgetWide : SonanceWidgetProvider(WidgetStyle.WIDE)
 /** 样式 4：极简文字 2x1 */
 class SonanceWidgetMinimal : SonanceWidgetProvider(WidgetStyle.MINIMAL)
 
+/** 样式 5：大幅卡片 5x2 */
+class SonanceWidgetLarge : SonanceWidgetProvider(WidgetStyle.LARGE)
+
 /**
  * 小组件的对外入口：应用侧只跟它打交道。
  */
@@ -154,6 +169,10 @@ object SonanceWidgets {
         coverKey: String?
     ) {
         val app = context.applicationContext
+        // 先读一次：颜色不归这里管（换肤走 [onSkinChanged]），
+        // 构造新快照时必须原样带回去，否则会把皮肤色冲成默认值、
+        // 而且每次播放状态跳动都会被判成"内容变了"而白白重绘一次。
+        val previous = WidgetState.read(app)
         val snap = WidgetState.Snapshot(
             hasSong = title.isNotBlank(),
             title = title,
@@ -161,13 +180,36 @@ object SonanceWidgets {
             isPlaying = isPlaying,
             albumId = albumId,
             sourceUri = sourceUri,
-            coverKey = coverKey
+            coverKey = coverKey,
+            colorBg = previous.colorBg,
+            colorText = previous.colorText,
+            colorTextDim = previous.colorTextDim,
+            colorAccent = previous.colorAccent,
+            colorOnAccent = previous.colorOnAccent
         )
-        val previous = WidgetState.read(app)
         if (!WidgetState.write(app, snap)) return
         // 封面来源变了才清位图缓存（只是播放/暂停切换的话，缓存还能继续用）
         if (!snap.sameArtwork(previous)) WidgetCover.clear()
         // 渲染要读磁盘，扔到后台线程；这一步只在内容真的变了时才会走到
+        Thread { refreshAll(app) }.start()
+    }
+
+    /**
+     * 皮肤换了 —— 小组件的颜色跟着变。
+     *
+     * 只更新颜色那几个键，播放内容一个都不碰；颜色没变就什么都不做
+     * （换肤面板里来回点会连续触发，不该每次都重画一遍所有小组件）。
+     */
+    fun onSkinChanged(
+        context: Context,
+        bg: Int,
+        text: Int,
+        textDim: Int,
+        accent: Int,
+        onAccent: Int
+    ) {
+        val app = context.applicationContext
+        if (!WidgetState.writeSkin(app, bg, text, textDim, accent, onAccent)) return
         Thread { refreshAll(app) }.start()
     }
 
@@ -194,6 +236,26 @@ internal object WidgetRenderer {
     ) {
         val snap = WidgetState.read(context)
         val views = RemoteViews(context.packageName, style.layoutId)
+
+        // ---- 皮肤色 ----
+        //
+        // RemoteViews 只能调 View 上的现成方法，没有"给背景 drawable 染个色"这种
+        // 干净办法（`setBackgroundTintList` 要 API 31，minSdk 是 24）。所以：
+        // - 底色走 `setBackgroundColor`（会盖掉布局里那个圆角 drawable，
+        //   但 Android 12+ 系统会统一给小组件裁剪圆角，实际看不出来）；
+        // - 图标走 `setColorFilter`（ImageView.setColorFilter(int)，全版本可用）。
+        views.setInt(R.id.widget_root, "setBackgroundColor", snap.colorBg)
+        views.setTextColor(R.id.widget_title, snap.colorText)
+        views.setTextColor(R.id.widget_artist, snap.colorTextDim)
+        // 播放键画在强调色实心圆上，图标必须用"强调色上的前景色"才看得清
+        views.setInt(R.id.widget_play, "setColorFilter", snap.colorOnAccent)
+        if (style.showPrevNext) {
+            views.setInt(R.id.widget_prev, "setColorFilter", snap.colorAccent)
+            views.setInt(R.id.widget_next, "setColorFilter", snap.colorAccent)
+        }
+        if (style.showOpen) {
+            views.setInt(R.id.widget_open, "setColorFilter", snap.colorAccent)
+        }
 
         // ---- 文本 ----
         views.setTextViewText(

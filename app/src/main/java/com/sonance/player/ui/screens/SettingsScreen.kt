@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -741,6 +742,57 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
             checked = vm.onlineCoverEnabled,
             onCheckedChange = { vm.changeOnlineCover(it) }
         )
+
+        // ===== 一键补齐全部封面 =====
+        val batch = vm.coverBatch
+        if (batch == null) {
+            SettingsActionRow(
+                title = "一键补齐全部封面",
+                subtitle = "立刻给曲库里所有还缺封面的歌补一张，点一下就开始（不挑网络）。\n" +
+                    "本地内嵌 / 之前下载过的会自动跳过，只补真正缺的那些；" +
+                    "华语歌建议先打开「在线音乐 → 用网易云补全本地歌」，命中率会高很多。",
+                onClick = { vm.fetchAllMissingCovers() },
+                actionLabel = "开始"
+            )
+        } else {
+            Column(Modifier.padding(vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "正在补齐封面",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = skin.text
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "${batch.done}/${batch.total} · 已补 ${batch.found} 张" +
+                                if (batch.current.isBlank()) "" else " · ${batch.current}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "停止",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = skin.accent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable { vm.cancelCoverBatch() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { (batch.done.toFloat() / batch.total.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = skin.accent,
+                    trackColor = skin.surface3
+                )
+            }
+        }
 
         Column(Modifier.padding(top = 12.dp)) {
             Text(

@@ -251,6 +251,8 @@ fun OnlineScreen(
                             track = track,
                             thumbUrl = vm.onlineThumbUrl(track, THUMB_PX),
                             sourceLabel = src.label,
+                            // 存过本地的标出来：点它播的是文件，不再联网
+                            downloaded = vm.isDownloaded(track),
                             isCurrent = playerState.mediaId == songId,
                             isPlaying = playerState.isPlaying,
                             onClick = { vm.playOnline(index) }
@@ -347,6 +349,8 @@ private fun OnlineTrackRow(
     thumbUrl: String?,
     /** 音源显示名。小字标出来，让"这首歌是从哪来的"看得见 */
     sourceLabel: String,
+    /** 这首已经存到本地了 —— 点它播的是文件，不再联网取流 */
+    downloaded: Boolean = false,
     isCurrent: Boolean,
     isPlaying: Boolean,
     onClick: () -> Unit
@@ -461,6 +465,11 @@ private fun OnlineTrackRow(
             VipBadge()
         }
 
+        if (downloaded) {
+            Spacer(Modifier.width(6.dp))
+            DownloadedBadge()
+        }
+
         if (track.durationMs > 0) {
             Spacer(Modifier.width(10.dp))
             Text(
@@ -486,6 +495,39 @@ private fun VipBadge() {
     ) {
         Text(
             text = "VIP",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.accent
+        )
+    }
+}
+
+/**
+ * 「已存」小徽标 —— 这首歌已经在本地有一份，点它播的是文件、不再联网。
+ *
+ * 用**对勾**而不是下载箭头：它说的是"这里已经有一份了"（状态），
+ * 不是"点这里下载"（动作）。和 VIP 徽标同一套底色，跟着皮肤走。
+ */
+@Composable
+private fun DownloadedBadge() {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(skin.accentGlow)
+            .border(1.dp, skin.accentDim, RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Icon(
+            imageVector = SonanceIcons.Check,
+            contentDescription = null,
+            tint = skin.accent,
+            modifier = Modifier.size(10.dp)
+        )
+        Text(
+            text = "已存",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = skin.accent

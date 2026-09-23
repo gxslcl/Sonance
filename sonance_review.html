@@ -1,0 +1,79 @@
+<html style="margin:0;padding:0;">
+<title>Sonance 项目代码审查</title>
+<div style="width:100%;box-sizing:border-box;background:#0f1420;color:#e8ecf4;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:24px 20px 32px;">
+  <div style="border-left:6px solid #38bdf8;padding-left:14px;margin-bottom:6px;">
+    <div style="font-size:24px;font-weight:700;letter-spacing:.5px;">Sonance · Android 本地音乐播放器 代码审查</div>
+    <div style="font-size:13px;color:#9aa7bd;margin-top:4px;">Kotlin + Jetpack Compose + Media3 · 单 Activity · 服务常驻后台播放</div>
+  </div>
+
+  <!-- 规模指标 -->
+  <div style="display:flex;flex-wrap:wrap;gap:10px;margin:16px 0 22px;">
+    <div style="background:#161e2e;border:1px solid #26334d;border-radius:10px;padding:10px 16px;min-width:130px;"><div style="font-size:26px;font-weight:700;color:#38bdf8;">21,921</div><div style="font-size:12px;color:#9aa7bd;">生产代码行（65 个 .kt）</div></div>
+    <div style="background:#161e2e;border:1px solid #26334d;border-radius:10px;padding:10px 16px;min-width:130px;"><div style="font-size:26px;font-weight:700;color:#4ade80;">299</div><div style="font-size:12px;color:#9aa7bd;">JVM 单元测试（24 文件）</div></div>
+    <div style="background:#161e2e;border:1px solid #26334d;border-radius:10px;padding:10px 16px;min-width:130px;"><div style="font-size:26px;font-weight:700;color:#fbbf24;">35</div><div style="font-size:12px;color:#9aa7bd;">git 提交 · 全程修复驱动</div></div>
+    <div style="background:#161e2e;border:1px solid #26334d;border-radius:10px;padding:10px 16px;min-width:130px;"><div style="font-size:26px;font-weight:700;color:#f87171;">1</div><div style="font-size:12px;color:#9aa7bd;">严重安全问题（密钥入库）</div></div>
+  </div>
+
+  <!-- 架构分层 -->
+  <div style="font-size:16px;font-weight:700;margin-bottom:10px;">架构分层（按实际包结构）</div>
+  <div style="display:flex;flex-direction:column;gap:8px;">
+    <div style="background:#0e2a3a;border:1px solid #1d4a63;border-radius:8px;padding:10px 14px;">
+      <div style="color:#7dd3fc;font-weight:700;font-size:14px;">UI 层 · ui/</div>
+      <div style="font-size:12.5px;color:#c7d3e3;margin-top:3px;">SonanceRoot（断点/权限/导航） · screens（曲库/在线/设置/还原） · components（FullPlayer 1467 行、Visualizer 1133 行、Lyrics 1040 行） · sheets · theme（多皮肤）</div>
+    </div>
+    <div style="text-align:center;color:#5b6b83;font-size:12px;">▲ 状态流：mutableStateOf / StateFlow</div>
+    <div style="background:#16283a;border:1px solid #24506e;border-radius:8px;padding:10px 14px;">
+      <div style="color:#7dd3fc;font-weight:700;font-size:14px;">状态与编排 · SonanceViewModel（2156 行）+ PlayerController</div>
+      <div style="font-size:12.5px;color:#c7d3e3;margin-top:3px;">曲库扫描/排序/去重、收藏/最近播放、在线音乐、封面/歌词补全、播放并下载、容器还原 —— 全部状态集中在一个类</div>
+    </div>
+    <div style="text-align:center;color:#5b6b83;font-size:12px;">▲ MediaController ↔ MediaSession</div>
+    <div style="background:#1a2438;border:1px solid #2f4266;border-radius:8px;padding:10px 14px;">
+      <div style="color:#7dd3fc;font-weight:700;font-size:14px;">播放层 · playback/</div>
+      <div style="font-size:12.5px;color:#c7d3e3;margin-top:3px;">PlaybackService（MediaSessionService）· 软件均衡器 EqProcessor（biquad，绕开系统 AudioEffect）· PcmTap 取样 · VizPhysics（帧率无关物理）· AudioVisualizer</div>
+    </div>
+    <div style="text-align:center;color:#5b6b83;font-size:12px;">▲</div>
+    <div style="background:#1f2438;border:1px solid #343a5e;border-radius:8px;padding:10px 14px;">
+      <div style="color:#7dd3fc;font-weight:700;font-size:14px;">数据层 · data/</div>
+      <div style="font-size:12.5px;color:#c7d3e3;margin-top:3px;">MediaRepository（MediaStore 扫描+文件头二次确认）· OnlineMusic/NeteaseMatch（在线源接口化）· Prefs（SharedPreferences）· ArtworkLoader/Lyrics/Id3Writer · PrivateAudioRestorer/RestoreEngine（KGM 解密）· OnlineDownloader（MediaStore 落盘）</div>
+    </div>
+    <div style="text-align:center;color:#5b6b83;font-size:12px;">▲</div>
+    <div style="background:#241f38;border:1px solid #3c335e;border-radius:8px;padding:10px 14px;">
+      <div style="color:#c4b5fd;font-weight:700;font-size:14px;">系统集成 · widget/ + Manifest</div>
+      <div style="font-size:12.5px;color:#c7d3e3;margin-top:3px;">5 种桌面小组件（独立 receiver）· FileProvider 封面通道 · 40 个 activity-alias 图标变体 · 权限最小化声明 · network_security_config 只放行 music.126.net 明文</div>
+    </div>
+  </div>
+
+  <!-- 评估双栏 -->
+  <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:26px;">
+    <div style="flex:1 1 400px;background:#14241a;border:1px solid #2c5a3a;border-radius:10px;padding:14px 16px;">
+      <div style="font-size:16px;font-weight:700;color:#4ade80;margin-bottom:10px;">✓ 做得好的地方</div>
+      <ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.75;color:#d5e8dc;">
+        <li><b>决策型注释近乎教科书级</b>：每个设计决策都带「为什么 + 踩坑实测」，如网易云 fee 字段行为表、CDN https→http 302、120Hz 下衰减速度翻倍等，维护者可以直接接手。</li>
+        <li><b>测试策略极其务实</b>：299 个纯 JVM 单测覆盖歌词解析/匹配打分/去重/排序/均衡器 DSP/物理模拟；刻意用泛型纯函数（findDuplicatesIn、nextOnlineHistory）绕开 Android Uri 桩，让核心逻辑可测。</li>
+        <li><b>性能意识深入骨髓</b>：release 强制 R8、Baseline Profile + profileinstaller、Compose 稳定性报告、@Immutable 防全屏掉帧、物理模拟用解析解实现精确帧率无关（附数学证明）、EqBus 用 revision 避免每块重算系数。</li>
+        <li><b>音频链路顺序有讲究</b>：均衡器在取样器之前 → 可视化读的是「用户实际听到的声音」；软件 EQ 绕开 ColorOS 拒绝 AudioEffect 的兼容坑，全机型可用。</li>
+        <li><b>权限与隐私克制</b>：WRITE_EXTERNAL_STORAGE 用 maxSdkVersion=28 限死、MediaStore IS_PENDING 免权限落盘、三个联网功能全部默认关闭、明文 HTTP 只放行 CDN 单域而非全局。</li>
+        <li><b>边界处理扎实</b>：remoteSongId 用 FNV-1a 64 位并附生日悖论计算、负数 id 约定防与 MediaStore 撞车、在线歌持久化用 StoredOnlineSong 而非会过期的 Uri、下载校验 Content-Length 防半首歌。</li>
+      </ol>
+    </div>
+    <div style="flex:1 1 400px;background:#2a1717;border:1px solid #5e2c2c;border-radius:10px;padding:14px 16px;">
+      <div style="font-size:16px;font-weight:700;color:#f87171;margin-bottom:10px;">✗ 值得优化的地方（按严重度）</div>
+      <ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.75;color:#f2d9d9;">
+        <li><b style="color:#fca5a5;">P0 安全 · 签名密钥明文入库</b>：sonance.keystore 被 git 跟踪（git ls-files 确认），storePassword/keyPassword 明文写死在 build.gradle.kts（[REDACTED]），.gitignore 注释还注明「故意纳入」。仓库一旦泄露，攻击者可签名恶意更新冒充 Sonance，全量用户中招。密钥应立即移出版本管理并轮换。</li>
+        <li><b style="color:#fca5a5;">P1 合规 · KGM/VPR 解密 + 未公开接口</b>：PrivateAudioRestorer 实现私有 DRM 容器脱壳（LockedFormat 注释却写「不会去解密」，自相矛盾）；网易云搜索/取流走未公开接口 + 浏览器 UA 伪装，改版即失效，有《著作权法》技术措施条款风险。注释需与实现一致，风险需正视。</li>
+        <li><b>P1 结构 · 上帝对象与巨型文件</b>：SonanceViewModel 2156 行承载曲库/在线/还原/设置全部状态；FullPlayer 1467、SettingsScreen 1390、Visualizer 1133。按域拆分 ViewModel 或引入 use-case 层是必然方向。</li>
+        <li><b>P2 存储 · SharedPreferences 膨胀</b>：播放次数每首歌一个键、收藏/隐藏/下载键全堆 XML，几千首歌时读写退化；allPlayCounts 遍历 sp.all 是缓解非根治，应考虑 Room/DataStore。</li>
+        <li><b>P2 质量门禁 · lint 关闭</b>：abortOnError=false + checkReleaseBuilds=false 等于 lint 不设防；无 instrumented/UI 测试，回归全押在手测 + 299 个纯逻辑单测。</li>
+        <li><b>P2 工程 · 其他</b>：无 README 上手文档；依赖偏旧（compose-bom 2024.10、media3 1.5、compileSdk 35）；build/ 残留 210MB 磁盘产物；可观测性仅 Log 无崩溃上报。</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- 结论 -->
+  <div style="margin-top:22px;background:#141a2a;border:1px solid #2c3858;border-radius:10px;padding:14px 16px;">
+    <div style="font-size:15px;font-weight:700;color:#38bdf8;margin-bottom:6px;">总评</div>
+    <div style="font-size:13.5px;line-height:1.8;color:#c7d3e3;">单人项目的工程质量显著高于平均水准：注释即文档、测试钉住最容易静默出错的部分、性能优化有量化依据（实测数据而非感觉）。核心短板不在代码写法，而在<b>工程治理</b>——签名密钥入库是必须立刻处理的硬伤；巨型 ViewModel 和关闭的 lint 会在功能继续膨胀后成为改不动的手脚架；解密 DRM 容器与未公开接口是产品化之前必须想清楚的风险敞口。</div>
+    <div style="font-size:12px;color:#7c8aa0;margin-top:8px;">建议行动顺序：① 密钥移出仓库 + 轮换 → ② 修正 LockedFormat 注释/评估解密功能去留 → ③ 拆分 ViewModel → ④ 补 README、重开 lint。</div>
+  </div>
+</div>
+</html>

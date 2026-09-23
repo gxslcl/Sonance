@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sonance.player.data.Album
@@ -104,6 +105,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // ===== 偏好 =====
     var skin by mutableStateOf(Skins.byId(prefs.skinId))
         private set
+
+    /**
+     * 启动时把皮肤色同步给桌面小组件一次。
+     *
+     * 换肤走 [changeSkin]，但**没换过皮肤**的用户（绝大多数）永远不会走到那里 ——
+     * 不同步的话，小组件会一直用 `WidgetState` 里那套默认色，
+     * 和 App 里的皮肤对不上。
+     *
+     * 放在 `skin` 声明之后：Kotlin 按源码顺序初始化属性。
+     */
+    private fun pushSkinToWidget() {
+        val s = skin
+        com.sonance.player.widget.SonanceWidgets.onSkinChanged(
+            context = getApplication(),
+            bg = s.bg.toArgb(),
+            text = s.text.toArgb(),
+            textDim = s.textDim.toArgb(),
+            accent = s.accent.toArgb(),
+            onAccent = s.onAccent.toArgb()
+        )
+    }
     var sortField by mutableStateOf(runCatching { SortField.valueOf(prefs.sortField) }.getOrDefault(SortField.TITLE))
         private set
     var sortAscending by mutableStateOf(prefs.sortAscending)
@@ -192,6 +214,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingStartupScroll = false
 
     init {
+        pushSkinToWidget()
         player.onSongStarted = { id ->
             // 在线歌不进本地记账。
             //
@@ -674,6 +697,31 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         showToast("已从列表隐藏 ${victims.size} 首（文件未删除）")
     }
 
+    /**
+     * 把某一首歌从列表移除（**只隐藏，不动文件**）。
+     *
+     * 和 [cleanDuplicates] 走同一套机制（[Prefs.hiddenIdSet]），所以设置页那个
+     * 「恢复隐藏曲目」的入口能一并把它找回来 —— 误删不用重装 App。
+     *
+     * 只对本地歌有意义：在线歌的 id 是哈希出来的负数，而且它们本来就不在
+     * 曲库列表里（搜索结果列表每次都是重新拉的）。
+     */
+    fun hideSong(song: Song) {
+        if (!song.isLocal) return
+        if (song.id in prefs.hiddenIdSet()) return
+        val merged = prefs.hiddenIdSet() + song.id
+        prefs.hiddenSongIds = merged.joinToString(",")
+        hiddenCount = merged.size
+
+        // 只改内存里的曲库列表，文件一个都没动
+        songs = songs.filter { it.id != song.id }
+        albums = MediaRepository.groupAlbums(songs)
+        artists = MediaRepository.groupArtists(songs)
+        folders = MediaRepository.groupFolders(songs)
+        prefs.songsCacheJson = encodeSongsToJson(songs)
+        showToast("已从列表移除「${song.title}」（文件未删除）")
+    }
+
     /** 恢复所有被隐藏的曲目 */
     fun restoreHiddenSongs() {
         if (prefs.hiddenIdSet().isEmpty()) {
@@ -898,6 +946,111 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 2. 本地（含文件内嵌）已有封面 → 直接返回
      * 3. 这次会话已经试过这首 → 直接返回
      */
+    // ===== 一键补齐所有缺失的封面 =====
+
+    /** 批量补封面的进度。`null` = 当前没在跑 */
+    var coverBatch by mutableStateOf<CoverBatchProgress?>(null)
+        private set
+
+    private var coverBatchJob: Job? = null
+
+    data class CoverBatchProgress(
+        /** 已经处理完的歌数 */
+        val done: Int,
+        /** 一共要处理多少首 */
+        val total: Int,
+        /** 成功补到的张数 */
+        val found: Int,
+        /** 正在处理的歌名 —— 让用户看得见"它在动" */
+        val current: String
+    )
+
+    /**
+     * 一键给**所有还缺封面**的歌补上封面。点一下就开始，不挑网络。
+     *
+     * ## 为什么串行
+     *
+     * 一次请求约 1 秒，几百首歌并发下去既会打爆音源（iTunes 和网易云都是
+     * 免费公开接口，没有配额可言），也会让进度条瞬间跳到底 ——
+     * 用户看不到过程，反而以为卡住了。串行还能让「停止」立刻生效。
+     *
+     * ## 为什么会重复点没反应
+     *
+     * 已经在跑的时候直接返回：[coverBatchJob] 只有一个，重新启动会把
+     * 上一轮的进度冲掉，而上一轮的协程还在发请求。
+     */
+    fun fetchAllMissingCovers() {
+        if (coverBatchJob?.isActive == true) return
+        // 快照一份：跑的过程中用户可能从列表删歌，那不该影响这一轮
+        val targets = songs.filter { it.isLocal }
+        if (targets.isEmpty()) {
+            showToast("曲库里还没有歌")
+            return
+        }
+        coverBatchJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            var found = 0
+            var done = 0
+            for (song in targets) {
+                // 每首之间检查一次：点了「停止」就真的停在这里，不再发下一个请求
+                if (!isActive) break
+                coverBatch = CoverBatchProgress(done, targets.size, found, song.title)
+                if (withContext(Dispatchers.IO) { fetchOneCover(app, song) }) found++
+                done++
+                coverBatch = CoverBatchProgress(done, targets.size, found, song.title)
+            }
+            coverBatch = null
+            showToast(
+                if (found == 0) "一首都没补到（可能本来就有封面）"
+                else "已补齐 $found 张封面"
+            )
+        }
+    }
+
+    fun cancelCoverBatch() {
+        coverBatchJob?.cancel()
+        coverBatchJob = null
+        coverBatch = null
+        showToast("已停止")
+    }
+
+    /**
+     * 给一首歌补封面（只补"确实没有"的）。@return 是否补到了新封面。
+     *
+     * 三道短路，避免把已经有的封面再下一遍：
+     * 1. 磁盘缓存里已经有（之前下载过）；
+     * 2. 之前确认过"确实没有"（[CoverCache.Lookup.KnownMiss]）；
+     * 3. 本地 / 内嵌有封面。
+     *
+     * 第 3 步用 **128 的尺寸档**只为判断"有没有"，不为显示 ——
+     * 批量跑的时候不该为每张封面都解一张 320px 的位图出来。
+     */
+    private suspend fun fetchOneCover(app: Application, song: Song): Boolean {
+        val key = OnlineCover.keyOf(song.title, song.artist) ?: return false
+        when (CoverCache.lookup(app, key)) {
+            is CoverCache.Lookup.Hit -> return false
+            CoverCache.Lookup.KnownMiss -> return false
+            CoverCache.Lookup.Unknown -> Unit
+        }
+        if (ArtworkLoader.load(app, song.albumId, 128, song.uri, key) != null) return false
+
+        val url = findCoverUrl(song)
+        if (url.isNullOrBlank()) {
+            // 记一个"确认没有"，下次同一首不再打接口
+            CoverCache.store(app, key, null)
+            return false
+        }
+        val raw = OnlineCover.downloadBytes(url) ?: return false
+        CoverCache.store(app, key, raw)
+        // 让「磁盘里也没有封面」那条短路失效：列表 200px 和播放页 900px 是两个缓存键，
+        // 不失效的话另一个档位会一直以为没封面。
+        //
+        // 这里**不**调 `ArtworkLoader.putOnline`：批量下载的图若全部驻留内存，
+        // 几百首就是几百张位图。写盘已经足够 —— 列表下次组合（滚动 / 重进）就会读到。
+        ArtworkLoader.forgetCoverMiss(key)
+        return true
+    }
+
     fun ensureCover(song: Song) {
         // 在线歌走另一条路：它**自带**封面地址，不需要"本地探测 + 联网猜"那一套，
         // 也不该受「在线封面」开关约束 —— 这首歌本来就在联网播。
@@ -1161,6 +1314,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeSkin(value: Skin) {
         skin = value
         prefs.skinId = value.id
+        // 桌面小组件也跟着换色。它在**另一个进程上下文**里渲染，
+        // 不会自己感知到皮肤变了，必须应用侧把颜色写过去并请求重画。
+        val app = getApplication<Application>()
+        com.sonance.player.widget.SonanceWidgets.onSkinChanged(
+            context = app,
+            bg = value.bg.toArgb(),
+            text = value.text.toArgb(),
+            textDim = value.textDim.toArgb(),
+            accent = value.accent.toArgb(),
+            onAccent = value.onAccent.toArgb()
+        )
         showToast("已切换皮肤 · ${value.name}")
     }
 
@@ -1791,10 +1955,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 下标**在过滤之后**再算：mapNotNull 理论上可能丢条目（比如音源被换掉、
         // 映射里还没这一首），先取下标再过滤的话队列和下标就会错位 —— 表现是
         // "点了 A 却播了 B"，而且只在边界情况下出现，很难复现。
-        val songs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
-        val at = songs.indexOfFirst { it.remoteId == track.remoteId }
+        //
+        // 下标必须在**换成曲库副本之前**算：换过去的本地 Song 没有 remoteId，
+        // 换完再按 remoteId 找会一首都找不到（表现是点了没反应）。
+        val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
+        val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
         if (at < 0) return
+        // 已存到本地的那几首换成曲库里的副本 —— 直接播文件，不再联网取流
+        val songs = onlineSongs.map { localCopyOf(it) ?: it }
         player.play(songs, at)
+    }
+
+    /**
+     * 这首歌是不是**已经存到本地**了。
+     *
+     * 判据是 [Prefs.downloadedKeys]（`音源:远端id`），和 [maybeDownload] 用同一个键 ——
+     * 判断和写入必须是同一套，否则会出现"存过却还是每次都下"。
+     */
+    fun isDownloaded(track: RemoteTrack): Boolean {
+        val key = OnlineDownloader.downloadKeyOf(onlineSourceId, track.remoteId) ?: return false
+        return key in prefs.downloadedKeys()
+    }
+
+    /**
+     * 已经存到本地的在线歌 → 曲库里对应的那一首；没存过 / 曲库里找不到则返回 null。
+     *
+     * 匹配用**标题 + 艺术家**：下载时这些信息都写进了 ID3 标签，扫描进曲库后
+     * 读出来的就是它们。用 id 匹配是不行的 —— 在线 id 是哈希出来的负数，
+     * 和 MediaStore 给的本地 id 没有任何关系。
+     *
+     * 找不到时返回 null 而不是硬凑：那说明文件被用户挪走或删了，
+     * 退回在线播放（重新取一次流）比播一个找不到文件的本地条目强。
+     */
+    private fun localCopyOf(song: Song): Song? {
+        val key = OnlineDownloader.downloadKeyOf(song.source, song.remoteId) ?: return null
+        if (key !in prefs.downloadedKeys()) return null
+        return songs.firstOrNull { it.isLocal && it.title == song.title && it.artist == song.artist }
     }
 
     /** 在线歌的缩略图地址（列表用）。没有音源或没有封面时返回 null */

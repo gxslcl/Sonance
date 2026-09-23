@@ -9,12 +9,14 @@
     <string name="widget_label_card">山水有清音 · 封面卡片</string>
     <string name="widget_label_wide">山水有清音 · 信息宽条</string>
     <string name="widget_label_minimal">山水有清音 · 极简文字</string>
+    <string name="widget_label_large">山水有清音 · 大幅卡片</string>
 
     <!-- 系统选择器里的描述文案（Android 12+ 显示） -->
     <string name="widget_desc_bar">小封面 + 歌名，只有一个播放键，最省空间</string>
     <string name="widget_desc_card">大封面 + 上一首/播放/下一首，桌面上的迷你播放器</string>
     <string name="widget_desc_wide">横排铺开，信息最多：封面、歌名、三键控制与打开应用</string>
     <string name="widget_desc_minimal">不显示封面，只有歌名和播放键，最省内存</string>
+    <string name="widget_desc_large">5x2 大尺寸：左边大封面，右边歌名与全套控制</string>
 
     <!-- 空态与无障碍 -->
     <string name="widget_idle_title">未在播放</string>

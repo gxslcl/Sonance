@@ -86,7 +86,12 @@ fun SongList(
      * "我要只听这几首"。用筛选后的列表当队列的话，搜一首歌点播放就只剩搜索结果，
      * 播完就没了。专辑 / 艺术家 / 文件夹 / 收藏这些页不传，保持"列表即上下文"。
      */
-    queueSongs: List<Song> = songs
+    queueSongs: List<Song> = songs,
+    /**
+     * 从列表移除某一首的回调。**传 null 就不在菜单里显示这一项** ——
+     * 专辑 / 艺术家这些聚合页里，"移除"该作用于哪一层说不清，摆出来只会误导。
+     */
+    onRemoveFromLibrary: ((Song) -> Unit)? = null
 ) {
     val dense = LocalDenseLayout.current
     val padding = contentPadding ?: PaddingValues(
@@ -148,6 +153,9 @@ fun SongList(
                 onClick = { playFromSongs(song) },
                 onToggleFavorite = { toggleFav(song.id) },
                 onPlayNext = { playNextSong(song) },
+                onRemoveFromLibrary = onRemoveFromLibrary?.let { remove ->
+                    { remove(song) }
+                },
                 compact = compact || dense
             )
         }
@@ -216,6 +224,9 @@ fun SongsScreen(
             searching = vm.searchQuery.isNotBlank() && mode != 1
         )
     }
+    // 「最近播放」模式里的歌可能是**在线存档**（在线歌不进曲库），
+    // 那种条目没有本地 id，"从曲库移除"对它没有意义 —— vm.hideSong 自己会挡掉。
+    val removeSong = remember(vm) { { song: Song -> vm.hideSong(song) } }
     val folders = vm.folders
 
     Column(modifier.fillMaxSize()) {
@@ -346,7 +357,9 @@ fun SongsScreen(
                 vm = vm,
                 playerState = playerState,
                 scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                queueSongs = playQueue
+                queueSongs = playQueue,
+                // 「全部歌曲」是曲库本身，"从列表移除"在这一页才说得清
+                onRemoveFromLibrary = removeSong
             )
         }
     }

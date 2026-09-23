@@ -22,6 +22,23 @@ object WidgetState {
     private const val K_ALBUM = "album_id"
     private const val K_URI = "source_uri"
     private const val K_COVER = "cover_key"
+    private const val K_BG = "skin_bg"
+    private const val K_TEXT = "skin_text"
+    private const val K_TEXT_DIM = "skin_text_dim"
+    private const val K_ACCENT = "skin_accent"
+    private const val K_ON_ACCENT = "skin_on_accent"
+
+    /**
+     * 皮肤色的默认值 = `res/values/colors.xml` 里那套 widget 配色。
+     *
+     * 用户没换过皮肤（或换肤后还没触发过一次写盘）时用它，
+     * 保证小组件第一次放上去就有颜色，而不是一片透明。
+     */
+    private const val DEF_BG = 0xFF1A1A1A.toInt()
+    private const val DEF_TEXT = 0xFFEDE8E0.toInt()
+    private const val DEF_TEXT_DIM = 0xFF9A958E.toInt()
+    private const val DEF_ACCENT = 0xFFE8A838.toInt()
+    private const val DEF_ON_ACCENT = 0xFF121212.toInt()
 
     data class Snapshot(
         val hasSong: Boolean = false,
@@ -31,7 +48,19 @@ object WidgetState {
         val albumId: Long = -1L,
         val sourceUri: String? = null,
         /** 已下载封面的缓存 key（[com.sonance.player.data.OnlineCover.keyOf]） */
-        val coverKey: String? = null
+        val coverKey: String? = null,
+        /**
+         * 皮肤色（ARGB）。
+         *
+         * 由应用侧在换肤时写进来，小组件只管读 —— 和 title/artist 同一个道理：
+         * 小组件的 `onUpdate` 跑在 `BroadcastReceiver` 里，让它自己去翻 Prefs
+         * 再解析 14 套皮肤是不现实的，而且 `RemoteViews` 只能同步构造。
+         */
+        val colorBg: Int = DEF_BG,
+        val colorText: Int = DEF_TEXT,
+        val colorTextDim: Int = DEF_TEXT_DIM,
+        val colorAccent: Int = DEF_ACCENT,
+        val colorOnAccent: Int = DEF_ON_ACCENT
     ) {
         /**
          * 封面相关字段是否变了。
@@ -51,8 +80,39 @@ object WidgetState {
             isPlaying = sp.getBoolean(K_PLAYING, false),
             albumId = sp.getLong(K_ALBUM, -1L),
             sourceUri = sp.getString(K_URI, null),
-            coverKey = sp.getString(K_COVER, null)
+            coverKey = sp.getString(K_COVER, null),
+            colorBg = sp.getInt(K_BG, DEF_BG),
+            colorText = sp.getInt(K_TEXT, DEF_TEXT),
+            colorTextDim = sp.getInt(K_TEXT_DIM, DEF_TEXT_DIM),
+            colorAccent = sp.getInt(K_ACCENT, DEF_ACCENT),
+            colorOnAccent = sp.getInt(K_ON_ACCENT, DEF_ON_ACCENT)
         )
+    }
+
+    /**
+     * 换肤时单独更新颜色。
+     *
+     * 走独立的方法而不是塞进 [write]：换肤不该碰播放内容，
+     * 而播放状态每 500ms 就会推一次，两者的更新频率差着一个量级。
+     *
+     * @return 颜色是否真的变了
+     */
+    fun writeSkin(context: Context, bg: Int, text: Int, textDim: Int, accent: Int, onAccent: Int): Boolean {
+        val sp = context.applicationContext.getSharedPreferences(SP, Context.MODE_PRIVATE)
+        if (sp.getInt(K_BG, DEF_BG) == bg &&
+            sp.getInt(K_TEXT, DEF_TEXT) == text &&
+            sp.getInt(K_TEXT_DIM, DEF_TEXT_DIM) == textDim &&
+            sp.getInt(K_ACCENT, DEF_ACCENT) == accent &&
+            sp.getInt(K_ON_ACCENT, DEF_ON_ACCENT) == onAccent
+        ) return false
+        sp.edit()
+            .putInt(K_BG, bg)
+            .putInt(K_TEXT, text)
+            .putInt(K_TEXT_DIM, textDim)
+            .putInt(K_ACCENT, accent)
+            .putInt(K_ON_ACCENT, onAccent)
+            .apply()
+        return true
     }
 
     /** @return 内容是否真的变了（没变就不用去更新小组件，省掉一次跨进程传输） */
