@@ -17,8 +17,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -173,6 +176,16 @@ fun OnlineScreen(
                 checked = vm.onlineHideUnplayable,
                 onCheckedChange = { vm.changeOnlineHideUnplayable(it) },
                 height = if (dense) 38.dp else 44.dp
+            )
+        }
+
+        // ---- 搜索历史：输入框为空时显示，点一下直接搜 ----
+        if (vm.onlineQuery.isEmpty() && vm.onlineHistory.isNotEmpty()) {
+            SearchHistoryRow(
+                items = vm.onlineHistory,
+                onPick = { vm.searchFromHistory(it) },
+                onRemove = { vm.removeOnlineHistory(it) },
+                onClearAll = { vm.clearOnlineHistory() }
             )
         }
 
@@ -477,6 +490,94 @@ private fun VipBadge() {
             fontWeight = FontWeight.SemiBold,
             color = skin.accent
         )
+    }
+}
+
+/**
+ * 搜索历史：输入框为空时显示的一排胶囊。
+ *
+ * ## 为什么是胶囊横排，而不是下拉框
+ *
+ * 它和「音源切换」那排胶囊在视觉上是同一个东西，用户的肌肉记忆可以直接复用；
+ * 横向滑动，超出就滑 —— 竖着占地方会把搜索结果往下挤。
+ *
+ * ## 为什么只有输入框为空时才显示
+ *
+ * 用户一开始打字，说明他正要搜一个**不在历史里**的词，
+ * 这时候历史排在正中间只会挡路。
+ *
+ * 每个胶囊整体可点（= 搜这个词），右侧的 × 单独可点（= 只删这一条）。
+ * 内层的 clickable 会消费掉这次点击，不会同时触发外层的搜索。
+ */
+@Composable
+private fun SearchHistoryRow(
+    items: List<String>,
+    onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClearAll: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "最近",
+            style = MaterialTheme.typography.labelMedium,
+            color = skin.textMuted,
+            modifier = Modifier.padding(end = 10.dp)
+        )
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // key 用词条本身：删掉某一条时，Compose 只需要处理那一个，
+            // 不会把整排胶囊全部重新摆一遍（会看到闪）
+            items(items, key = { it }) { term ->
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(skin.surface)
+                        .clickable { onPick(term) }
+                        .padding(start = 14.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = term,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = SonanceIcons.Close,
+                        contentDescription = "删除「$term」",
+                        tint = skin.textMuted,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .clickable { onRemove(term) }
+                            .padding(3.dp)
+                    )
+                }
+            }
+            item {
+                Text(
+                    text = "清空",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = skin.accent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable(onClick = onClearAll)
+                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                )
+            }
+        }
     }
 }
 

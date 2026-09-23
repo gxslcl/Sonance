@@ -210,15 +210,19 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.lastOnlineSongJson = null
                 prefs.onlineQueueJson = null
             } else {
-                // 在线歌**也要进最近播放**。
+                // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
                 //
-                // 必须存完整信息而不是只存 id：在线歌的 id 是哈希出来的负数，
-                // 冷启动后本地曲库里查不到任何歌，只存 id 会留下一条
-                // "看得见、点不开、还删不掉"的幽灵记录。
+                // lastOnlineSongJson / lastPlayedOnline 是「恢复上次播放现场」用的，
+                // 和「最近播放」是两回事 —— 删了的话，切几次后台进程被回收后，
+                // 正在播的在线歌就找不回来了（那才是真正的"数据丢失"）。
+                //Prefs.recentEntries() 那边也会把历史遗留的在线条目过滤掉。
                 songById(id)?.toStoredOrNull()?.let { stored ->
-                    prefs.pushRecentOnline(stored)
                     prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
                     prefs.lastPlayedOnline = true
+                    // 切歌瞬间把进度归零：playPositionMs 是本地/在线**共用**的一个键，
+                    // 不归零的话「切歌后还没走到 onStop 就被杀」会把上一首的
+                    // 进度摆到这一首上，恢复出来直接跳到歌中间。
+                    prefs.playPositionMs = 0L
                 }
             }
             recentEntries = prefs.recentEntries()
@@ -325,7 +329,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             songs = list,
             index = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex),
             autoplay = false,
-            startPositionMs = 0L,
+            // 上次停在哪就摆回哪（配合 persistPlayback 对在线歌存进度）。
+            // 地址是当场重新取的（带签名会过期）；流不支持 Range 时最坏退化为从头播。
+            startPositionMs = prefs.playPositionMs.coerceAtLeast(0L),
             notifyStart = false
         )
         return true
@@ -410,7 +416,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.lastOnlineSongJson = storedOnlineSongToJson(it).toString()
                 prefs.lastPlayedOnline = true
             }
-            prefs.playPositionMs = 0L
+            // 进度也存下来。以前这里抹成 0，进程被杀后恢复的歌会**从头开始** ——
+            // 听到一半切几次后台回来就回到开头，用户感知就是「播放在中断」。
+            // 网易云的取流地址支持 Range 请求，恢复时可以直接摆回这个位置。
+            prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
         }
         if (st.queueIds.isNotEmpty()) {
             if (isRemoteSongId(st.mediaId)) {
@@ -1421,6 +1430,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.onlineHideUnplayable = v
     }
 
+    // ===== 在线搜索历史 =====
+
+    /** 最近搜过的词，最新在前。给搜索框下面那排胶囊用 */
+    var onlineHistory by mutableStateOf(prefs.onlineHistory())
+        private set
+
+    /**
+     * 点历史词直接搜。
+     *
+     * 先把输入框填上这个词再搜 —— **必须两步都做**：只搜不填的话，
+     * 结果回来之后输入框还是空的，看起来像搜了个空气；
+     * 只填不搜的话用户还得再点一次放大镜。
+     */
+    fun searchFromHistory(term: String) {
+        if (term.isBlank()) return
+        onlineQuery = term
+        searchOnline(term)
+    }
+
+    fun removeOnlineHistory(term: String) {
+        prefs.removeOnlineHistory(term)
+        onlineHistory = prefs.onlineHistory()
+    }
+
+    fun clearOnlineHistory() {
+        prefs.clearOnlineHistory()
+        onlineHistory = emptyList()
+        showToast("已清空搜索历史")
+    }
+
+    /** 有结果时把这个词记进历史。状态持久化在 [Prefs]，这里只负责让组合能观察到 */
+    private fun pushOnlineHistory(term: String) {
+        prefs.pushOnlineHistory(term)
+        onlineHistory = prefs.onlineHistory()
+    }
+
     /**
      * 列表要显示的曲目，带**在 [onlineResults] 里的原始下标**。
      *
@@ -1572,6 +1617,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     page.hasMore(offset = 0, limit = ONLINE_PAGE_SIZE) &&
                     tracks.size < MAX_ONLINE_RESULTS
                 onlineLoadMoreFailed = false
+                // **搜到了东西**才记进历史。
+                // 打了一半的词、搜不到结果的词都不该留 —— 历史的价值在于
+                // "点一下就能回到上次搜到东西的那次搜索"。
+                // 失败（page == null）也不记：断网时误触的那一下不该占一个位置。
+                if (page != null && tracks.isNotEmpty()) pushOnlineHistory(kw)
                 // 失败和"没搜到"要分开说：断网时显示「没搜到「周杰伦」」
                 // 会让用户以为搜索坏了（音源用 null 表示失败）
                 onlineNotice = when {

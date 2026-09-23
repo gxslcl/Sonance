@@ -1034,3 +1034,76 @@ private fun LabeledField(
         }
     }
 }
+
+/* ============================================================
+ * 律动柱页面：歌名上方那条「单行歌词」
+ * ============================================================ */
+
+/**
+ * 律动柱页面里、歌名正上方那条**单行歌词**（用户要求单行）。
+ *
+ * 只填掉歌名上方本来就空着的那条带子：显示**当前句**，
+ * 不滚、不点、**不吃任何手势** —— 律动柱那一页的左右滑动要留给"切层"。
+ *
+ * 只认**带时间轴**的歌词（[Lyrics.Synced]）。纯文本歌词没有时间信息，
+ * 摆在这儿就是一段和播放无关的静态文字，所以宁可不显示（那块本来就是空的，
+ * 不显示不会留下占位文字或空格）。取词链路和歌词页完全共用（本地内嵌 →
+ * 本地缓存 → 在线 / 网易云），设置里的字号、简繁转换在这里一样生效。
+ *
+ * @param fontSizeSp 已经算好的字号（比歌词页小几号，免得压到律动柱主体）
+ */
+@Composable
+fun LyricStrip(
+    song: Song,
+    positionMs: Long,
+    prefs: Prefs,
+    fontSizeSp: Int,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var lines by remember(song.id) { mutableStateOf<List<LyricLine>?>(null) }
+
+    val onlineEnabled = prefs.onlineLyricsEnabled
+    val apiBase = prefs.lyricsApiBase
+    val convertT2S = prefs.lyricsConvertToSimplified
+    val neteaseFill = prefs.neteaseFillEnabled
+
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
+        lines = null
+        val loaded = LyricsRepository.load(
+            context = context,
+            songId = song.id,
+            uri = song.uri,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            onlineEnabled = onlineEnabled,
+            apiBase = apiBase,
+            convertToSimplified = convertT2S,
+            durationMs = song.durationMs,
+            neteaseEnabled = neteaseFill
+        )
+        lines = (loaded?.lyrics as? Lyrics.Synced)?.lines
+    }
+
+    // 还没取到 / 不是同步歌词 / 当前还在前奏（indexAt 返回 -1）→ 什么都不画。
+    // 三种情况都返回而不是显示占位文字：那块地方是律动柱的留白，
+    // 写"正在读取歌词…"这类字反而比空着更吵。
+    val all = lines ?: return
+    val current = remember(positionMs, all) { all.indexAt(positionMs) }
+    if (current < 0) return
+
+    val skin = LocalSkin.current
+    Text(
+        text = all[current].text,
+        fontSize = fontSizeSp.sp,
+        // 行高写死且比字号大一截：句子切换时高度不变，整条不抖
+        lineHeight = (fontSizeSp * 1.45f).sp,
+        fontWeight = FontWeight.SemiBold,
+        color = skin.accent,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier.fillMaxWidth()
+    )
+}
