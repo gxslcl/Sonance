@@ -2,6 +2,7 @@ package com.sonance.player.ui.components
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -86,7 +87,8 @@ import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
-import com.sonance.player.data.blendGlowColors
+import com.sonance.player.data.GlowSample
+import com.sonance.player.data.blendGlowSample
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.playback.PlayMode
@@ -205,8 +207,12 @@ fun FullPlayer(
     // 颜色插值必须落在**颜色本身**上，不能靠两次 src-over 去拼。
     val isSwipeGlow = glowTransition == GlowTransition.SWIPE
 
-    /** 这一帧要画的那一层素材。 */
-    val glowFrame: GlowFrame = if (isSwipeGlow) {
+    /**
+     * 这一帧要画的颜色，以及它**有多可信**（[GlowSample.readiness]）。
+     *
+     * 可信度是本轮修掉「闪」的关键，见 [blendGlowSample]。
+     */
+    val glowSample: GlowSample = if (isSwipeGlow) {
         // 滚动位置**只在这里读一次**，位置和素材因此来自同一份快照。
         // （原来是在绘制期读 currentPage、素材却在组合期算；两者错开一帧时，
         //   翻页那一刻会拿"新下标配旧素材"，背景闪一帧别的颜色。）
@@ -215,19 +221,39 @@ fun FullPlayer(
         // 该画哪两页由**滚动位置**决定，和 currentPage 在哪翻页无关 ——
         // 于是原来那套 `i = (base - (currentPage - 1))` 的下标运算整个不需要了，
         // 要取色的页也从三份变成两份。
-        val blended = blendGlowColors(
-            cur = rememberGlowColors(queue.getOrNull(base), skin),
-            next = rememberGlowColors(queue.getOrNull(base + 1), skin),
-            t = (pos - base).coerceIn(0f, 1f)
+        rememberHeldGlowSample(
+            blendGlowSample(
+                cur = rememberGlowColors(queue.getOrNull(base), skin),
+                next = rememberGlowColors(queue.getOrNull(base + 1), skin),
+                t = (pos - base).coerceIn(0f, 1f)
+            )
         )
-        rememberGlowFrame(rememberHeldGlowColors(blended), glowMode, glowStrength)
     } else {
-        rememberGlowFrame(
-            colors = rememberFadeGlowColors(queue, queueIndex, skin, glowFadeMs),
-            mode = glowMode,
-            strength = glowStrength
-        )
+        // 渐变模式：颜色自己走 animateColorAsState（见 [rememberFadeGlowColors]），
+        // 本来就不存在单帧突变，所以可信度恒为 1、不需要淡出。
+        GlowSample(rememberFadeGlowColors(queue, queueIndex, skin, glowFadeMs), 1f)
     }
+
+    /**
+     * 颜色：跟手模式下再叠一小段补间，专门用来吃掉「色卡到位」那一帧的跳变。
+     *
+     * 正常跟手时目标每帧只变一点点，这段补间完全看不出存在；
+     * 只有色卡迟到造成的突变会被它摊平（见 [GLOW_SNAP_MS]）。
+     */
+    val glowColors = rememberSnapGlowColors(glowSample.colors, skin)
+
+    /**
+     * 可信度：变化慢一点，观感是「轻轻呼吸一下」而不是「闪」。
+     *
+     * 它慢不影响跟手 —— 跟手跟的是**颜色**（上面那条），不是浓度。
+     */
+    val glowReadiness by animateFloatAsState(
+        targetValue = glowSample.readiness,
+        animationSpec = tween(GLOW_READY_MS, easing = LinearEasing),
+        label = "glowReadiness"
+    )
+
+    val glowFrame = rememberGlowFrame(glowColors, glowMode, glowStrength)
 
     // 预取前后两首的封面：色卡和位图都要，换歌时颜色和封面都得「一上来就在」。
     //
@@ -333,7 +359,7 @@ fun FullPlayer(
                 // 滑出时照样能看见。
                 // 只有一层，颜色（含过渡插值）已经在组合期算好了 ——
                 // 绘制阶段在这里只做"把这张图铺到封面周围"，不做任何混合。
-                clipRect { drawGlow(glowFrame, cover, glowMode, glowStrength) }
+                clipRect { drawGlow(glowFrame, cover, glowMode, glowStrength, glowReadiness) }
             }
     ) {
         val currentSong = queue.getOrNull(queueIndex)
@@ -703,6 +729,26 @@ private const val GLOW_BITMAP_H = 128
  */
 private val GLOW_FADE_RANGE = Prefs.MIN_GLOW_FADE_MS..Prefs.MAX_GLOW_FADE_MS
 
+/**
+ * 「跟手」模式下，颜色**突变**时用来摊平的补间时长。
+ *
+ * 50ms ≈ 3 帧 @60Hz：够把「一帧跳变」摊成看不出台阶的一小段渐变，
+ * 又短到不影响跟手（一次切歌约 300ms，它只占 1/6）。
+ *
+ * ⚠️ 不能再加长 —— 跟手的价值就是颜色和手指同步，补间一长就变成「滞后」，
+ * 实测 120ms 会让颜色落后手指约 40%，手感明显变肉。
+ */
+private const val GLOW_SNAP_MS = 50
+
+/**
+ * **可信度**变化的补间时长。
+ *
+ * 可以比 [GLOW_SNAP_MS] 长得多：正常切歌时可信度恒为 1、压根不动，
+ * 只有「色卡没算出来」时才在 1 与 0.55 之间来回，慢一点反而更柔和。
+ * 它慢不影响跟手 —— 跟手跟的是**颜色**，不是浓度。
+ */
+private const val GLOW_READY_MS = 140
+
 
 /**
  * 纵向浓度曲线：`v = 0` 是晕染区**靠封面的那一端**，`v = 1` 是远端。
@@ -848,12 +894,40 @@ private fun rememberGlowPage(pagerState: PagerState): Float {
  * 那也是一次「闪」。
  */
 @Composable
-private fun rememberHeldGlowColors(colors: List<Color>): List<Color> {
-    var lastColors by remember { mutableStateOf<List<Color>>(emptyList()) }
-    LaunchedEffect(colors) {
-        if (colors.isNotEmpty()) lastColors = colors
+private fun rememberHeldGlowSample(sample: GlowSample): GlowSample {
+    var last by remember { mutableStateOf(GlowSample.EMPTY) }
+    LaunchedEffect(sample.colors) {
+        if (sample.colors.isNotEmpty()) last = sample
     }
-    return colors.ifEmpty { lastColors }
+    return if (sample.colors.isEmpty()) last else sample
+}
+
+/**
+ * 跟手模式的颜色：在目标色上叠一小段补间。
+ *
+ * ## 为什么需要它（本轮修的那下闪）
+ *
+ * 色卡是异步算出来的。缺一侧时 [blendGlowSample] 会拿另一侧顶上
+ * （配上逐渐下降的可信度），等色卡到位，目标色会**一帧之内**从「顶上的值」
+ * 跳到插值结果 —— 跳变量约 30% 的色差、一帧完成，这就是屏幕上那下闪。
+ * 可信度的淡出能让它不那么突兀，但**颜色本身**仍然是跳的，必须也摊平。
+ *
+ * ## 为什么时长这么短
+ *
+ * 跟手的价值就在于颜色和手指同步，补间一长就退化成「滞后」。
+ * [GLOW_SNAP_MS] 取 50ms（约 3 帧）：够把突变摊成看不出台阶的一小段，
+ * 又只占一次切歌（约 300ms）的 1/6，手感上察觉不到。
+ *
+ * 空色卡时退回 [Skin.bg]：等于「画了但看不见」，不会先套一版和封面无关的假色。
+ */
+@Composable
+private fun rememberSnapGlowColors(colors: List<Color>, skin: Skin): List<Color> {
+    val fallback = skin.bg
+    val spec: AnimationSpec<Color> = tween(GLOW_SNAP_MS, easing = LinearEasing)
+    val c0 by animateColorAsState(colors.getOrElse(0) { fallback }, spec, label = "snap0")
+    val c1 by animateColorAsState(colors.getOrElse(1) { fallback }, spec, label = "snap1")
+    val c2 by animateColorAsState(colors.getOrElse(2) { fallback }, spec, label = "snap2")
+    return remember(c0, c1, c2) { listOf(c0, c1, c2) }
 }
 
 /**
@@ -947,11 +1021,18 @@ private fun DrawScope.drawGlow(
     frame: GlowFrame,
     cover: Rect,
     mode: GlowMode,
-    strength: Float
+    strength: Float,
+    /**
+     * 这份颜色有多可信（0~1）。见 [GlowSample.readiness]。
+     *
+     * ⚠️ 它是**绘制期**的乘数，不烘进位图 —— 可信度每帧都在变，
+     * 烘进去就等于每帧重建 Bitmap。走 [drawImage] 的 alpha 是零成本的。
+     */
+    readiness: Float
 ) {
     val colors = frame.colors
     val image = frame.image
-    if (colors.isEmpty() || strength <= 0f) return
+    if (colors.isEmpty() || strength <= 0f || readiness <= 0f) return
     val w = cover.width
     val h = cover.height
     val cx = cover.center.x
@@ -962,7 +1043,8 @@ private fun DrawScope.drawGlow(
                     GlowMode.BOTTOM -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f + h * GLOW_TOP - GLOW_BOTTOM_LIFT.toPx(),
-                        height = h * GLOW_REACH
+                        height = h * GLOW_REACH,
+                        alpha = readiness
                     )
 
                     // ── 只从左右两侧向外晕 ──
@@ -976,7 +1058,8 @@ private fun DrawScope.drawGlow(
                         drawGlowImage(
                             image = image,
                             top = cy - h / 2f - pad,
-                            height = h + pad * 2f
+                            height = h + pad * 2f,
+                            alpha = readiness
                         )
                     }
 
@@ -998,8 +1081,8 @@ private fun DrawScope.drawGlow(
                         translate(left = 0f, top = cy - r) {
                             drawRect(
                                 brush = Brush.radialGradient(
-                                    0.00f to c.copy(alpha = strength),
-                                    inner to c.copy(alpha = strength),
+                                    0.00f to c.copy(alpha = strength * readiness),
+                                    inner to c.copy(alpha = strength * readiness),
                                     1.00f to c.copy(alpha = 0f),
                                     center = Offset(cx, r),
                                     radius = r
@@ -1016,7 +1099,8 @@ private fun DrawScope.drawGlow(
                     GlowMode.FULL -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f - h * 1.2f,
-                        height = h * 3.4f
+                        height = h * 3.4f,
+                        alpha = readiness
                     )
                 }
 }
@@ -1024,23 +1108,28 @@ private fun DrawScope.drawGlow(
 /**
  * 把位图按目标矩形拉伸绘制 —— 颜色和浓度都已经烘在位图里，一次就画完了。
  *
- * 没有不透明度参数：跨页过渡不在这里做，而是在组合期就把相邻两页的颜色插值好
- * （见 [blendGlowColors]）。两层各按 `1-t` / `t` 叠加**不是**等价的交叉淡化 ——
+ * 跨页过渡不在这里做，而是在组合期就把相邻两页的颜色插值好（见 [blendGlowSample]）。
+ * 两层各按 `1-t` / `t` 叠加**不是**等价的交叉淡化 ——
  * 两次 src-over 之后中点会比两端淡一成半，底色透出来就是「背景闪一下」。
+ *
+ * [alpha] 只承担**可信度**（色卡没算出来时淡一点）。它刻意走这里的 alpha、
+ * 而不是烘进位图 —— 可信度每帧都在变，烘进去就得每帧重建 Bitmap。
  */
 private fun DrawScope.drawGlowImage(
     image: ImageBitmap?,
     top: Float,
-    height: Float
+    height: Float,
+    alpha: Float = 1f
 ) {
     val width = size.width
-    if (image == null || width <= 0f || height <= 0f) return
+    if (image == null || width <= 0f || height <= 0f || alpha <= 0f) return
     drawImage(
         image = image,
         srcOffset = IntOffset.Zero,
         srcSize = IntSize(image.width, image.height),
         dstOffset = IntOffset(0, top.roundToInt()),
-        dstSize = IntSize(width.roundToInt(), height.roundToInt())
+        dstSize = IntSize(width.roundToInt(), height.roundToInt()),
+        alpha = alpha
     )
 }
 
