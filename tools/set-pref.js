@@ -79,8 +79,30 @@ run(['shell', 'chmod', '666', tmp]);
 console.log('写入: ' + run(['shell', 'run-as', PKG, 'cp', tmp, XML]).trim());
 
 const check = String(run(['shell', 'run-as', PKG, 'cat', XML]));
+let ok = true;
 for (const [name] of pairs) {
   const m = check.match(new RegExp(`name="${name}" value="([^"]*)"`));
+  if (!m) ok = false;
   console.log(`  ${name} = ${m ? m[1] : '(缺失)'}`);
 }
 fs.rmSync('.prefs_set.xml', { force: true });
+
+// ⚠️ 写完必须再把进程按死一次，而且要**确认它真的死了**。
+//
+// 桌面小组件（`SonanceWidgetProvider`）会让系统在包被杀掉之后又把进程拉起来 ——
+// 那次启动会在我们写文件**之前**就把 prefs 读进内存，于是进程一直用着旧值，
+// 直到下一次冷启动才看到新值（而且它不一定会回写文件，所以"读文件是对的、
+// 界面却是旧的"这种最误导人的组合就这么来的：本轮在模拟器上连续踩中两次）。
+// 这里轮询到进程真的没了为止，调用方紧接着 `am start` 就能拿到新值。
+if (ok) {
+  for (let i = 0; i < 10; i++) {
+    run(['shell', 'am', 'force-stop', PKG]);
+    const pid = String(run(['shell', 'pidof', PKG])).trim();
+    if (!pid) { console.log('  进程已确认退出'); break; }
+    const end = Date.now() + 400;
+    while (Date.now() < end) {
+      try { execFileSync('cmd', ['/c', 'ping', '-n', '1', '-w', '1000', '127.0.0.1'], { stdio: 'ignore' }); } catch (_) {}
+    }
+    if (i === 9) console.log('  ⚠️ 进程一直活着，pref 可能不生效');
+  }
+}

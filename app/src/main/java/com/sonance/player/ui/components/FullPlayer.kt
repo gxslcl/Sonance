@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -39,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,6 +86,7 @@ import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
+import com.sonance.player.data.blendGlowColors
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.playback.PlayMode
@@ -189,31 +192,39 @@ fun FullPlayer(
 
     // ===== 晕染素材 =====
     //
-    // 两种过渡方式共用同一批「已经烘好的位图」，区别只在**什么时候换**：
-    // - SWIPE（跟手）：按分页器的滚动位置在相邻两页之间混合，颜色和页面位移同步；
+    // 两种过渡方式都只用**一层**烘好的素材，区别只在"颜色什么时候换"：
+    // - SWIPE（跟手）：颜色由分页器的滚动位置驱动，和页面位移同步；
     // - FADE（渐变）：页面落定之后，用 animateColorAsState 在设定时长内补间。
+    //
+    // ⚠️ 都必须只有一层。早先跟手模式是"相邻两页各画一次，按 (1-t) / t 交叉淡化"，
+    // 而两层都半透明地叠起来之后，中点的总覆盖度**低于**两端（底色透了出来），
+    // 观感就是每次切歌到一半背景亮一下 —— 用户报的「切歌时背景会闪一下」。
+    // 实测（1080×2400，给测试曲注入高饱和封面）：背景左右边缘的 G 通道
+    // 两端是 56 / 93，中间那几帧只有 64~75，比端点连线低 8~10 个单位。
+    // 颜色插值必须落在**颜色本身**上，不能靠两次 src-over 去拼。
     val isSwipeGlow = glowTransition == GlowTransition.SWIPE
 
-    /**
-     * 这一帧要画的一到两层素材。
-     *
-     * SWIPE 下是 `[上一页, 当前页, 下一页]` 三份（按滚动位置取其中相邻的两份混合）；
-     * FADE 下只有当前这一首。
-     */
-    val glowFrames: List<GlowFrame> = if (isSwipeGlow) {
-        // currentPage 只在翻页那一刻变（一次滑动最多变一次），不会每帧重组
-        val page = pagerState.currentPage
-        val prev = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page - 1), skin), glowMode, glowStrength)
-        val cur = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page), skin), glowMode, glowStrength)
-        val next = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page + 1), skin), glowMode, glowStrength)
-        remember(prev, cur, next) { listOf(prev, cur, next) }
+    /** 这一帧要画的那一层素材。 */
+    val glowFrame: GlowFrame = if (isSwipeGlow) {
+        // 滚动位置**只在这里读一次**，位置和素材因此来自同一份快照。
+        // （原来是在绘制期读 currentPage、素材却在组合期算；两者错开一帧时，
+        //   翻页那一刻会拿"新下标配旧素材"，背景闪一帧别的颜色。）
+        val pos = rememberGlowPage(pagerState)
+        val base = floor(pos).toInt()
+        // 该画哪两页由**滚动位置**决定，和 currentPage 在哪翻页无关 ——
+        // 于是原来那套 `i = (base - (currentPage - 1))` 的下标运算整个不需要了，
+        // 要取色的页也从三份变成两份。
+        val blended = blendGlowColors(
+            cur = rememberGlowColors(queue.getOrNull(base), skin),
+            next = rememberGlowColors(queue.getOrNull(base + 1), skin),
+            t = (pos - base).coerceIn(0f, 1f)
+        )
+        rememberGlowFrame(rememberHeldGlowColors(blended), glowMode, glowStrength)
     } else {
-        listOf(
-            rememberGlowFrame(
-                colors = rememberFadeGlowColors(queue, queueIndex, skin, glowFadeMs),
-                mode = glowMode,
-                strength = glowStrength
-            )
+        rememberGlowFrame(
+            colors = rememberFadeGlowColors(queue, queueIndex, skin, glowFadeMs),
+            mode = glowMode,
+            strength = glowStrength
         )
     }
 
@@ -303,31 +314,9 @@ fun FullPlayer(
                 // 一个都没少。注意必须裁在这里（Box 自己身上、在 slide 变换之内），
                 // 裁在 AnimatedVisibility 的 modifier 上会因为顺序问题裁在变换之外，
                 // 滑出时照样能看见。
-                clipRect {
-                    if (!isSwipeGlow) {
-                        // 渐变模式：只有一层，颜色已经在组合期补间过了
-                        drawGlow(glowFrames[0], cover, glowMode, glowStrength)
-                    } else {
-                        // 跟手模式：按分页器的滚动位置在相邻两页之间混合。
-                        //
-                        // pos 是连续的「第几页」（例如 3.4）。基准页必须用 floor 取，
-                        // **不能**用 offsetFraction 的符号判方向 —— 那个值在 currentPage
-                        // 翻页的一刻会变号，用符号判会在中点处跳一下
-                        // （3.4 和 3.6 会算成相反的混合比）。
-                        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
-                        val base = floor(pos).toInt()
-                        val t = (pos - base).coerceIn(0f, 1f)
-                        // glowFrames = [currentPage-1, currentPage, currentPage+1]
-                        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
-                        drawGlow(glowFrames[i], cover, glowMode, glowStrength, alpha = 1f - t)
-                        if (t > 0f) {
-                            // 相邻页色卡还没算出来时 drawGlow 会直接返回，
-                            // 于是画面变成「一层淡到 (1-t)」—— 平滑地淡下去，
-                            // 比"先按住不动、等色卡到了再跳一下"好。预取会把这个窗口压到很小。
-                            drawGlow(glowFrames[i + 1], cover, glowMode, glowStrength, alpha = t)
-                        }
-                    }
-                }
+                // 只有一层，颜色（含过渡插值）已经在组合期算好了 ——
+                // 绘制阶段在这里只做"把这张图铺到封面周围"，不做任何混合。
+                clipRect { drawGlow(glowFrame, cover, glowMode, glowStrength) }
             }
     ) {
         val currentSong = queue.getOrNull(queueIndex)
@@ -626,6 +615,12 @@ private const val GLOW_TOP = 0.86f
 /** 晕染向外扩散的距离，按封面高度的比例算（「下方」「四周」模式用） */
 private const val GLOW_REACH = 0.62f
 
+/**
+ * 「跟手」过渡里滚动位置量化的档数（一页分成多少档）。
+ * 取 64 的取舍见 [rememberGlowPage]。
+ */
+private const val GLOW_POS_STEPS = 64f
+
 /** 「左右」模式里，颜色上下各超出封面高度的比例 */
 private const val GLOW_SIDE_PAD = 0.10f
 
@@ -785,12 +780,54 @@ private fun rememberGlowColors(song: Song?, skin: Skin): List<Color> {
  * 这里**不写提前 return**：`remember` 必须无条件调用，否则条件翻转时
  * 组合的 group 结构会跟着变。空色卡交给 [buildGlowImage]（它对空列表直接返回 null），
  * 画出来就是全透明。
+ *
+ * key 里放的是一份 List —— `remember` 用 `equals` 比，所以颜色没变时不会重烘；
+ * 跟手过渡期间颜色每量化一档变一次，一次切歌最多重烘 [GLOW_POS_STEPS] 次。
  */
 @Composable
 private fun rememberGlowFrame(colors: List<Color>, mode: GlowMode, strength: Float): GlowFrame =
     remember(colors, mode, strength) {
         GlowFrame(colors, buildGlowImage(colors, mode, strength))
     }
+
+/**
+ * 跟手过渡里**唯一**读滚动位置的地方：量化到 1/[GLOW_POS_STEPS] 页。
+ *
+ * 为什么要量化：
+ * - 一档颜色就要重烘一张位图（见 [rememberGlowFrame]），量化之后一次切歌最多
+ *   重烘 64 次，而不是每帧一次；
+ * - 外面套一层 [derivedStateOf]，值没变时**不会**通知读它的组合 ——
+ *   直接读 `currentPageOffsetFraction` 那个浮点值是每帧都变的，会让整页每帧重组。
+ *
+ * 量化精度够不够：一页 2400px、64 档，每档 37px 的手指位移；
+ * 相邻两档的颜色差不到一个色阶，看不出台阶。
+ */
+@Composable
+private fun rememberGlowPage(pagerState: PagerState): Float {
+    val page by remember(pagerState) {
+        derivedStateOf {
+            val raw = pagerState.currentPage + pagerState.currentPageOffsetFraction
+            floor(raw * GLOW_POS_STEPS) / GLOW_POS_STEPS
+        }
+    }
+    return page
+}
+
+/**
+ * 插值结果为空（两侧色卡都还没算出来）时，沿用**上一次真正画出来的颜色**。
+ *
+ * 和 [rememberFadeGlowColors] 里那条"色卡没算出来就沿用上一份"是同一个道理。
+ * 少了它，切歌切到一半会有几百毫秒背景完全没有颜色、等色卡到了再突变回来 ——
+ * 那也是一次「闪」。
+ */
+@Composable
+private fun rememberHeldGlowColors(colors: List<Color>): List<Color> {
+    var lastColors by remember { mutableStateOf<List<Color>>(emptyList()) }
+    LaunchedEffect(colors) {
+        if (colors.isNotEmpty()) lastColors = colors
+    }
+    return colors.ifEmpty { lastColors }
+}
 
 /**
  * 「渐变」模式要显示的色卡：在当前这一首的色卡上做补间。
@@ -861,10 +898,11 @@ private fun Modifier.onDoubleTapGlow(action: () -> Unit): Modifier {
 }
 
 /**
- * 一页的晕染素材：三个取样色 + **已经烘好**的渐变位图。
+ * 一份晕染素材：三个取样色 + **已经烘好**的渐变位图。
  *
- * 位图提前烘好是刻意的：换歌过渡时每帧只需要按不透明度把两张图叠起来，
- * 不必在绘制阶段重新填 8192 个像素、也不必每帧新建 Bitmap。
+ * 位图提前烘好是刻意的：绘制阶段只做一次 `drawImage`，不必重新填 8192 个像素、
+ * 也不必每帧新建 Bitmap。过渡靠**组合期**把颜色插值好再烘 ——
+ * 所以整页永远只有这一层素材（原因见 [FullPlayer] 里那段说明）。
  */
 private data class GlowFrame(val colors: List<Color>, val image: ImageBitmap?)
 
@@ -882,12 +920,11 @@ private fun DrawScope.drawGlow(
     frame: GlowFrame,
     cover: Rect,
     mode: GlowMode,
-    strength: Float,
-    alpha: Float = 1f
+    strength: Float
 ) {
     val colors = frame.colors
     val image = frame.image
-    if (colors.isEmpty() || strength <= 0f || alpha <= 0f) return
+    if (colors.isEmpty() || strength <= 0f) return
     val w = cover.width
     val h = cover.height
     val cx = cover.center.x
@@ -898,8 +935,7 @@ private fun DrawScope.drawGlow(
                     GlowMode.BOTTOM -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f + h * GLOW_TOP - GLOW_BOTTOM_LIFT.toPx(),
-                        height = h * GLOW_REACH,
-                        alpha = alpha
+                        height = h * GLOW_REACH
                     )
 
                     // ── 只从左右两侧向外晕 ──
@@ -913,8 +949,7 @@ private fun DrawScope.drawGlow(
                         drawGlowImage(
                             image = image,
                             top = cy - h / 2f - pad,
-                            height = h + pad * 2f,
-                            alpha = alpha
+                            height = h + pad * 2f
                         )
                     }
 
@@ -936,8 +971,8 @@ private fun DrawScope.drawGlow(
                         translate(left = 0f, top = cy - r) {
                             drawRect(
                                 brush = Brush.radialGradient(
-                                    0.00f to c.copy(alpha = strength * alpha),
-                                    inner to c.copy(alpha = strength * alpha),
+                                    0.00f to c.copy(alpha = strength),
+                                    inner to c.copy(alpha = strength),
                                     1.00f to c.copy(alpha = 0f),
                                     center = Offset(cx, r),
                                     radius = r
@@ -954,8 +989,7 @@ private fun DrawScope.drawGlow(
                     GlowMode.FULL -> drawGlowImage(
                         image = image,
                         top = cy - h / 2f - h * 1.2f,
-                        height = h * 3.4f,
-                        alpha = alpha
+                        height = h * 3.4f
                     )
                 }
 }
@@ -963,28 +997,23 @@ private fun DrawScope.drawGlow(
 /**
  * 把位图按目标矩形拉伸绘制 —— 颜色和浓度都已经烘在位图里，一次就画完了。
  *
- * [alpha] 是给「跟手」模式做跨页交叉淡化用的整体不透明度。
- *
- * ⚠️ 两层各按 `t` / `1-t` 叠加，严格来说不是数学上等价的交叉淡化：
- * src-over 两次之后，过渡中点会比两端淡大约 14%（因为底色透出来了一部分）。
- * 但端点（t=0 / t=1）是精确的，中间只是一个平滑的轻微变淡，看不出台阶，
- * 而换来的是「零每帧分配」—— 不值得为这点差异去每帧重烘位图。
+ * 没有不透明度参数：跨页过渡不在这里做，而是在组合期就把相邻两页的颜色插值好
+ * （见 [blendGlowColors]）。两层各按 `1-t` / `t` 叠加**不是**等价的交叉淡化 ——
+ * 两次 src-over 之后中点会比两端淡一成半，底色透出来就是「背景闪一下」。
  */
 private fun DrawScope.drawGlowImage(
     image: ImageBitmap?,
     top: Float,
-    height: Float,
-    alpha: Float = 1f
+    height: Float
 ) {
     val width = size.width
-    if (image == null || width <= 0f || height <= 0f || alpha <= 0f) return
+    if (image == null || width <= 0f || height <= 0f) return
     drawImage(
         image = image,
         srcOffset = IntOffset.Zero,
         srcSize = IntSize(image.width, image.height),
         dstOffset = IntOffset(0, top.roundToInt()),
-        dstSize = IntSize(width.roundToInt(), height.roundToInt()),
-        alpha = alpha
+        dstSize = IntSize(width.roundToInt(), height.roundToInt())
     )
 }
 
