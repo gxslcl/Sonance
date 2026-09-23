@@ -68,7 +68,11 @@ internal object Id3Writer {
         // 歌词同理：空字符串不写帧。歌词文本按**原样**存（LRC 的时间轴要留着，
         // 播放器就是靠 `[mm:ss.xx]` 做滚动高亮的）
         if (!lyrics.isNullOrBlank()) frames += lyricsFrame(lyrics)
+        return assemble(frames)
+    }
 
+    /** 把帧序列包上 10 字节标签头（v2.3，无 unsynchronisation / extended header） */
+    private fun assemble(frames: List<ByteArray>): ByteArray {
         val bodySize = frames.sumOf { it.size }
         val out = ByteArray(10 + bodySize)
         out[0] = 'I'.code.toByte()
@@ -76,7 +80,7 @@ internal object Id3Writer {
         out[2] = '3'.code.toByte()
         out[3] = VERSION_MAJOR
         out[4] = 0x00          // revision
-        out[5] = 0x00          // flags：不用 unsynchronisation / extended header
+        out[5] = 0x00          // flags
         writeSyncSafe(out, 6, bodySize)
         var p = 10
         for (f in frames) {
@@ -84,6 +88,109 @@ internal object Id3Writer {
             p += f.size
         }
         return out
+    }
+
+    /** 一个已经解析出来的帧：帧 ID + 原始负载 */
+    internal class Id3Frame(val id: String, val payload: ByteArray)
+
+    /**
+     * 解析一个 ID3v2 标签里的所有帧。
+     *
+     * 只认 v2.3 / v2.4；**v2.2 不认**（帧 ID 只有 3 字节，结构不同），
+     * 带 unsynchronisation / extended header 的也不认 —— 这两种情况返回 null，
+     * 调用方就该放弃重写这个文件，而不是冒着做出坏文件的风险硬改。
+     *
+     * v2.4 的两处差异在这里抹平（重发时统一按 v2.3 的规矩写）：
+     * - 帧长度用 syncsafe（v2.3 是普通大端）；
+     * - 文本帧允许 UTF-8（v2.3 没有）→ 解出来重新按 UTF-16 + BOM 编。
+     *
+     * @return 帧列表（保持原顺序）；解析不了返回 null
+     */
+    internal fun parseFrames(tag: ByteArray): List<Id3Frame>? {
+        if (tag.size < 10) return null
+        if (tag[0] != 'I'.code.toByte() || tag[1] != 'D'.code.toByte() || tag[2] != '3'.code.toByte()) {
+            return null
+        }
+        val major = tag[3].toInt()
+        if (major != 3 && major != 4) return null
+        val flags = tag[5].toInt()
+        if (flags and 0x80 != 0) return null   // unsynchronisation：帧体被转义，原样搬运会坏
+        if (flags and 0x40 != 0) return null   // extended header
+        val tagSize = existingTagSize(tag)
+        if (tagSize <= 10 || tagSize > tag.size) return null
+
+        val frames = ArrayList<Id3Frame>()
+        var p = 10
+        val end = tagSize
+        while (p + 10 <= end) {
+            val id = String(tag, p, 4, Charsets.ISO_8859_1)
+            if (id[0] == '\u0000') break       // padding：帧区结束
+            val size = if (major == 4) {
+                ((tag[p + 4].toInt() and 0x7F) shl 21) or ((tag[p + 5].toInt() and 0x7F) shl 14) or
+                    ((tag[p + 6].toInt() and 0x7F) shl 7) or (tag[p + 7].toInt() and 0x7F)
+            } else {
+                ((tag[p + 4].toInt() and 0xFF) shl 24) or ((tag[p + 5].toInt() and 0xFF) shl 16) or
+                    ((tag[p + 6].toInt() and 0xFF) shl 8) or (tag[p + 7].toInt() and 0xFF)
+            }
+            if (size <= 0 || p + 10 + size > end) return null
+            val formatFlags = tag[p + 9].toInt() and 0xFF
+            // 压缩 / 加密 / 分组（v2.3 第二字节、v2.4 的 format bits）搬不动 ——
+            // 带着原始负载重发会坏，跳过整个帧比做坏文件强
+            if (formatFlags != 0) {
+                p += 10 + size
+                continue
+            }
+            var payload = tag.copyOfRange(p + 10, p + 10 + size)
+            // v2.4 文本帧的 UTF-8 编码 → 转 v2.3 认的 UTF-16 + BOM
+            // （utf16() 产出的第一个字节就是编码字节 0x01，正好顶掉原来那个）
+            if (major == 4 && id[0] == 'T' && payload.isNotEmpty() && payload[0] == 3.toByte()) {
+                payload = utf16(String(payload, 1, payload.size - 1, Charsets.UTF_8))
+            }
+            frames += Id3Frame(id, payload)
+            p += 10 + size
+        }
+        return frames
+    }
+
+    /**
+     * 在**保留原有所有帧**的前提下，替换 / 追加封面与歌词。
+     *
+     * ## 为什么不直接用 [buildTag] 重写一遍
+     *
+     * [buildTag] 只写标题 / 歌手 / 专辑三样，而这三样来自 MediaStore ——
+     * 那里的信息可能是**从文件名猜出来的**（「张卫健 - 虚虚实实」当标题、
+     * 歌手是「未知艺术家」）。拿它去覆盖文件里本来的标签，等于把用户
+     * 原本正确的元数据改错。所以重写必须**保留原有全部帧**，只动
+     * APIC / USLT 这两个我们负责的。
+     *
+     * @param existing 原文件的完整标签（含 10 字节头）；**本来就没有标签**时传 null，
+     *   会走 [buildTag] 那条"从零写"的路
+     * @return 新标签；**有标签但结构解析不了**时返回 null —— 调用方应跳过这个文件，
+     *   绝不能把读不懂的标签整条剥掉（会丢掉里面所有元数据）
+     */
+    internal fun rebuildTag(existing: ByteArray?, cover: ByteArray?, coverMime: String?, lyrics: String?): ByteArray? {
+        if (existing == null) return buildTag("", "", "", cover, coverMime, lyrics)
+        val old = parseFrames(existing) ?: return null
+        val newCover = cover?.takeIf { it.isNotEmpty() }
+        val newLyrics = lyrics?.takeIf { it.isNotBlank() }
+        val frames = ArrayList<ByteArray>(old.size + 2)
+        for (f in old) {
+            // 只有**这次真的要换**的那种帧才丢掉重写，别的一律原样保留。
+            //
+            // ⚠️ 不能写成"看到 APIC / USLT 就无条件剥掉"：写回文件时经常只补其中一样
+            // （文件里已有歌词、只缺封面），无条件剥掉就会把**文件里本来就有的歌词
+            // 删掉** —— 那是用户数据的净损失，而且文件表面一切正常，只有打开歌词页
+            // 才会发现空了。实测在真机上写回文件时踩到过（写入前后大小还变小了）。
+            val replaced = (newCover != null && (f.id == "APIC" || f.id == "PIC")) ||
+                (newLyrics != null && f.id == "USLT")
+            if (replaced) continue
+            frames += frame(f.id, f.payload)
+        }
+        if (newCover != null) {
+            frames += apicFrame(newCover, coverMime?.takeIf { it.isNotBlank() } ?: DEFAULT_MIME)
+        }
+        if (newLyrics != null) frames += lyricsFrame(newLyrics)
+        return assemble(frames)
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.sonance.player
 
 import android.app.Application
+import android.content.IntentSender
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -25,6 +26,7 @@ import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.ResolvedQueue
+import com.sonance.player.data.TagWriteBack
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
 import org.json.JSONObject
@@ -1267,6 +1269,73 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             if (enabled) "已开启网易云补全（会联网补封面与歌词）"
             else "已关闭网易云补全"
         )
+    }
+
+    // ===== 把缓存里的封面 / 歌词写回音乐文件（详见 data/TagWriteBack.kt）=====
+
+    /**
+     * 还有多少首值得写。-1 = 还没探测。
+     * 进入设置页时探测一次（[prepareTagWriteBack]），结果缓存在这里，
+     * 不然每次重组都要把整个曲库的文件头读一遍。
+     */
+    var tagWriteBackPending by mutableIntStateOf(-1)
+        private set
+
+    /** 写回进行中（按钮转圈用） */
+    var tagWriteBackBusy by mutableStateOf(false)
+        private set
+
+    private var tagWriteBackItems: List<TagWriteBack.Item> = emptyList()
+
+    /**
+     * 探测候选项。幂等：已经有结果（或正在写）就不再算。
+     * 一首写完之后文件里就有了，下次探测它自然出局。
+     */
+    fun prepareTagWriteBack() {
+        if (tagWriteBackPending >= 0 || tagWriteBackBusy) return
+        tagWriteBackPending = 0
+        viewModelScope.launch {
+            val items = TagWriteBack.findCandidates(getApplication(), songs, lyricsApiBase)
+            tagWriteBackItems = items
+            tagWriteBackPending = items.size
+        }
+    }
+
+    /**
+     * 批量授权入口（API 30+）。返回 null 表示这一步不需要 ——
+     * 要么是应用自己的文件（直接能写），要么是老系统（写的时候再说）。
+     */
+    fun tagWriteBackConsentSender(): IntentSender? =
+        TagWriteBack.consentSender(getApplication(), tagWriteBackItems.map { it.uri })
+
+    /** 用户确认（并授权）之后真正动手写 */
+    fun performTagWriteBack() {
+        if (tagWriteBackBusy) return
+        val items = tagWriteBackItems
+        if (items.isEmpty()) return
+        tagWriteBackBusy = true
+        viewModelScope.launch {
+            val summary = TagWriteBack.write(getApplication(), items) { _, _ -> }
+            tagWriteBackBusy = false
+            tagWriteBackItems = emptyList()
+            if (summary.consentSender != null) {
+                showToast("需要系统授权后重试")
+                return@launch
+            }
+            // 重新探测：写完的文件里已经有了，不该再出现在提醒里
+            tagWriteBackPending = -1
+            prepareTagWriteBack()
+            // 文件里现在有封面了，封面缓存里还记着「这张没有」—— 清掉重新探测
+            if (summary.written > 0) ArtworkLoader.clear()
+            showToast(
+                when {
+                    summary.written == 0 && summary.failed == 0 -> "没有需要写入的文件"
+                    else -> "已写入 ${summary.written} 首" +
+                        (if (summary.skipped > 0) " · 跳过 ${summary.skipped} 首" else "") +
+                        (if (summary.failed > 0) " · 失败 ${summary.failed} 首" else "")
+                }
+            )
+        }
     }
 
     // ===== 播放并下载 =====
