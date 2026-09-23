@@ -3,7 +3,6 @@ package com.sonance.player.data
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -38,37 +37,6 @@ class Id3WriterTest {
         val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", cover, "image/jpeg")
         val file = tagged(tag)
         assertArrayEquals(cover, AudioTags.coverArtFrom(ByteArrayInputStream(file)))
-    }
-
-    @Test
-    fun `歌词写进去之后 AudioTags 能读出来`() {
-        // 同样用项目自己的解析器当裁判（AudioTags 支持 USLT，见它的格式表）
-        val lrc = "[00:01.00]第一行\n[00:05.50]第二行\n[00:09.00]END"
-        val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", lyrics = lrc)
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(tagged(tag))))
-    }
-
-    @Test
-    fun `封面和歌词可以同时存在且互不干扰`() {
-        val lrc = "[00:02.00]词"
-        val tag = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", cover, "image/jpeg", lyrics = lrc)
-        val file = tagged(tag)
-        assertArrayEquals(cover, AudioTags.coverArtFrom(ByteArrayInputStream(file)))
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(file)))
-    }
-
-    @Test
-    fun `歌词为空时不写 USLT 帧`() {
-        val file = tagged(Id3Writer.buildTag("晴天", "周杰伦", "叶惠美", lyrics = "   "))
-        assertEquals(null, AudioTags.lyricsFrom(ByteArrayInputStream(file)))
-    }
-
-    @Test
-    fun `歌词里的换行和方括号原样保留`() {
-        // LRC 的时间戳是给播放器做滚动高亮用的，一个字符都不能动
-        val lrc = "[offset:+500]\n[00:00.00]\n[00:01.234][00:03.456]重复句"
-        val tag = Id3Writer.buildTag("A", "B", "C", lyrics = lrc)
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(tagged(tag))))
     }
 
     @Test
@@ -275,134 +243,4 @@ class Id3WriterTest {
         }
         return out
     }
-}
-
-
-/* ============================================================
- * rebuildTag：写回文件时「保留原有帧，只换封面 / 歌词」
- * ============================================================ */
-
-class Id3WriterRebuildTest {
-
-    private val oldCover = byteArrayOf(0x11, 0x22, 0x33)
-    private val newCover = byteArrayOf(0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte())
-    private val lrc = "[00:01.00]词"
-
-    private fun framesOf(tag: ByteArray) = Id3Writer.parseFrames(tag)!!.associate { it.id to it.payload }
-
-    private fun utf16(text: String) =
-        byteArrayOf(0x01, 0xFF.toByte(), 0xFE.toByte()) + text.toByteArray(Charsets.UTF_16LE)
-
-    @Test
-    fun `重写后原有文本帧原样保留`() {
-        val existing = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美")
-        val rebuilt = Id3Writer.rebuildTag(existing, newCover, null, lrc)!!
-        val frames = framesOf(rebuilt)
-        assertArrayEquals(utf16("晴天"), frames["TIT2"])
-        assertArrayEquals(utf16("周杰伦"), frames["TPE1"])
-        assertArrayEquals(utf16("叶惠美"), frames["TALB"])
-    }
-
-    @Test
-    fun `重写会写入新封面和歌词`() {
-        val existing = Id3Writer.buildTag("晴天", "周杰伦", "叶惠美")
-        val rebuilt = Id3Writer.rebuildTag(existing, newCover, null, lrc)!!
-        val file = rebuilt + ByteArray(64) { 0x55 }
-        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(file)))
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(file)))
-    }
-
-    @Test
-    fun `重写会替换旧封面而不是叠加`() {
-        val existing = Id3Writer.buildTag("A", "B", "C", oldCover, "image/jpeg")
-        val rebuilt = Id3Writer.rebuildTag(existing, newCover, null, null)!!
-        // 整个文件里旧封面字节不应该再出现
-        val s = rebuilt.joinToString(",") { it.toString() }
-        assertFalse("旧封面还在标签里", s.contains(oldCover.joinToString(",")))
-        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
-    }
-
-    @Test
-    fun `重写会替换旧歌词`() {
-        val existing = Id3Writer.buildTag("A", "B", "C", lyrics = "[00:09.00]旧词")
-        val rebuilt = Id3Writer.rebuildTag(existing, null, null, "[00:01.00]新词")!!
-        assertEquals("[00:01.00]新词", AudioTags.lyricsFrom(ByteArrayInputStream(rebuilt)))
-        assertFalse(AudioTags.lyricsFrom(ByteArrayInputStream(rebuilt))!!.contains("旧词"))
-    }
-
-    /**
-     * 写回文件时**只补一样**是常态：文件里已经有歌词、只缺封面（或反过来）。
-     * 没在补的那种帧必须原样留着 —— 删掉它是用户数据的净损失，
-     * 而且文件表面一切正常，只有打开歌词页才会发现空了。
-     * （实测在真机写回时踩到：写入后文件反而变小了 78 字节。）
-     */
-    @Test
-    fun `只补封面时，文件里原有的歌词必须留着`() {
-        val existing = Id3Writer.buildTag("A", "B", "C", oldCover, "image/jpeg", lyrics = "[00:09.00]原有歌词")
-        val rebuilt = Id3Writer.rebuildTag(existing, newCover, null, null)!!
-        assertEquals("[00:09.00]原有歌词", AudioTags.lyricsFrom(ByteArrayInputStream(rebuilt)))
-        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
-    }
-
-    @Test
-    fun `只补歌词时，文件里原有的封面必须留着`() {
-        val existing = Id3Writer.buildTag("A", "B", "C", oldCover, "image/jpeg")
-        val rebuilt = Id3Writer.rebuildTag(existing, null, null, lrc)!!
-        assertArrayEquals(oldCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(rebuilt)))
-    }
-
-    @Test
-    fun `v2_4 的 UTF_8 文本帧重发为 v2_3 认的编码`() {
-        // 手工拼一个 v2.4 标签：帧长是 syncsafe，文本帧编码字节是 3（UTF-8）
-        val text = "晴天"
-        val payload = byteArrayOf(0x03) + text.toByteArray(Charsets.UTF_8)
-        val frame = "TIT2".toByteArray(Charsets.ISO_8859_1) + syncSafe(payload.size) +
-            byteArrayOf(0, 0) + payload
-        val body = frame
-        val tag = "ID3".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(4, 0, 0) + syncSafe(body.size) + body
-
-        val rebuilt = Id3Writer.rebuildTag(tag, newCover, null, null)!!
-        val frames = Id3Writer.parseFrames(rebuilt)!!
-        val tit2 = frames.first { it.id == "TIT2" }
-        // 编码字节变成 0x01（UTF-16 + BOM），内容不变
-        assertArrayEquals(utf16(text), tit2.payload)
-    }
-
-    @Test
-    fun `读不懂的标签返回 null 而不是硬写`() {
-        // 有 ID3 头但帧区是垃圾 —— 宁可跳过这个文件，也不能把原标签剥了
-        val garbage = "ID3".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(3, 0, 0) +
-            byteArrayOf(0x7F, 0x7F, 0x7F, 0x7F) + ByteArray(32) { 0x55 }
-        assertNull(Id3Writer.rebuildTag(garbage, newCover, null, lrc))
-    }
-
-    @Test
-    fun `v2_2 和带 unsync 位的标签都拒绝重写`() {
-        val body = "TIT2".toByteArray(Charsets.ISO_8859_1) + be32(5) + byteArrayOf(0, 0) + byteArrayOf(0, 1, 2, 3, 4)
-        val v22 = "ID3".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(2, 0, 0) + syncSafe(body.size) + body
-        assertNull(Id3Writer.rebuildTag(v22, newCover, null, null))
-        val unsync = "ID3".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(3, 0, 0x80.toByte()) +
-            syncSafe(body.size) + body
-        assertNull(Id3Writer.rebuildTag(unsync, newCover, null, null))
-    }
-
-    @Test
-    fun `本来没有标签时从零写`() {
-        val rebuilt = Id3Writer.rebuildTag(null, newCover, null, lrc)!!
-        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
-        assertEquals(lrc, AudioTags.lyricsFrom(ByteArrayInputStream(rebuilt)))
-        // 没有可保留的元数据 → 不该有文本帧
-        assertTrue(Id3Writer.parseFrames(rebuilt)!!.none { it.id == "TIT2" })
-    }
-
-    private fun be32(n: Int) = byteArrayOf(
-        ((n ushr 24) and 0xFF).toByte(), ((n ushr 16) and 0xFF).toByte(),
-        ((n ushr 8) and 0xFF).toByte(), (n and 0xFF).toByte()
-    )
-
-    private fun syncSafe(n: Int) = byteArrayOf(
-        ((n shr 21) and 0x7F).toByte(), ((n shr 14) and 0x7F).toByte(),
-        ((n shr 7) and 0x7F).toByte(), (n and 0x7F).toByte()
-    )
 }

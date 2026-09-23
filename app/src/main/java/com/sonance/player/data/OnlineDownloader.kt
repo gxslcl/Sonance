@@ -117,7 +117,6 @@ object OnlineDownloader {
      *
      * @param streamUrl  取流地址（[OnlineSource.streamUrl] 的结果）
      * @param coverBytes 要嵌进 ID3 的封面字节；null 就不嵌
-     * @param lyrics     要嵌进 ID3 的歌词（LRC 原文）；null / 空白就不嵌
      */
     suspend fun download(
         context: Context,
@@ -127,8 +126,7 @@ object OnlineDownloader {
         artist: String,
         album: String,
         streamUrl: String,
-        coverBytes: ByteArray?,
-        lyrics: String? = null
+        coverBytes: ByteArray?
     ): Outcome = withContext(Dispatchers.IO) {
         val fileName = fileNameFor(title, artist)
         val temp = File(context.cacheDir, "dl-${System.nanoTime()}.part")
@@ -174,10 +172,7 @@ object OnlineDownloader {
             }
 
             // ---- 2) 写标签 + 落到目标位置（流式，不把整首歌读进内存）----
-            // 标题 / 歌手 / 专辑 / 封面 / 歌词一次写全：这样存下来的文件
-            // 在**任何**播放器里都是完整的一首歌，而不是"文件名当标题、歌手未知"。
-            // 封面和歌词都来自下载时顺手取的那份，不额外发请求。
-            val tag = Id3Writer.buildTag(title, artist, album, coverBytes, lyrics = lyrics)
+            val tag = Id3Writer.buildTag(title, artist, album, coverBytes)
             val opened = openTarget(context, fileName) ?: return@withContext Outcome.Failed
             try {
                 temp.inputStream().use { input ->

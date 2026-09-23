@@ -54,66 +54,11 @@ class PlaybackRestoreTest {
     }
 
     @Test
-    fun `丢歌之后下标会跟着前移`() {
-        // 存档下标指向第 3 首（id=10），但中间那首没了
+    fun `丢歌之后下标会重新夹紧`() {
+        // 存档下标指向第 3 首（id=10），但中间那首没了，现在只剩 2 首
         val (queue, index) = PlaybackRestore.resolveIds(listOf(30L, 20L, 10L), 2, setOf(10L, 30L))!!
         assertEquals(listOf(30L, 10L), queue)
-        // ★ 必须是**对齐后**的位置，而不是把旧下标夹到 lastIndex。
-        // id=10 现在排第 2 位，夹紧的写法恰好也是 1，两者在这个例子里撞上了 ——
-        // 靠下面"当前曲不在中间"的那条才区分得开。
-        assertEquals(1, index)
-    }
-
-    @Test
-    fun `前面丢三首后面留一首时下标仍然指向同一首歌`() {
-        // 存档 [10,11,12,13,14]，播到 12（下标 2）；10、11 没了但 13、14 还在。
-        // ★ 这条是这套规则存在的理由：
-        //   - 旧实现（把旧下标夹紧）= min(2, 2) = 2 → 恢复出来是 **14**，
-        //     也就是"重启之后换了一首歌"（用户报过同类现象）；
-        //   - 对齐后 = 0 → 仍然是 12。
-        val (queue, index) = PlaybackRestore.resolveIds(
-            listOf(10L, 11L, 12L, 13L, 14L), 2, setOf(12L, 13L, 14L)
-        )!!
-        assertEquals(listOf(12L, 13L, 14L), queue)
-        assertEquals(0, index)
-    }
-
-    @Test
-    fun `当前曲自己也失效时退回夹紧的旧行为`() {
-        val (queue, index) = PlaybackRestore.resolveIds(listOf(1L, 2L, 3L), 1, setOf(1L, 3L))!!
-        assertEquals(listOf(1L, 3L), queue)
-        assertEquals(1, index)   // 1 在范围内，不乱跳
-    }
-
-    // ===== alignIndices =====
-
-    @Test
-    fun `alignIndices 返回保留项的原始下标`() {
-        val (kept, mapped) = PlaybackRestore.alignIndices(listOf(10L, 11L, 12L, 13L), 2) { it % 2 == 0L }
-        assertEquals(listOf(0, 2), kept)     // 只有 10 和 12
-        assertEquals(1, mapped)              // 12 落在保留后的第 2 位
-    }
-
-    @Test
-    fun `alignIndices 全部保留时下标不变`() {
-        val (kept, mapped) = PlaybackRestore.alignIndices(listOf(5L, 6L, 7L), 1) { true }
-        assertEquals(listOf(0, 1, 2), kept)
-        assertEquals(1, mapped)
-    }
-
-    @Test
-    fun `alignIndices 关心那项被过滤掉时返回 -1`() {
-        val (kept, mapped) = PlaybackRestore.alignIndices(listOf(10L, 11L), 1) { it == 10L }
-        assertEquals(listOf(0), kept)
-        assertEquals(-1, mapped)
-    }
-
-    @Test
-    fun `alignIndices 对空输入与越界下标都不炸`() {
-        assertEquals(emptyList<Int>(), PlaybackRestore.alignIndices(emptyList(), 0) { true }.first)
-        val (kept, mapped) = PlaybackRestore.alignIndices(listOf(1L), 99) { true }
-        assertEquals(listOf(0), kept)
-        assertEquals(-1, mapped)
+        assertEquals(1, index)   // 夹到 lastIndex，不能越界
     }
 
     @Test

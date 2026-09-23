@@ -52,37 +52,15 @@ import kotlinx.coroutines.withContext
  */
 data class CoverTint(val left: Int, val center: Int, val right: Int)
 
-/**
- * 请求尺寸归一到几档，避免同一张专辑为每个像素尺寸都缓存一份。
- *
- * 放在**文件级**而不是 `ArtworkLoader` 对象里：它们是纯函数，
- * 而 `ArtworkLoader` 的静态初始化会碰 `LruCache`（Android 类），
- * 挂在它里面的话 JVM 单测就没法单独验这些规则了。
- */
-private val SIZE_BUCKETS = intArrayOf(128, 256, 512, 1024)
-
-internal fun artworkBucketOf(sizePx: Int): Int {
-    for (b in SIZE_BUCKETS) if (sizePx <= b) return b
-    return SIZE_BUCKETS.last()
-}
-
-/**
- * 依次该试哪些尺寸档：**请求档优先，然后从大到小退到更小的档**。
- *
- * ⚠️ **只退到更小的档，绝不能往上取**：更大档的图不一定在缓存里，
- * 而如果它正好在，拿它去顶小尺寸的请求就是白占内存（一张 1024 是 4 MB）。
- *
- * 抽出来就是为了能单测 —— 这条顺序错了不会报错，只会"该显示的时候没显示"。
- */
-internal fun artworkPeekOrder(sizePx: Int): IntArray {
-    val want = artworkBucketOf(sizePx)
-    val smaller = SIZE_BUCKETS.filter { it < want }.sortedDescending().toIntArray()
-    return intArrayOf(want) + smaller
-}
-
 object ArtworkLoader {
 
-    internal fun bucketOf(sizePx: Int): Int = artworkBucketOf(sizePx)
+    /** 请求尺寸归一到几档，避免同一张专辑为每个像素尺寸都缓存一份 */
+    private val SIZE_BUCKETS = intArrayOf(128, 256, 512, 1024)
+
+    private fun bucketOf(sizePx: Int): Int {
+        for (b in SIZE_BUCKETS) if (sizePx <= b) return b
+        return SIZE_BUCKETS.last()
+    }
 
     /**
      * 是不是**远程**地址（在线歌的取流 URL）。
@@ -217,31 +195,17 @@ object ArtworkLoader {
      * 同时进行的解码任务上限。
      *
      * 原来只有 2 —— 一屏十来行封面要排 5~6 批，每批都要等一轮 MediaStore IPC，
-     * 加起来就是肉眼可见的一两秒。后来放到 6，一屏的量基本能一波跑完。
-     *
-     * 现在放到 8：滚动期间**也**允许加载（见 [load] 里对 [paused] 的用法），
-     * 并发里有一部分会被"滑过去又没停住"的行占着。256px 的 RGB_565 缩略图
-     * 每张约 128KB，8 张同时在解也就 1MB 上下，内存无压力。
+     * 加起来就是肉眼可见的一两秒。取 6：一屏的量基本能一波跑完，
+     * 而 256px 的 RGB_565 缩略图每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
      */
-    private val decodeGate = Semaphore(permits = 8)
+    private val decodeGate = Semaphore(permits = 6)
 
     /**
-     * **滚动期间**的额外并发上限。
+     * 列表 / 网格滚动中：跳过**新发起**的加载。
      *
-     * 滚动时允许加载，是为了让封面在手指停下之前就开始出来（原来是一停手才开工，
-     * 于是"停下来 0.5~1 秒才显示"）。但滚动期间没必要开到 8 ——
-     * 那时发起的加载有一部分是给"滑过去就没停住"的行做的，开到满会跟滑动动效抢 IO。
-     *
-     * 两个信号量是**套用**的（先拿大闸、滚动中再拿小闸），不是二选一：
-     * 静止时只有大闸生效，滚动中才叠加限制。
-     */
-    private val scrollGate = Semaphore(permits = 2)
-
-    /**
-     * 列表 / 网格**是否正在滚动**。
-     *
-     * 语义已经改过：以前它是"滚动中就完全不加载"，这会让封面只能等手停下来才开工；
-     * 现在它只用来**降并发**（见 [scrollGate]）。用例见 `CoverArt`。
+     * 必须是 Compose 的 [mutableStateOf] 而不是普通字段 ——
+     * `CoverArt` 把它当 `LaunchedEffect` 的 key 用，普通字段不参与快照系统，
+     * 变化不会重启 effect，滚动停止后那些被跳过的行就永远不补图了。
      */
     var paused: Boolean by mutableStateOf(false)
 
@@ -293,16 +257,12 @@ object ArtworkLoader {
     private const val TINT_SAMPLE = 24
 
     /**
-     * 预取封面时的**兜底**解码边长（调用方一般会传自己的显示尺寸，见 [prefetchTint]）。
+     * 预取封面时的解码边长。
      *
-     * ⚠️ 尺寸决定缓存键（[bucketOf] 把尺寸归一到 128/256/512/1024 几档），
-     * **对不上档就等于白预热**：早先这里固定 192（档 256），而播放页的封面是 900
-     * （档 1024）—— 键不同，`peek` 命中不了，切歌时封面还得现解一次，
-     * 那几十到几百毫秒里显示的是占位图。用户看到的就是「切歌时闪一下」，
-     * 而且只在**上一曲**方向明显（分页器只往"前进方向"预组合下一页，
-     * 上一页的封面没人预热）。
+     * 取色只要 24×24，这里给大一点是为了让预取出来的位图还能顶一次真实的封面显示
+     * （[bucketOf] 会把尺寸归一到几档，192 落在小档里，代价很低）。
      */
-    private const val PREFETCH_PX = 900
+    private const val PREFETCH_PX = 192
 
     /**
      * 按封面来源存的色卡。
@@ -339,39 +299,22 @@ object ArtworkLoader {
     }
 
     /**
-     * 预取封面：提前把某首歌的封面解出来、算一遍颜色，顺带把位图放进位图缓存。
+     * 预取色卡：提前把某首歌的封面解出来、算一遍颜色。
      *
-     * 两件事都需要它：
+     * 色卡是「解码封面时顺手算」的，所以换歌瞬间新歌多半还没有颜色可用 ——
+     * 那段时间晕染只能沿用上一首的色，表现为「颜色慢半拍才变过来」。
+     * 提前给相邻的下一首算一遍，切歌时新色已经就绪，过渡就完全跟得上了。
      *
-     * 1. **色卡**。色卡是"解码封面时顺手算"的，换歌那一瞬间新歌多半还没有颜色可用，
-     *    晕染只能沿用上一首的色 —— 表现为「颜色慢半拍才变过来」。
-     * 2. **封面位图本身**。播放页上下切歌时，分页器只会往**前进方向**预组合下一页，
-     *    所以往回切的那一页是临时才组合的；它的 `CoverArt` 若在缓存里命中不了，
-     *    就得走"先占位图、解完再换成真封面"那一趟 —— 用户看到的就是「切歌时闪一下」。
-     *    实测上一曲方向会闪、下一曲不闪，正是这个原因。
+     * 走的就是 [load] 那条路（封面通常已在内存 / 磁盘缓存里，命中时几乎不花钱），
+     * 顺带把封面位图也预热了，上下滑动切歌时封面出现得更快。
      *
-     * ⚠️ [sizePx] 必须**和调用方真正显示封面时用的尺寸落在同一个档**
-     * （[bucketOf] 把尺寸归一到 128/256/512/1024）。对不上档 = 缓存键不同 =
-     * 上面第 2 条白做，封面照样要现解一次。播放页传的就是它自己 `CoverArt` 的尺寸。
-     *
-     * 走的就是 [load] 那条路（封面通常已在内存 / 磁盘缓存里，命中时几乎不花钱）。
-     *
-     * ⚠️ 跳过条件是「**这个尺寸**的位图已经在缓存里」，**不能**用"色卡算过了"来代替：
-     * 色卡是尺寸无关的，列表按 400（档 512）看过一遍就已经有色卡了，而播放页要的是
-     * 900（档 1024）—— 拿色卡当判据会直接跳过，播放页那份位图永远没人预热，
-     * 切歌时照样先显示占位图。
+     * 已经有色卡就直接返回 —— 别为了"预取"把已经算好的东西再解一遍。
      */
-    suspend fun prefetchTint(
-        context: Context,
-        albumId: Long,
-        sourceUri: Uri?,
-        coverKey: String?,
-        sizePx: Int = PREFETCH_PX
-    ) {
-        if (peek(albumId, sizePx, sourceUri, coverKey) != null) return
+    suspend fun prefetchTint(context: Context, albumId: Long, sourceUri: Uri?, coverKey: String?) {
+        if (tintOf(albumId, sourceUri, coverKey) != null) return
         withContext(Dispatchers.IO) {
             try {
-                load(context, albumId, sizePx = sizePx, sourceUri = sourceUri, coverKey = coverKey)
+                load(context, albumId, sizePx = PREFETCH_PX, sourceUri = sourceUri, coverKey = coverKey)
             } catch (c: CancellationException) {
                 // 用户快速跳歌时这个协程会被取消。必须原样抛出 —— 吞掉 CancellationException
                 // 会让结构化并发失效（外层以为还活着）。
@@ -501,38 +444,6 @@ object ArtworkLoader {
         return cache.get(keyOf(albumId, size, sourceUri, coverKey))
     }
 
-    /**
-     * 取一张**能立刻显示**的封面：先要准确尺寸档，没有就退到更小的档。
-     *
-     * ## 为什么需要它
-     *
-     * 播放页要 1024 档，而列表早就解过同一张封面的 512 档。只认准确档的话，
-     * 第一次进播放页、或切到那一页还没预热完的时候，会**先显示占位图**、
-     * 几十到几百毫秒后才换成真封面 —— 那就是用户看到的「切歌时背景闪一下」。
-     *
-     * 退一步拿到小图立刻显示，虽然会糊那么一瞬，但**不会闪一帧空白**，
-     * 而准确档解码好了会马上顶上来。
-     *
-     * ## 只往下退，不往上取
-     *
-     * 更大的档不一定有；而且真有的话等于"用大图顶小图"，白占内存。
-     */
-    fun peekAny(
-        albumId: Long,
-        sizePx: Int,
-        sourceUri: Uri? = null,
-        coverKey: String? = null
-    ): ImageBitmap? {
-        if (albumId <= 0 && sourceUri == null && coverKey == null) return null
-        for (size in peekOrder(sizePx)) {
-            cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
-            cache.get(keyOf(albumId, size, sourceUri, coverKey))?.let { return it }
-        }
-        return null
-    }
-
-    internal fun peekOrder(sizePx: Int): IntArray = artworkPeekOrder(sizePx)
-
     suspend fun load(
         context: Context,
         albumId: Long,
@@ -556,6 +467,8 @@ object ArtworkLoader {
         // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
         cache.get(localKey)?.let { return it }
         cache.get(key)?.let { return it }
+        // 滚动中跳过新发起的加载
+        if (paused) return null
 
         // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
@@ -567,14 +480,7 @@ object ArtworkLoader {
             decodeGate.withPermit {
                 cache.get(localKey)?.let { return@withPermit it }
                 cache.get(key)?.let { return@withPermit it }
-                // 滚动中：叠加一层更严的名额限制，而不是像以前那样整个跳过。
-                // 跳过等于"手不停就不开工"，封面只能等停下来才解码 —— 那正是
-                // 「快速滑动时没封面、停下 0.5~1 秒才出来」的原因。
-                if (paused) {
-                    scrollGate.withPermit { decode(context, albumId, size, key, localKey, sourceUri, coverKey) }
-                } else {
-                    decode(context, albumId, size, key, localKey, sourceUri, coverKey)
-                }
+                decode(context, albumId, size, key, localKey, sourceUri, coverKey)
             }
         }
     }

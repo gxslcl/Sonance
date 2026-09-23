@@ -95,20 +95,6 @@ switch (cmd) {
     console.log(`drag -${total} -> x=${x}`);
     break;
   }
-  case 'dragv': {
-    // 纵向分小步上移 offset（播放页上下切歌用的就是纵向分页器）。
-    // 和 drag 一样必须分小步：单次大跳会被判成 fling，抓不到中间态。
-    const total = +process.argv[3];
-    const steps = Math.max(1, Math.round(Math.abs(total) / 50));
-    for (let i = 1; i <= steps; i++) {
-      const ny = Math.round(y - (total * i) / steps);
-      shell(`input motionevent MOVE ${x} ${ny}`);
-    }
-    y -= total;
-    save();
-    console.log(`dragv -${total} -> y=${y}`);
-    break;
-  }
   default:
-    console.log('用法: down | move <x> [y] | up [x] [y] | shot <name> | drag <offset> | dragv <offset>');
+    console.log('用法: down | move <x> [y] | up [x] [y] | shot <name> | drag <offset>');
 }

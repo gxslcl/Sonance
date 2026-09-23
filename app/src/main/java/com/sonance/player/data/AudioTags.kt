@@ -46,24 +46,6 @@ object AudioTags {
     }.getOrNull()
 
     /**
-     * 一趟同时取**封面和歌词**（「把缓存写回文件」探测候选用）。
-     *
-     * 以前只有 `readCoverArt` / `readLyrics` 两个入口，各开一遍文件；
-     * 而且它们各自只认一种帧、找到就提前返回。这里两个都要，
-     * 所以 `scan` 也得改成「想要的都找到了才返回」（见里面的注释）。
-     *
-     * @return 封面字节（可能为 null）和歌词文本（可能为 null）
-     */
-    fun readTags(context: Context, uri: Uri): Pair<ByteArray?, String?> {
-        val found = runCatching {
-            context.contentResolver.openInputStream(uri)?.use {
-                scan(it, wantCover = true, wantLyrics = true)
-            }
-        }.getOrNull() ?: return null to null
-        return found?.cover to found?.lyrics
-    }
-
-    /**
      * 纯流版本的入口，**只给单元测试用**。
      * tag 解析逻辑全在这里，真机跑不了的时候靠它兜住正确性。
      */
@@ -74,11 +56,6 @@ object AudioTags {
     @androidx.annotation.VisibleForTesting
     internal fun lyricsFrom(input: InputStream): String? =
         scan(input, wantCover = false, wantLyrics = true).lyrics
-
-    /** 纯流版本：一趟同时取两样（给「写回文件」的测试用，规则见 [readTags]） */
-    @androidx.annotation.VisibleForTesting
-    internal fun tagsFrom(input: InputStream): Pair<ByteArray?, String?> =
-        scan(input, wantCover = true, wantLyrics = true).let { it.cover to it.lyrics }
 
     /* ============================================================
      * 容器分派
@@ -189,15 +166,13 @@ object AudioTags {
                     val img = extractApicImage(body)
                     if (img != null) {
                         found.cover = img
-                        // 两个都要时要继续扫 —— 封面帧通常排在最前，提前 return
-                        // 会把后面的歌词帧丢掉（写回文件时要一次拿齐两样）
-                        if (!wantLyrics || found.lyrics != null) return
+                        return
                     }
                 } else {
                     val t = extractUsltText(body)
                     if (!t.isNullOrBlank()) {
                         found.lyrics = t
-                        if (!wantCover || found.cover != null) return
+                        return
                     }
                 }
             } else if (!skipFully(input, size.toLong())) {

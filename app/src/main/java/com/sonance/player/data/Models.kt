@@ -191,26 +191,3 @@ fun formatSize(bytes: Long): String {
 /** 无 ID3 信息时的兜底 */
 const val UNKNOWN_ARTIST = "未知艺术家"
 const val UNKNOWN_ALBUM = "未知专辑"
-
-/**
- * 解析好的播放队列：可显示的 [Song] 列表 + **每个元素在播放器里的原始下标**。
- *
- * 存在的意义是把"列表"和"下标"绑在一起走。只给列表、让界面自己按
- * `state.queueIndex` 去取，一旦解析时少掉几条就会整体错位 ——
- * 表现是"播放条是这首、进播放页却是另一首"。
- * 规则本体见 [PlaybackRestore.alignIndices]。
- *
- * @param songs      队列（解析成功的那些，顺序不变）
- * @param index      当前曲在 [songs] 里的下标
- * @param sourceIndex `sourceIndex[i]` = `songs[i]` 在播放器队列里的原始下标。
- *   界面要按 index 操作播放器（播放 / 移除）时，先用它换回去。
- */
-data class ResolvedQueue(
-    val songs: List<Song>,
-    val index: Int,
-    val sourceIndex: List<Int>
-) {
-    companion object {
-        val EMPTY = ResolvedQueue(emptyList(), 0, emptyList())
-    }
-}

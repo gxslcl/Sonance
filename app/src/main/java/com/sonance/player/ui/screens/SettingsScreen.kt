@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,10 +35,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -122,15 +119,6 @@ fun SettingsScreen(
             )
             Spacer(Modifier.height(12.dp))
             AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
-        }
-
-        // ===== 写回提醒：进设置页探测一次，有待写入内容才出现 =====
-        //
-        // 放在页面最顶上而不是收进「封面」分区 —— 用户不会主动来找一个
-        // "把缓存写回文件"的功能，它得自己站出来说"我这儿有活"。
-        LaunchedEffect(vm.songs.size, vm.tagWriteBackBusy) { vm.prepareTagWriteBack() }
-        if (vm.tagWriteBackPending > 0) {
-            TagWriteBackCard(vm)
         }
 
         // ===== 媒体库 =====
@@ -1433,80 +1421,4 @@ internal fun buildLastScanSubtitle(context: android.content.Context, songCount: 
         else -> "${mins / (24 * 60)} 天前"
     }
     return "上次扫描：$rel · $songCount 首"
-}
-
-/* ============================================================
- * 「写回音乐文件」：进设置页时若有待写入内容，在页面顶上提醒
- * ============================================================ */
-
-@Composable
-private fun TagWriteBackCard(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
-    // 授权结果回来 → 真正动手写。取消的话什么都不发生，提醒还在
-    val consent = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { res ->
-        if (res.resultCode == android.app.Activity.RESULT_OK) vm.performTagWriteBack()
-    }
-    var confirmOpen by rememberSaveable { mutableStateOf(false) }
-
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(skin.accentGlow)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-    ) {
-        Text(
-            text = "有 ${vm.tagWriteBackPending} 首歌的封面 / 歌词还只存在应用里",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = skin.text
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "写进音乐文件后，换机、换播放器也能看到。" +
-                "只处理 MP3；原有标题歌手原样保留，只补封面和歌词。",
-            style = MaterialTheme.typography.labelSmall,
-            color = skin.textDim
-        )
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton(
-                label = if (vm.tagWriteBackBusy) "写入中…" else "去确认",
-                onClick = { if (!vm.tagWriteBackBusy) confirmOpen = true },
-                filled = true
-            )
-        }
-    }
-
-    if (confirmOpen && !vm.tagWriteBackBusy) {
-        AlertDialog(
-            onDismissRequest = { confirmOpen = false },
-            title = { Text("写入音乐文件？") },
-            text = {
-                Text(
-                    "将把 ${vm.tagWriteBackPending} 首歌的封面 / 歌词写进对应的 MP3 文件。\n\n" +
-                        "· 只处理 MP3（WAV / FLAC / M4A 的标签结构不同，暂不碰）\n" +
-                        "· 原有标题、歌手、专辑等全部保留，只补封面和歌词\n" +
-                        "· 每个文件先备份再覆盖，失败自动回滚\n" +
-                        "· 需要系统授权一次（允许修改这些文件）"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmOpen = false
-                    val sender = vm.tagWriteBackConsentSender()
-                    if (sender != null) {
-                        consent.launch(IntentSenderRequest.Builder(sender).build())
-                    } else {
-                        vm.performTagWriteBack()
-                    }
-                }) { Text("写入") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmOpen = false }) { Text("取消") }
-            }
-        )
-    }
 }

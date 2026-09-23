@@ -255,22 +255,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // onlineRevision 是必须的 key：在线歌不在 vm.songs 里，搜一次之后
     // 队列页 / 播放页要按 id 反查它们，映射必须重建。
     val songMap = remember(vm.songs, vm.onlineRevision) { vm.songMap() }
-    val currentSong = songMap[playerState.mediaId]
-    // 队列**连同"每个元素在播放器里的原始下标"一起解析**，不要在界面里
-    // `mapNotNull` —— 那会悄悄丢掉解析不出来的条目，而后面的下标不会跟着前移，
-    // 表现就是「播放条是这首、进播放页却是另一首」（用户报的 bug）。
-    val resolvedQueue = remember(
-        playerState.queueIds,
-        playerState.queueIndex,
-        playerState.mediaId,
-        songMap,
-        vm.onlineRevision
-    ) {
-        vm.resolveQueue(playerState.queueIds, playerState.queueIndex, currentSong)
+    val queue = remember(playerState.queueIds, songMap) {
+        playerState.queueIds.mapNotNull { songMap[it] }
     }
-    val queue = resolvedQueue.songs
-    /** 界面下标 → 播放器下标。越界时退回自身（宁可试一下，也不要静默点错一首） */
-    fun playerIndexOf(i: Int): Int = resolvedQueue.sourceIndex.getOrElse(i) { i }
+    val currentSong = songMap[playerState.mediaId]
 
     fun openAlbum(albumId: Long) {
         detail = Detail.AlbumDetail(albumId)
@@ -337,15 +325,13 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             FullPlayer(
                 state = playerState,
                 queue = queue,
-                queueIndex = resolvedQueue.index,
                 favorites = vm.favorites,
                 onClose = {
                     fullPlayerOpen = false
                     // 收起播放页时把正在播放的那首滚进可视区
                     vm.requestScrollToCurrent()
                 },
-                // 界面下标 → 播放器下标。两者在"队列里有解析不出来的条目"时不是一回事
-                onPlayAt = { vm.player.playAt(playerIndexOf(it)) },
+                onPlayAt = { vm.player.playAt(it) },
                 onToggleFavorite = { vm.toggleFavorite(it) },
                 onCyclePlayMode = { vm.cyclePlayMode() },
                 onPrev = { vm.player.previous() },
@@ -388,11 +374,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     if (queueOpen) {
         QueueSheet(
             queue = queue,
-            queueIndex = resolvedQueue.index,
             state = playerState,
             onDismiss = { queueOpen = false },
-            onPlayAt = { vm.player.playAt(playerIndexOf(it)) },
-            onRemoveAt = { vm.player.removeAt(playerIndexOf(it)) },
+            onPlayAt = { vm.player.playAt(it) },
+            onRemoveAt = { vm.player.removeAt(it) },
             onShuffle = { vm.toggleShuffle() },
             onClear = {
                 vm.player.clearQueue()
