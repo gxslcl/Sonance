@@ -337,6 +337,42 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, true)
         set(v) = sp.edit().putBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, v).apply()
 
+    // ===== 在线搜索历史 =====
+
+    /**
+     * 最近搜过的词，**最新的在前**，最多 [MAX_ONLINE_HISTORY] 个。
+     *
+     * 词与词之间用换行分隔 —— 搜索词来自单行输入框，正常不会有换行；
+     * 万一粘贴进来的词带换行，存之前会先剥掉。
+     */
+    fun onlineHistory(): List<String> =
+        (sp.getString(KEY_ONLINE_HISTORY, "") ?: "")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+    /**
+     * 记一次搜索。
+     *
+     * **去重并把这条提到最前** —— 同一个词搜第二次，它应该还在原来的位置上吗？
+     * 不该，用户现在关心的就是它。
+     *
+     * 只存 [MAX_ONLINE_HISTORY] 个：再多这一行就翻不动了，而且没人会翻回去用。
+     */
+    fun pushOnlineHistory(term: String) {
+        val next = nextOnlineHistory(onlineHistory(), term, MAX_ONLINE_HISTORY)
+        sp.edit().putString(KEY_ONLINE_HISTORY, next.joinToString("\n")).apply()
+    }
+
+    /** 删掉某一条（历史胶囊上那个 × ） */
+    fun removeOnlineHistory(term: String) {
+        if (!onlineHistory().contains(term)) return
+        sp.edit().putString(KEY_ONLINE_HISTORY, onlineHistory().filter { it != term }.joinToString("\n"))
+            .apply()
+    }
+
+    fun clearOnlineHistory() = sp.edit().remove(KEY_ONLINE_HISTORY).apply()
+
     /**
      * 用网易云补全**本地歌**的封面与歌词。**默认关闭**。
      *
@@ -692,6 +728,10 @@ class Prefs(context: Context) {
         private const val KEY_ONLINE_MUSIC = "online_music_enabled"
         private const val KEY_ONLINE_SOURCE = "online_music_source"
         private const val KEY_ONLINE_HIDE_UNPLAYABLE = "online_hide_unplayable"
+        private const val KEY_ONLINE_HISTORY = "online_search_history"
+
+        /** 搜索历史最多存几条。再多这一行胶囊就翻不动了，而且没人会翻回去用 */
+        const val MAX_ONLINE_HISTORY = 12
         private const val KEY_NETEASE_FILL = "netease_fill_enabled"
         private const val KEY_DL_ENABLED = "online_download_enabled"
         private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
@@ -721,4 +761,25 @@ class Prefs(context: Context) {
         private const val KEY_RESTORE_OUT_URI = "restore_out_uri"
         private const val KEY_RESTORE_OUT_LABEL = "restore_out_label"
     }
+}
+
+/**
+ * 算出存完这个词之后，搜索历史应该长什么样。
+ *
+ * ## 三条规则
+ *
+ * 1. **去重并提到最前** —— 同一个词搜第二次，它不该留在原地：用户现在关心的就是它
+ * 2. **截断到 [max] 条** —— 再多这排胶囊就翻不动了，而且没人会翻回去用
+ * 3. **空词不动** —— 空着输入框触发的搜索（清空那次）不该往历史里塞一个空条
+ *
+ * 放在**文件级**而不是 `Prefs` 类里：纯函数，JVM 单测不用构造 SharedPreferences。
+ *
+ * @param existing 现在的历史（最新在前）
+ * @param term     这次搜到的词
+ * @param max      最多留几条
+ */
+internal fun nextOnlineHistory(existing: List<String>, term: String, max: Int): List<String> {
+    val t = term.replace('\n', ' ').trim()
+    if (t.isEmpty()) return existing
+    return (listOf(t) + existing.filter { it != t }).take(max.coerceAtLeast(1))
 }

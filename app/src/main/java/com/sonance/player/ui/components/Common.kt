@@ -97,8 +97,15 @@ fun CoverArt(
     // 首帧就直接读内存缓存 —— 已加载过的封面必须立刻出现，不能先给占位图。
     // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
     //   表现就是"滚回来还要等半秒"。）
+    //
+    // 用 [ArtworkLoader.peekAny] 而不是 `peek`：拿不到**准确尺寸档**时退到更小的档。
+    //
+    // 播放页要 1024 档，而列表早就解过同一张图的 512 档。只认准确档的话，
+    // 切到那一页的瞬间它会显示占位图、几十到几百毫秒后才换成真封面 ——
+    // 那就是「切歌时背景闪一下」（往回切尤其明显：那一页是切过去才组合的）。
+    // 退一步先显示小图，糊一瞬但**不会闪空白**，准确档解码好就立刻顶上来。
     var bitmap by remember(albumId, sourceUri, coverKey) {
-        mutableStateOf(ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey))
+        mutableStateOf(ArtworkLoader.peekAny(albumId, sizePx, sourceUri, coverKey))
     }
 
     LaunchedEffect(albumId, sizePx, sourceUri, coverKey) {

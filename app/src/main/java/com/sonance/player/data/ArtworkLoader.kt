@@ -52,15 +52,37 @@ import kotlinx.coroutines.withContext
  */
 data class CoverTint(val left: Int, val center: Int, val right: Int)
 
+/**
+ * 请求尺寸归一到几档，避免同一张专辑为每个像素尺寸都缓存一份。
+ *
+ * 放在**文件级**而不是 `ArtworkLoader` 对象里：它们是纯函数，
+ * 而 `ArtworkLoader` 的静态初始化会碰 `LruCache`（Android 类），
+ * 挂在它里面的话 JVM 单测就没法单独验这些规则了。
+ */
+private val SIZE_BUCKETS = intArrayOf(128, 256, 512, 1024)
+
+internal fun artworkBucketOf(sizePx: Int): Int {
+    for (b in SIZE_BUCKETS) if (sizePx <= b) return b
+    return SIZE_BUCKETS.last()
+}
+
+/**
+ * 依次该试哪些尺寸档：**请求档优先，然后从大到小退到更小的档**。
+ *
+ * ⚠️ **只退到更小的档，绝不能往上取**：更大档的图不一定在缓存里，
+ * 而如果它正好在，拿它去顶小尺寸的请求就是白占内存（一张 1024 是 4 MB）。
+ *
+ * 抽出来就是为了能单测 —— 这条顺序错了不会报错，只会"该显示的时候没显示"。
+ */
+internal fun artworkPeekOrder(sizePx: Int): IntArray {
+    val want = artworkBucketOf(sizePx)
+    val smaller = SIZE_BUCKETS.filter { it < want }.sortedDescending().toIntArray()
+    return intArrayOf(want) + smaller
+}
+
 object ArtworkLoader {
 
-    /** 请求尺寸归一到几档，避免同一张专辑为每个像素尺寸都缓存一份 */
-    private val SIZE_BUCKETS = intArrayOf(128, 256, 512, 1024)
-
-    private fun bucketOf(sizePx: Int): Int {
-        for (b in SIZE_BUCKETS) if (sizePx <= b) return b
-        return SIZE_BUCKETS.last()
-    }
+    internal fun bucketOf(sizePx: Int): Int = artworkBucketOf(sizePx)
 
     /**
      * 是不是**远程**地址（在线歌的取流 URL）。
@@ -478,6 +500,38 @@ object ArtworkLoader {
         cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
         return cache.get(keyOf(albumId, size, sourceUri, coverKey))
     }
+
+    /**
+     * 取一张**能立刻显示**的封面：先要准确尺寸档，没有就退到更小的档。
+     *
+     * ## 为什么需要它
+     *
+     * 播放页要 1024 档，而列表早就解过同一张封面的 512 档。只认准确档的话，
+     * 第一次进播放页、或切到那一页还没预热完的时候，会**先显示占位图**、
+     * 几十到几百毫秒后才换成真封面 —— 那就是用户看到的「切歌时背景闪一下」。
+     *
+     * 退一步拿到小图立刻显示，虽然会糊那么一瞬，但**不会闪一帧空白**，
+     * 而准确档解码好了会马上顶上来。
+     *
+     * ## 只往下退，不往上取
+     *
+     * 更大的档不一定有；而且真有的话等于"用大图顶小图"，白占内存。
+     */
+    fun peekAny(
+        albumId: Long,
+        sizePx: Int,
+        sourceUri: Uri? = null,
+        coverKey: String? = null
+    ): ImageBitmap? {
+        if (albumId <= 0 && sourceUri == null && coverKey == null) return null
+        for (size in peekOrder(sizePx)) {
+            cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
+            cache.get(keyOf(albumId, size, sourceUri, coverKey))?.let { return it }
+        }
+        return null
+    }
+
+    internal fun peekOrder(sizePx: Int): IntArray = artworkPeekOrder(sizePx)
 
     suspend fun load(
         context: Context,

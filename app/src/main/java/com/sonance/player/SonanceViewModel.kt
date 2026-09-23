@@ -1513,6 +1513,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.onlineHideUnplayable = v
     }
 
+    // ===== 在线搜索历史 =====
+
+    /** 最近搜过的词，最新在前。给搜索框下面那排胶囊用 */
+    var onlineHistory by mutableStateOf(prefs.onlineHistory())
+        private set
+
+    /**
+     * 点历史词直接搜。
+     *
+     * 先把输入框填上这个词再搜 —— **必须两步都做**：只搜不填的话，
+     * 结果回来之后输入框还是空的，看起来像搜了个空气；
+     * 只填不搜的话用户还得再点一次放大镜。
+     */
+    fun searchFromHistory(term: String) {
+        if (term.isBlank()) return
+        onlineQuery = term
+        searchOnline(term)
+    }
+
+    fun removeOnlineHistory(term: String) {
+        prefs.removeOnlineHistory(term)
+        onlineHistory = prefs.onlineHistory()
+    }
+
+    fun clearOnlineHistory() {
+        prefs.clearOnlineHistory()
+        onlineHistory = emptyList()
+        showToast("已清空搜索历史")
+    }
+
+    /** 有结果时把这个词记进历史。状态持久化在 [Prefs]，这里只负责让组合能观察到 */
+    private fun pushOnlineHistory(term: String) {
+        prefs.pushOnlineHistory(term)
+        onlineHistory = prefs.onlineHistory()
+    }
+
     /**
      * 列表要显示的曲目，带**在 [onlineResults] 里的原始下标**。
      *
@@ -1664,6 +1700,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     page.hasMore(offset = 0, limit = ONLINE_PAGE_SIZE) &&
                     tracks.size < MAX_ONLINE_RESULTS
                 onlineLoadMoreFailed = false
+                // **搜到了东西**才记进历史。
+                //
+                // 打了一半的词、搜不到结果的词都不该留 —— 历史的价值在于
+                // "点一下就能回到上次搜到东西的那次搜索"。
+                // 失败（page == null）也不记：断网时误触的那一下不该占一个位置。
+                if (page != null && tracks.isNotEmpty()) pushOnlineHistory(kw)
                 // 失败和"没搜到"要分开说：断网时显示「没搜到「周杰伦」」
                 // 会让用户以为搜索坏了（音源用 null 表示失败）
                 onlineNotice = when {
