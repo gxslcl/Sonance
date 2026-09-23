@@ -93,6 +93,7 @@ import com.sonance.player.playback.PlayMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.floor
@@ -228,18 +229,34 @@ fun FullPlayer(
         )
     }
 
-    // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
-    // 只取前后各一首 —— 队列可能有几千首，不能遍历。
+    // 预取前后两首的封面：色卡和位图都要，换歌时颜色和封面都得「一上来就在」。
+    //
+    // 两个细节都是"上一曲会闪、下一曲不闪"的直接原因（用户报的 bug）：
+    //
+    // 1. **尺寸要用播放页自己的封面尺寸**。缓存键里带尺寸档（[ArtworkLoader] 的 bucketOf），
+    //    早先这里固定 192（档 256）而播放页封面是 900（档 1024）—— 键对不上，
+    //    等于完全没预热，切过去时封面还得现解一次，那几十到几百毫秒里是占位图。
+    // 2. **两个方向必须并行、而且不能只赌前进方向**。分页器只往"前进方向"预组合下一页，
+    //    往回切的那一页是临时才组合的 —— 它的封面唯一的预热来源就是这里。
+    //    原来是 `forEach` 顺序取，`idx + 1` 排在前、`idx - 1` 排在后，
+    //    上一曲被系统性地推到最后（快速连切时根本等不到）。
     LaunchedEffect(queueIndex, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
         val idx = queueIndex
-        listOfNotNull(queue.getOrNull(idx + 1), queue.getOrNull(idx - 1)).forEach { s ->
-            ArtworkLoader.prefetchTint(
-                context = context,
-                albumId = s.albumId,
-                sourceUri = s.uri,
-                coverKey = OnlineCover.keyOf(s.title, s.artist)
-            )
+        // 只取前后各一首 —— 队列可能有几千首，不能遍历
+        val neighbors = listOfNotNull(queue.getOrNull(idx + 1), queue.getOrNull(idx - 1))
+        coroutineScope {
+            neighbors.forEach { s ->
+                launch {
+                    ArtworkLoader.prefetchTint(
+                        context = context,
+                        albumId = s.albumId,
+                        sourceUri = s.uri,
+                        coverKey = OnlineCover.keyOf(s.title, s.artist),
+                        sizePx = PLAYER_COVER_PX
+                    )
+                }
+            }
         }
     }
 
@@ -598,6 +615,16 @@ private enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
  * 又让左右两个方向都有足够余量一直滑下去。
  */
 private const val LAYER_RING_START = 3000
+
+/**
+ * 播放页封面的解码尺寸。
+ *
+ * ⚠️ 它同时被 [ArtworkLoader.prefetchTint] 用来预热相邻两首 ——
+ * 两边必须**用同一个值**，否则缓存键的尺寸档对不上，预热等于没做，
+ * 切歌时封面会先显示占位图（「切歌时闪一下」就是这么来的）。
+ * 改这里就够了，别在两处各写一个 900。
+ */
+private const val PLAYER_COVER_PX = 900
 
 /* ============================================================
  * 封面颜色渗到背景
@@ -1284,7 +1311,7 @@ private fun PlayerPage(
                                     // 位置由左栏那一层上报（见上面的注释）
                                     .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
-                                sizePx = 900,
+                                sizePx = PLAYER_COVER_PX,
                                 sourceUri = song.uri,
                                 songId = song.id,
                                 coverKey = coverKey
@@ -1375,7 +1402,7 @@ private fun PlayerPage(
                                     // 挂在这里的话歌词态就断了
                                     .onDoubleTapGlow(onOpenGlow),
                                 cornerRadius = 16.dp,
-                                sizePx = 900,
+                                sizePx = PLAYER_COVER_PX,
                                 sourceUri = song.uri,
                                 songId = song.id,
                                 coverKey = coverKey

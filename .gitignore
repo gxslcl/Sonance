@@ -48,3 +48,6 @@ __pycache__/
 # ---------- 说明 ----------
 # sonance.keystore 按你的选择纳入版本管理，故不在此忽略。
 # app/build.gradle.kts 里的签名口令同样是明文提交，二者保持一致。
+
+# 工具的运行时状态（drag-capture.js 记录手指位置），不该进版本库
+.drag-state.json

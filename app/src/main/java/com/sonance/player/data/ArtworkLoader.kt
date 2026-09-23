@@ -271,12 +271,16 @@ object ArtworkLoader {
     private const val TINT_SAMPLE = 24
 
     /**
-     * 预取封面时的解码边长。
+     * 预取封面时的**兜底**解码边长（调用方一般会传自己的显示尺寸，见 [prefetchTint]）。
      *
-     * 取色只要 24×24，这里给大一点是为了让预取出来的位图还能顶一次真实的封面显示
-     * （[bucketOf] 会把尺寸归一到几档，192 落在小档里，代价很低）。
+     * ⚠️ 尺寸决定缓存键（[bucketOf] 把尺寸归一到 128/256/512/1024 几档），
+     * **对不上档就等于白预热**：早先这里固定 192（档 256），而播放页的封面是 900
+     * （档 1024）—— 键不同，`peek` 命中不了，切歌时封面还得现解一次，
+     * 那几十到几百毫秒里显示的是占位图。用户看到的就是「切歌时闪一下」，
+     * 而且只在**上一曲**方向明显（分页器只往"前进方向"预组合下一页，
+     * 上一页的封面没人预热）。
      */
-    private const val PREFETCH_PX = 192
+    private const val PREFETCH_PX = 900
 
     /**
      * 按封面来源存的色卡。
@@ -313,22 +317,39 @@ object ArtworkLoader {
     }
 
     /**
-     * 预取色卡：提前把某首歌的封面解出来、算一遍颜色。
+     * 预取封面：提前把某首歌的封面解出来、算一遍颜色，顺带把位图放进位图缓存。
      *
-     * 色卡是「解码封面时顺手算」的，所以换歌瞬间新歌多半还没有颜色可用 ——
-     * 那段时间晕染只能沿用上一首的色，表现为「颜色慢半拍才变过来」。
-     * 提前给相邻的下一首算一遍，切歌时新色已经就绪，过渡就完全跟得上了。
+     * 两件事都需要它：
      *
-     * 走的就是 [load] 那条路（封面通常已在内存 / 磁盘缓存里，命中时几乎不花钱），
-     * 顺带把封面位图也预热了，上下滑动切歌时封面出现得更快。
+     * 1. **色卡**。色卡是"解码封面时顺手算"的，换歌那一瞬间新歌多半还没有颜色可用，
+     *    晕染只能沿用上一首的色 —— 表现为「颜色慢半拍才变过来」。
+     * 2. **封面位图本身**。播放页上下切歌时，分页器只会往**前进方向**预组合下一页，
+     *    所以往回切的那一页是临时才组合的；它的 `CoverArt` 若在缓存里命中不了，
+     *    就得走"先占位图、解完再换成真封面"那一趟 —— 用户看到的就是「切歌时闪一下」。
+     *    实测上一曲方向会闪、下一曲不闪，正是这个原因。
      *
-     * 已经有色卡就直接返回 —— 别为了"预取"把已经算好的东西再解一遍。
+     * ⚠️ [sizePx] 必须**和调用方真正显示封面时用的尺寸落在同一个档**
+     * （[bucketOf] 把尺寸归一到 128/256/512/1024）。对不上档 = 缓存键不同 =
+     * 上面第 2 条白做，封面照样要现解一次。播放页传的就是它自己 `CoverArt` 的尺寸。
+     *
+     * 走的就是 [load] 那条路（封面通常已在内存 / 磁盘缓存里，命中时几乎不花钱）。
+     *
+     * ⚠️ 跳过条件是「**这个尺寸**的位图已经在缓存里」，**不能**用"色卡算过了"来代替：
+     * 色卡是尺寸无关的，列表按 400（档 512）看过一遍就已经有色卡了，而播放页要的是
+     * 900（档 1024）—— 拿色卡当判据会直接跳过，播放页那份位图永远没人预热，
+     * 切歌时照样先显示占位图。
      */
-    suspend fun prefetchTint(context: Context, albumId: Long, sourceUri: Uri?, coverKey: String?) {
-        if (tintOf(albumId, sourceUri, coverKey) != null) return
+    suspend fun prefetchTint(
+        context: Context,
+        albumId: Long,
+        sourceUri: Uri?,
+        coverKey: String?,
+        sizePx: Int = PREFETCH_PX
+    ) {
+        if (peek(albumId, sizePx, sourceUri, coverKey) != null) return
         withContext(Dispatchers.IO) {
             try {
-                load(context, albumId, sizePx = PREFETCH_PX, sourceUri = sourceUri, coverKey = coverKey)
+                load(context, albumId, sizePx = sizePx, sourceUri = sourceUri, coverKey = coverKey)
             } catch (c: CancellationException) {
                 // 用户快速跳歌时这个协程会被取消。必须原样抛出 —— 吞掉 CancellationException
                 // 会让结构化并发失效（外层以为还活着）。
