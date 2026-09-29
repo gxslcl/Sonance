@@ -14,6 +14,7 @@ release/
 
 # ---------- 本机相关 / IDE ----------
 local.properties
+sonance.keystore
 .idea/
 *.iml
 .omo/
@@ -46,5 +47,6 @@ __pycache__/
 *.pyc
 
 # ---------- 说明 ----------
-# sonance.keystore 按你的选择纳入版本管理，故不在此忽略。
-# app/build.gradle.kts 里的签名口令同样是明文提交，二者保持一致。
+# 签名密钥 sonance.keystore 与其口令一律不进版本库：
+# 口令写在 local.properties（本机专用），app/build.gradle.kts 只负责读取。
+# 没配签名的机器上 release 会回退 debug 签名，照样能构建。

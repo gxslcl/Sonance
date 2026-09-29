@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -27,12 +28,24 @@ android {
         }
     }
 
+    // 签名信息从 local.properties 读（该文件不进版本库，见 .gitignore）。
+    // 配了就用自备密钥，没配就回退 debug 签名 —— clone 下来的人不改配置也能构建。
     signingConfigs {
-        create("fixed") {
-            storeFile = rootProject.file("sonance.keystore")
-            storePassword = "[REDACTED]"
-            keyAlias = "sonance"
-            keyPassword = "[REDACTED]"
+        val props = Properties().apply {
+            rootProject.file("local.properties")
+                .takeIf { it.exists() }
+                ?.inputStream()?.use { load(it) }
+        }
+        fun prop(key: String): String? = props.getProperty(key)?.takeIf { it.isNotBlank() }
+
+        val storePath = prop("sonance.storeFile")
+        if (storePath != null) {
+            create("release") {
+                storeFile = rootProject.file(storePath)
+                storePassword = prop("sonance.storePassword")
+                keyAlias = prop("sonance.keyAlias")
+                keyPassword = prop("sonance.keyPassword")
+            }
         }
     }
 
@@ -45,7 +58,8 @@ android {
             // runtime 全部走解释执行，UI 线程在滑动场景会被卡到 30Hz 以下。
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("fixed")
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
