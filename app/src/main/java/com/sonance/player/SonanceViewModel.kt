@@ -1,6 +1,7 @@
 package com.sonance.player
 
 import android.app.Application
+import android.content.IntentSender
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -17,6 +18,7 @@ import com.sonance.player.data.Artist
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
+import com.sonance.player.data.CoverTagWriter
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
@@ -622,7 +624,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * （用户边听边下载时特别明显）。
      */
     private suspend fun runScan(clearArtwork: Boolean = true): ScanOutcome {
-        if (clearArtwork) ArtworkLoader.clear()
+        if (clearArtwork) ArtworkLoader.clear(getApplication())
         val outcome = repo.scan(filterShortAudio, currentScanFilters())
         applyScanOutcome(outcome)
         // 把结果落到 Prefs，下次冷启动直接用、不再扫 MediaStore
@@ -894,6 +896,26 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     var coverCacheCount by mutableIntStateOf(0)
+        private set
+
+    /**
+     * 一次「等用户点头」的封面写回。
+     *
+     * 之所以要把封面字节一起存下来：系统的授权框弹出来之后，用户可能过一会儿才点，
+     * 而那时选封面对话框已经关了 —— 没有别的地方还留着这张图，重试时就拿不到了。
+     */
+    class PendingCoverWrite(
+        val songId: Long,
+        val cover: ByteArray,
+        /**
+         * 非空 → 用 `StartIntentSenderForResult` 拉起「允许修改此文件？」（API 29+）；
+         * 为空 → API 28 及以下，得先授予 `WRITE_EXTERNAL_STORAGE`
+         */
+        val intentSender: IntentSender?
+    )
+
+    /** 待用户授权的写回请求；null 表示没有。界面据此拉起系统弹窗 */
+    var pendingCoverWrite by mutableStateOf<PendingCoverWrite?>(null)
         private set
 
     // ===== 播放页封面晕染 =====
@@ -1213,6 +1235,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) {
                 song?.let { CoverCache.store(app, OnlineCover.keyOf(it.title, it.artist), raw) }
             }
+
+            // 本地歌：顺手把封面写进**文件本身**，这样换设备、拷给别人、
+            // 用别的播放器打开时封面都还在。在线歌没有本地文件，跳过。
+            //
+            // 只在这个入口写：自动补封面（ensureOnlineSongCover）是后台行为，
+            // 不该在用户不知情的时候改他的文件。
+            val writeOutcome = if (song != null && song.isLocal) {
+                withContext(Dispatchers.IO) { CoverTagWriter.write(app, song, raw) }
+            } else {
+                null
+            }
+            if (writeOutcome is CoverTagWriter.Result.NeedsPermission) {
+                // 弹窗交给界面（ViewModel 拿不到 Activity），授权后走
+                // onCoverWritePermissionResult 重试
+                pendingCoverWrite = PendingCoverWrite(songId, raw, writeOutcome.intentSender)
+            }
+
             // 只有本地歌才记「用户钉过这张封面」。
             //
             // 在线歌的补图走 ensureOnlineSongCover，它只认音源给的地址、**不读这个 pin** ——
@@ -1231,7 +1270,44 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             coverResults = emptyList()
             coverTargetSongId = 0L
             refreshCoverCacheStats()
-            showToast("封面已更新")
+            showToast(coverAppliedMessage(writeOutcome))
+        }
+    }
+
+    /** 封面应用后给用户的一句话 —— 写文件的结果不同，说法也该不同 */
+    private fun coverAppliedMessage(outcome: CoverTagWriter.Result?): String = when (outcome) {
+        null -> "封面已更新"
+        CoverTagWriter.Result.Written -> "封面已更新，并写入文件"
+        CoverTagWriter.Result.UnsupportedFormat -> "封面已更新（该格式暂不支持写入文件）"
+        is CoverTagWriter.Result.NeedsPermission -> "封面已更新，确认后可写入文件"
+        else -> "封面已更新（写入文件失败）"
+    }
+
+    /**
+     * 系统写文件确认框的结果（见 [pendingCoverWrite]）。
+     *
+     * @param granted 用户在「允许修改此文件？」里点了允许（或已授予存储权限）
+     */
+    fun onCoverWritePermissionResult(granted: Boolean) {
+        val pending = pendingCoverWrite ?: return
+        pendingCoverWrite = null
+        if (!granted) {
+            showToast("未授权改写文件，封面只存在应用里")
+            return
+        }
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val song = songById(pending.songId) ?: return@launch
+            val result = withContext(Dispatchers.IO) {
+                CoverTagWriter.write(app, song, pending.cover)
+            }
+            showToast(
+                when (result) {
+                    CoverTagWriter.Result.Written -> "封面已写入文件"
+                    is CoverTagWriter.Result.NeedsPermission -> "还是没拿到写入权限"
+                    else -> "写入文件失败"
+                }
+            )
         }
     }
 
@@ -1246,7 +1322,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             prefs.pinCoverUrl(songId, null)
             ArtworkLoader.putOnline(songId, null)
             coverTried.remove(songId)
-            ArtworkLoader.clear()
+            ArtworkLoader.clear(app)
             // 封面文件已删 → 通知栏也要跟着退回 MediaStore 的封面地址
             song?.let { player.refreshCurrentArtwork(it) }
             refreshCoverCacheStats()
@@ -1275,7 +1351,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun clearCoverCache() {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { CoverCache.clear(getApplication()) }
-            ArtworkLoader.clear()
+            ArtworkLoader.clear(getApplication())
             coverTried.clear()
             coverCacheCount = 0
             showToast("已清除封面缓存")

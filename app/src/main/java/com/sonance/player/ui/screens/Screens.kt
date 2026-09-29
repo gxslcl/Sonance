@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,12 +33,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.Album
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.MediaRepository
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
@@ -69,6 +72,15 @@ import com.sonance.player.ui.components.MenuRow
  * 歌曲列表骨架
  * ============================================================ */
 
+/**
+ * 列表行封面的请求尺寸。**必须和 `SongRow` 里传的一致**（也是 200），
+ * 否则预取解出来的是另一档，真正的行还得再解一次，白做。
+ */
+private const val LIST_COVER_PX = 200
+
+/** 预取在可见区外各外扩多少行。一屏约 12~14 行，上下各 10 行够盖住中速滑动 */
+private const val COVER_PREFETCH_AHEAD = 10
+
 @Composable
 fun SongList(
     songs: List<Song>,
@@ -93,6 +105,7 @@ fun SongList(
      */
     onRemoveFromLibrary: ((Song) -> Unit)? = null
 ) {
+    val context = LocalContext.current
     val dense = LocalDenseLayout.current
     val padding = contentPadding ?: PaddingValues(
         horizontal = 16.dp,
@@ -104,10 +117,40 @@ fun SongList(
     val isPlaying = playerState.isPlaying
     val favorites = vm.favorites
 
-    // 滚动期间暂停封面解码，避免主线程被 bitmap 状态写入轰炸。
+    // 滚动期间**降低**封面解码并发（不是停掉，见 ArtworkLoader.withDecodeGate）。
+    // 这一句同时被下面几个列表复用，所以放在 SongList 里，不散到每个调用点。
     val listState = rememberLazyListState()
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }.collect { ArtworkLoader.paused = it }
+    }
+
+    // 预取窗口 = 可见区上下各外扩 COVER_PREFETCH_AHEAD 行。
+    // 只依赖首尾可见项的下标，所以滚动中每帧变化也只是一次 Int 比较。
+    val prefetchWindow by remember(songs) {
+        derivedStateOf {
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val first = visible.firstOrNull()?.index ?: return@derivedStateOf IntRange.EMPTY
+            val last = visible.lastOrNull()?.index ?: return@derivedStateOf IntRange.EMPTY
+            (first - COVER_PREFETCH_AHEAD)..(last + COVER_PREFETCH_AHEAD)
+        }
+    }
+    // 用 IntRange 当 key 是安全的：它是值相等，窗口没变就不会重启 effect。
+    // 预取本身不阻塞、也不随本 effect 取消（见 ArtworkLoader.workScope），
+    // 所以滚动中频繁重启只是"多发一批请求"，不会把已发起的解码掐掉。
+    LaunchedEffect(prefetchWindow, songs) {
+        if (prefetchWindow.isEmpty()) return@LaunchedEffect
+        val visibleNow = listState.layoutInfo.visibleItemsInfo.mapTo(HashSet()) { it.index }
+        // 可见的那些有自己的 CoverArt 在解，不用重复发
+        val targets = prefetchWindow.filter { it in songs.indices && it !in visibleNow }
+        if (targets.isEmpty()) return@LaunchedEffect
+        ArtworkLoader.prefetch(
+            context = context,
+            requests = targets.map { i ->
+                val s = songs[i]
+                CoverRequest(s.albumId, s.uri, OnlineCover.keyOf(s.title, s.artist))
+            },
+            sizePx = LIST_COVER_PX
+        )
     }
 
     // 「回到列表时滚到正在播放的歌」。

@@ -97,25 +97,26 @@ fun CoverArt(
     // 首帧就直接读内存缓存 —— 已加载过的封面必须立刻出现，不能先给占位图。
     // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
     //   表现就是"滚回来还要等半秒"。）
-    var bitmap by remember(albumId, sourceUri, coverKey) {
+    // sizePx 也进 key：尺寸档变了要重新 peek，否则播放页会拿到列表留下的缩略图。
+    var bitmap by remember(albumId, sizePx, sourceUri, coverKey) {
         mutableStateOf(ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey))
     }
 
-    LaunchedEffect(albumId, sizePx, sourceUri, coverKey, ArtworkLoader.paused) {
-        // 缓存命中：同步取，不走协程，也不再受 paused 影响
+    // 这里**故意不把 ArtworkLoader.paused 放进 key**：放进去的话，滚动开始和结束
+    // 各会重启一次本 effect，可见的几十行同时重新发起加载 —— 那正是
+    // "停下来还要等 0.5~1 秒"的成因。滚动中要不要降并发由 ArtworkLoader 内部决定
+    // （见 withDecodeGate），界面这边只管发起。
+    LaunchedEffect(albumId, sizePx, sourceUri, coverKey) {
+        // 缓存命中：同步取，不走协程
         ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey)?.let {
             bitmap = it
             return@LaunchedEffect
         }
-        // 滚动暂停期间只跳过"需要新解码"的，不动已有的图。
-        // 之前这里会走到 load() 拿回 null 再赋给 bitmap，等于把已经加载好的封面
-        // 抹掉、退回占位图 —— 滚动时封面会"闪一下"。
-        if (ArtworkLoader.paused) return@LaunchedEffect
-        bitmap = if (albumId > 0 || sourceUri != null || coverKey != null) {
-            ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)
-        } else {
-            null
-        }
+        if (albumId <= 0 && sourceUri == null && coverKey == null) return@LaunchedEffect
+        // 只在拿到图时赋值：load() 返回 null 只代表"这次没取到"（可能因为这张
+        // 确实没有封面），**不能**拿它去覆盖已有的图 —— 早先这么写会让
+        // 滚动时封面闪回占位图。
+        ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)?.let { bitmap = it }
     }
 
     // 读 SnapshotStateMap：在线封面补进来时这里会自动重组

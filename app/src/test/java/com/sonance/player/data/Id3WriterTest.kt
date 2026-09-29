@@ -3,6 +3,8 @@ package com.sonance.player.data
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -206,6 +208,111 @@ class Id3WriterTest {
         assertArrayEquals(cover, AudioTags.coverArtFrom(ByteArrayInputStream(out.toByteArray())))
     }
 
+    // ===== 换封面：保留原有帧 =====
+
+    /**
+     * 给用户自己的曲库换封面时，**除了封面之外的帧一个都不能少**。
+     *
+     * 这条是 [Id3Writer.withCoverPreserving] 存在的全部理由：走 [Id3Writer.buildTag]
+     * 的话，音轨号、流派、年份这些会被一起抹掉 —— 换张封面不该有这种副作用。
+     */
+    @Test
+    fun `换封面保留音轨号和流派`() {
+        val original = tagOf(
+            3,
+            frameV(3, "TIT2", utf16("晴天")),
+            frameV(3, "TRCK", utf16("3/12")),
+            frameV(3, "TCON", utf16("Pop")),
+            frameV(3, "APIC", apicPayload(cover))
+        )
+        val newCover = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE1.toByte(), 1, 2, 3, 4
+        )
+
+        val rebuilt = Id3Writer.withCoverPreserving(original, newCover, "image/jpeg")
+        assertNotNull(rebuilt)
+
+        val texts = readTextFrames(rebuilt!!)
+        assertEquals("晴天", texts["TIT2"])
+        assertEquals("3/12", texts["TRCK"])
+        assertEquals("Pop", texts["TCON"])
+        assertEquals(3, rebuilt[3].toInt())          // 原标签是 v2.3，产出也必须是 v2.3
+    }
+
+    /**
+     * 一个文件里留多张封面会让部分播放器显示**错的那张**（通常是最先遇到的那张），
+     * 所以旧的 APIC 要全丢掉，只留新写的这一张。
+     */
+    @Test
+    fun `换封面后只剩一张封面`() {
+        val original = tagOf(
+            3,
+            frameV(3, "TIT2", utf16("晴天")),
+            frameV(3, "APIC", apicPayload(cover)),
+            frameV(3, "APIC", apicPayload(cover))
+        )
+        val newCover = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 9, 9, 9)
+
+        val rebuilt = Id3Writer.withCoverPreserving(original, newCover, "image/jpeg")!!
+        assertEquals(1, countFrames(rebuilt, "APIC"))
+        // 端到端：拿项目自己的解析器读回来，必须是新那张
+        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
+    }
+
+    /**
+     * v2.4 的帧长度是 syncsafe，v2.3 是普通大端 —— 混着写整套帧都会解析歪。
+     * 所以版本必须**跟着原标签走**，不能一律按 v2.3 重建。
+     */
+    @Test
+    fun `原标签是 v2_4 时产出 v2_4`() {
+        val original = tagOf(
+            4,
+            frameV(4, "TIT2", utf16("晴天")),
+            frameV(4, "TRCK", utf16("1/1"))
+        )
+        val newCover = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 7)
+
+        val rebuilt = Id3Writer.withCoverPreserving(original, newCover, "image/jpeg")!!
+        assertEquals(4, rebuilt[3].toInt())
+        // APIC 的帧长度字段必须是 syncsafe（每字节高位为 0）；按大端写的话这里会挂
+        val apicStart = 10 + frameV(4, "TIT2", utf16("晴天")).size +
+            frameV(4, "TRCK", utf16("1/1")).size
+        assertEquals("APIC", String(rebuilt, apicStart, 4, Charsets.US_ASCII))
+        for (i in 4..7) {
+            assertTrue(
+                "v2.4 的帧长度必须是 syncsafe",
+                rebuilt[apicStart + i].toInt() and 0x80 == 0
+            )
+        }
+        // AudioTags 按 v2.4 的规则解析，能读出来就说明长度字段写对了
+        assertArrayEquals(newCover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
+    }
+
+    /** 没有原标签 → 返回 null，由调用方退回 [Id3Writer.buildTag] 从零建 */
+    @Test
+    fun `没有原标签时返回 null`() {
+        assertNull(Id3Writer.withCoverPreserving(null, cover, "image/jpeg"))
+        assertNull(Id3Writer.withCoverPreserving(audio, cover, "image/jpeg"))
+        assertNull(Id3Writer.withCoverPreserving(ByteArray(0), cover, "image/jpeg"))
+    }
+
+    /**
+     * 头部 flags 非 0（unsynchronisation / extended header / footer）时结构特殊，
+     * 原样搬帧会写出坏文件 —— 宁可返回 null 退回 [Id3Writer.buildTag]。
+     */
+    @Test
+    fun `原标签带 flags 时返回 null`() {
+        val normal = tagOf(3, frameV(3, "TIT2", utf16("晴天")))
+        for (flag in intArrayOf(0x80, 0x40, 0x10)) {
+            val withFlag = normal.copyOf()
+            withFlag[5] = flag.toByte()
+            assertNull(
+                "flags=0x${flag.toString(16)} 时不该硬搬",
+                Id3Writer.withCoverPreserving(withFlag, cover, "image/jpeg")
+            )
+        }
+    }
+
     // ===== 测试用的迷你解析器 =====
 
     /**
@@ -242,5 +349,100 @@ class Id3WriterTest {
             i += 10 + n
         }
         return out
+    }
+
+    // ===== 造标签用的最小工具 =====
+
+    /** 文本帧的 payload：编码字节 0x01 + BOM + UTF-16LE */
+    private fun utf16(text: String): ByteArray {
+        val body = text.toByteArray(Charsets.UTF_16LE)
+        val out = ByteArray(3 + body.size)
+        out[0] = 1
+        out[1] = 0xFF.toByte()
+        out[2] = 0xFE.toByte()
+        body.copyInto(out, 3)
+        return out
+    }
+
+    /** APIC 的 payload：编码 + MIME\0 + 图片类型 + 空描述\0 + 图片数据 */
+    private fun apicPayload(image: ByteArray): ByteArray {
+        val mime = "image/jpeg".toByteArray(Charsets.US_ASCII)
+        val out = ByteArray(1 + mime.size + 1 + 1 + 1 + image.size)
+        var p = 0
+        out[p++] = 0                              // 描述用 latin1
+        mime.copyInto(out, p)
+        p += mime.size
+        out[p++] = 0                              // MIME 结束符
+        out[p++] = 3                              // 图片类型：封面
+        out[p++] = 0                              // 空描述的结束符
+        image.copyInto(out, p)
+        return out
+    }
+
+    /**
+     * 手工造一个帧（含 10 字节帧头）。
+     * [version] 决定长度字段的编码 —— 这正是 v2.3 / v2.4 唯一的差别。
+     */
+    private fun frameV(version: Int, id: String, payload: ByteArray): ByteArray {
+        val out = ByteArray(10 + payload.size)
+        for (i in 0 until 4) out[i] = id[i].code.toByte()
+        val n = payload.size
+        if (version >= 4) {
+            out[4] = ((n ushr 21) and 0x7F).toByte()
+            out[5] = ((n ushr 14) and 0x7F).toByte()
+            out[6] = ((n ushr 7) and 0x7F).toByte()
+            out[7] = (n and 0x7F).toByte()
+        } else {
+            out[4] = ((n ushr 24) and 0xFF).toByte()
+            out[5] = ((n ushr 16) and 0xFF).toByte()
+            out[6] = ((n ushr 8) and 0xFF).toByte()
+            out[7] = (n and 0xFF).toByte()
+        }
+        payload.copyInto(out, 10)
+        return out
+    }
+
+    /** 把帧拼成一个完整标签（10 字节头 + 帧区） */
+    private fun tagOf(version: Int, vararg frames: ByteArray): ByteArray {
+        val body = frames.sumOf { it.size }
+        val out = ByteArray(10 + body)
+        out[0] = 'I'.code.toByte()
+        out[1] = 'D'.code.toByte()
+        out[2] = '3'.code.toByte()
+        out[3] = version.toByte()
+        out[4] = 0
+        out[5] = 0
+        out[6] = ((body ushr 21) and 0x7F).toByte()
+        out[7] = ((body ushr 14) and 0x7F).toByte()
+        out[8] = ((body ushr 7) and 0x7F).toByte()
+        out[9] = (body and 0x7F).toByte()
+        var p = 10
+        for (f in frames) {
+            f.copyInto(out, p)
+            p += f.size
+        }
+        return out
+    }
+
+    /** 数某个帧出现了几次。按 v2.3 的大端长度扫（只给 v2.3 的用例用） */
+    private fun countFrames(tag: ByteArray, id: String): Int {
+        var count = 0
+        var i = 10
+        val end = 10 + (((tag[6].toInt() and 0x7F) shl 21) or
+            ((tag[7].toInt() and 0x7F) shl 14) or
+            ((tag[8].toInt() and 0x7F) shl 7) or
+            (tag[9].toInt() and 0x7F))
+        while (i + 10 <= end && i + 10 <= tag.size) {
+            val fid = String(tag, i, 4, Charsets.US_ASCII)
+            if (fid[0] == '\u0000') break
+            val n = ((tag[i + 4].toInt() and 0xFF) shl 24) or
+                ((tag[i + 5].toInt() and 0xFF) shl 16) or
+                ((tag[i + 6].toInt() and 0xFF) shl 8) or
+                (tag[i + 7].toInt() and 0xFF)
+            if (n <= 0 || i + 10 + n > tag.size) break
+            if (fid == id) count++
+            i += 10 + n
+        }
+        return count
     }
 }

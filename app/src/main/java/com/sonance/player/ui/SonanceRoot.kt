@@ -1,10 +1,12 @@
 package com.sonance.player.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -193,6 +195,50 @@ private fun PermissionScreen(onGrant: () -> Unit, onRescan: () -> Unit) {
 }
 
 /* ============================================================
+ * 封面写回文件的授权
+ * ============================================================ */
+
+/**
+ * 把封面写进歌曲文件时，如果系统要求用户确认，就把那个确认框拉起来。
+ *
+ * 两个 launcher 对应两代权限模型：
+ * - API 29+：系统给一个 `IntentSender`，走「允许修改此文件？」（`StartIntentSenderForResult`）
+ * - API 28 及以下：没有 `IntentSender`，只能先要 `WRITE_EXTERNAL_STORAGE`
+ *
+ * ViewModel 拿不到 Activity，所以这件事只能由界面来做 ——
+ * ViewModel 那边只负责把「待授权的请求」放进 [SonanceViewModel.pendingCoverWrite]。
+ */
+@Composable
+private fun CoverWritePermissionGate(vm: SonanceViewModel) {
+    val pending = vm.pendingCoverWrite
+
+    val writeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        vm.onCoverWritePermissionResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    val storageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> vm.onCoverWritePermissionResult(granted) }
+
+    LaunchedEffect(pending) {
+        val request = pending ?: return@LaunchedEffect
+        val sender = request.intentSender
+        if (sender != null) {
+            val launched = runCatching {
+                writeLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }.isSuccess
+            // 拉不起来（IntentSender 已失效等）也要收尾，否则 pendingCoverWrite
+            // 会一直挂着，用户下次换封面时又弹一次
+            if (!launched) vm.onCoverWritePermissionResult(false)
+        } else {
+            storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+}
+
+/* ============================================================
  * 自适应外壳
  * ============================================================ */
 
@@ -370,6 +416,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     // 手动选封面（设置页和播放页的入口都汇到这里，避免同时渲染两个对话框）
     CoverPickerDialog(vm = vm)
+
+    // 把封面写进原文件时，系统可能要用户点一下「允许修改此文件？」
+    CoverWritePermissionGate(vm)
 
     if (queueOpen) {
         QueueSheet(

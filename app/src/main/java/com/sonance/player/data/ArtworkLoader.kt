@@ -22,7 +22,13 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -41,9 +47,10 @@ import kotlinx.coroutines.withContext
  *    列表要等播放到那首歌才显示封面
  * 5. 都没有 → 由界面显示占位图；上层可再通过 [putOnline] 补在线封面
  *
- * [paused] 由列表 / 网格的滚动状态驱动：滚动过程中跳过加载。
- * 注意只影响"新发起的加载"，不动已经拿到图的那些 —— 早先的实现在这里会把
- * 已加载的封面重新赋成 null，导致滚动时封面闪回占位图。
+ * [paused] 由列表 / 网格的滚动状态驱动：滚动中**降低**解码并发（见 [withDecodeGate]），
+ * 不是停掉加载。早先的实现在这里直接跳过加载，代价是停下来那一刻所有可见行一起开工、
+ * 全排在闸门后面 —— 用户看到的就是"停下后还要等半秒到一秒"。
+ * 唯一要守住的底线是：**不动已经拿到图的那些**，否则滚动时封面会闪回占位图。
  */
 /**
  * 封面下边缘的三个取样色，用来把封面的颜色淡淡地渗到背景上。
@@ -51,6 +58,18 @@ import kotlinx.coroutines.withContext
  * 三个值都是不透明的 ARGB（透明度交给界面按档位控制）。
  */
 data class CoverTint(val left: Int, val center: Int, val right: Int)
+
+/**
+ * 一次封面请求。列表把「即将进入视野」的行交给 [ArtworkLoader.prefetch] 时用。
+ *
+ * 只带定位封面需要的三样东西：尺寸由调用方统一给（同一份列表只有一个尺寸档），
+ * songId 是界面层的事，这里用不上。
+ */
+data class CoverRequest(
+    val albumId: Long,
+    val sourceUri: Uri?,
+    val coverKey: String?
+)
 
 object ArtworkLoader {
 
@@ -116,15 +135,35 @@ object ArtworkLoader {
     private fun localKeyOf(albumId: Long, size: Int, sourceUri: Uri?): Key =
         Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), null)
 
+    /** 尺寸档 ≤ 它算「缩略图」，走独立的小图缓存，也只有它值得落盘（见 [ArtworkThumbCache]） */
+    private const val THUMB_BUCKET = 256
+
     /** 按**字节**算上限，不是按条数 —— 80 张 900px 位图能吃掉一百多 MB */
     private val maxBytes: Int = run {
         val heap = Runtime.getRuntime().maxMemory()
         (heap / 8L).coerceIn(8L * 1024 * 1024, 48L * 1024 * 1024).toInt()
     }
 
-    private val cache = object : LruCache<Key, ImageBitmap>(maxBytes) {
+    /**
+     * 内存缓存按**尺寸档分成两个**，不是一个。
+     *
+     * 为什么必须分：列表要 200px（归一到 256 档，单张 256KB），播放页要 900px、
+     * 专辑网格要 600px（都归一到 **1024** 档，单张 **4MB**，是缩略图的 16 倍）。
+     * 混在一个 LRU 里，进一次播放页、或者滚一遍专辑网格，就能把整个列表的缩略图
+     * 全部挤出去 —— 于是"明明加载过的封面，滚回来还要重新解码"，
+     * 这正是快速滑动时占位图迟迟不消的原因之一。分开之后大图只会挤掉大图。
+     */
+    private val thumbCache = object : LruCache<Key, ImageBitmap>(maxBytes * 3 / 5) {
         override fun sizeOf(key: Key, value: ImageBitmap): Int = value.width * value.height * 4
     }
+
+    /** 大图数量少但每张贵，剩下的预算够放几张就够用 */
+    private val largeCache = object : LruCache<Key, ImageBitmap>(maxBytes * 2 / 5) {
+        override fun sizeOf(key: Key, value: ImageBitmap): Int = value.width * value.height * 4
+    }
+
+    private fun cacheFor(size: Int): LruCache<Key, ImageBitmap> =
+        if (size <= THUMB_BUCKET) thumbCache else largeCache
 
     /**
      * 确认过没有封面的条目，避免重复走一遍失败的 IPC / 文件解析。
@@ -192,20 +231,29 @@ object ArtworkLoader {
     }
 
     /**
-     * 同时进行的解码任务上限。
+     * 解码并发闸门，**按是否在滑动分两档**。
      *
-     * 原来只有 2 —— 一屏十来行封面要排 5~6 批，每批都要等一轮 MediaStore IPC，
-     * 加起来就是肉眼可见的一两秒。取 6：一屏的量基本能一波跑完，
-     * 而 256px 的 RGB_565 缩略图每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
+     * 早先是"滚动中直接不加载"，代价是停下来那一刻所有可见行同时开工，
+     * 全挤在一个 Semaphore(6) 后面排队 —— 用户看到的就是"停下后还要等 0.5~1 秒"。
+     * 现在滚动中不禁止、只降并发：滑动时最多 2 个在解，停下来立刻回到 6 个。
+     * 滚到哪，路上那几行的封面其实已经解好了，占位图基本不出现。
+     *
+     * 非滑动档取 6：一屏十来行基本能一波跑完，而 256px 的 RGB_565 缩略图
+     * 每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
      */
-    private val decodeGate = Semaphore(permits = 6)
+    private val idleGate = Semaphore(permits = 6)
+    private val scrollGate = Semaphore(permits = 2)
+
+    /** 在闸门里跑 [block]。`paused` 在**真正开工时**读，排队期间状态变了也能跟上 */
+    private suspend fun <T> withDecodeGate(block: suspend () -> T): T =
+        if (paused) scrollGate.withPermit { block() } else idleGate.withPermit { block() }
 
     /**
-     * 列表 / 网格滚动中：跳过**新发起**的加载。
+     * 列表 / 网格滚动中 —— 只用来**降低**解码并发（见 [withDecodeGate]），不再用来跳过加载。
      *
-     * 必须是 Compose 的 [mutableStateOf] 而不是普通字段 ——
-     * `CoverArt` 把它当 `LaunchedEffect` 的 key 用，普通字段不参与快照系统，
-     * 变化不会重启 effect，滚动停止后那些被跳过的行就永远不补图了。
+     * 它**不再是 `LaunchedEffect` 的 key**：当 key 用的话，滚动开始和结束各会重启一次
+     * 整列表的 effect，几十行同时重新发起加载 —— 那正是"停下后集体开工"的成因之一。
+     * 保持 [mutableStateOf] 是因为它仍然由列表那边写入、并要参与快照。
      */
     var paused: Boolean by mutableStateOf(false)
 
@@ -439,9 +487,58 @@ object ArtworkLoader {
     ): ImageBitmap? {
         if (albumId <= 0 && sourceUri == null && coverKey == null) return null
         val size = bucketOf(sizePx)
+        val cache = cacheFor(size)
         // 先查本地键（同专辑共用），再查带 coverKey 的完整键
         cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
         return cache.get(keyOf(albumId, size, sourceUri, coverKey))
+    }
+
+    /**
+     * 预取用的独立作用域。
+     *
+     * 不能挂在 `LaunchedEffect` 上：预取是"顺手提前做"的事，而滚动中列表项的 effect
+     * 每帧都在重建/取消，挂上去的话预取刚发起就被取消，等于没做。
+     * 放在这里，调用方被取消时取消的只是**等待**，实际解码照常跑完并落进缓存。
+     */
+    private val workScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 同一张封面正在解码时的共享任务。
+     *
+     * 为什么需要：快速滑动时同一张专辑的十几首歌会**同时**进入视野，
+     * 各自的 `load` 同时未命中缓存、同时去探 MediaStore —— 十几轮重复的 binder IPC。
+     * 有了它，第二个请求直接等第一个的结果。
+     *
+     * 用 [Deferred] 而不是"标记位 + 轮询"：等待方 `await()` 拿到的是同一个位图实例，
+     * 而且调用方被取消时**不会**连带取消这个共享任务（取消的只是 await）。
+     */
+    private val inFlight = HashMap<Key, Deferred<ImageBitmap?>>()
+
+    /**
+     * 预取一批封面。给列表用：算出即将进入视野的行，提前把它们的封面解出来放进缓存。
+     *
+     * 已经是缓存的、以及正在解的直接跳过（后者靠 [inFlight] 去重），
+     * 所以滚动中每帧调用一次也很便宜。
+     *
+     * **不阻塞调用方**，也不受调用方生命周期影响（见 [workScope]）。
+     */
+    fun prefetch(context: Context, requests: List<CoverRequest>, sizePx: Int) {
+        if (requests.isEmpty()) return
+        val app = context.applicationContext
+        for (r in requests) {
+            if (r.albumId <= 0 && r.sourceUri == null && r.coverKey == null) continue
+            if (peek(r.albumId, sizePx, r.sourceUri, r.coverKey) != null) continue
+            workScope.launch {
+                try {
+                    load(app, r.albumId, sizePx, r.sourceUri, r.coverKey)
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    // 预取是尽力而为：失败只意味着这一行要等界面自己来解
+                    Log.w("SonanceCover", "预取封面失败: ${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
+        }
     }
 
     suspend fun load(
@@ -462,13 +559,12 @@ object ArtworkLoader {
         val size = bucketOf(sizePx)
         val key = keyOf(albumId, size, sourceUri, coverKey)
         val localKey = localKeyOf(albumId, size, sourceUri)
+        val cache = cacheFor(size)
 
-        // 缓存命中直接返回，不切线程、不暂停检查。
+        // 缓存命中直接返回，不切线程、不看 paused。
         // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
         cache.get(localKey)?.let { return it }
         cache.get(key)?.let { return it }
-        // 滚动中跳过新发起的加载
-        if (paused) return null
 
         // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
@@ -476,13 +572,42 @@ object ArtworkLoader {
         val coverGone = coverKey == null || synchronized(coverMiss) { coverMiss.contains(coverKey) }
         if (localGone && coverGone) return null
 
-        return withContext(Dispatchers.IO) {
-            decodeGate.withPermit {
-                cache.get(localKey)?.let { return@withPermit it }
-                cache.get(key)?.let { return@withPermit it }
-                decode(context, albumId, size, key, localKey, sourceUri, coverKey)
-            }
+        return decodeShared(context, albumId, size, key, localKey, sourceUri, coverKey)
+    }
+
+    /**
+     * 发起一次解码，或者搭上同一张封面已经在跑的那次 —— 见 [inFlight]。
+     *
+     * 解码本身跑在 [workScope] 里，所以调用方（列表项、预取）被取消时
+     * 它照常跑完并落进缓存，下一个滚到这里的行直接命中。
+     */
+    private suspend fun decodeShared(
+        context: Context,
+        albumId: Long,
+        size: Int,
+        key: Key,
+        localKey: Key,
+        sourceUri: Uri?,
+        coverKey: String?
+    ): ImageBitmap? {
+        val job = synchronized(inFlight) {
+            inFlight[key] ?: workScope.async(start = CoroutineStart.LAZY) {
+                try {
+                    withDecodeGate {
+                        val cache = cacheFor(size)
+                        // 排队期间可能已经被别人解好了，再查一次
+                        cache.get(localKey)?.let { return@withDecodeGate it }
+                        cache.get(key)?.let { return@withDecodeGate it }
+                        decode(context, albumId, size, key, localKey, sourceUri, coverKey)
+                    }
+                } finally {
+                    synchronized(inFlight) { inFlight.remove(key) }
+                }
+            }.also { inFlight[key] = it }
         }
+        // 懒启动：注册进 inFlight 之后才开跑，避免任务在登记前就结束、finally 白删一次
+        job.start()
+        return job.await()
     }
 
     private fun isMissingKey(key: String): Boolean =
@@ -498,7 +623,30 @@ object ArtworkLoader {
         coverKey: String?
     ): ImageBitmap? {
         val missKey = missingKeyOf(albumId, sourceUri)
+        val cache = cacheFor(size)
+        // 只有**本地**来源才配磁盘缩略图：在线歌的 sourceUri 是带时效的取流地址，
+        // 拿它当键存下来的图第二天就是垃圾；而 coverKey 那条路本来就有 [CoverCache] 兜着。
+        val localSource = albumId > 0 || (sourceUri != null && !sourceUri.isRemote())
         var bitmap: Bitmap? = null
+
+        // ---- 0) 磁盘缩略图缓存 ----
+        // 进程重启后内存缓存是空的，但磁盘上还留着上次解码好的小图。
+        // 读它只要一次文件 IO，能整段跳过 MediaStore 的 binder IPC —— 首屏慢的大头。
+        if (localSource && size <= THUMB_BUCKET) {
+            ArtworkThumbCache.lookup(context, missKey, size)?.let { bytes ->
+                val cached = runCatching {
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }.getOrNull()
+                if (cached != null) {
+                    rememberTint("t:$missKey", cached)
+                    val image = cached.asImageBitmap()
+                    cache.put(localKey, image)
+                    return image
+                }
+                // 文件坏了（比如写到一半被系统的清理任务截断）：当没有，继续往下探测
+                ArtworkThumbCache.remove(context, missKey, size)
+            }
+        }
 
         // ---- 1) MediaStore 专辑封面 + 2) 音频文件内嵌封面 ----
         if (!isMissingKey(missKey)) {
@@ -540,6 +688,11 @@ object ArtworkLoader {
             rememberTint("t:$missKey", bitmap)
             val image = bitmap.asImageBitmap()
             cache.put(localKey, image)
+            // 顺手落盘：下次冷启动滚到这里就不用再探 MediaStore 了。
+            // 只存小档 —— 1024 档一张 4MB，落盘不划算。
+            if (localSource && size <= THUMB_BUCKET) {
+                ArtworkThumbCache.store(context, missKey, size, bitmap)
+            }
             return image
         }
 
@@ -595,14 +748,23 @@ object ArtworkLoader {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, real)
     }
 
-    /** 清掉已缓存的封面（重新扫描曲库时调用） */
-    fun clear() {
-        cache.evictAll()
+    /**
+     * 清掉已缓存的封面（重新扫描曲库时调用）。
+     *
+     * 磁盘缩略图也要一起清：它按专辑 id / URI 做键，重扫之后这两样都可能变，
+     * 留着就是永远命不中的垃圾。删除是文件 IO，丢给 [workScope] 去做，
+     * 别让调用方（可能正在主线程）等它。
+     */
+    fun clear(context: Context) {
+        thumbCache.evictAll()
+        largeCache.evictAll()
         synchronized(missing) { missing.clear() }
         synchronized(coverMiss) { coverMiss.clear() }
         // 色卡也要清：封面缓存都清了，按旧封面算出来的颜色自然也不作数了
         tints.clear()
         artworkGoneVersion++
         onlineCovers.clear()
+        val app = context.applicationContext
+        workScope.launch { ArtworkThumbCache.clear(app) }
     }
 }
