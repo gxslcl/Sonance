@@ -19,7 +19,14 @@ object SonanceIcons {
 
     private fun dot(cx: Double, cy: Double): String = "M$cx,$cy h0.01"
 
-    private fun build(name: String, filled: Boolean, paths: List<String>): ImageVector {
+    /**
+     * 组装图标。
+     *
+     * 描边和填充分成两组传。**整只图标只能有一种模式**的话，
+     * 「描边横线 + 实心音符」这种组合就表达不出来 —— 硬塞进 [o] 的结果是
+     * 音符也被描边、变成空心的（队列图标踩过这个坑）。混合图标走 [mx]。
+     */
+    private fun build(name: String, stroked: List<String>, filled: List<String>): ImageVector {
         val builder = ImageVector.Builder(
             name = name,
             defaultWidth = 24.dp,
@@ -27,27 +34,30 @@ object SonanceIcons {
             viewportWidth = 24f,
             viewportHeight = 24f
         )
-        paths.forEach { d ->
-            if (filled) {
-                builder.addPath(
-                    pathData = PathParser().parsePathString(d).toNodes(),
-                    fill = SolidColor(Color.White)
-                )
-            } else {
-                builder.addPath(
-                    pathData = PathParser().parsePathString(d).toNodes(),
-                    stroke = SolidColor(Color.White),
-                    strokeLineWidth = 2f,
-                    strokeLineCap = StrokeCap.Round,
-                    strokeLineJoin = StrokeJoin.Round
-                )
-            }
+        stroked.forEach { d ->
+            builder.addPath(
+                pathData = PathParser().parsePathString(d).toNodes(),
+                stroke = SolidColor(Color.White),
+                strokeLineWidth = 2f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            )
+        }
+        filled.forEach { d ->
+            builder.addPath(
+                pathData = PathParser().parsePathString(d).toNodes(),
+                fill = SolidColor(Color.White)
+            )
         }
         return builder.build()
     }
 
-    private fun o(name: String, vararg d: String) = lazy { build(name, false, d.toList()) }
-    private fun f(name: String, vararg d: String) = lazy { build(name, true, d.toList()) }
+    private fun o(name: String, vararg d: String) = lazy { build(name, d.toList(), emptyList()) }
+    private fun f(name: String, vararg d: String) = lazy { build(name, emptyList(), d.toList()) }
+
+    /** 描边 + 填充混合：第一组描边，第二组填充 */
+    private fun mx(name: String, stroked: List<String>, filled: List<String>) =
+        lazy { build(name, stroked, filled) }
 
     // ===== 品牌 =====
     val Logo by o("Logo", circle(12.0, 12.0, 9.0), circle(12.0, 12.0, 2.5))
@@ -186,25 +196,37 @@ object SonanceIcons {
         "M11.4 11.2l1.6-1.1V16"
     )
     /**
-     * 播放队列。
+     * 播放队列：三横线 + 音符。
      *
-     * ## 为什么改过一版
+     * ## 为什么是「描边横线 + 实心音符」
      *
-     * 原来画的是「三横线 + **填充**三角」，而控制行里跟它并排的
-     * Shuffle / Repeat / Prev / Next **全是纯描边** —— 混一个实心块进去，
-     * 视觉重量明显重一档，在一排线性图标里显得脏（用户反馈"不好看"）。
+     * 控制行里 Shuffle / Repeat 是描边，Prev / Play / Next 是实心，两种笔法本来就混着用。
+     * 队列整只描边会比 Prev/Next 轻一档（用户反馈"不协调、偏小"），整只实心又跟左边的
+     * Shuffle 打架。所以拆开：横线跟着线性图标走，音符用实心把重量补回来 ——
+     * 这正是 [build] 要分描边 / 填充两组的原因。
      *
-     * 现在整只图标只有描边，并顺手修了比例：
-     * - 三条线等长递减（12 / 12 / 7），不再让三角悬在第 2、3 行之间显得错位
-     * - 三角**垂直对齐中间那条线**（中心 y=12），这是 playlist 类图标的通行做法
-     * - 整只图标的外接框 x 3~21.5、y 7~17，在 24 视口里是居中的
+     * ## 比例
+     *
+     * 老版外接框只有 y 7~17（10 个单位），而 Prev/Next 是 y 5~20（15 个单位）——
+     * 同样 18dp / 22dp，画出来就是小一圈，这才是"偏小"的来源。现在整体 y 5~20。
+     *
+     * ## 音符为什么必须写成**一条**路径
+     *
+     * 符头 / 符干 / 符尾是互相**重叠**的。拆成三条填充路径时：重叠处按各自的环绕
+     * 方向相减会挖出空洞（符头是逆时针、矩形是顺时针），而且半透明 tint 下重叠处
+     * 会叠两次色。一条闭合轮廓 + 非零环绕两个问题都没有。
      */
-    val Queue by o(
+    val Queue by mx(
         "Queue",
-        "M3 7h12",
-        "M3 12h12",
-        "M3 17h7",
-        "M16.5 15.5l5-3.5-5-3.5z"
+        stroked = listOf(
+            "M3 5.5h9",
+            "M3 10.5h9",
+            "M3 15.5h5"
+        ),
+        filled = listOf(
+            // 从符干左上角起，绕「横梁 → 符干 → 符头下半弧 → 符头上半弧」一圈闭合
+            "M15.1 4.5H21.3V6.5H17.1V17A2.6 2.6 0 0 1 11.9 17A2.6 2.6 0 0 1 15.1 14.47Z"
+        )
     )
     val Volume by o(
         "Volume",
