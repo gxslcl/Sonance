@@ -228,6 +228,16 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_LYRICS_FONT, DEFAULT_LYRICS_FONT).coerceIn(14, 30)
         set(v) = sp.edit().putInt(KEY_LYRICS_FONT, v.coerceIn(14, 30)).apply()
 
+    /**
+     * 歌词要不要跟着背景自动调色（见 [LyricAdaptMode]）。
+     *
+     * 默认 [LyricAdaptMode.ALL] —— 这正是当初做这个功能的原因：封面透出来和歌词撞色时，
+     * 撞的通常只是屏幕某一段的那几行。但它是**动用户选的那套配色**，所以能关。
+     */
+    var lyricsAdaptMode: LyricAdaptMode
+        get() = LyricAdaptMode.fromId(sp.getString(KEY_LYRICS_ADAPT, null))
+        set(v) = sp.edit().putString(KEY_LYRICS_ADAPT, v.id).apply()
+
     // ===== 一次性迁移 =====
 
     /**
@@ -741,6 +751,7 @@ class Prefs(context: Context) {
         private const val KEY_DL_KEYS = "online_download_keys"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
+        private const val KEY_LYRICS_ADAPT = "lyrics_adapt_mode"
         private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"
         private const val KEY_GLASS_CLEARED = "glass_cleared"
         private const val KEY_GLASS_STYLE = "glass_style"

@@ -1,0 +1,452 @@
+package com.sonance.player.ui.screens
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.RemotePlaylist
+import com.sonance.player.data.formatDuration
+import com.sonance.player.data.remoteSongId
+import com.sonance.player.playback.PlayerUiState
+import com.sonance.player.ui.components.EmptyState
+import com.sonance.player.ui.components.LocalDenseLayout
+import com.sonance.player.ui.components.LoadingState
+import com.sonance.player.ui.components.PillButton
+import com.sonance.player.ui.components.PlaceholderCover
+import com.sonance.player.ui.components.rememberRemoteCover
+import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.LocalSkin
+
+/**
+ * 在线歌单详情（独立页面）。
+ *
+ * ## 为什么曲目要现拉
+ *
+ * 歌单搜索一次回来几十个歌单，每个都顺手拉曲目就是几十次请求。列表页只用得上
+ * 「名字 / 封面 / 曲目数」，所以曲目推迟到这里、按需拉一次（见 [OnlineSource.playlistTracks]）。
+ *
+ * ## 生命周期
+ *
+ * 进页面 [SonanceViewModel.openPlaylist] 拉曲目，离开 [SonanceViewModel.closePlaylist]
+ * 清状态并取消在途请求。用 `DisposableEffect(playlist.remoteId)` 而不是 `LaunchedEffect`：
+ * 离开时（含返回键、切 tab）必须收尾，`LaunchedEffect` 的取消回调不适合做这件事。
+ *
+ * ## 一键下载
+ *
+ * 不在这一页写下载循环 —— 那属于 ViewModel（要跨页面存活、要遵守 Wi-Fi 限制、
+ * 要能取消）。这里只负责「确认弹窗 → 调一下」和「把进度画出来」。
+ */
+@Composable
+fun OnlinePlaylistScreen(
+    playlist: RemotePlaylist,
+    vm: SonanceViewModel,
+    playerState: PlayerUiState,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val src = vm.onlineSource
+    if (src == null) {
+        EmptyState(
+            icon = SonanceIcons.Info,
+            title = "音源不可用",
+            subtitle = "在线音乐可能已关闭，回到在线页重新开启。",
+            modifier = modifier
+        )
+        return
+    }
+
+    DisposableEffect(playlist.remoteId) {
+        vm.openPlaylist(playlist)
+        onDispose { vm.closePlaylist() }
+    }
+
+    // VM 还没切到这个歌单时也算「加载中」—— 否则第一帧会闪一下「这个歌单是空的」。
+    // openPlaylist 是同步置位的，正常情况下这一帧只出现在极短的过渡里。
+    val ready = vm.playlistDetail?.remoteId == playlist.remoteId
+    val loading = !ready || vm.playlistLoading
+    val tracks = if (ready) vm.playlistTracks else emptyList()
+
+    var confirmOpen by remember(playlist.remoteId) { mutableStateOf(false) }
+
+    Column(modifier.fillMaxSize()) {
+        PlaylistHeader(
+            playlist = playlist,
+            vm = vm,
+            loadedCount = if (ready) tracks.size else null,
+            totalMs = if (ready) tracks.sumOf { it.durationMs } else 0L,
+            onPlayAll = { vm.playPlaylist() },
+            onDownload = { confirmOpen = true }
+        )
+
+        // 只有"这轮下载属于本歌单"才显示进度条：下载跨页面存活，用户可能已经翻到
+        // 别的歌单，把上一个歌单的进度摆在这里会让人以为在下这一个
+        if (vm.playlistDownloadActive && vm.playlistDownloadOwner == playlist.remoteId) {
+            DownloadProgress(
+                done = vm.playlistDownloadDone,
+                total = vm.playlistDownloadTotal,
+                saved = vm.playlistDownloadSaved,
+                skipped = vm.playlistDownloadSkipped,
+                failed = vm.playlistDownloadFailed,
+                onCancel = { vm.cancelPlaylistDownload() }
+            )
+        }
+
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when {
+                loading -> LoadingState(
+                    title = "正在读取歌单…",
+                    subtitle = "大歌单要等几秒，音源要分批取歌曲信息"
+                )
+
+                vm.playlistFailed -> EmptyState(
+                    icon = SonanceIcons.Refresh,
+                    title = "歌单读取失败",
+                    subtitle = "检查一下网络，或者稍后再试。",
+                    actionLabel = "重试",
+                    onAction = { vm.retryPlaylistTracks() }
+                )
+
+                tracks.isEmpty() -> EmptyState(
+                    icon = SonanceIcons.Music,
+                    title = "这个歌单是空的",
+                    subtitle = "音源没有返回任何曲目。"
+                )
+
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 10.dp,
+                        end = 10.dp,
+                        top = 4.dp,
+                        bottom = 24.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    itemsIndexed(
+                        items = tracks,
+                        key = { _, t -> t.remoteId }
+                    ) { index, track ->
+                        OnlineTrackRow(
+                            track = track,
+                            thumbUrl = vm.onlineThumbUrl(track, ROW_COVER_PX),
+                            sourceLabel = src.label,
+                            downloaded = vm.isDownloaded(track),
+                            isCurrent = playerState.mediaId == remoteSongId(src.id, track.remoteId),
+                            isPlaying = playerState.isPlaying,
+                            // 下标是 playlistTracks 里的原始下标 —— 队列就是按它建的
+                            onClick = { vm.playPlaylistTrack(index) }
+                        )
+                    }
+
+                    item {
+                        Text(
+                            text = "标 VIP 的歌需要会员，取流接口拿不到播放地址。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (confirmOpen) {
+        DownloadConfirmDialog(
+            playlist = playlist,
+            vm = vm,
+            onDismiss = { confirmOpen = false },
+            onConfirm = {
+                confirmOpen = false
+                vm.downloadPlaylistTracks()
+            }
+        )
+    }
+}
+
+/**
+ * 头部：封面 + 标题 + 创建者/曲目数 + 「播放全部 / 下载全部」。
+ *
+ * [loadedCount] 为 null 表示曲目还没到 —— 此时不摆下载按钮（下载的目标数还不知道，
+ * 摆一个「下载全部 0」是误导）。标题下的曲目数先用音源报的 [RemotePlaylist.trackCount]。
+ */
+@Composable
+private fun PlaylistHeader(
+    playlist: RemotePlaylist,
+    vm: SonanceViewModel,
+    loadedCount: Int?,
+    totalMs: Long,
+    onPlayAll: () -> Unit,
+    onDownload: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val dense = LocalDenseLayout.current
+    val cover = rememberRemoteCover(vm.playlistThumbUrl(playlist, HEADER_COVER_PX), HEADER_COVER_PX)
+    val count = loadedCount ?: playlist.trackCount
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = if (dense) 6.dp else 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Box(Modifier.size(if (dense) 76.dp else 104.dp)) {
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(12.dp))
+                )
+            } else {
+                PlaceholderCover(
+                    seed = playlist.name,
+                    showMark = false,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(12.dp))
+                )
+            }
+        }
+
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = playlist.name,
+                style = MaterialTheme.typography.headlineSmall,
+                color = skin.text,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = buildString {
+                    if (playlist.creatorName.isNotBlank()) append("${playlist.creatorName} · ")
+                    append("$count 首")
+                    if (totalMs > 0L) append(" · ${formatDuration(totalMs)}")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textDim,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(if (dense) 8.dp else 12.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PillButton(label = "播放全部", onClick = onPlayAll)
+
+                // 曲目还没到时先不摆下载按钮：目标数都不知道，摆一个「下载全部 0」是误导
+                if (loadedCount != null) {
+                    val left = vm.playlistDownloadableCount
+                    when {
+                        // 本歌单正在下：进度条已经在下面了，再摆一个会让人以为能重开一轮
+                        vm.playlistDownloadActive && vm.playlistDownloadOwner == playlist.remoteId -> Unit
+
+                        // 别的歌单正在下：ViewModel 会拒绝新的一轮，所以按钮不能摆 ——
+                        // 摆出来点了没反应比不摆更让人困惑。说清楚为什么点不了。
+                        vm.playlistDownloadActive -> Text(
+                            text = "有歌单正在下载…",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = skin.textMuted
+                        )
+
+                        left > 0 -> PillButton(
+                            label = "下载全部 $left",
+                            onClick = onDownload,
+                            filled = false
+                        )
+
+                        else -> Text(
+                            text = "已全部存到本地",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 下载进度：文案 + 进度条 + 取消。
+ *
+ * 进度条自己画（一个圆角轨道 + 一个按比例填充的块）而不是用 `LinearProgressIndicator`：
+ * 后者的 `progress` 参数在不同 material3 版本里签名不一样（`Float` / `() -> Float`），
+ * 自绘能避开这个版本坑，样式也和皮肤一致。
+ */
+@Composable
+private fun DownloadProgress(
+    done: Int,
+    total: Int,
+    saved: Int,
+    skipped: Int,
+    failed: Int,
+    onCancel: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val fraction = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "正在下载 $done / $total",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.text,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "取消",
+                style = MaterialTheme.typography.labelLarge,
+                color = skin.accent,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onCancel)
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(skin.surface3)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(fraction)
+                    .fillMaxHeight()
+                    .background(skin.accent)
+            )
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(
+            text = buildString {
+                append("新存 $saved")
+                if (skipped > 0) append(" · 跳过 $skipped")
+                if (failed > 0) append(" · 失败 $failed")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted
+        )
+    }
+}
+
+/**
+ * 「下载整个歌单」确认弹窗。
+ *
+ * 先确认再全下：一个 500 首的歌单动辄几百 MB、几十次请求，点错一次的代价太大。
+ * 弹窗把「下几首、跳过几首、为什么跳过」讲清楚，用户才好决定。
+ */
+@Composable
+private fun DownloadConfirmDialog(
+    playlist: RemotePlaylist,
+    vm: SonanceViewModel,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val total = vm.playlistTracks.size
+    val playable = vm.playlistTracks.count { it.playable }
+    val notPlayable = total - playable
+    val downloadable = vm.playlistDownloadableCount
+    val downloaded = vm.playlistDownloadedCount
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = skin.surface2,
+        title = {
+            Text(
+                text = "下载整个歌单",
+                style = MaterialTheme.typography.titleMedium,
+                color = skin.text
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "「${playlist.name}」",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = skin.text,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "共 $total 首，本次会下载 $downloadable 首。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textDim
+                )
+                if (downloaded > 0) {
+                    HintLine("已存到本地的 $downloaded 首会自动跳过")
+                }
+                if (notPlayable > 0) {
+                    HintLine("$notPlayable 首需要会员或已下架，会跳过")
+                }
+                if (vm.onlineDownloadWifiOnly) {
+                    HintLine("当前设置「只在 Wi-Fi 下载」，非 Wi-Fi 会直接跳过")
+                }
+                HintLine("逐首下载，中途可以取消。")
+            }
+        },
+        confirmButton = {
+            PillButton(label = "开始下载", onClick = onConfirm)
+        },
+        dismissButton = {
+            PillButton(label = "取消", onClick = onDismiss, filled = false)
+        }
+    )
+}
+
+@Composable
+private fun HintLine(text: String) {
+    Text(
+        text = "· $text",
+        style = MaterialTheme.typography.labelSmall,
+        color = LocalSkin.current.textMuted
+    )
+}
+
+/** 头部大封面的请求尺寸。铺满 104dp 需要 2~3 倍图，取 500 够清晰又不至于太大 */
+private const val HEADER_COVER_PX = 500
+
+/** 曲目行缩略图。和搜索列表保持一致 */
+private const val ROW_COVER_PX = 200

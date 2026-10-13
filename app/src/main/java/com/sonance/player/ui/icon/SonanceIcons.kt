@@ -116,6 +116,14 @@ object SonanceIcons {
         "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
     )
     val Plus by o("Plus", "M12 5v14", "M5 12h14")
+
+    /** 下载：托盘 + 向下的箭头（feather download） */
+    val Download by o(
+        "Download",
+        "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4",
+        "M7 10l5 5 5-5",
+        "M12 15V3"
+    )
     val Waveform by o("Waveform", "M22 12h-4l-3 9L9 3l-3 9H2")
     val Image by o(
         "Image",

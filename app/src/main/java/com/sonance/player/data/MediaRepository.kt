@@ -360,10 +360,14 @@ data class DuplicateGroup<T>(
 /**
  * 重复检测结果。
  *
- * - [exactGroups]：**同一首歌的多份文件** —— 标题、歌手、时长完全一致。
- *   基本可以确定是重复（同一文件拷了两份 / 换过格式又留了原件）。
+ * - [exactGroups]：**同一首歌的多份文件** —— 标题、歌手归一化后一致，且时长在
+ *   [DUPLICATE_DURATION_TOLERANCE_MS] 容差内。基本可以确定是重复
+ *   （同一文件拷了两份 / 换过格式又留了原件）。
  * - [sameNameGroups]：**同名但时长不同** —— 可能是同一首的不同版本（现场 / 重录 / 不同码率），
  *   也可能是真的重复。所以清理时单独一个按钮、单独确认，不跟"确定重复"混在一起。
+ *
+ * 标题 / 歌手的「一致」是归一化后的一致：全角半角、大小写、括号修饰、音轨号前缀、
+ * 复制体尾巴、中英标点、多歌手顺序都不算差异（见 [canonicalTitle] / [canonicalArtist]）。
  */
 data class DuplicateReport<T>(
     val exactGroups: List<DuplicateGroup<T>>,
@@ -376,19 +380,162 @@ data class DuplicateReport<T>(
 
 /**
  * 在内存里的曲库中找重复。**不碰文件系统**，纯列表比对。
+ *
+ * 比对前先把标题 / 歌手过一遍**繁 → 简**（[ChineseConverter]）：同一首歌在曲库里
+ * 常常一份是简体标签、一份是繁体标签（台版 / 港版抓轨、老 CD 抓轨），不做这一步
+ * 会把它俩当成两首不同的歌，正是"明明重复却检测不出来"的主因。
+ *
+ * 转换只作用于**判定键**，[Song] 里显示的值一个都不改。
  */
-fun findDuplicates(songs: List<Song>): DuplicateReport<Song> = findDuplicatesIn(
+fun findDuplicates(songs: List<Song>, context: Context): DuplicateReport<Song> = findDuplicatesIn(
     items = songs,
     id = { it.id },
-    title = { it.title },
-    artist = { it.artist },
+    title = { ChineseConverter.toSimplified(context, it.title) },
+    artist = { ChineseConverter.toSimplified(context, it.artist) },
     durationMs = { it.durationMs },
     sizeBytes = { it.sizeBytes }
 )
 
 /**
+ * 判定「同一首歌」时允许的时长偏差（毫秒）。
+ *
+ * 同一首歌重新编码（换码率、mp3 ↔ flac）后时长常差几百毫秒，硬比相等会漏判。
+ * 取 **1 秒以下**：真·不同版本（现场 / 重录）通常差几十秒，不会被误并。
+ */
+internal const val DUPLICATE_DURATION_TOLERANCE_MS = 1000L
+
+/** 全角转半角，顺带做 Unicode 兼容分解（`Ｈｅｌｌｏ` → `Hello`、`①` → `1`） */
+private fun normalizeWidth(s: String): String =
+    runCatching { java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC) }
+        .getOrDefault(s)
+
+/** 括号及其内容：`(Live)` / `【伴奏】` / `（1）` */
+private val TITLE_BRACKET = Regex("""[(\[【（][^)\]】）]*[)\]】）]""")
+
+/** 开头的音轨号：`01 - ` / `03.` / `12、` */
+private val TITLE_TRACK_PREFIX = Regex("""^\s*\d{1,3}\s*[-–—.、_]\s*""")
+
+/** 复制体尾巴：`- 副本` / ` copy 2` */
+private val TITLE_COPY_TAIL = Regex("""(?i)[-_ ]*(copy|副本|拷贝)\s*\d*\s*$""")
+
+/** 标点 / 空白一律折叠成空格 */
+private val TITLE_NON_WORD = Regex("""[^\p{L}\p{N}]+""")
+private val WHITESPACE_RUN = Regex("""\s+""")
+
+/**
+ * 标题归一化 —— 把「同一首歌的不同写法」折叠成同一个键。
+ *
+ * 覆盖曲库里真实存在的差异：全角半角、大小写、括号修饰（`(Live)` / `【伴奏】`）、
+ * 开头音轨号（`01 - `）、复制体尾巴（`X (1)` / `X - 副本`）、中英标点。
+ *
+ * 只在去重判定里用，**不写回 [Song]** —— 列表里显示的仍是原始标题。
+ */
+internal fun canonicalTitle(raw: String): String {
+    if (raw.isBlank()) return ""
+    var s = normalizeWidth(raw).lowercase()
+    s = TITLE_COPY_TAIL.replace(s, "")
+    s = TITLE_TRACK_PREFIX.replace(s, "")
+    s = TITLE_BRACKET.replace(s, " ")
+    s = TITLE_NON_WORD.replace(s, " ")
+    return s.trim().replace(WHITESPACE_RUN, " ")
+}
+
+/** 歌手分隔符：`A/B`、`A、B`、`A & B`、`A feat. B` 都视为同一组人 */
+private val ARTIST_SEPARATOR =
+    Regex("""(?i)\s*(?:[/\\、,，;；&＆+]|feat\.?|ft\.?|with)\s*""")
+
+/** 视为「没有歌手信息」的写法 —— 这类条目在聚簇时按通配处理 */
+private val UNKNOWN_ARTIST_TOKENS = setOf(
+    UNKNOWN_ARTIST.lowercase(), "unknown", "<unknown>", "未知", "未知歌手"
+)
+
+/**
+ * 歌手归一化。返回空串表示「歌手未知」，调用方按**通配**处理 ——
+ * 同一首歌常常一份打了标签、一份没打，按空串硬分桶就永远聚不到一起。
+ */
+internal fun canonicalArtist(raw: String): String {
+    val s = normalizeWidth(raw).lowercase().trim()
+    if (s.isEmpty() || s in UNKNOWN_ARTIST_TOKENS) return ""
+    return s.split(ARTIST_SEPARATOR)
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && it !in UNKNOWN_ARTIST_TOKENS }
+        .distinct()
+        .sorted()
+        .joinToString("/")
+}
+
+/**
+ * 同一标题下的条目按歌手聚簇。
+ *
+ * 歌手未知（归一化后为空）的条目**与任何簇兼容**：先并进已有簇，没有簇时自己起一个
+ * 待定簇（后续有具名歌手进来会补上代表歌手）。
+ */
+private fun <T> clusterByArtist(items: List<T>, artist: (T) -> String): List<MutableList<T>> {
+    val clusters = ArrayList<MutableList<T>>()
+    val reps = ArrayList<String>()
+    for (item in items) {
+        val a = canonicalArtist(artist(item))
+        if (a.isEmpty()) {
+            if (clusters.isEmpty()) {
+                clusters.add(ArrayList<T>(2).also { it.add(item) })
+                reps.add("")
+            } else {
+                clusters[0].add(item)
+            }
+            continue
+        }
+        val idx = reps.indexOfFirst { it.isEmpty() || it == a }
+        if (idx >= 0) {
+            clusters[idx].add(item)
+            if (reps[idx].isEmpty()) reps[idx] = a
+        } else {
+            clusters.add(ArrayList<T>(2).also { it.add(item) })
+            reps.add(a)
+        }
+    }
+    return clusters
+}
+
+/**
+ * 把一簇条目按时长（带 [DUPLICATE_DURATION_TOLERANCE_MS] 容差）切成若干子簇。
+ *
+ * 先按时长排序，再让每个子簇的**跨度**不超过容差 —— 避免 200.0 / 200.9 / 201.8
+ * 这种链式相邻被串成一串（跨度 1.8s，其实已经是两首不同的东西）。
+ */
+private fun <T> splitByDuration(items: List<T>, durationMs: (T) -> Long): List<MutableList<T>> {
+    if (items.size < 2) return listOf(ArrayList(items))
+    val sorted = items.sortedBy { durationMs(it) }
+    val out = ArrayList<MutableList<T>>()
+    var current = ArrayList<T>()
+    var firstMs = 0L
+    for (item in sorted) {
+        val d = durationMs(item)
+        if (current.isEmpty()) {
+            firstMs = d
+            current.add(item)
+        } else if (d - firstMs < DUPLICATE_DURATION_TOLERANCE_MS) {
+            current.add(item)
+        } else {
+            out.add(current)
+            current = ArrayList()
+            firstMs = d
+            current.add(item)
+        }
+    }
+    if (current.isNotEmpty()) out.add(current)
+    return out
+}
+
+/**
  * 去重的核心逻辑。做成泛型是为了能在**纯 JVM 单测**里覆盖 ——
  * [Song] 带 `android.net.Uri` 字段，普通单元测试构造不出来（项目没引 Robolectric）。
+ *
+ * 分三层判定：
+ * 1. **标题**（归一化后）分桶 —— 「是不是同一首歌」的主键；
+ * 2. 同标题下按**歌手**聚簇，歌手未知者当通配；
+ * 3. 簇内按**时长**（带容差）切分：时长一致 → 确定重复；否则 → 同名待确认。
+ *
+ * 归一化见 [canonicalTitle] / [canonicalArtist]，容差见 [DUPLICATE_DURATION_TOLERANCE_MS]。
  */
 internal fun <T> findDuplicatesIn(
     items: List<T>,
@@ -400,43 +547,43 @@ internal fun <T> findDuplicatesIn(
 ): DuplicateReport<T> {
     if (items.size < 2) return DuplicateReport(emptyList(), emptyList())
 
-    fun norm(s: String) = s.trim().lowercase()
-
-    // ---- 精确重复：标题 + 歌手 + 时长 ----
-    val exactBuckets = LinkedHashMap<String, MutableList<T>>()
+    // 1) 按归一化标题分桶
+    val byTitle = LinkedHashMap<String, MutableList<T>>()
     for (item in items) {
-        val t = title(item)
-        if (t.isBlank()) continue
-        val k = "${norm(t)}|${norm(artist(item))}|${durationMs(item)}"
-        exactBuckets.getOrPut(k) { ArrayList(2) }.add(item)
+        val t = canonicalTitle(title(item))
+        if (t.isEmpty()) continue
+        byTitle.getOrPut(t) { ArrayList(2) }.add(item)
     }
+
     val exactGroups = ArrayList<DuplicateGroup<T>>()
-    val exactMemberIds = HashSet<Long>()
-    for ((k, list) in exactBuckets) {
-        if (list.size < 2) continue
-        // 保留体积最大的那份（同样时长下体积大 = 码率更高）
-        val sorted = list.sortedByDescending { sizeBytes(it) }
-        val dups = sorted.drop(1)
-        exactGroups.add(DuplicateGroup(k, sorted.first(), dups))
-        dups.forEach { exactMemberIds.add(id(it)) }
-    }
-
-    // ---- 同名：标题 + 歌手，但时长不同 ----
-    val nameBuckets = LinkedHashMap<String, MutableList<T>>()
-    for (item in items) {
-        val t = title(item)
-        if (t.isBlank()) continue
-        // 已经判为精确重复的成员不再进同名分组，避免同一个文件被算两次
-        if (id(item) in exactMemberIds) continue
-        val k = "${norm(t)}|${norm(artist(item))}"
-        nameBuckets.getOrPut(k) { ArrayList(2) }.add(item)
-    }
     val sameNameGroups = ArrayList<DuplicateGroup<T>>()
-    for ((k, list) in nameBuckets) {
-        if (list.size < 2) continue
-        // 保留时长最长的那份（通常是完整版）
-        val sorted = list.sortedByDescending { durationMs(it) }
-        sameNameGroups.add(DuplicateGroup(k, sorted.first(), sorted.drop(1)))
+
+    for ((titleKey, titleGroup) in byTitle) {
+        if (titleGroup.size < 2) continue
+
+        // 2) 同标题下按歌手聚簇（歌手未知 = 通配）
+        for (cluster in clusterByArtist(titleGroup, artist)) {
+            if (cluster.size < 2) continue
+
+            // 3) 时长一致（含容差）的算「确定重复」，保留体积最大的那份
+            //    （同样时长下体积大 = 码率更高）
+            val hiddenHere = HashSet<Long>()
+            for (sub in splitByDuration(cluster, durationMs)) {
+                if (sub.size < 2) continue
+                val sorted = sub.sortedByDescending { sizeBytes(it) }
+                val dups = sorted.drop(1)
+                exactGroups.add(DuplicateGroup(titleKey, sorted.first(), dups))
+                dups.forEach { hiddenHere.add(id(it)) }
+            }
+
+            // 4) 剩下的（时长不同 / 没被算进重复）只要还有 ≥2 个，就算同名。
+            //    保留时长最长的那份（通常是完整版）。
+            val rest = cluster.filter { id(it) !in hiddenHere }
+            if (rest.size >= 2) {
+                val sorted = rest.sortedByDescending { durationMs(it) }
+                sameNameGroups.add(DuplicateGroup(titleKey, sorted.first(), sorted.drop(1)))
+            }
+        }
     }
 
     return DuplicateReport(exactGroups, sameNameGroups)

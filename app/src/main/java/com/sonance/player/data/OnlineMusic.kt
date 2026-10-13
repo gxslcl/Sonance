@@ -54,6 +54,30 @@ interface OnlineSource {
     suspend fun search(query: String, limit: Int, offset: Int): RemoteSearchPage?
 
     /**
+     * 搜索歌单。
+     *
+     * 和 [search] 同一套约定：`null` = 请求失败，空列表 = 确实没有。
+     */
+    suspend fun searchPlaylists(query: String, limit: Int, offset: Int): RemotePlaylistPage?
+
+    /**
+     * 首页推荐歌单。
+     *
+     * `null` = 请求失败（和 [search] 一致）；空列表 = 音源确实没给推荐。
+     */
+    suspend fun recommendedPlaylists(limit: Int): List<RemotePlaylist>?
+
+    /**
+     * 一个歌单里的**全部**曲目，元数据已补全，可直接进播放 / 下载队列。
+     *
+     * `null` = 请求失败；空列表 = 歌单确实是空的。
+     *
+     * ⚠️ 网易云的歌单详情接口只给歌曲 id 列表（`trackIds`），不带歌名 / 歌手 /
+     * 时长 / fee，所以实现里必须再按批补一次详情 —— 大歌单会产生多次请求。
+     */
+    suspend fun playlistTracks(playlistId: String): List<RemoteTrack>?
+
+    /**
      * 这首歌的取流地址。
      *
      * 返回 **String** 而不是 `Uri`：播放和下载共用同一个地址，而下载走
@@ -156,6 +180,39 @@ data class RemoteTrack(
     /** 需要会员 */
     val vip: Boolean
 )
+
+/**
+ * 一个歌单（搜索 / 推荐结果里的一条）。
+ *
+ * 只带**列表展示够用**的字段。曲目要等进详情页时再按需拉 —— 一次歌单搜索
+ * 会回来几十个歌单，每个都顺手去拉曲目列表就是几十次请求，没有必要。
+ */
+data class RemotePlaylist(
+    val remoteId: String,
+    val name: String,
+    val coverUrl: String?,
+    /** 歌单曲目数（音源报的，可能和实际能取回的有出入） */
+    val trackCount: Int,
+    /** 创建者昵称；推荐接口不返回，此时为空串 */
+    val creatorName: String
+)
+
+/**
+ * 一次歌单搜索的结果。
+ *
+ * [total] 语义和 [RemoteSearchPage.total] 完全一致（分页靠它判断"后面还有没有"），
+ * 只是 [RemoteSearchPage.hasMore] 那句警告同样适用 —— 不能拿"这页满没满"去猜。
+ */
+data class RemotePlaylistPage(
+    val playlists: List<RemotePlaylist>,
+    /** 总条数；-1 表示音源没报 */
+    val total: Int = -1
+) {
+    fun hasMore(offset: Int, limit: Int): Boolean = when {
+        total < 0 -> playlists.size >= limit
+        else -> offset + playlists.size < total
+    }
+}
 
 /**
  * 在线歌的**可持久化**形态。
@@ -463,6 +520,17 @@ object NeteaseSource : OnlineSource {
     private const val READ_TIMEOUT_MS = 12_000
     private const val MAX_BODY_CHARS = 512 * 1024
 
+    /** 搜索接口的 `type`：1 = 单曲，1000 = 歌单 */
+    private const val TYPE_PLAYLIST = 1000
+
+    /**
+     * 批量补歌曲元数据时一次带多少个 id。
+     *
+     * 100 是实测的稳妥值：再往上（试过 200）响应体接近 [MAX_BODY_CHARS]，
+     * 偶发被截断，而截断在解析层只表现为"少了几首"，很难发现。
+     */
+    private const val DETAIL_BATCH = 100
+
     /**
      * 带一个像浏览器的 UA。
      *
@@ -563,6 +631,151 @@ object NeteaseSource : OnlineSource {
                 }
             }
         }.getOrDefault(emptyMap())
+    }
+
+    // ===== 歌单 =====
+
+    /**
+     * 歌单搜索：和单曲搜索**同一个端点**，只是 `type` 从 1 换成 [TYPE_PLAYLIST]。
+     *
+     * 返回字段和单曲搜索不同：这里给 `coverImgUrl` 和 `creator.nickname`。
+     */
+    override suspend fun searchPlaylists(
+        query: String,
+        limit: Int,
+        offset: Int
+    ): RemotePlaylistPage? = withContext(Dispatchers.IO) {
+        val kw = query.trim()
+        if (kw.isEmpty()) return@withContext RemotePlaylistPage(emptyList(), 0)
+
+        val url = "$BASE/api/search/get?s=${enc(kw)}&type=$TYPE_PLAYLIST&limit=$limit&offset=$offset"
+        val body = get(url) ?: return@withContext null
+        val result = runCatching { JSONObject(body).optJSONObject("result") }.getOrNull()
+            ?: return@withContext null
+        val arr = result.optJSONArray("playlists") ?: return@withContext null
+        val total = if (result.has("playlistCount")) result.optInt("playlistCount", -1) else -1
+
+        val list = ArrayList<RemotePlaylist>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val pid = o.optLong("id")
+            if (pid <= 0L) continue
+            list += RemotePlaylist(
+                remoteId = pid.toString(),
+                name = o.optString("name"),
+                coverUrl = o.optString("coverImgUrl").takeIf { it.isNotBlank() },
+                trackCount = o.optInt("trackCount", 0),
+                creatorName = o.optJSONObject("creator")?.optString("nickname").orEmpty()
+            )
+        }
+        RemotePlaylistPage(list, total)
+    }
+
+    /**
+     * 推荐歌单：`/api/personalized/playlist`。
+     *
+     * ⚠️ 这个接口给的是 `picUrl`（不是搜索接口的 `coverImgUrl`），而且**没有
+     * `creator` 字段** —— 两个接口的字段名不一样，混用会静默拿到空封面。
+     */
+    override suspend fun recommendedPlaylists(limit: Int): List<RemotePlaylist>? =
+        withContext(Dispatchers.IO) {
+            val body = get("$BASE/api/personalized/playlist?limit=$limit")
+                ?: return@withContext null
+            val arr = runCatching { JSONObject(body).optJSONArray("result") }.getOrNull()
+                ?: return@withContext null
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val pid = o.optLong("id")
+                    if (pid <= 0L) continue
+                    add(
+                        RemotePlaylist(
+                            remoteId = pid.toString(),
+                            name = o.optString("name"),
+                            coverUrl = o.optString("picUrl").takeIf { it.isNotBlank() },
+                            trackCount = o.optInt("trackCount", 0),
+                            creatorName = ""
+                        )
+                    )
+                }
+            }
+        }
+
+    /**
+     * 歌单全部曲目。
+     *
+     * ## 为什么是两次请求
+     *
+     * `/api/v6/playlist/detail` 的 `tracks` 字段只给**前若干首**（`n` 控制），
+     * 而 `trackIds` 是完整的 —— 但 `trackIds` 里只有 id，没有歌名 / 歌手 / 时长 / fee。
+     * 所以拿完 id 还要走 [fetchTrackDetails] 批量补全，每 [DETAIL_BATCH] 个一批。
+     * 500 首的歌单 ≈ 1 次详情 + 5 次批量，这是接口形态决定的，绕不开。
+     *
+     * `n=1` 是故意的：只要 `trackIds`，`tracks` 那 1 首白送的不用，省流量。
+     */
+    override suspend fun playlistTracks(playlistId: String): List<RemoteTrack>? =
+        withContext(Dispatchers.IO) {
+            val body = get("$BASE/api/v6/playlist/detail?id=$playlistId&n=1")
+                ?: return@withContext null
+            val playlist = runCatching {
+                JSONObject(body).optJSONObject("playlist")
+            }.getOrNull() ?: return@withContext null
+            val idsArr = playlist.optJSONArray("trackIds") ?: return@withContext emptyList()
+
+            val ids = ArrayList<String>(idsArr.length())
+            for (i in 0 until idsArr.length()) {
+                val id = idsArr.optJSONObject(i)?.optLong("id") ?: continue
+                if (id > 0L) ids += id.toString()
+            }
+            if (ids.isEmpty()) return@withContext emptyList()
+
+            val out = ArrayList<RemoteTrack>(ids.size)
+            for (chunk in ids.chunked(DETAIL_BATCH)) {
+                // 某一批失败就整体按失败处理 —— 返回"半个歌单"比报错更让人困惑：
+                // 用户会以为歌单本来就这么短，然后去下一半
+                val part = fetchTrackDetails(chunk) ?: return@withContext null
+                out += part
+            }
+            out
+        }
+
+    /**
+     * `/api/song/detail` 批量取完整元数据。
+     *
+     * 失败返回 null（**不是**空列表）：这里缺数据就拼不出可用的曲目列表，
+     * 必须让调用方知道是"请求失败"而不是"歌单是空的"。
+     */
+    private suspend fun fetchTrackDetails(ids: List<String>): List<RemoteTrack>? {
+        if (ids.isEmpty()) return emptyList()
+        val url = "$BASE/api/song/detail?ids=%5B${ids.joinToString(",")}%5D"
+        val body = get(url) ?: return null
+        return runCatching {
+            val arr = JSONObject(body).optJSONArray("songs") ?: return@runCatching null
+            // 显式给 buildList 类型参数：runCatching 的 R 同时被 `null` 和这里推，
+            // 新推理器会先定成 `List<RemoteTrack>?`，导致 add() 的实参对不上 E
+            buildList<RemoteTrack> {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val sid = o.optLong("id")
+                    if (sid <= 0L) continue
+                    val fee = o.optInt("fee", 0)
+                    val album = o.optJSONObject("album")
+                    add(
+                        RemoteTrack(
+                            remoteId = sid.toString(),
+                            title = o.optString("name"),
+                            artist = joinNames(o.optJSONArray("artists")),
+                            album = album?.optString("name").orEmpty(),
+                            durationMs = o.optLong("duration"),
+                            coverUrl = album?.optString("picUrl")?.takeIf { it.isNotBlank() },
+                            // 和搜索接口同一套 fee 判据（见 neteasePlayable 的说明）
+                            playable = neteasePlayable(fee),
+                            vip = neteaseVip(fee)
+                        )
+                    )
+                }
+            }
+        }.getOrNull()
     }
 
     // ===== 给**本地歌**补封面 / 歌词 =====

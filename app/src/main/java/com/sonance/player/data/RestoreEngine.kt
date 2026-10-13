@@ -138,12 +138,17 @@ class RestoreEngine(private val context: Context) {
         val dirCache = HashMap<String, DocumentFile>()
         outputRoot?.let { dirCache[""] = it }
 
+        // 输出目录里已有的文件。用来跳过「已经转换过」的源文件 —— 否则重复跑一次
+        // 会在输出目录里堆出 "X (1).mp3"、"X (2).mp3" 这种重复成品。
+        val existingOutputs: MutableMap<String, OutputFile> =
+            if (outputRoot == null) HashMap() else indexOutputFiles(outputRoot)
+
         var done = 0
         for ((doc, relPath) in files) {
             coroutineContext.ensureActive()
             val name = relPath.substringAfterLast('/')
             try {
-                processOne(doc, name, relPath, dryRun, outputRoot, dirCache, stats)
+                processOne(doc, name, relPath, dryRun, outputRoot, dirCache, existingOutputs, stats)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -176,6 +181,7 @@ class RestoreEngine(private val context: Context) {
         dryRun: Boolean,
         outputRoot: DocumentFile?,
         dirCache: MutableMap<String, DocumentFile>,
+        existingOutputs: MutableMap<String, OutputFile>,
         stats: RestoreStats
     ) {
         val size = doc.length()
@@ -228,12 +234,26 @@ class RestoreEngine(private val context: Context) {
 
             val outRoot = outputRoot ?: throw IOException("输出文件夹不可用")
             val dirPath = relPath.substringBeforeLast('/', "")
+            val outRel = if (dirPath.isEmpty()) outName else "$dirPath/$outName"
+
+            // 已经转换过：输出目录里已有同名文件、且大小与本次要写的载荷一致 -> 跳过。
+            // 这是「重跑一遍不再重复转换」的关键，否则会一直堆出 "X (1).mp3"。
+            val prior = existingOutputs[outRel]
+            if (prior != null && prior.size == payloadSize) {
+                stats.skip("已转换过")
+                return
+            }
+
             val parent = resolveDir(outRoot, dirPath, dirCache)
                 ?: throw IOException("创建目录失败")
             val mime = if (ext == ".flac") "audio/flac" else "audio/mpeg"
-            val newUri = DocumentsContract.createDocument(context.contentResolver, parent.uri, mime, outName)
+            // 同名但大小对不上 = 上次中途取消留下的半截文件：复用同一个 Uri 覆盖重写，
+            // 而不是再 createDocument 出一个 "X (1).mp3"
+            val newUri = prior?.uri
+                ?: DocumentsContract.createDocument(context.contentResolver, parent.uri, mime, outName)
                 ?: throw IOException("创建文件失败")
-            val output = context.contentResolver.openOutputStream(newUri, "w")
+            existingOutputs[outRel] = OutputFile(newUri, payloadSize)
+            val output = context.contentResolver.openOutputStream(newUri, "wt")
                 ?: throw IOException("打开输出流失败")
 
             output.use { out ->
@@ -259,6 +279,37 @@ class RestoreEngine(private val context: Context) {
             if (ext == ".flac") stats.flacCount++ else stats.mp3Count++
             stats.bytesIn += payloadSize
         }
+    }
+
+    /**
+     * 递归收集输出目录里已有的文件（相对路径 -> uri/大小）。
+     *
+     * 一次遍历，换来后面每个源文件 O(1) 的「是否已转换过」判断 ——
+     * 逐个 `findFile` 会是 O(n²) 的目录扫描，几千个文件时非常慢。
+     */
+    private fun indexOutputFiles(root: DocumentFile): MutableMap<String, OutputFile> {
+        val out = HashMap<String, OutputFile>()
+        val stack = ArrayDeque<Pair<DocumentFile, String>>()
+        stack.addLast(root to "")
+        var visited = 0
+
+        while (stack.isNotEmpty()) {
+            if (visited >= MAX_FILES) break
+            val (dir, path) = stack.removeLast()
+            val children = runCatching { dir.listFiles() }.getOrNull() ?: continue
+            for (child in children) {
+                visited++
+                if (visited >= MAX_FILES) break
+                val name = child.name ?: continue
+                val childPath = if (path.isEmpty()) name else "$path/$name"
+                if (child.isDirectory) {
+                    if (stack.size < MAX_FOLDERS) stack.addLast(child to childPath)
+                } else {
+                    out[childPath] = OutputFile(child.uri, child.length())
+                }
+            }
+        }
+        return out
     }
 
     /** 逐级解析 / 创建输出目录链，结果缓存到 dirCache */
@@ -309,6 +360,9 @@ class RestoreEngine(private val context: Context) {
             }
         }
     }
+
+    /** 输出目录里已存在的一个成品文件：Uri + 载荷大小，用于判断「是否已转换过」 */
+    private data class OutputFile(val uri: Uri, val size: Long)
 
     companion object {
         private const val MAX_FILES = 40_000

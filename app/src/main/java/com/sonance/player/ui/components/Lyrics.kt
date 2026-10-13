@@ -56,6 +56,7 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.LyricLine
+import com.sonance.player.data.LyricAdaptMode
 import com.sonance.player.data.Lyrics
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.LyricsResult
@@ -75,8 +77,10 @@ import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -139,6 +143,10 @@ fun LyricsOverlay(
     var fontSize by remember(song.id) { mutableIntStateOf(prefs.lyricsFontSizeSp) }
     var convertT2S by remember(song.id) { mutableStateOf(prefs.lyricsConvertToSimplified) }
 
+    // 自动适配档位。和字号不一样，它是**全局设置**、和当前这首歌无关，
+    // 所以不用 song.id 当 key（换歌时不该重新读一遍、也不该丢掉页面里的改动）。
+    var adaptMode by remember { mutableStateOf(prefs.lyricsAdaptMode) }
+
     // 开关进 key：用户在设置里打开「网易云补全」后回到歌词页要能立刻生效
     LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
         loading = true
@@ -161,11 +169,61 @@ fun LyricsOverlay(
 
     val lyrics = result?.lyrics
 
-    Box(modifier.fillMaxSize().background(skin.bg)) {
+    // 封面：背景玻璃和「歌词自动适配背景」用的是同一张图，所以在这里加载一次往下传。
+    // 早先这张图是 GlassBackdrop 自己在内部加载的，外面拿不到，也就没法据它算歌词颜色。
+    var art by remember(song.id) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(song.albumId, song.id, song.title, song.artist) {
+        art = ArtworkLoader.load(
+            context = context,
+            albumId = song.albumId,
+            sizePx = 320,
+            sourceUri = song.uri,
+            coverKey = OnlineCover.keyOf(song.title, song.artist)
+        ) ?: ArtworkLoader.online(song.id)
+    }
+
+    // 封面的分段平均色。像素读取放在后台线程、只在换图时算一次 ——
+    // 下面的色带要跟着「透出」滑杆实时重算，那一步必须是纯数值运算，不能再读像素。
+    var artBands by remember(song.id) { mutableStateOf<List<Color>?>(null) }
+    LaunchedEffect(art) {
+        val bmp = art
+        artBands = if (bmp == null) null else withContext(Dispatchers.Default) {
+            artBandColors(bmp)
+        }
+    }
+
+    BoxWithConstraints(modifier.fillMaxSize().background(skin.bg)) {
+
+        // ===== 歌词自动适配背景 =====
+        // 把「封面 + 遮罩」折算成一条自上而下的等效背景色带；取不到（没有封面，
+        // 或者背景玻璃关着 —— 那时背景就是纯皮肤底色，皮肤自己的配色本来就是照它配的）
+        // 就整条置空，歌词退回原本的颜色。
+        val density = LocalDensity.current
+        val boxW = with(density) { maxWidth.toPx() }
+        val boxH = with(density) { maxHeight.toPx() }
+        val bands = artBands
+        val artW = art?.width ?: 0
+        val artH = art?.height ?: 0
+        val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        // 色带只在"真的会用到"时才算：关掉自适应、或背景玻璃关着（那时背景就是纯皮肤底色，
+        // 皮肤自己的配色本来就是照它配的）都直接置空。
+        // 「只调当前句」档色带照算，只是非当前句不走它（见 shouldAdapt）。
+        val bgProfile = remember(bands, artW, artH, boxW, boxH, skin, glassStyle, glassVisibility, canBlur, adaptMode) {
+            if (bands == null || glassStyle == GlassStyle.OFF || adaptMode == LyricAdaptMode.OFF) {
+                null
+            } else {
+                // liquid 要传下去：液态玻璃多叠了一道顶部镜面高光，色带得跟着算，
+                // 否则顶部那几行的背景会被低估、歌词颜色浅一档。
+                buildBgProfile(
+                    bands, artW, artH, boxW, boxH, skin, glassVisibility, canBlur,
+                    liquid = glassStyle.liquid
+                )
+            }
+        }
 
         // ===== 玻璃背景（可调强度 / 液态玻璃）=====
         GlassBackdrop(
-            song = song,
+            art = art,
             style = glassStyle,
             blurDp = glassBlur,
             visibility = glassVisibility
@@ -261,6 +319,14 @@ fun LyricsOverlay(
                         },
                         skin = skin
                     )
+                    AdaptModeRow(
+                        mode = adaptMode,
+                        onModeChange = {
+                            adaptMode = it
+                            prefs.lyricsAdaptMode = it
+                        },
+                        skin = skin
+                    )
                 }
             }
 
@@ -310,10 +376,17 @@ fun LyricsOverlay(
                         lines = lyrics.lines,
                         positionMs = positionMs,
                         fontSizeSp = fontSize,
-                        onSeek = onSeek
+                        onSeek = onSeek,
+                        bgProfile = bgProfile,
+                        adaptMode = adaptMode
                     )
 
-                    else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize)
+                    else -> PlainLyrics(
+                        lines = (lyrics as Lyrics.Plain).lines,
+                        fontSizeSp = fontSize,
+                        bgProfile = bgProfile,
+                        adaptMode = adaptMode
+                    )
                 }
             }
 
@@ -399,14 +472,20 @@ fun LyricsOverlay(
  */
 @Composable
 private fun GlassBackdrop(
-    song: Song,
+    /**
+     * 已经加载好的封面。**由调用方加载**，不是这里自己取 ——
+     * 因为「歌词自动适配背景」也要用这张图算色带，两边必须是同一张，
+     * 否则用户手动换过在线封面时会算出色不对版的歌词颜色。
+     *
+     * 取图链路：专辑封面 → 歌曲内嵌 → 之前下载落盘的封面（在 [LyricsOverlay] 里）。
+     */
+    art: ImageBitmap?,
     style: GlassStyle,
     blurDp: Int,
     visibility: Int,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
-    val context = LocalContext.current
 
     if (style == GlassStyle.OFF) {
         // 「关闭」就是真的什么都不画：歌词页只有纯背景色，连渐变也不留
@@ -416,21 +495,6 @@ private fun GlassBackdrop(
     val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val artAlpha = GlassStyle.artAlpha(visibility)
     val scrim = GlassStyle.scrimAlpha(visibility)
-
-    var art by remember(song.id) { mutableStateOf<ImageBitmap?>(null) }
-    // 走和列表 / 播放页**完全相同**的取图链路：专辑封面 → 歌曲内嵌 → 之前下载落盘的封面。
-    // 早先这里只传了 albumId，两个兜底都没接上，于是**磁盘上已经下好的封面读不到**：
-    // 表现是「列表里明明有封面，歌词页背景却是空的」，冷启动后尤其明显
-    // （那时内存里的 onlineCovers 是空的）。sourceUri 兜内嵌封面，coverKey 兜磁盘缓存。
-    LaunchedEffect(song.albumId, song.id, song.title, song.artist) {
-        art = ArtworkLoader.load(
-            context = context,
-            albumId = song.albumId,
-            sizePx = 320,
-            sourceUri = song.uri,
-            coverKey = OnlineCover.keyOf(song.title, song.artist)
-        ) ?: ArtworkLoader.online(song.id)
-    }
 
     art?.let { bmp ->
         val matrix = remember(style.liquid, visibility) {
@@ -451,7 +515,7 @@ private fun GlassBackdrop(
             modifier = modifier
                 .fillMaxSize()
                 .clipToBounds()
-                .scale(1.35f)
+                .scale(ART_ZOOM)
                 .then(if (canBlur && blurDp > 0) Modifier.blur(blurDp.dp) else Modifier)
                 .alpha(if (canBlur) artAlpha else (artAlpha * 0.45f))
         )
@@ -667,6 +731,46 @@ private fun FontSizeRow(
 }
 
 /* ============================================================
+ * 歌词自动适配背景（档位）
+ * ============================================================ */
+
+/**
+ * 「歌词跟着背景自动调色」的三档。
+ *
+ * 为什么不是简单的开关：这套调色再克制，也是**动了**用户选的那套配色 ——
+ * 有人只在意当前唱到的那一句，有人想要原样。给三档，让他自己决定干预到什么程度。
+ */
+@Composable
+fun AdaptModeRow(
+    mode: LyricAdaptMode,
+    onModeChange: (LyricAdaptMode) -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        ChipsRow(
+            chips = LyricAdaptMode.entries.map { it.label to (it == mode) },
+            onSelect = { onModeChange(LyricAdaptMode.entries[it]) }
+        )
+        // 当前档位是干什么的，写在下面一行 —— 标签只有两个字，光看标签猜不出差别
+        Text(
+            mode.hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted,
+            fontSize = 10.sp
+        )
+    }
+}
+
+/* ============================================================
  * 播放页主区域内的歌词（不是全屏歌词页）
  * ============================================================ */
 
@@ -762,14 +866,35 @@ fun InlineLyrics(
  * 带时间轴：跟随播放高亮 + 自动居中
  * ============================================================ */
 
+/**
+ * 歌词区里「当前句」停在屏幕的什么位置。
+ *
+ * LazyColumn 上下各留这么一块 contentPadding，`animateScrollToItem(当前句)`
+ * 会把当前句推到距顶这么高的地方。这个值同时管两件事：
+ *  - 首尾两句也能滚到偏中间来（上下留白）；
+ *  - 每行歌词换算"自己在屏幕哪一段"时的锚点（见 [SyncedLyrics] 的 `bgProfile`）。
+ */
+private const val LYRIC_ANCHOR_FRACTION = 0.34f
+
 @Composable
 internal fun SyncedLyrics(
     lines: List<LyricLine>,
     positionMs: Long,
     fontSizeSp: Int,
-    onSeek: (Long) -> Unit
+    onSeek: (Long) -> Unit,
+    /**
+     * 背景色带。给了就按每行**在屏幕上的位置**取该处的背景色，把歌词颜色调到看得清
+     * （见 [lyricColor]）；不给（播放页里的歌词、律动柱那一页）就维持皮肤原本的配色。
+     */
+    bgProfile: BgProfile? = null,
+    /**
+     * 调色的档位（见 [LyricAdaptMode]）。[LyricAdaptMode.CURRENT_ONLY] 时只有当前句
+     * 走色带，其余行保持皮肤原色。[bgProfile] 为 null 时这个参数不起作用。
+     */
+    adaptMode: LyricAdaptMode = LyricAdaptMode.ALL
 ) {
     val skin = LocalSkin.current
+    val density = LocalDensity.current
     val listState = rememberLazyListState()
     val current = remember(positionMs, lines) { lines.indexAt(positionMs) }
 
@@ -806,7 +931,21 @@ internal fun SyncedLyrics(
                 }
             }
     ) {
-        val centerPad = maxHeight * 0.34f
+        val centerPad = maxHeight * LYRIC_ANCHOR_FRACTION
+
+        // 「行号差 → 屏幕纵向比例」的换算：当前句停在锚点处，往上 / 往下每行移动
+        // linePx（行高 + 行距 + 上下各 2dp 的 padding）。有了它，某一行歌词就能
+        // 拿到**自己那一块**的背景色，只在这一块背景偏亮时才提亮自己。
+        //
+        // 注意：这个换算默认"当前句是居中的"（自动跟随滚动时的状态）。
+        // 用户手动翻到别处时会有偏差 —— 但那种时候他正在读的也不是当前句，
+        // 颜色差一点点看不出来，不值得为此挂一层逐项布局回调。
+        val containerPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
+        val linePx = with(density) {
+            (fontSizeSp * 1.5f).sp.toPx() + (fontSizeSp * 0.62f).dp.toPx() + 4.dp.toPx()
+        }
+        val anchorPx = containerPx * LYRIC_ANCHOR_FRACTION
+
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -822,16 +961,27 @@ internal fun SyncedLyrics(
                 val isCurrent = index == current
                 // 有时间轴的行才可点：点了把播放进度跳到那一句
                 val seekable = line.timeMs >= 0
+                val baseColor = when {
+                    isCurrent -> skin.accent
+                    index < current -> skin.textMuted
+                    else -> skin.textDim
+                }
+                val color = if (bgProfile == null || !shouldAdapt(isCurrent, adaptMode)) {
+                    baseColor
+                } else {
+                    lyricColor(
+                        base = baseColor,
+                        screenFraction = (anchorPx + (index - current) * linePx) / containerPx,
+                        isCurrent = isCurrent,
+                        profile = bgProfile
+                    )
+                }
                 Text(
                     text = line.text,
                     fontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp,
                     lineHeight = (fontSizeSp * 1.5f).sp,
                     fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
-                    color = when {
-                        isCurrent -> skin.accent
-                        index < current -> skin.textMuted
-                        else -> skin.textDim
-                    },
+                    color = color,
                     textAlign = TextAlign.Center,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -856,19 +1006,49 @@ internal fun SyncedLyrics(
  * ============================================================ */
 
 @Composable
-internal fun PlainLyrics(lines: List<String>, fontSizeSp: Int) {
+internal fun PlainLyrics(
+    lines: List<String>,
+    fontSizeSp: Int,
+    /** 同 [SyncedLyrics]：给了就按背景把颜色调到看得清 */
+    bgProfile: BgProfile? = null,
+    /**
+     * 同 [SyncedLyrics]。纯文本歌词**每一行都是"非当前句"**（没有高亮句），
+     * 所以 [LyricAdaptMode.CURRENT_ONLY] 在这一页等同关闭 —— 由 [shouldAdapt] 自动成立。
+     */
+    adaptMode: LyricAdaptMode = LyricAdaptMode.ALL
+) {
     val skin = LocalSkin.current
+
+    // 纯文本歌词没有时间轴，推不出"第几行在屏幕哪一块"；行高也不齐（长句会折行），
+    // 所以不能像 [SyncedLyrics] 那样用"当前句 + 行号差"算。
+    // 这里直接问 LazyColumn 要它刚量出来的位置，让每一行按**自己那一块**背景取色。
+    // 量不到位置的（视口高度拿不到、或刚进视口还没来得及量）退回"整页按中段取色"。
+    val listState = rememberLazyListState()
+    val layout = listState.layoutInfo
+    val fractions = remember(layout) {
+        visibleFractions(
+            boxes = layout.visibleItemsInfo.map { VisibleLine(it.index, it.offset, it.size) },
+            viewportHeightPx = layout.viewportSize.height
+        )
+    }
+
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 28.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy((fontSizeSp * 0.5f).dp)
     ) {
-        itemsIndexed(lines) { _, line ->
+        itemsIndexed(lines) { index, line ->
+            val color = if (bgProfile == null || !shouldAdapt(isCurrent = false, mode = adaptMode)) {
+                skin.textDim
+            } else {
+                lyricColor(skin.textDim, fractions[index] ?: 0.5f, false, bgProfile)
+            }
             Text(
                 text = line,
                 fontSize = fontSizeSp.sp,
                 lineHeight = (fontSizeSp * 1.5f).sp,
-                color = skin.textDim,
+                color = color,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )

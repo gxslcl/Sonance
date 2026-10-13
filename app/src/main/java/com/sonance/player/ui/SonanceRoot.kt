@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.LibraryTab
+import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.playback.PlayerUiState
@@ -70,6 +71,7 @@ import com.sonance.player.ui.screens.AlbumsScreen
 import com.sonance.player.ui.screens.ArtistsScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
+import com.sonance.player.ui.screens.OnlinePlaylistScreen
 import com.sonance.player.ui.screens.OnlineScreen
 import com.sonance.player.ui.screens.RecentScreen
 import com.sonance.player.ui.screens.SettingsScreen
@@ -98,6 +100,14 @@ sealed interface Detail {
     data class AlbumDetail(val albumId: Long) : Detail
     data class ArtistDetail(val name: String) : Detail
     data class FolderDetail(val path: String) : Detail
+
+    /**
+     * 在线歌单详情。
+     *
+     * 直接带上 [RemotePlaylist] 本身，而不是一个 id：详情页的标题 / 封面 / 曲目数
+     * 都要用它，而歌单**不在任何本地查找表里**（不像专辑 / 艺术家能按 id 反查）。
+     */
+    data class PlaylistDetail(val playlist: RemotePlaylist) : Detail
 }
 
 /* ============================================================
@@ -811,6 +821,12 @@ private fun ScreenBody(
                     )
                 }
             }
+
+            is Detail.PlaylistDetail -> OnlinePlaylistScreen(
+                playlist = detail.playlist,
+                vm = vm,
+                playerState = playerState
+            )
         }
         return
     }
@@ -841,7 +857,11 @@ private fun ScreenBody(
 
         LibraryTab.RECENT -> RecentScreen(vm = vm, playerState = playerState)
 
-        LibraryTab.ONLINE -> OnlineScreen(vm = vm, playerState = playerState)
+        LibraryTab.ONLINE -> OnlineScreen(
+            vm = vm,
+            playerState = playerState,
+            onOpenPlaylist = { onOpenDetail(Detail.PlaylistDetail(it)) }
+        )
 
         LibraryTab.FAVORITES -> FavoritesScreen(vm = vm, playerState = playerState)
 
@@ -874,6 +894,7 @@ private fun detailTitle(vm: SonanceViewModel, detail: Detail): String = when (de
     is Detail.AlbumDetail -> vm.albumById(detail.albumId)?.name ?: "专辑"
     is Detail.ArtistDetail -> detail.name
     is Detail.FolderDetail -> vm.folderByPath(detail.path)?.name ?: "文件夹"
+    is Detail.PlaylistDetail -> detail.playlist.name
 }
 
 private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when (detail) {
@@ -882,4 +903,9 @@ private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when 
 
     is Detail.ArtistDetail -> vm.artistByName(detail.name)?.let { "${it.songs.size} 首" } ?: ""
     is Detail.FolderDetail -> vm.folderByPath(detail.path)?.path ?: ""
+
+    is Detail.PlaylistDetail -> buildString {
+        if (detail.playlist.creatorName.isNotBlank()) append("${detail.playlist.creatorName} · ")
+        append("${detail.playlist.trackCount} 首")
+    }
 }

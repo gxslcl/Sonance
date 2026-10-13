@@ -104,6 +104,26 @@ enum class SortField(val label: String) {
 enum class ViewMode { LIST, GRID }
 
 /**
+ * 歌词要不要跟着背景自动调色。
+ *
+ * 起因：歌词页的背景是封面模糊后透出来的，有些封面透出来以后正好和歌词撞色，
+ * 屏幕上某一段的歌词就糊进背景里了。做法是按每行**在屏幕上的位置**取那一段的
+ * 背景色，把歌词的明度挪到刚好看得清（色相不动，所以还是原来那套颜色）。
+ *
+ * 默认 [ALL] —— 撞色往往只发生在屏幕某一段的那几行，只调当前句解决不了它。
+ * 但这件事终究是**动了用户选的那套配色**，所以必须留一个能关的开关。
+ */
+enum class LyricAdaptMode(val id: String, val label: String, val hint: String) {
+    OFF("off", "关闭", "歌词保持皮肤原本的颜色，不跟着背景调"),
+    CURRENT_ONLY("current", "只调当前句", "只有唱到的那一句跟着背景调，其余行保持原色（纯文本歌词没有高亮句，此档等同关闭）"),
+    ALL("all", "全部", "当前句和其它行都按所在区域调：压在偏亮背景上的那几行会被压暗，偏暗的会被提亮");
+
+    companion object {
+        fun fromId(id: String?): LyricAdaptMode = entries.firstOrNull { it.id == id } ?: ALL
+    }
+}
+
+/**
  * 播放页封面颜色的「包裹方式」—— 决定颜色从封面的哪一侧向外晕开。
  *
  * 默认 [AROUND]：这是最初的需求本身（「图片四周的颜色渐变到背景上」），

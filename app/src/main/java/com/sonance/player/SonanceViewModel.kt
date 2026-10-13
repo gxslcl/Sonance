@@ -27,6 +27,7 @@ import com.sonance.player.data.NeteaseSource
 import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
+import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
 import org.json.JSONObject
@@ -40,6 +41,7 @@ import com.sonance.player.data.remoteSongId
 import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
+import com.sonance.player.data.LyricAdaptMode
 import com.sonance.player.data.LyricsCache
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.MediaRepository
@@ -658,7 +660,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun scanDuplicates() {
         viewModelScope.launch {
             val all = lastScanOutcome?.songs ?: songs
-            duplicateReport = withContext(Dispatchers.Default) { findDuplicates(all) }
+            duplicateReport = withContext(Dispatchers.Default) { findDuplicates(all, getApplication()) }
             val r = duplicateReport
             showToast(
                 when {
@@ -826,6 +828,26 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 歌词字号（sp） */
     var lyricsFontSizeSp by mutableIntStateOf(prefs.lyricsFontSizeSp)
         private set
+
+    /**
+     * 歌词要不要跟着背景自动调色（见 [LyricAdaptMode]）。
+     *
+     * 这个值**只影响展示**：色带是每次进歌词页现算的，改完不用清缓存、不用重新解析歌词。
+     */
+    var lyricsAdaptMode by mutableStateOf(prefs.lyricsAdaptMode)
+        private set
+
+    fun changeLyricsAdaptMode(value: LyricAdaptMode) {
+        lyricsAdaptMode = value
+        prefs.lyricsAdaptMode = value
+        showToast(
+            when (value) {
+                LyricAdaptMode.OFF -> "歌词将保持皮肤原本的颜色"
+                LyricAdaptMode.CURRENT_ONLY -> "只有当前句会跟着背景调色"
+                LyricAdaptMode.ALL -> "歌词会按所在区域自动调色"
+            }
+        )
+    }
 
     fun changeLyricsT2S(value: Boolean) {
         lyricsConvertT2S = value
@@ -1631,14 +1653,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 没必要为写标签再拉一次。真没有再按在线歌自带的地址取，
      * 取到顺手写进 [CoverCache]，这样封面补全那边也不会重复下载。
      */
-    private suspend fun coverBytesForTag(song: Song): ByteArray? {
-        val key = OnlineCover.keyOf(song.title, song.artist) ?: return null
+    private suspend fun coverBytesForTag(song: Song): ByteArray? =
+        coverBytesForTag(song.title, song.artist, song.coverUrl)
+
+    /**
+     * [coverBytesForTag] 的原始字段版本 —— 歌单批量下载拿到的只有 [RemoteTrack]，
+     * 不必为了写个封面标签去拼一个 [Song] 出来。
+     */
+    private suspend fun coverBytesForTag(
+        title: String,
+        artist: String,
+        coverUrl: String?
+    ): ByteArray? {
+        val key = OnlineCover.keyOf(title, artist) ?: return null
         val app = getApplication<Application>()
         return withContext(Dispatchers.IO) {
             when (val hit = CoverCache.lookup(app, key)) {
                 is CoverCache.Lookup.Hit -> hit.bytes
                 else -> {
-                    val url = song.coverUrl ?: return@withContext null
+                    val url = coverUrl ?: return@withContext null
                     OnlineCover.downloadBytes(url)?.also { CoverCache.store(app, key, it) }
                 }
             }
@@ -1790,6 +1823,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.onlineSourceId = id
         // 换音源之后旧结果没意义了（id 是各音源自己的命名空间）
         clearOnlineSearch()
+        // 推荐也是按音源拉的，一并清掉让界面重新拉一次
+        recommendedJob?.cancel()
+        recommendedJob = null
+        recommendedPlaylists = emptyList()
+        recommendedFailed = false
+        recommendedLoading = false
     }
 
     /** 正在跑的那次搜索。新的一次会取消它，理由见 [searchOnline] */
@@ -1824,6 +1863,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 这里每次都**从头开始**：换搜索词之后旧结果作废，累积条数也要归零。
      */
     fun searchOnline(query: String = onlineQuery) {
+        // 搜单曲还是搜歌单，由 [onlineSearchMode] 决定。两类结果的下标语义完全不同
+        // （一个进播放队列、一个进歌单详情页），所以共用一套"在搜 / 有下一页 / 搜索词"
+        // 状态，但结果列表各存各的 —— 切换模式时会清空，同一时刻只有一类在生效。
+        when (onlineSearchMode) {
+            OnlineSearchMode.SINGLE -> searchOnlineSingles(query)
+            OnlineSearchMode.PLAYLIST -> searchOnlinePlaylists(query)
+        }
+    }
+
+    private fun searchOnlineSingles(query: String) {
         val src = onlineSource ?: run {
             onlineNotice = "音源不可用"
             return
@@ -1886,6 +1935,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 把用户已经翻到的内容清掉是最糟的处理。
      */
     fun loadMoreOnline() {
+        when (onlineSearchMode) {
+            OnlineSearchMode.SINGLE -> loadMoreOnlineSingles()
+            OnlineSearchMode.PLAYLIST -> loadMoreOnlinePlaylists()
+        }
+    }
+
+    private fun loadMoreOnlineSingles() {
         val src = onlineSource ?: return
         if (!onlineMusicEnabled) return
         if (onlineSearching || onlineLoadingMore || !onlineHasMore) return
@@ -2002,6 +2058,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         cancelOnlineRequests()
         onlineSearchToken++
         onlineResults = emptyList()
+        onlinePlaylistResults = emptyList()
         onlineLoadedCount = 0
         onlineHasMore = false
         onlineLoadingMore = false
@@ -2073,6 +2130,406 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun onlineThumbUrl(track: RemoteTrack, px: Int): String? {
         val url = track.coverUrl ?: return null
         return onlineSource?.thumbUrl(url, px)
+    }
+
+    /** 歌单封面的缩略图地址。和 [onlineThumbUrl] 同理，只是数据源是 [RemotePlaylist] */
+    fun playlistThumbUrl(playlist: RemotePlaylist, px: Int): String? {
+        val url = playlist.coverUrl ?: return null
+        return onlineSource?.thumbUrl(url, px)
+    }
+
+    // ===== 在线歌单：搜索 / 推荐 / 详情 / 批量下载 =====
+
+    /**
+     * 在线搜索的对象：单曲还是歌单。
+     *
+     * 两类结果**共用**「在搜 / 有下一页 / 搜索词 / 翻页失败」这套状态（同一时刻只有一类
+     * 在生效），但结果列表各存各的 —— 一个进播放队列，一个进歌单详情页，下标语义
+     * 完全不同，混在一起点播放必然错位。切换模式会走 [clearOnlineSearch]。
+     */
+    enum class OnlineSearchMode { SINGLE, PLAYLIST }
+
+    var onlineSearchMode by mutableStateOf(OnlineSearchMode.SINGLE)
+        private set
+
+    fun changeOnlineSearchMode(mode: OnlineSearchMode) {
+        if (mode == onlineSearchMode) return
+        val keepQuery = onlineQuery
+        onlineSearchMode = mode
+        // 换对象 = 换结果，旧结果的下标不能留
+        clearOnlineSearch()
+        // 但输入框里的词要放回去：切模式通常是想"换个对象搜同一个词"，
+        // 清掉的话用户得重新打一遍。放回去之后防抖逻辑会自然触发一次新搜索。
+        onlineQuery = keepQuery
+    }
+
+    /** 歌单搜索结果（**已累积多页**）。和 [onlineResults] 同一套分页约定 */
+    var onlinePlaylistResults by mutableStateOf<List<RemotePlaylist>>(emptyList())
+        private set
+
+    /**
+     * 搜歌单（第一页）。
+     *
+     * 和 [searchOnlineSingles] 是同一套骨架（取消在途请求 → 拿总数判断有没有下一页 →
+     * 失败和"没搜到"分开说），只是换了音源方法、结果类型和空态文案。
+     */
+    private fun searchOnlinePlaylists(query: String) {
+        val src = onlineSource ?: run {
+            onlineNotice = "音源不可用"
+            return
+        }
+        val kw = query.trim()
+        if (kw.isEmpty()) {
+            clearOnlineSearch()
+            return
+        }
+        onlineQuery = query
+
+        cancelOnlineRequests()
+        val token = ++onlineSearchToken
+        onlineSearchJob = viewModelScope.launch {
+            onlineSearching = true
+            onlineNotice = null
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    src.searchPlaylists(kw, ONLINE_PAGE_SIZE, 0)
+                }
+                val lists = page?.playlists.orEmpty()
+
+                onlinePlaylistResults = lists
+                onlineLoadedCount = lists.size
+                onlineSearchedFor = kw
+                onlineSearchFailed = page == null
+                onlineHasMore = page != null &&
+                    page.hasMore(offset = 0, limit = ONLINE_PAGE_SIZE) &&
+                    lists.size < MAX_ONLINE_RESULTS
+                onlineLoadMoreFailed = false
+                if (page != null && lists.isNotEmpty()) pushOnlineHistory(kw)
+                onlineNotice = when {
+                    page == null -> "搜索失败，检查一下网络或稍后再试"
+                    lists.isEmpty() -> "没搜到「$kw」相关的歌单"
+                    else -> null
+                }
+            } finally {
+                if (token == onlineSearchToken) onlineSearching = false
+            }
+        }
+    }
+
+    /** 歌单搜索的下一页。语义和 [loadMoreOnlineSingles] 一致 */
+    private fun loadMoreOnlinePlaylists() {
+        val src = onlineSource ?: return
+        if (!onlineMusicEnabled) return
+        if (onlineSearching || onlineLoadingMore || !onlineHasMore) return
+        val kw = onlineSearchedFor
+        if (kw.isEmpty()) return
+
+        val token = onlineSearchToken
+        val offset = onlineLoadedCount
+        onlineLoadMoreJob = viewModelScope.launch {
+            onlineLoadingMore = true
+            onlineLoadMoreFailed = false
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    src.searchPlaylists(kw, ONLINE_PAGE_SIZE, offset)
+                }
+                if (token != onlineSearchToken) return@launch
+                if (page == null) {
+                    onlineLoadMoreFailed = true
+                    return@launch
+                }
+                val lists = page.playlists
+                if (lists.isEmpty()) {
+                    onlineHasMore = false
+                    return@launch
+                }
+                val seen = onlinePlaylistResults.mapTo(HashSet(onlinePlaylistResults.size * 2)) {
+                    it.remoteId
+                }
+                onlinePlaylistResults = onlinePlaylistResults + lists.filter { it.remoteId !in seen }
+                onlineLoadedCount = offset + lists.size
+                onlineHasMore = page.hasMore(offset, ONLINE_PAGE_SIZE) &&
+                    onlineLoadedCount < MAX_ONLINE_RESULTS
+            } finally {
+                if (token == onlineSearchToken) onlineLoadingMore = false
+            }
+        }
+    }
+
+    // ---- 首页推荐歌单 ----
+
+    /** 首页推荐（输入框为空时展示）。空列表 + [recommendedFailed] 才代表"拉失败" */
+    var recommendedPlaylists by mutableStateOf<List<RemotePlaylist>>(emptyList())
+        private set
+
+    var recommendedLoading by mutableStateOf(false)
+        private set
+
+    var recommendedFailed by mutableStateOf(false)
+        private set
+
+    private var recommendedJob: Job? = null
+
+    /**
+     * 拉一次推荐歌单。
+     *
+     * 已经有结果就直接返回 —— 它由界面在进入在线页 / 换音源时调一次，
+     * 不跟着输入框的每次变化重拉。失败时可以走 [retryRecommendedPlaylists]。
+     */
+    fun loadRecommendedPlaylists() {
+        val src = onlineSource ?: return
+        if (!onlineMusicEnabled) return
+        if (recommendedLoading || recommendedPlaylists.isNotEmpty()) return
+        recommendedJob = viewModelScope.launch {
+            recommendedLoading = true
+            recommendedFailed = false
+            try {
+                val list = withContext(Dispatchers.IO) { src.recommendedPlaylists(RECOMMEND_LIMIT) }
+                if (list == null) {
+                    recommendedFailed = true
+                } else {
+                    recommendedPlaylists = list
+                }
+            } finally {
+                recommendedLoading = false
+            }
+        }
+    }
+
+    fun retryRecommendedPlaylists() {
+        recommendedJob?.cancel()
+        recommendedJob = null
+        recommendedLoading = false
+        recommendedFailed = false
+        loadRecommendedPlaylists()
+    }
+
+    // ---- 歌单详情 ----
+
+    /** 当前打开的歌单；null 表示没在详情页。界面据此渲染标题 / 封面 */
+    var playlistDetail by mutableStateOf<RemotePlaylist?>(null)
+        private set
+
+    /** 详情页的曲目（已补全元数据）。空 + [playlistFailed] 才是"拉失败" */
+    var playlistTracks by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var playlistLoading by mutableStateOf(false)
+        private set
+
+    var playlistFailed by mutableStateOf(false)
+        private set
+
+    private var playlistJob: Job? = null
+
+    /**
+     * 打开一个歌单：记住它，然后去拉全部曲目。
+     *
+     * 拉曲目是**两次请求起步**（trackIds + 批量详情，见 [OnlineSource.playlistTracks]），
+     * 大歌单要好几秒，所以这里只负责发起，界面用 [playlistLoading] 显示进度。
+     */
+    fun openPlaylist(playlist: RemotePlaylist) {
+        val src = onlineSource ?: return
+        playlistJob?.cancel()
+        playlistDetail = playlist
+        playlistTracks = emptyList()
+        playlistFailed = false
+        // 同步置位，别等协程调度 —— 否则详情页会先闪一下"这个歌单是空的"
+        playlistLoading = true
+        playlistJob = viewModelScope.launch {
+            try {
+                val tracks = withContext(Dispatchers.IO) { src.playlistTracks(playlist.remoteId) }
+                // 期间关掉了 / 又点了别的歌单：这一批已经不属于当前页面
+                if (playlistDetail?.remoteId != playlist.remoteId) return@launch
+                if (tracks == null) {
+                    playlistFailed = true
+                } else {
+                    playlistTracks = tracks
+                    // 并进 onlineSongMap：播放、队列页、播放页、收藏判断都要按 id 反查
+                    commitOnlinePage(src, tracks)
+                }
+            } finally {
+                if (playlistDetail?.remoteId == playlist.remoteId) playlistLoading = false
+            }
+        }
+    }
+
+    /** 详情页加载失败后的"点击重试" */
+    fun retryPlaylistTracks() {
+        playlistDetail?.let { openPlaylist(it) }
+    }
+
+    /** 离开详情页时调用，顺带取消在途的曲目请求 */
+    fun closePlaylist() {
+        playlistJob?.cancel()
+        playlistJob = null
+        playlistDetail = null
+        playlistTracks = emptyList()
+        playlistLoading = false
+        playlistFailed = false
+    }
+
+    /**
+     * 播放歌单里的第 [index] 首。
+     *
+     * 队列只放**能播的**，理由和 [playOnline] 完全一样：VIP 歌塞进队列，
+     * 自动续播到它就会卡住报错，用户还以为播放器坏了。
+     */
+    fun playPlaylistTrack(index: Int) {
+        val src = onlineSource ?: return
+        val track = playlistTracks.getOrNull(index) ?: return
+        if (!track.playable) {
+            showToast("「${track.title}」需要会员，拿不到播放地址")
+            return
+        }
+        val playable = playlistTracks.filter { it.playable }
+        val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
+        val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
+        if (at < 0) return
+        val songs = onlineSongs.map { localCopyOf(it) ?: it }
+        player.play(songs, at)
+    }
+
+    /** 从歌单里第一首能播的开始放整个歌单（详情页的「播放全部」） */
+    fun playPlaylist() {
+        val at = playlistTracks.indexOfFirst { it.playable }
+        if (at < 0) {
+            showToast("这个歌单里没有能播的歌")
+            return
+        }
+        playPlaylistTrack(at)
+    }
+
+    /** 当前歌单里已经存到本地的曲目数（详情页头部显示进度用） */
+    val playlistDownloadedCount: Int
+        get() = playlistTracks.count { isDownloaded(it) }
+
+    /** 当前歌单里"还能下"的曲目数（可播且没存过）。确认弹窗用它报预期 */
+    val playlistDownloadableCount: Int
+        get() = playlistTracks.count { it.playable && !isDownloaded(it) }
+
+    // ---- 一键下载整个歌单 ----
+
+    var playlistDownloadActive by mutableStateOf(false)
+        private set
+
+    /**
+     * 这一轮下载属于哪个歌单（[RemotePlaylist.remoteId]）；null = 没在跑。
+     *
+     * 下载是**跨页面存活**的：用户可以在下载途中退出去开另一个歌单。详情页靠它
+     * 判断"这进度是不是我这一页的" —— 否则 A 歌单的进度条会出现在 B 歌单页上，
+     * 让人以为在下 B。
+     */
+    var playlistDownloadOwner by mutableStateOf<String?>(null)
+        private set
+
+    /** 这一轮要下多少首（= 可播的曲目数，含已存过要跳过的） */
+    var playlistDownloadTotal by mutableIntStateOf(0)
+        private set
+
+    /** 已处理多少首（含跳过和失败） */
+    var playlistDownloadDone by mutableIntStateOf(0)
+        private set
+
+    var playlistDownloadSaved by mutableIntStateOf(0)
+        private set
+
+    var playlistDownloadSkipped by mutableIntStateOf(0)
+        private set
+
+    var playlistDownloadFailed by mutableIntStateOf(0)
+        private set
+
+    private var playlistDownloadJob: Job? = null
+
+    /**
+     * 一键下载当前歌单的**全部**曲目。
+     *
+     * ## 和 [maybeDownload] 的区别
+     *
+     * 那个是"播放时顺手存一份"，受 [onlineDownloadEnabled] 开关和 8 秒冷静期约束；
+     * 这个是用户**明确点出来**的动作，所以不看那个开关 —— 但
+     * [onlineDownloadWifiOnly] 仍然生效（用户设的流量红线，手动下载也得守）。
+     *
+     * ## 串行 + 可取消
+     *
+     * 一首接一首地下，不并发：并发会和播放抢带宽，网易云对外链请求也不友好。
+     * 可播的、没存过的才下；VIP / 下架的跳过并计数，不报错（它们本来也播不了）。
+     */
+    fun downloadPlaylistTracks() {
+        val src = onlineSource ?: return
+        if (playlistDownloadActive) return
+        val tracks = playlistTracks
+        if (tracks.isEmpty()) return
+
+        playlistDownloadJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            // 只在 Wi-Fi 下下载：判断不出来时跳过，和 [maybeDownload] 同一套保守策略
+            if (onlineDownloadWifiOnly && !OnlineDownloader.isOnUnmeteredNetwork(app)) {
+                showToast("当前不是 Wi-Fi，已按「只在 Wi-Fi 下载」跳过")
+                return@launch
+            }
+            val targets = tracks.filter { it.playable }
+            playlistDownloadTotal = targets.size
+            playlistDownloadDone = 0
+            playlistDownloadSaved = 0
+            playlistDownloadSkipped = tracks.size - targets.size
+            playlistDownloadFailed = 0
+            playlistDownloadActive = true
+            // 记下"这轮属于哪个歌单"。取的是发起时的那个，之后用户翻到别的歌单也不受影响
+            playlistDownloadOwner = playlistDetail?.remoteId
+            try {
+                for (track in targets) {
+                    if (!isActive) break
+                    val key = OnlineDownloader.downloadKeyOf(src.id, track.remoteId)
+                    if (key != null && key in prefs.downloadedKeys()) {
+                        playlistDownloadSkipped++
+                        playlistDownloadDone++
+                        continue
+                    }
+                    val outcome = OnlineDownloader.download(
+                        context = app,
+                        source = src.id,
+                        remoteId = track.remoteId,
+                        title = track.title,
+                        artist = track.artist,
+                        album = track.album,
+                        streamUrl = src.streamUrl(track.remoteId),
+                        coverBytes = coverBytesForTag(track.title, track.artist, track.coverUrl)
+                    )
+                    when (outcome) {
+                        is OnlineDownloader.Outcome.Saved -> {
+                            key?.let { prefs.markDownloaded(it) }
+                            downloadedCount = prefs.downloadedKeys().size
+                            playlistDownloadSaved++
+                        }
+                        OnlineDownloader.Outcome.Unavailable -> playlistDownloadSkipped++
+                        OnlineDownloader.Outcome.Failed -> playlistDownloadFailed++
+                        OnlineDownloader.Outcome.Skipped -> playlistDownloadSkipped++
+                    }
+                    playlistDownloadDone++
+                }
+            } finally {
+                playlistDownloadActive = false
+                playlistDownloadOwner = null
+                // 有东西落盘才重扫 —— 全跳过时扫一次纯属浪费
+                if (playlistDownloadSaved > 0) rescanAfterDownload()
+                val tail = buildString {
+                    if (playlistDownloadSkipped > 0) append(" · 跳过 ${playlistDownloadSkipped}")
+                    if (playlistDownloadFailed > 0) append(" · 失败 ${playlistDownloadFailed}")
+                }
+                showToast(
+                    if (!isActive) "已取消 · 新存 ${playlistDownloadSaved} 首$tail"
+                    else "歌单下载完成 · 新存 ${playlistDownloadSaved} 首$tail"
+                )
+            }
+        }
+    }
+
+    /** 取消正在跑的歌单下载。进度状态由协程的 `finally` 收尾 */
+    fun cancelPlaylistDownload() {
+        playlistDownloadJob?.cancel()
+        playlistDownloadJob = null
     }
 
     // ===== 派生数据 =====
@@ -2482,6 +2939,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 没有上限就会一直往下翻、一直打接口。300 条对一个"搜首歌来听"的场景绰绰有余。
          */
         private const val MAX_ONLINE_RESULTS = 300
+
+        /**
+         * 首页推荐歌单拉多少个。
+         *
+         * 12 个够横向滑两屏，也够凑满一屏的网格。每个都要下缩略图，
+         * 再多会让首页首屏等太久。
+         */
+        private const val RECOMMEND_LIMIT = 12
 
         /**
          * 开始播放后**多久**才真正触发下载。

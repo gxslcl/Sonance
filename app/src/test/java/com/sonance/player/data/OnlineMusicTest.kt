@@ -206,6 +206,19 @@ class OnlineMusicTest {
                 offset: Int
             ): RemoteSearchPage? = RemoteSearchPage(emptyList(), 0)
 
+            // 歌单相关的三个方法在接口上**没有**默认实现：一个不支持歌单的音源
+            // 该"明确地"表示不支持，而不是悄悄返回空列表让人以为"确实没歌单"。
+            // 这里只是为了凑齐接口，返回值不会被这个用例用到。
+            override suspend fun searchPlaylists(
+                query: String,
+                limit: Int,
+                offset: Int
+            ): RemotePlaylistPage? = RemotePlaylistPage(emptyList(), 0)
+
+            override suspend fun recommendedPlaylists(limit: Int): List<RemotePlaylist>? = emptyList()
+
+            override suspend fun playlistTracks(playlistId: String): List<RemoteTrack>? = emptyList()
+
             override fun streamUrl(remoteId: String) = "https://example.com/a.mp3"
         }
         val url = "https://example.com/a.jpg"

@@ -63,6 +63,7 @@ import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.ChipsRow
+import com.sonance.player.ui.components.AdaptModeRow
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
@@ -524,6 +525,28 @@ private fun LyricsSettingsSection(vm: SonanceViewModel) {
                     "只影响显示，缓存里仍存原文，关掉开关无需重新联网。",
                 checked = vm.lyricsConvertT2S,
                 onCheckedChange = { vm.changeLyricsT2S(it) }
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "歌词适配背景",
+                style = MaterialTheme.typography.titleSmall,
+                color = skin.text
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "歌词页的背景是封面模糊后透出来的。有些封面透出来正好和歌词撞色，" +
+                    "屏幕上某一段的歌词就糊进背景里了。\n" +
+                    "打开后按每行**在屏幕上的位置**取那一段的背景色，把歌词明度挪到刚好看得清 ——" +
+                    "色相不动，所以还是你选的皮肤那套颜色。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            AdaptModeRow(
+                mode = vm.lyricsAdaptMode,
+                onModeChange = { vm.changeLyricsAdaptMode(it) },
+                skin = skin
             )
 
             Spacer(Modifier.height(12.dp))
