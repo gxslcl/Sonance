@@ -32,6 +32,8 @@ Thumbs.db
 *.idsig
 
 # ---------- 开发与验证用的临时数据 ----------
+# WorkBuddy 会话数据（记忆、日志、临时脚本），不进版本库
+/.workbuddy/
 /shots/
 /testaudio/
 /lyricstest/

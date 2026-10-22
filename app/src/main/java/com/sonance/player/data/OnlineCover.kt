@@ -20,7 +20,9 @@ data class CoverCandidate(
     /** 列表展示用（小图） */
     val thumbUrl: String,
     /** 实际写入 / 显示用（大图） */
-    val fullUrl: String
+    val fullUrl: String,
+    /** 来自哪个源（"iTunes" / "网易云"），只用于界面上说明一句 */
+    val source: String = ""
 )
 
 /**
@@ -56,12 +58,12 @@ object OnlineCover {
     const val FULL_PX = 800
 
     @androidx.annotation.VisibleForTesting
-    internal fun buildSearchUrl(term: String, limit: Int, country: String?): String? {
+    internal fun buildSearchUrl(term: String, limit: Int, country: String?, entity: String = "song"): String? {
         val q = term.trim()
         if (q.isEmpty()) return null
         return buildString {
             append("https://itunes.apple.com/search?term=").append(enc(q))
-            append("&entity=song&media=music&limit=").append(limit.coerceIn(1, 50))
+            append("&entity=").append(entity).append("&media=music&limit=").append(limit.coerceIn(1, 50))
             if (!country.isNullOrBlank()) append("&country=").append(enc(country))
         }
     }
@@ -93,10 +95,30 @@ object OnlineCover {
     }
 
     /**
+     * 去掉标题里的括号补充说明：`晴天 (Live)` → `晴天`。
+     *
+     * 本地文件名里这类后缀特别多（`(Live)`、`（电影主题曲）`、`【无损】`、
+     * `- 抖音热播版`），拼进查询词几乎必然搜不到。
+     * 但它是**额外的**一条查询词，不是替换 —— `(Live)` 有时正是要找的版本。
+     */
+    internal fun stripExtras(title: String): String {
+        var t = title.trim()
+        // 括号及其内容（中英文、方头括号）
+        t = t.replace(Regex("[（(\\[【][^）)\\]】]*[）)\\]】]"), " ")
+        // 横线 / 空格后面的版本尾巴，只在**结尾**出现时才去掉
+        t = t.replace(Regex("[-—–_]\\s*[^\\-—–_]{0,20}$"), "")
+        return t.replace(Regex("\\s+"), " ").trim().ifBlank { title.trim() }
+    }
+
+    /**
      * 依次用「越来越宽松」的查询词搜，命中即返回。
      *
      * 顺序是刻意的：先精确（标题+歌手+专辑），不行再逐级放宽。
      * 直接上最宽的话，一首叫「Summer」的歌会被一堆同名结果淹没。
+     *
+     * 变体有两组（原样 / 去括号），每组都按「全带 → 标题+歌手 → 只要标题」放宽。
+     * 加"去括号"这一组是因为本地文件名几乎都带尾巴，
+     * 而原来只有一条查询词能过，稍微对不上就整首搜不到。
      */
     @androidx.annotation.VisibleForTesting
     internal fun buildQueries(title: String, artist: String, album: String): List<String> {
@@ -104,20 +126,31 @@ object OnlineCover {
         val a = artist.trim().takeIf { isRealArtist(it) }.orEmpty()
         val al = album.trim().takeIf { isRealArtist(it) }.orEmpty()
         val ct = cleanTitle(t)
+        val st = stripExtras(t)
 
         return buildList {
-            if (t.isNotBlank() && a.isNotBlank() && al.isNotBlank()) add("$t $a $al")
-            if (t.isNotBlank() && a.isNotBlank()) add("$t $a")
-            if (t.isNotBlank()) add(t)
-            if (ct.isNotBlank() && ct != t) {
-                if (a.isNotBlank()) add("$ct $a")
-                add(ct)
-            }
+            addAll(variants(t, a, al))
+            if (ct != t) addAll(variants(ct, a, al))
+            if (st != t && st != ct) addAll(variants(st, a, al))
         }.distinct()
+    }
+
+    private fun variants(t: String, a: String, al: String): List<String> = buildList {
+        if (t.isNotBlank() && a.isNotBlank() && al.isNotBlank()) add("$t $a $al")
+        if (t.isNotBlank() && a.isNotBlank()) add("$t $a")
+        if (t.isNotBlank()) add(t)
     }
 
     /**
      * 搜封面。
+     *
+     * 两个源都试，谁先给结果用谁：
+     * - **iTunes**（[searchItunes]）：西洋曲库覆盖好、免 key
+     * - **网易云**（[searchNetease]）：东亚曲库覆盖好，App 里本来就在用它的歌词和音源
+     *
+     * 顺序按语种定：标题或歌手里有中日韩字符就先问网易云 ——
+     * 实测华语歌问 iTunes 经常返回**同名翻唱**的封面，那比"没有封面"更糟。
+     *
      * @return 候选列表（可能为空，表示没搜到）；参数不合法返回 null
      */
     suspend fun search(
@@ -132,21 +165,65 @@ object OnlineCover {
             return@withContext null
         }
 
-        for (q in queries) {
-            // 每个查询词先试中国区（华语曲目命中率更高），再退回全球
-            for (country in listOf("CN", null)) {
-                val url = buildSearchUrl(q, limit, country) ?: continue
-                val body = httpGetText(url) ?: continue
-                val list = parseResults(body)
-                if (!list.isNullOrEmpty()) {
-                    Log.i(TAG, "封面搜索命中 ${list.size} 条（query='$q' country=$country）")
-                    return@withContext list
+        val cjk = hasCjkText(title, artist)
+        val first = if (cjk) searchNetease(queries, limit) else searchItunes(queries, limit)
+        if (!first.isNullOrEmpty()) return@withContext first
+
+        val second = if (cjk) searchItunes(queries, limit) else searchNetease(queries, limit)
+        if (!second.isNullOrEmpty()) return@withContext second
+
+        Log.i(TAG, "封面搜索用尽两个源仍无结果: $queries")
+        emptyList()
+    }
+
+    /**
+     * iTunes：每个查询词先全球区、再中国区，还不行再按**专辑**搜一遍。
+     *
+     * ⚠️ 中国区**必须排在全球区后面**：实测 `country=CN` 对华语曲目
+     * 返回的 `resultCount` 常年是 0（Apple Music 中国区不进这个老接口）。
+     * 原来把它排在最前面，于是华语歌第一条查询词就死在这里。
+     */
+    private suspend fun searchItunes(queries: List<String>, limit: Int): List<CoverCandidate>? {
+        for (entity in listOf("song", "album")) {
+            for (q in queries) {
+                for (country in listOf(null, "CN")) {
+                    val url = buildSearchUrl(q, limit, country, entity) ?: continue
+                    val body = httpGetText(url) ?: continue
+                    val list = parseResults(body, "iTunes")
+                    if (!list.isNullOrEmpty()) {
+                        Log.i(TAG, "封面搜索命中 ${list.size} 条（iTunes entity=$entity query='$q' country=$country）")
+                        return list
+                    }
                 }
             }
-            Log.i(TAG, "封面搜索该查询词无结果，继续放宽: '$q'")
         }
-        Log.i(TAG, "封面搜索用尽所有查询词仍无结果: $queries")
-        emptyList()
+        return null
+    }
+
+    /** 网易云：搜索接口一次就带歌名+歌手，够用了 */
+    private suspend fun searchNetease(queries: List<String>, limit: Int): List<CoverCandidate>? {
+        for (q in queries) {
+            val page = runCatching { NeteaseSource.search(q, limit.coerceIn(1, 20), 0) }
+                .onFailure { Log.w(TAG, "网易封面搜索失败: ${it.message}") }
+                .getOrNull() ?: continue
+            val list = page.tracks.mapNotNull { t ->
+                val url = t.coverUrl?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                CoverCandidate(
+                    trackName = t.title,
+                    artistName = t.artist,
+                    collectionName = t.album,
+                    // 图床认 `?param=宽y高`，会真的缩放再返回；不指定的话一张图 1MB+
+                    thumbUrl = NeteaseSource.thumbUrl(url, THUMB_PX),
+                    fullUrl = NeteaseSource.thumbUrl(url, FULL_PX),
+                    source = "网易云"
+                )
+            }.distinctBy { it.fullUrl }
+            if (list.isNotEmpty()) {
+                Log.i(TAG, "封面搜索命中 ${list.size} 条（网易云 query='$q'）")
+                return list
+            }
+        }
+        return null
     }
 
     /**
@@ -198,7 +275,7 @@ object OnlineCover {
 
     /* ============================================================ */
 
-    internal fun parseResults(body: String): List<CoverCandidate>? = runCatching {
+    internal fun parseResults(body: String, source: String = "iTunes"): List<CoverCandidate>? = runCatching {
         val json = JSONObject(body)
         val arr = json.optJSONArray("results") ?: return@runCatching emptyList()
         val out = ArrayList<CoverCandidate>(arr.length())
@@ -212,12 +289,16 @@ object OnlineCover {
             if (art.isNullOrBlank()) continue
             val full = resizeUrl(art, FULL_PX)
             if (!seen.add(full)) continue
+            // entity=album 时没有 trackName，用专辑名补上，界面那两行文字不至于空着
+            val track = o.optString("trackName").orEmpty()
+                .ifBlank { o.optString("collectionName").orEmpty() }
             out += CoverCandidate(
-                trackName = o.optString("trackName").orEmpty(),
+                trackName = track,
                 artistName = o.optString("artistName").orEmpty(),
                 collectionName = o.optString("collectionName").orEmpty(),
                 thumbUrl = resizeUrl(art, THUMB_PX),
-                fullUrl = full
+                fullUrl = full,
+                source = source
             )
         }
         out

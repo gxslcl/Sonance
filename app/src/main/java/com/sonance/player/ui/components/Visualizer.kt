@@ -52,10 +52,12 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -65,12 +67,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.AudioVisualizer
 import com.sonance.player.playback.PcmBus
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -136,6 +141,36 @@ fun VisualizerOverlay(
     var colorIndex by remember { mutableStateOf(prefs.vizColorIndex) }
     var barWidth by remember { mutableStateOf(prefs.vizBarWidth) }
 
+    // ===== 背景（和歌词页同一套玻璃参数，但各存一份）=====
+    //
+    // 这一页原来只有一条「底色 → 表面色 → 底色」的渐变，柱子飘在上面像贴纸。
+    // 铺一层糊开的封面之后，画面才有"在什么东西上面动"的感觉。
+    var glassStyle by remember { mutableStateOf(GlassStyle.of(prefs.vizGlassStyle)) }
+    var glassBlur by remember { mutableIntStateOf(prefs.vizGlassBlurDp) }
+    var glassVisibility by remember { mutableIntStateOf(prefs.vizGlassVisibility) }
+
+    fun applyGlass(s: GlassStyle) {
+        glassStyle = s
+        glassBlur = s.defaultBlurDp
+        glassVisibility = s.defaultVisibility
+        prefs.vizGlassStyle = s.ordinal
+        prefs.vizGlassBlurDp = s.defaultBlurDp
+        prefs.vizGlassVisibility = s.defaultVisibility
+    }
+
+    // 背景用的封面：**整页铺开**要用大一点的图（缩略图放大再糊会全是色块）
+    val context = LocalContext.current
+    var art by remember(song.id) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(song.albumId, song.id, song.title, song.artist) {
+        art = ArtworkLoader.load(
+            context = context,
+            albumId = song.albumId,
+            sizePx = 320,
+            sourceUri = song.uri,
+            coverKey = OnlineCover.keyOf(song.title, song.artist)
+        ) ?: ArtworkLoader.online(song.id)
+    }
+
     // ===== 物理手感参数（全部可在设置面板里调，见 VizPhysics）=====
     var attack by remember { mutableStateOf(prefs.vizAttack) }
     var decayDamping by remember { mutableStateOf(prefs.vizDecayDamping) }
@@ -166,6 +201,17 @@ fun VisualizerOverlay(
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(skin.bg, skin.surface, skin.bg)))
     ) {
+        // ===== 背景玻璃（可在设置面板里调，默认「标准」）=====
+        GlassBackdrop(
+            art = art,
+            style = glassStyle,
+            blurDp = glassBlur,
+            visibility = glassVisibility,
+            modifier = Modifier
+                .matchParentSize()
+                .clipToBounds()
+        )
+
         // ===== 可视化主体 =====
         VisualizerCanvas(
             viz = viz,
@@ -413,6 +459,18 @@ fun VisualizerOverlay(
                 onEmaAlpha = {
                     emaAlpha = it
                     prefs.vizEmaAlpha = it
+                },
+                glassStyle = glassStyle,
+                glassBlur = glassBlur,
+                glassVisibility = glassVisibility,
+                onGlassStyle = ::applyGlass,
+                onGlassBlur = {
+                    glassBlur = it
+                    prefs.vizGlassBlurDp = it
+                },
+                onGlassVisibility = {
+                    glassVisibility = it
+                    prefs.vizGlassVisibility = it
                 },
                 onDismiss = { settingsOpen = false }
             )
@@ -834,6 +892,13 @@ private fun VizSettingsPanel(
     onPeakHoldTicks: (Int) -> Unit,
     onShowPeak: (Boolean) -> Unit,
     onEmaAlpha: (Float) -> Unit,
+    // ---- 背景玻璃（与歌词页同一套控件，各存一份设置）----
+    glassStyle: GlassStyle,
+    glassBlur: Int,
+    glassVisibility: Int,
+    onGlassStyle: (GlassStyle) -> Unit,
+    onGlassBlur: (Int) -> Unit,
+    onGlassVisibility: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -901,6 +966,25 @@ Column(
                     alwaysShowThumb = true
                 )
             }
+
+            // ---- 背景 ----
+            //
+            // 和歌词页同一套玻璃参数（样式 / 模糊 / 透出），**各存一份**：
+            // 这一页要的是"背景有东西但别抢戏"，通常压得比歌词页更暗。
+            Text(
+                "背景",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.accent
+            )
+            GlassControls(
+                style = glassStyle,
+                blurDp = glassBlur,
+                visibility = glassVisibility,
+                onStyleChange = onGlassStyle,
+                onBlurChange = onGlassBlur,
+                onVisibilityChange = onGlassVisibility,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             // ---- 物理手感 ----
             //

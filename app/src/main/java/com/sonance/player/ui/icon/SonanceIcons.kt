@@ -100,6 +100,8 @@ object SonanceIcons {
     val Close by o("Close", "M18 6L6 18", "M6 6l12 12")
     val ChevronDown by o("ChevronDown", "M6 9l6 6 6-6")
     val ArrowLeft by o("ArrowLeft", "M19 12H5", "M12 19l-7-7 7-7")
+    /** 「回到顶部」按钮的箭头。实心向上，比 chevron 在小尺寸下更好认 */
+    val ArrowUp by o("ArrowUp", "M12 20V6", "M6 12l6-6 6 6")
     val MoreVertical by o("MoreVertical", dot(12.0, 12.0), dot(12.0, 5.0), dot(12.0, 19.0))
     val Check by o("Check", "M20 6L9 17l-5-5")
     val Refresh by o(
@@ -108,6 +110,17 @@ object SonanceIcons {
         "M1 20v-6h6",
         "M3.51 9a9 9 0 0 1 14.85-3.36L23 10",
         "M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+    )
+
+    /**
+     * 云朵：在线音乐入口。
+     *
+     * 为什么不复用放大镜：搜索框已经占了一个放大镜（本地搜索），
+     * 右上角再放一个，用户分不清哪个联网、哪个搜本地。
+     */
+    val Cloud by o(
+        "Cloud",
+        "M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"
     )
     val Trash by o(
         "Trash",

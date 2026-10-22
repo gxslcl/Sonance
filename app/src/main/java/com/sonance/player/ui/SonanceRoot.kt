@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,9 +25,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -39,10 +43,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
@@ -71,16 +78,19 @@ import com.sonance.player.ui.screens.AlbumsScreen
 import com.sonance.player.ui.screens.ArtistsScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
+import com.sonance.player.ui.screens.LibraryPagerScreen
 import com.sonance.player.ui.screens.OnlinePlaylistScreen
 import com.sonance.player.ui.screens.OnlineScreen
 import com.sonance.player.ui.screens.RecentScreen
 import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
 import com.sonance.player.ui.screens.SongsScreen
+import com.sonance.player.ui.screens.inPager
 import com.sonance.player.ui.sheets.EqualizerSheet
 import com.sonance.player.ui.sheets.QueueSheet
 import com.sonance.player.ui.sheets.SleepTimerSheet
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.SonanceTheme
 import com.sonance.player.ui.components.CoverPickerDialog
 
@@ -161,7 +171,15 @@ private fun PermissionGate(vm: SonanceViewModel, content: @Composable () -> Unit
     }
 
     LaunchedEffect(granted) {
-        if (granted && vm.scanState == ScanState.IDLE) vm.scan()
+        if (!granted) return@LaunchedEffect
+        if (vm.scanState == ScanState.IDLE) {
+            // 首次启动：没有缓存，扫一遍（走加载态）
+            vm.scan()
+        } else {
+            // 有缓存：后台静默刷新一次。这就是"每次打开应用自动刷新"，
+            // 取代了已经被去掉的下拉刷新
+            vm.refreshOnStart()
+        }
     }
 
     if (granted) {
@@ -301,7 +319,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 放在前面会被全屏播放页 / 详情页抢走。另外这里刻意要求 detail == null ——
     // 详情页的返回优先级要高于设置页。
     BackHandler(
-        enabled = !fullPlayerOpen && detail == null && vm.tab == LibraryTab.SETTINGS
+        enabled = !fullPlayerOpen && detail == null &&
+            (vm.tab == LibraryTab.SETTINGS || vm.tab == LibraryTab.ONLINE)
     ) {
         vm.selectTab(LibraryTab.SONGS)
     }
@@ -468,10 +487,17 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
 }
 
+/**
+ * 悬浮迷你播放条占掉的那一条高度（内容要给它让出来）。
+ * 卡片 62dp 内容 + 10dp 下边距，留 76dp 刚好不压住列表最后一行。
+ */
+private val MINI_FLOAT_RESERVE = 76.dp
+
 /* ============================================================
  * 手机布局：顶栏 + 内容 + 迷你播放条 + 底部导航
  * ============================================================ */
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactLayout(
     vm: SonanceViewModel,
@@ -485,83 +511,247 @@ private fun CompactLayout(
     onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
+    // 「视图」弹层：专辑 / 艺术家 / 文件夹 —— 从底栏下沉到这里
+    var showViewSheet by remember { mutableStateOf(false) }
+    // 双击顶栏标题 / logo 弹出的「应用名 + 桌面图标」编辑面板
+    var showBrandEditor by remember { mutableStateOf(false) }
+
+    // 悬浮卡片要叠在内容上：内容按卡片高度让出一条底边距，
+    // 免得列表最后一行被卡片压住（贴底通栏本来就在内容下面，不需要让）
+    val floating = vm.miniPlayerStyle == MiniPlayerStyle.FLOAT
+
+    // 悬浮卡的**实测高度**。设置里能把卡片调到 2 倍高，原来那个写死的
+    // MINI_FLOAT_RESERVE(76dp) 就兜不住了 —— 卡片会压住内容底部，
+    // 连右下角「回到顶部」都被盖在里面。改成量一次高度，内容让位和那个按钮
+    // 都跟着走，用户怎么调都不会再互相挡。
+    var miniBarHeightPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+    val miniBarHeight = with(density) { miniBarHeightPx.toDp() }
+    // 还没测到之前先按老值垫着，避免第一帧内容跳动
+    val miniReserve = if (miniBarHeightPx > 0) miniBarHeight + 8.dp else MINI_FLOAT_RESERVE
+
     Column(Modifier.fillMaxSize()) {
 
-        Column(
+        Box(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(skin.bg)
+                .navigationBarsPadding()
         ) {
+            Column(Modifier.fillMaxSize()) {
             AppTopBar(
-                title = detail?.let { detailTitle(vm, it) } ?: vm.tab.label,
+                // 主页面标题固定成**应用名**：原来跟着页签换（"全部歌曲 · 共 N 首 ·
+                // 21 小时"），每切一次页文字都在变，顶栏永远没有稳定锚点。
+                // 详情页仍是专辑/艺术家名 —— 那是"我在看什么"的位置指示。
+                title = detail?.let { detailTitle(vm, it) } ?: vm.appDisplayName,
                 subtitle = detail?.let { detailSubtitle(vm, it) } ?: tabSubtitle(vm),
                 // 列表页把统计并进标题行（省一整行）；详情页标题可能是长专辑名，
                 // 挤一行会把标题截没，所以保持两行
                 subtitleInline = detail == null,
                 modifier = Modifier.statusBarsPadding(),
-                onBack = detail?.let { { onCloseDetail() } },
+                // 双击标题/logo → 改应用名、换**顶栏图标**（不是桌面图标）
+                onTitleDoubleTap = if (detail == null) {
+                    { showBrandEditor = true }
+                } else null,
+                logoId = vm.topBarLogoId,
+                // 底栏去掉之后，专辑/艺术家/文件夹/在线 变成"深一层"的页面 ——
+                // 不给返回键，用户只能再点一次 ▤ 才能回曲库，等于走进死胡同
+                onBack = when {
+                    detail != null -> { { onCloseDetail() } }
+                    vm.tab == LibraryTab.ALBUMS || vm.tab == LibraryTab.ARTISTS ||
+                        vm.tab == LibraryTab.FOLDERS || vm.tab == LibraryTab.ONLINE ->
+                        { { vm.selectTab(LibraryTab.SONGS) } }
+                    else -> null
+                },
                 actions = {
-                    // 「重新扫描」只对本地曲库有意义。在线页上摆一个会让人以为
-                    // 它是"重新搜索" —— 而那是搜索框自己的事。
-                    if (detail == null &&
-                        vm.tab != LibraryTab.SETTINGS &&
-                        vm.tab != LibraryTab.ONLINE
-                    ) {
+                    if (detail == null) {
+                        // ① 视图：专辑 / 艺术家 / 文件夹 收进弹层（原来占底栏三格）
                         IconAction(
-                            icon = SonanceIcons.Refresh,
-                            contentDescription = "重新扫描",
-                            onClick = { vm.scan() },
-                            iconSize = 18.dp
+                            icon = SonanceIcons.Layers,
+                            contentDescription = "切换视图",
+                            onClick = { showViewSheet = true },
+                            iconSize = 19.dp,
+                            tint = if (vm.tab == LibraryTab.ALBUMS ||
+                                vm.tab == LibraryTab.ARTISTS ||
+                                vm.tab == LibraryTab.FOLDERS
+                            ) {
+                                skin.accent
+                            } else {
+                                skin.textDim
+                            }
+                        )
+                        // ② 在线音乐：云图标进（不跟本地搜索框抢放大镜）；
+                        // 已经停在在线音乐页时变成 ✕ —— 和设置页同一条规则：
+                        // 这类"全屏接管"的页面，原样图标点上去毫无反应，看着就像坏了。
+                        val inOnline = vm.tab == LibraryTab.ONLINE
+                        IconAction(
+                            icon = if (inOnline) SonanceIcons.Close else SonanceIcons.Cloud,
+                            contentDescription = if (inOnline) "关闭在线音乐" else "在线音乐",
+                            onClick = {
+                                if (inOnline) {
+                                    vm.selectTab(LibraryTab.SONGS)
+                                } else {
+                                    vm.selectTab(LibraryTab.ONLINE)
+                                    onCloseDetail()
+                                }
+                            },
+                            iconSize = 19.dp,
+                            tint = if (inOnline) skin.accent else skin.textDim
                         )
                     }
-                    // 设置入口：从底部栏搬到右上角齿轮
+                    // ③ 设置：固定在最右。
+                    //
+                    // 已经停在设置页时它变成 ✕ —— 设置页是"全屏接管"的一页，
+                    // 右上角那个齿轮点上去没有任何变化，看着就像坏了；
+                    // 变成 ✕ 才说明「再点一下就退出去」。
+                    val inSettings = detail == null && vm.tab == LibraryTab.SETTINGS
                     IconAction(
-                        icon = SonanceIcons.Settings,
-                        contentDescription = "皮肤与设置",
+                        icon = if (inSettings) SonanceIcons.Close else SonanceIcons.Settings,
+                        contentDescription = if (inSettings) "关闭设置" else "皮肤与设置",
                         onClick = {
-                            vm.selectTab(LibraryTab.SETTINGS)
-                            onCloseDetail()
+                            if (inSettings) {
+                                vm.selectTab(LibraryTab.SONGS)
+                            } else {
+                                vm.selectTab(LibraryTab.SETTINGS)
+                                onCloseDetail()
+                            }
                         },
                         iconSize = 19.dp,
-                        tint = if (detail == null && vm.tab == LibraryTab.SETTINGS) {
-                            skin.accent
-                        } else {
-                            skin.textDim
-                        }
+                        tint = if (inSettings) skin.accent else skin.textDim
                     )
                 }
             )
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                ScreenBody(
-                    vm = vm,
-                    playerState = playerState,
-                    detail = detail,
-                    onOpenDetail = onOpenDetail,
-                    onOpenEqualizer = onOpenEqualizer
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(bottom = if (floating && playerState.hasItem) miniReserve else 0.dp)
+                ) {
+                    if (detail == null && vm.tab.inPager) {
+                        // 三页滑动：全部 / 最近 / 收藏（下拉刷新已移除，改由启动时自动刷新）
+                        LibraryPagerScreen(
+                            vm = vm,
+                            playerState = playerState,
+                            onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) }
+                        )
+                    } else {
+                        ScreenBody(
+                            vm = vm,
+                            playerState = playerState,
+                            detail = detail,
+                            onOpenDetail = onOpenDetail,
+                            onOpenEqualizer = onOpenEqualizer
+                        )
+                    }
+                }
+            }
+
+            // 迷你播放条：悬浮时叠在内容上（Align.BottomCenter），
+            // 经典时由下方那条 navigationBarsPadding 的位置关系自然贴底
+            if (playerState.hasItem) {
+                MiniPlayer(
+                    state = playerState,
+                    song = null,
+                    onOpen = onOpenFullPlayer,
+                    onPlayPause = { vm.player.togglePlay() },
+                    onNext = { vm.player.next() },
+                    onPrev = { vm.player.previous() },
+                    style = vm.miniPlayerStyle,
+                    glass = vm.miniGlassStyle,
+                    glassBlur = vm.miniGlassBlur,
+                    glassVisibility = vm.miniGlassVisibility,
+                    cardOpacity = vm.miniCardOpacity,
+                    progressStyle = vm.miniProgressStyle,
+                    swipeLeftPct = vm.miniSwipeLeftPct,
+                    swipeRightPct = vm.miniSwipeRightPct,
+                    heightScale = vm.miniHeightScale / 100f,
+                    coverScale = vm.miniCoverScale / 100f,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        // 量出真实高度：内容让位、回到顶部按钮的避让都靠它
+                        .onSizeChanged { miniBarHeightPx = it.height }
                 )
             }
         }
+        // 底栏已移除：五个入口重新分层（三页滑动 / 视图弹层 / 右上角在线）
+    }
 
-        if (playerState.hasItem) {
-            MiniPlayer(
-                state = playerState,
-                song = null,
-                onOpen = onOpenFullPlayer,
-                onPlayPause = { vm.player.togglePlay() },
-                onNext = { vm.player.next() },
-                onPrev = { vm.player.previous() }
+    if (showViewSheet) {
+        ModalBottomSheet(onDismissRequest = { showViewSheet = false }) {
+            ViewPickerSheet(
+                current = vm.tab,
+                onPick = { tab ->
+                    vm.selectTab(tab)
+                    onCloseDetail()
+                    showViewSheet = false
+                }
             )
         }
+    }
 
-        AppBottomBar(
-            selected = vm.tab,
-            onSelect = {
-                vm.selectTab(it)
-                onCloseDetail()
-            },
-            modifier = Modifier.navigationBarsPadding()
+    if (showBrandEditor) {
+        BrandEditorDialog(vm = vm, onDismiss = { showBrandEditor = false })
+    }
+}
+
+/**
+ * 「视图」弹层：把专辑 / 艺术家 / 文件夹 放在一步可达的位置。
+ *
+ * 为什么不塞进设置页：这三项是中频操作（按专辑听歌是常见路径），
+ * 埋进设置会变成"每次都要找"。放在标题栏一个图标后面，既不占常驻位，也只需一步。
+ */
+@Composable
+private fun ViewPickerSheet(
+    current: LibraryTab,
+    onPick: (LibraryTab) -> Unit
+) {
+    val skin = LocalSkin.current
+    val options = listOf(
+        Triple(LibraryTab.SONGS, SonanceIcons.Music, "歌曲"),
+        Triple(LibraryTab.ALBUMS, SonanceIcons.Album, "专辑"),
+        Triple(LibraryTab.ARTISTS, SonanceIcons.Users, "艺术家"),
+        Triple(LibraryTab.FOLDERS, SonanceIcons.Folder, "文件夹")
+    )
+    Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+        Text(
+            text = "按什么方式浏览曲库",
+            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            color = skin.textMuted,
+            modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 10.dp)
         )
+        options.forEach { (tab, icon, label) ->
+            val on = current == tab
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(tab) }
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (on) skin.accent else skin.textDim,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = label,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (on) skin.accent else skin.text
+                )
+                if (on) {
+                    Text(
+                        text = "当前",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -607,14 +797,8 @@ private fun MediumLayout(
                     subtitleInline = detail == null,
                     modifier = Modifier.statusBarsPadding(),
                     onBack = detail?.let { { onCloseDetail() } },
-                    actions = {
-                        IconAction(
-                            icon = SonanceIcons.Refresh,
-                            contentDescription = "重新扫描",
-                            onClick = { vm.scan() },
-                            iconSize = 18.dp
-                        )
-                    }
+                    // 同上：刷新不再占顶栏的位置
+                    actions = {}
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     ScreenBody(
@@ -635,6 +819,16 @@ private fun MediumLayout(
                     onPlayPause = { vm.player.togglePlay() },
                     onNext = { vm.player.next() },
                     onPrev = { vm.player.previous() },
+                    style = vm.miniPlayerStyle,
+                    glass = vm.miniGlassStyle,
+                    glassBlur = vm.miniGlassBlur,
+                    glassVisibility = vm.miniGlassVisibility,
+                    cardOpacity = vm.miniCardOpacity,
+                    progressStyle = vm.miniProgressStyle,
+                    swipeLeftPct = vm.miniSwipeLeftPct,
+                    swipeRightPct = vm.miniSwipeRightPct,
+                    heightScale = vm.miniHeightScale / 100f,
+                    coverScale = vm.miniCoverScale / 100f,
                     modifier = Modifier.navigationBarsPadding()
                 )
             } else {
@@ -696,14 +890,9 @@ private fun ExpandedLayout(
                         // 挤一行会把标题截没，所以保持两行
                         subtitleInline = detail == null,
                         onBack = detail?.let { { onCloseDetail() } },
-                        actions = {
-                            IconAction(
-                                icon = SonanceIcons.Refresh,
-                                contentDescription = "重新扫描",
-                                onClick = { vm.scan() },
-                                iconSize = 18.dp
-                            )
-                        }
+                        // 刷新图标去掉了：列表页有下拉刷新，其它页面走「设置 → 重新扫描」。
+                        // 顶栏只留真正一步到不了的入口，图标多了反而每个都不像入口。
+                        actions = {}
                     )
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         ScreenBody(
@@ -877,7 +1066,9 @@ private fun ScreenBody(
  * ============================================================ */
 
 private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
-    LibraryTab.SONGS -> "共 ${vm.songs.size} 首 · ${formatDuration(vm.totalDurationMs)}"
+    // 时间汇总去掉了：找歌的人不关心曲库总共多少小时，
+    // 而且它跟着扫描结果变，挂在那里只是噪音
+    LibraryTab.SONGS -> "共 ${vm.songs.size} 首"
     // 曲目数原来挂在 ListHeader 的统计行上，那行删掉之后并进这里，信息不丢
     LibraryTab.ALBUMS -> "共 ${vm.albums.size} 张专辑 · ${vm.songs.size} 首"
     LibraryTab.ARTISTS -> "共 ${vm.artists.size} 位艺术家"

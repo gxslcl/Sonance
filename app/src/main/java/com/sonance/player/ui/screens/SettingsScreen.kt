@@ -76,6 +76,12 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import com.sonance.player.ui.components.GlassControls
+import com.sonance.player.ui.components.SliderLine
+import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.ListCoverScale
+import com.sonance.player.ui.theme.ListRowStyle
+import com.sonance.player.ui.theme.MiniPlayerStyle
+import com.sonance.player.ui.theme.MiniProgressStyle
 import kotlin.math.roundToInt
 
 @Composable
@@ -122,6 +128,12 @@ fun SettingsScreen(
             Spacer(Modifier.height(12.dp))
             AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
         }
+
+        // ===== 底部播放条（形态 + 玻璃）=====
+        MiniPlayerSettingsSection(vm = vm)
+
+        // ===== 列表外观（行分隔方式）=====
+        ListAppearanceSection(vm = vm)
 
         // ===== 媒体库 =====
         SettingsSection(title = "媒体库") {
@@ -239,6 +251,256 @@ fun SettingsScreen(
 /** 设置页里可选的倒计时时长（分钟） */
 private val SETTINGS_SLEEP_MINUTES = listOf(15, 30, 45, 60, 90)
 
+@Composable
+/**
+ * 底部那个「正在播放」的形态与质感。
+ *
+ * 折叠起来是因为它下面挂着一整套玻璃滑杆 —— 默认展开会把媒体库、
+ * 播放这些真正常用的设置推到两屏之外。收起时标题下面那行摘要
+ * 依然写着当前是哪种形态、有没有开玻璃，不至于因为折叠丢信息。
+ */
+private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val float = vm.miniPlayerStyle == MiniPlayerStyle.FLOAT
+    val summary = buildString {
+        append("当前：").append(vm.miniPlayerStyle.label)
+        if (float && vm.miniGlassStyle != GlassStyle.OFF) {
+            append(" · ").append(vm.miniGlassStyle.label)
+        }
+    }
+    CollapsibleSection(
+        title = "底部播放条",
+        summary = summary,
+        icon = SonanceIcons.Music,
+        expanded = expanded,
+        onToggle = { expanded = !expanded }
+    ) {
+        Text(
+            "「悬浮卡片」离屏边有间距、大圆角带投影，可以叠毛玻璃 / 液态玻璃；" +
+                "「经典贴底」是原来那条通栏。两种都能用，随时可切。",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim
+        )
+        Spacer(Modifier.height(12.dp))
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MiniPlayerStyle.entries.forEach { s ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (s == vm.miniPlayerStyle) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (s == vm.miniPlayerStyle) 1.dp else 0.dp,
+                            color = if (s == vm.miniPlayerStyle) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeMiniPlayerStyle(s) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        s.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (s == vm.miniPlayerStyle) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        if (float) {
+            Spacer(Modifier.height(14.dp))
+            GlassControls(
+                style = vm.miniGlassStyle,
+                blurDp = vm.miniGlassBlur,
+                visibility = vm.miniGlassVisibility,
+                onStyleChange = vm::applyMiniGlassStyle,
+                onBlurChange = vm::changeMiniGlassBlur,
+                onVisibilityChange = vm::changeMiniGlassVisibility,
+                modifier = Modifier.fillMaxWidth()
+            )
+            SliderLine(
+                label = "不透明度",
+                valueText = "${vm.miniCardOpacity}%",
+                value = vm.miniCardOpacity / 100f
+            ) { f -> vm.changeMiniCardOpacity((f * 100).roundToInt()) }
+
+            // ---- 进度显示：环 / 线 / 两者 ----
+            //
+            // 环贴在播放键上、线贴在卡片下沿。两个同时开着就是同一个进度
+            // 说两遍 —— 所以做成三选一，而不是两个独立开关。
+            Spacer(Modifier.height(14.dp))
+            Text("进度显示", style = MaterialTheme.typography.titleSmall, color = skin.text)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "圆环贴在播放键上，长条贴在卡片下沿；同时开两者会重复。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MiniProgressStyle.entries.forEach { s ->
+                    val on = s == vm.miniProgressStyle
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (on) skin.accentGlow else skin.surface2)
+                            .border(
+                                width = if (on) 1.dp else 0.dp,
+                                color = if (on) skin.accent else Color.Transparent,
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeMiniProgressStyle(s) }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = when (s) {
+                                MiniProgressStyle.RING -> "圆环"
+                                MiniProgressStyle.BAR -> "长条"
+                                MiniProgressStyle.BOTH -> "两者"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (on) skin.accent else skin.textMuted
+                        )
+                    }
+                }
+            }
+
+            // ---- 卡片高度 / 封面大小 ----
+            Spacer(Modifier.height(14.dp))
+            Text("卡片尺寸", style = MaterialTheme.typography.titleSmall, color = skin.text)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "高度只加卡片上下的留白，字和按钮大小不变；封面单独缩放。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            SliderLine(
+                label = "高度",
+                valueText = String.format("%.2f×", vm.miniHeightScale / 100f),
+                value = (vm.miniHeightScale - 100) / 100f
+            ) { f -> vm.changeMiniHeightScale((100 + f * 100).roundToInt()) }
+            SliderLine(
+                label = "封面",
+                valueText = String.format("%.2f×", vm.miniCoverScale / 100f),
+                value = (vm.miniCoverScale - 100) / 100f
+            ) { f -> vm.changeMiniCoverScale((100 + f * 100).roundToInt()) }
+
+            // ---- 滑动切歌阈值（左右分开）----
+            //
+            // 右手持机时"从右往左"顺手、反过来要往回够，同一阈值会让右滑经常划不满，
+            // 所以给两个独立滑杆。默认右滑比左滑低。
+            Spacer(Modifier.height(14.dp))
+            Text("滑动切歌阈值", style = MaterialTheme.typography.titleSmall, color = skin.text)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "拖动多远才切歌（占卡片宽度的比例）。右手操作时把「右滑」调低会更好切。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            SliderLine(
+                label = "左滑",
+                valueText = "${vm.miniSwipeLeftPct}%",
+                value = (vm.miniSwipeLeftPct - 5) / 55f
+            ) { f -> vm.changeMiniSwipeLeftPct((5 + f * 55).roundToInt()) }
+            SliderLine(
+                label = "右滑",
+                valueText = "${vm.miniSwipeRightPct}%",
+                value = (vm.miniSwipeRightPct - 5) / 55f
+            ) { f -> vm.changeMiniSwipeRightPct((5 + f * 55).roundToInt()) }
+        }
+    }
+}
+
+/**
+ * 列表外观：行与行之间怎么分开。
+ *
+ * 默认仍是"无分界线"（原来的样子）。行一多容易看串行，所以额外给
+ * 「细分隔线」和「加宽行距」两个更清楚的选项 —— 不强制，交给用户。
+ */
+@Composable
+private fun ListAppearanceSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    SettingsSection(title = "列表外观") {
+        Text(
+            "行数多的时候容易看串行。默认不加线，保留原来那种靠留白区分的清爽感。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ListRowStyle.entries.forEach { s ->
+                val on = s == vm.listRowStyle
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeListRowStyle(s) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        s.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        // ---- 封面大小 ----
+        //
+        // 只放大封面那一格：文字区（标题 / 歌手 · 专辑 / 序号）的位置和字号都不变，
+        // 行高由封面撑开，文字跟着在垂直方向居中 —— 看上去是"图更大了"，
+        // 而不是整行被重新排过一遍。
+        Spacer(Modifier.height(16.dp))
+        Text("封面大小", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "放大后行会跟着变高，文字仍然居中、左右位置不变。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ListCoverScale.entries.forEach { s ->
+                val on = s == vm.listCoverScale
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeListCoverScale(s) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        s.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () -> Unit) {
@@ -264,6 +526,19 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
         )
 
         Spacer(Modifier.height(16.dp))
+
+        // ---- 锁屏歌词 ----
+        //
+        // ColorOS / OPlus 的锁屏歌词页读的是播放器 MediaSession 上的
+        // `lyricInfo` 字段；这里只控制"发不发"，歌词本身只用本地已有的
+        // （内嵌标签 / 本地缓存），不会为它联网。
+        SettingsSwitchRow(
+            title = "锁屏歌词",
+            subtitle = "把逐行歌词交给系统锁屏显示（ColorOS / OPlus 支持；其他机型会自动忽略）",
+            checked = vm.lockScreenLyrics,
+            onCheckedChange = vm::changeLockScreenLyrics
+        )
+        Spacer(Modifier.height(12.dp))
 
         // ---- 睡眠定时器 ----
         Row(
@@ -1080,7 +1355,7 @@ private fun DuplicateCleanupSection(vm: SonanceViewModel) {
  * ============================================================ */
 
 @Composable
-private fun AppIconGrid(currentId: String, onSelect: (String) -> Unit) {
+internal fun AppIconGrid(currentId: String, onSelect: (String) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val columns = (maxWidth / 86.dp).toInt().coerceIn(3, 6)
         val gap = 12.dp
@@ -1105,7 +1380,7 @@ private fun AppIconGrid(currentId: String, onSelect: (String) -> Unit) {
 }
 
 @Composable
-private fun AppIconCard(
+internal fun AppIconCard(
     variant: AppIconVariant,
     selected: Boolean,
     onClick: () -> Unit,

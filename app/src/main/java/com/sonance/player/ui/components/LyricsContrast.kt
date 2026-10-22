@@ -22,7 +22,7 @@ import com.sonance.player.ui.theme.Skin
  *  2. [buildBgProfile]：按歌词页**真实的绘制方式**（Crop 填满 → 放大 1.35 → 裁切，
  *     再叠上那层 skin.bg 的竖向遮罩）把封面折算成一条"自上而下的等效背景色带"；
  *  3. [ensureReadable]：把某一行歌词的颜色朝"更亮"或"更暗"挪到与它所在那一段
- *     背景的对比度达标，**取改动最小的那个方向 / 幅度** —— 所以颜色不会被推得很远。
+ *     背景的对比度达标。方向**整页只选一次**（[pickLighten]），不是每行各挑各的。
  *
  * 调色时先只动明度（色相、饱和度都不动，观感上最接近原色），实在不够才往
  * 纯白 / 纯黑靠一点。要的效果是"还看得出是原来那套颜色，只是能看清了"，
@@ -63,8 +63,11 @@ internal const val TARGET_OTHER = 3.4f
  *
  * [at] 收一个 0~1 的纵向比例（0 = 屏幕顶、1 = 屏幕底），返回该处的等效背景色，
  * 段与段之间做线性插值，所以相邻两行的颜色不会突然跳。
+ *
+ * [lighten] 是**整页共用**的调色方向（true = 往亮走），由 [buildBgProfile] 按皮肤的
+ * 歌词色算一次。为什么必须整页统一，见 [pickLighten]。
  */
-internal class BgProfile(private val colors: List<Color>) {
+internal class BgProfile(private val colors: List<Color>, val lighten: Boolean) {
 
     fun at(fraction: Float): Color {
         if (colors.isEmpty()) return Color.Black
@@ -74,6 +77,41 @@ internal class BgProfile(private val colors: List<Color>) {
         if (i >= colors.size - 1) return colors.last()
         return mix(colors[i], colors[i + 1], f - i)
     }
+}
+
+/**
+ * 整页共用的调色方向：true = 往亮走。
+ *
+ * 为什么必须**整页只选一次**：如果让每一行各自挑"改动更小的方向"，那么背景亮度跨过
+ * 中灰的那一行就成了分水岭 —— 它上面那行被压成近黑、下面那行被提成近白，两行紧挨着、
+ * 背景却几乎没差。屏幕上就是"一页三种颜色、中间硬跳一下"，非常难看。
+ * （实测就是这样：上半截近黑、中间近白、下半截原色 —— 用户的原话是"效果太差"。）
+ *
+ * 选法：只看**本来就不达标**的那几段（对 [bases] 里任何一个颜色都不达标才算），
+ * 分别算出"往亮走"和"往暗走"时**最难的那一段最多能到多少**对比度，谁的下限高就选谁。
+ * 说白了就是"让最糟的那一行尽量好读"。打平时让歌词待在它本来就在的那一侧 ——
+ * 原色比那几段的背景亮就继续往亮走，反之往暗走。
+ *
+ * @param bases 这一页会用到的歌词颜色（[Skin.textDim] / [Skin.textMuted] / [Skin.accent]）。
+ *   当前句的强调色**必须**算进来 —— 否则会出"其它行都够清楚、只有当前句撞色"时
+ *   一票都没有、方向随手选一个的情况（实测踩过：浅色皮肤配亮封面，当前句被推成了白色）。
+ */
+internal fun pickLighten(bases: List<Color>, colors: List<Color>, target: Float): Boolean {
+    var lightWorst = Float.MAX_VALUE
+    var darkWorst = Float.MAX_VALUE
+    var failSum = 0f
+    var failCount = 0
+    for (bg in colors) {
+        // 这一段对每个歌词色都够清楚 -> 它根本不会被改，方向与它无关
+        if (bases.none { contrastRatio(it, bg) < target }) continue
+        failSum += bg.luminance()
+        failCount++
+        lightWorst = minOf(lightWorst, contrastRatio(Color.White, bg))
+        darkWorst = minOf(darkWorst, contrastRatio(Color.Black, bg))
+    }
+    if (failCount == 0) return true
+    if (kotlin.math.abs(lightWorst - darkWorst) > 0.01f) return lightWorst > darkWorst
+    return bases.first().luminance() >= failSum / failCount
 }
 
 /**
@@ -184,7 +222,12 @@ internal fun buildBgProfile(
         // 所以顺序上必须放在最后一步，否则会把遮罩的压暗算反。
         out += if (liquid) mix(masked, Color.White, liquidHighlightAlpha(f)) else masked
     }
-    return BgProfile(out)
+    // 方向整页定一次 —— 三种歌词色都参与（当前句的强调色也算），用非当前句的目标
+    // （页面上绝大多数行是它）。
+    return BgProfile(
+        out,
+        pickLighten(listOf(skin.textDim, skin.textMuted, skin.accent), out, TARGET_OTHER)
+    )
 }
 
 /**
@@ -210,19 +253,23 @@ private const val MAX_STEPS = 24
 /**
  * 按背景把歌词颜色调到"看得清"。
  *
- * 往两个方向都扫一遍（变亮 / 变暗），取**改动最小的**那个能达标的版本 ——
- * 这样既保证看得清，又不会为了"保险"把颜色推得很远。
+ * 方向由调用方给定（[BgProfile.lighten]，整页统一），这里只负责"沿着这一个方向
+ * 走到刚好够用的那一档" —— 走得越少越好，绝不为了保险多推一截。
  *
  * 走的路（见 [walk]）分两段：先只动明度（饱和度不动，观感上最像原色），
  * 明度到顶 / 到底之后再往纯白 / 纯黑靠。少了后半段的话，浅色背景上的高饱和
  * 强调色会因为"明度已经到顶"而提不动，达不到目标。
  *
+ * 方向走到底（纯白 / 纯黑）都够不到目标时，返回这一方向上对比度最高的那一档 ——
+ * 仍然是"能看清多少算多少"，而不是掉头往反方向跳（那正是整页花掉的原因）。
+ *
  * @param target 目标对比度（WCAG 对比度，1~21）
+ * @param lighten true = 往亮走，false = 往暗走
  */
-internal fun ensureReadable(fg: Color, bg: Color, target: Float): Color {
+internal fun ensureReadable(fg: Color, bg: Color, target: Float, lighten: Boolean): Color {
     if (contrastRatio(fg, bg) >= target) return fg
 
-    // 原色的 H/S/V 只算一次 —— 下面两个方向、几十档都拿它当起点，
+    // 原色的 H/S/V 只算一次 —— 下面几十档都拿它当起点，
     // 每档重新转一遍是白费功夫（这段代码每个可见行、每次重组都会跑）。
     val hsv = FloatArray(3)
     rgbToHsv(fg.red, fg.green, fg.blue, hsv)
@@ -230,35 +277,18 @@ internal fun ensureReadable(fg: Color, bg: Color, target: Float): Color {
     val s = hsv[1]
     val v0 = hsv[2]
 
-    // 两个方向都扫，谁先够到目标谁就赢 —— 也就是取"改动更小"的那个。
-    // 背景暗就优先试提亮、背景亮就优先试压暗；先扫的那个方向只在两者
-    // 需要的改动量打平时才起决定作用（符合"深色底上歌词就该是亮的"这种直觉）。
-    val preferLight = bg.luminance() < 0.5f
-    var bestT = Float.MAX_VALUE
-    var bestColor: Color? = null
-    var fallback = fg
-    var fallbackRatio = contrastRatio(fg, bg)
-
-    for (lighten in booleanArrayOf(preferLight, !preferLight)) {
-        for (i in 1..MAX_STEPS) {
-            val t = i / MAX_STEPS.toFloat()
-            // 已经找到更小的改动量了，这个方向剩下的档只会更远，不必再看
-            if (t >= bestT) break
-            val cand = walk(h, s, v0, lighten, t)
-            val ratio = contrastRatio(cand, bg)
-            if (ratio >= target) {
-                bestT = t
-                bestColor = cand
-                break
-            }
-            // 两个方向都够不到目标（背景正好卡在中灰）时，取对比度更高的那个版本
-            if (ratio > fallbackRatio) {
-                fallbackRatio = ratio
-                fallback = cand
-            }
+    var best = fg
+    var bestRatio = contrastRatio(fg, bg)
+    for (i in 1..MAX_STEPS) {
+        val cand = walk(h, s, v0, lighten, i / MAX_STEPS.toFloat())
+        val ratio = contrastRatio(cand, bg)
+        if (ratio >= target) return cand
+        if (ratio > bestRatio) {
+            bestRatio = ratio
+            best = cand
         }
     }
-    return bestColor ?: fallback
+    return best
 }
 
 /**
@@ -304,13 +334,21 @@ internal fun contrastRatio(a: Color, b: Color): Float {
  * [screenFraction] 是这一行**在屏幕上的纵向位置**（0 = 顶、1 = 底），
  * 由调用方按"当前句停在哪、每行多高"换算出来。这样屏幕上半段取的就是上半段的
  * 背景色，某一段背景偏亮时只有那一段的歌词会被提亮，其余行不受影响。
+ *
+ * 往哪个方向调由 [BgProfile.lighten] 定（整页一次），所以同一页里不会出现
+ * "上一行近黑、下一行近白"这种跳变。
  */
 internal fun lyricColor(
     base: Color,
     screenFraction: Float,
     isCurrent: Boolean,
     profile: BgProfile
-): Color = ensureReadable(base, profile.at(screenFraction), if (isCurrent) TARGET_CURRENT else TARGET_OTHER)
+): Color = ensureReadable(
+    fg = base,
+    bg = profile.at(screenFraction),
+    target = if (isCurrent) TARGET_CURRENT else TARGET_OTHER,
+    lighten = profile.lighten
+)
 
 /**
  * 某一行要不要跟着背景调色。

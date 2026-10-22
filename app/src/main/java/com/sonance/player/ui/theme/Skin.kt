@@ -35,6 +35,15 @@ data class Skin(
     val danger: Color,
     // 无封面时的占位渐变
     val gradients: List<List<Color>>,
+    /**
+     * 这套皮肤**自带**的玻璃质感；null = 普通皮肤。
+     *
+     * 「毛玻璃 / 液态玻璃」光靠颜色令牌表达不出来 —— 它得让歌词页、律动柱页、
+     * 悬浮迷你播放条真的去糊一层封面。所以带玻璃的皮肤在**被选中的那一刻**
+     * 会把这几处的玻璃样式一起切到这一档（见 ViewModel.changeSkin）：
+     * 选主题 = 一次点完整套观感，不用再去三个地方各调一次。
+     */
+    val glass: GlassStyle? = null,
 ) {
     /**
      * 依据种子取一组稳定的占位渐变。
@@ -81,7 +90,7 @@ data class Skin(
 
 private fun c(hex: Long) = Color(hex)
 
-/** 14 套皮肤：6 套深色 + 8 套浅色 */
+/** 22 套皮肤：11 套深色（含液态玻璃）+ 11 套浅色（含霜华玻璃） */
 object Skins {
 
     /** 1 · 午夜琥珀 —— 原型默认 */
@@ -336,11 +345,159 @@ object Skins {
         )
     )
 
+    /** 15 · 霓虹青柠 —— 高饱和酸绿 */
+    val NeonLime = Skin(
+        id = "neon_lime",
+        name = "霓虹青柠",
+        tagline = "高饱和 · 酸绿",
+        isLight = false,
+        bg = c(0xFF0A1004), surface = c(0xFF121A09), surface2 = c(0xFF18240D), surface3 = c(0xFF223313),
+        border = c(0xFF253612), border2 = c(0xFF354D1C),
+        text = c(0xFFF4FFE2), textDim = c(0xFFA9C88C), textMuted = c(0xFF6D8A56),
+        accent = c(0xFFC9FF33), accentDim = c(0xFF8FD015), onAccent = c(0xFF0A1004),
+        accentGlow = c(0x2EC9FF33), danger = c(0xFFFF5470),
+        gradients = listOf(
+            listOf(c(0xFF2C4A0E), c(0xFF0C1405)),
+            listOf(c(0xFF395C12), c(0xFF101A07)),
+            listOf(c(0xFF1F380A), c(0xFF080F04)),
+        )
+    )
+
+    /** 16 · 赛博洋红 */
+    val CyberMagenta = Skin(
+        id = "cyber_magenta",
+        name = "赛博洋红",
+        tagline = "高饱和 · 电粉",
+        isLight = false,
+        bg = c(0xFF120516), surface = c(0xFF1D0A24), surface2 = c(0xFF270E32), surface3 = c(0xFF341444),
+        border = c(0xFF31123F), border2 = c(0xFF451A58),
+        text = c(0xFFFDEAFB), textDim = c(0xFFD292C7), textMuted = c(0xFF8C5C85),
+        accent = c(0xFFFF2FD0), accentDim = c(0xFFC2149F), onAccent = c(0xFF120516),
+        accentGlow = c(0x2EFF2FD0), danger = c(0xFFFF6B6B),
+        gradients = listOf(
+            listOf(c(0xFF5A0A4E), c(0xFF160619)),
+            listOf(c(0xFF42103C), c(0xFF110512)),
+            listOf(c(0xFF6B0F5C), c(0xFF1A0720)),
+        )
+    )
+
+    /** 17 · 电光冰蓝 */
+    val ElectricCyan = Skin(
+        id = "electric_cyan",
+        name = "电光冰蓝",
+        tagline = "高饱和 · 电蓝",
+        isLight = false,
+        bg = c(0xFF030B18), surface = c(0xFF07152B), surface2 = c(0xFF0B1E3C), surface3 = c(0xFF122A50),
+        border = c(0xFF12294A), border2 = c(0xFF1B3A66),
+        text = c(0xFFE4F5FF), textDim = c(0xFF87AACA), textMuted = c(0xFF537692),
+        accent = c(0xFF18E0FF), accentDim = c(0xFF0BA9CC), onAccent = c(0xFF031018),
+        accentGlow = c(0x2E18E0FF), danger = c(0xFFFF5C7A),
+        gradients = listOf(
+            listOf(c(0xFF0B3A5C), c(0xFF061320)),
+            listOf(c(0xFF0E4A72), c(0xFF081A2B)),
+            listOf(c(0xFF082E4A), c(0xFF040E18)),
+        )
+    )
+
+    /** 18 · 落日熔金 */
+    val SunsetBlaze = Skin(
+        id = "sunset_blaze",
+        name = "落日熔金",
+        tagline = "高饱和 · 炽橙",
+        isLight = false,
+        bg = c(0xFF1A0803), surface = c(0xFF271009), surface2 = c(0xFF34170D), surface3 = c(0xFF461F12),
+        border = c(0xFF421D11), border2 = c(0xFF5A281A),
+        text = c(0xFFFFF1E4), textDim = c(0xFFDBA483), textMuted = c(0xFF91614A),
+        accent = c(0xFFFF7A18), accentDim = c(0xFFD9530A), onAccent = c(0xFF1A0803),
+        accentGlow = c(0x2EFF7A18), danger = c(0xFFFF4D6A),
+        gradients = listOf(
+            listOf(c(0xFF5C1D06), c(0xFF1C0A04)),
+            listOf(c(0xFF451305), c(0xFF140703)),
+            listOf(c(0xFF6E2608), c(0xFF210C05)),
+        )
+    )
+
+    /** 19 · 热带果漾 */
+    val Tropical = Skin(
+        id = "tropical",
+        name = "热带果漾",
+        tagline = "鲜明 · 暖果",
+        isLight = true,
+        bg = c(0xFFFFFBF2), surface = c(0xFFFFFFFF), surface2 = c(0xFFFFF1DA), surface3 = c(0xFFFDE4C4),
+        border = c(0xFFFAE8CE), border2 = c(0xFFF4D4A8),
+        text = c(0xFF2A1A06), textDim = c(0xFF7C5C2C), textMuted = c(0xFFAB9165),
+        accent = c(0xFFFF6B35), accentDim = c(0xFFE04E1F), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x33FF6B35), danger = c(0xFFE0382F),
+        gradients = listOf(
+            listOf(c(0xFFFFE0A8), c(0xFFFFC178)),
+            listOf(c(0xFFFFD9C0), c(0xFFFBB98E)),
+            listOf(c(0xFFFFEBC8), c(0xFFFFCE96)),
+        )
+    )
+
+    /** 20 · 晴空柠檬 */
+    val SkyLemon = Skin(
+        id = "sky_lemon",
+        name = "晴空柠檬",
+        tagline = "鲜明 · 天蓝柠檬",
+        isLight = true,
+        bg = c(0xFFF6FCFF), surface = c(0xFFFFFFFF), surface2 = c(0xFFE6F6FF), surface3 = c(0xFFCFEBFA),
+        border = c(0xFFD8ECFA), border2 = c(0xFFB2D9F0),
+        text = c(0xFF0C1E29), textDim = c(0xFF4F7285), textMuted = c(0xFF89A6B8),
+        accent = c(0xFF00B8FF), accentDim = c(0xFF0089C4), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x3300B8FF), danger = c(0xFFE5392F),
+        gradients = listOf(
+            listOf(c(0xFFB8E8FF), c(0xFF8FD4F5)),
+            listOf(c(0xFFCDEFFD), c(0xFFA2DCF2)),
+            listOf(c(0xFFA9E0FA), c(0xFF7FCCEE)),
+        )
+    )
+
+    /** 21 · 霜华玻璃 —— 自带毛玻璃（选中时三处玻璃背景一起切到「强」）*/
+    val FrostedGlass = Skin(
+        id = "frosted_glass",
+        name = "霜华玻璃",
+        tagline = "毛玻璃 · 冷白",
+        isLight = true,
+        bg = c(0xFFEDF1F7), surface = c(0xFFF8FAFD), surface2 = c(0xFFE5EBF4), surface3 = c(0xFFD7E0EE),
+        border = c(0xFFDBE3EF), border2 = c(0xFFC4D1E2),
+        text = c(0xFF17202B), textDim = c(0xFF5A6879), textMuted = c(0xFF92A0B2),
+        accent = c(0xFF3A7BD5), accentDim = c(0xFF2A5FA8), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x333A7BD5), danger = c(0xFFD1453D),
+        gradients = listOf(
+            listOf(c(0xFFD9E6F5), c(0xFFBFD2E8)),
+            listOf(c(0xFFCFDFF1), c(0xFFB4CAE4)),
+            listOf(c(0xFFE2EDF8), c(0xFFC8DAEE)),
+        ),
+        glass = GlassStyle.STRONG
+    )
+
+    /** 22 · 液态玻璃 —— 自带液态玻璃（深色底 + 高光折射）*/
+    val LiquidGlass = Skin(
+        id = "liquid_glass",
+        name = "液态玻璃",
+        tagline = "液态玻璃 · 深蓝",
+        isLight = false,
+        bg = c(0xFF080D16), surface = c(0xFF111A27), surface2 = c(0xFF192533), surface3 = c(0xFF243141),
+        border = c(0xFF22303F), border2 = c(0xFF2F4155),
+        text = c(0xFFEAF3FF), textDim = c(0xFF9BB0C8), textMuted = c(0xFF647A93),
+        accent = c(0xFF5AC8FA), accentDim = c(0xFF2E9BD8), onAccent = c(0xFF04121C),
+        accentGlow = c(0x2E5AC8FA), danger = c(0xFFFF6B7A),
+        gradients = listOf(
+            listOf(c(0xFF1B3550), c(0xFF0A1420)),
+            listOf(c(0xFF152C44), c(0xFF08111B)),
+            listOf(c(0xFF22405E), c(0xFF0C1926)),
+        ),
+        glass = GlassStyle.LIQUID
+    )
+
     val all: List<Skin> = listOf(
         // ---- 深色 ----
         MidnightAmber, Graphite, Ocean, NeonViolet, Forest, Crimson,
+        NeonLime, CyberMagenta, ElectricCyan, SunsetBlaze, LiquidGlass,
         // ---- 浅色 ----
-        Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay
+        Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay,
+        Tropical, SkyLemon, FrostedGlass
     )
 
     fun byId(id: String?): Skin = all.firstOrNull { it.id == id } ?: MidnightAmber

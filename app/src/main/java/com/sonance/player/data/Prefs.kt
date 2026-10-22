@@ -4,6 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.sonance.player.playback.EqPreset
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.ListCoverScale
+import com.sonance.player.ui.theme.ListRowStyle
+import com.sonance.player.ui.theme.MiniPlayerStyle
+import com.sonance.player.ui.theme.MiniProgressStyle
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -296,6 +300,126 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_GLASS_VIS, GlassStyle.NORMAL.defaultVisibility).coerceIn(0, 100)
         set(v) = sp.edit().putInt(KEY_GLASS_VIS, v.coerceIn(0, 100)).apply()
 
+    // ===== 律动柱页背景（与歌词页同一套玻璃参数，但各自独立可调）=====
+
+    /**
+     * 律动柱页的背景原来只有一条「底色 → 表面色 → 底色」的渐变，看久了很单调。
+     * 这里给它和歌词页一样的玻璃背景（糊开的封面 + 遮罩），曲线和柱体压在上面。
+     *
+     * 之所以**不和歌词页共用一份设置**：律动柱页要的是"背景有东西但别抢戏"，
+     * 通常比歌词页压得更暗，共用一份会顾此失彼。
+     */
+    var vizGlassStyle: Int
+        get() = sp.getInt(KEY_VIZ_GLASS_STYLE, GlassStyle.NORMAL.ordinal)
+        set(v) = sp.edit().putInt(KEY_VIZ_GLASS_STYLE, v).apply()
+
+    var vizGlassBlurDp: Int
+        get() = sp.getInt(KEY_VIZ_GLASS_BLUR, GlassStyle.NORMAL.defaultBlurDp).coerceIn(0, 80)
+        set(v) = sp.edit().putInt(KEY_VIZ_GLASS_BLUR, v.coerceIn(0, 80)).apply()
+
+    var vizGlassVisibility: Int
+        get() = sp.getInt(KEY_VIZ_GLASS_VIS, GlassStyle.NORMAL.defaultVisibility).coerceIn(0, 100)
+        set(v) = sp.edit().putInt(KEY_VIZ_GLASS_VIS, v.coerceIn(0, 100)).apply()
+
+    // ===== 迷你播放条（列表页底部那个「正在播放」）=====
+
+    /** 形态：[MiniPlayerStyle] 的 ordinal。默认悬浮卡片。 */
+    var miniPlayerStyle: Int
+        get() = sp.getInt(KEY_MINI_STYLE, MiniPlayerStyle.FLOAT.ordinal)
+        set(v) = sp.edit().putInt(KEY_MINI_STYLE, v).apply()
+
+    /** 悬浮卡片的玻璃样式：[GlassStyle] 的 ordinal */
+    var miniGlassStyle: Int
+        get() = sp.getInt(KEY_MINI_GLASS_STYLE, GlassStyle.NORMAL.ordinal)
+        set(v) = sp.edit().putInt(KEY_MINI_GLASS_STYLE, v).apply()
+
+    var miniGlassBlurDp: Int
+        get() = sp.getInt(KEY_MINI_GLASS_BLUR, GlassStyle.NORMAL.defaultBlurDp).coerceIn(0, 80)
+        set(v) = sp.edit().putInt(KEY_MINI_GLASS_BLUR, v.coerceIn(0, 80)).apply()
+
+    var miniGlassVisibility: Int
+        get() = sp.getInt(KEY_MINI_GLASS_VIS, GlassStyle.NORMAL.defaultVisibility).coerceIn(0, 100)
+        set(v) = sp.edit().putInt(KEY_MINI_GLASS_VIS, v.coerceIn(0, 100)).apply()
+
+    /**
+     * 卡片自身底色的不透明度 0~100。
+     *
+     * 和「透出」不是一回事：透出调的是**封面糊开那层**露多少，
+     * 这里调的是卡片底色盖多实 —— 调到 0 就只剩玻璃和投影，卡片几乎"消失"。
+     */
+    var miniCardOpacity: Int
+        get() = sp.getInt(KEY_MINI_OPACITY, 82).coerceIn(0, 100)
+        set(v) = sp.edit().putInt(KEY_MINI_OPACITY, v.coerceIn(0, 100)).apply()
+
+    /**
+     * 是否把歌词发布到系统的 `MediaMetadata["lyricInfo"]`。
+     *
+     * 打开后 ColorOS / OPlus 的原生锁屏歌词页就能显示逐行歌词（小米/华为等
+     * 不支持这个字段的机型会直接忽略，没有副作用）。
+     * 只发**逐行**时间轴，且只用手上已有的歌词（内嵌 / 本地缓存），不会为它联网。
+     */
+    var lockScreenLyrics: Boolean
+        get() = sp.getBoolean(KEY_LOCK_LYRICS, true)
+        set(v) = sp.edit().putBoolean(KEY_LOCK_LYRICS, v).apply()
+
+    /**
+     * 悬浮卡片上的进度怎么显示：[MiniProgressStyle] 的 ordinal。
+     *
+     * 环和线同时开着会重复（一个进度说两遍），默认只留环 —— 玻璃卡片上环更自然。
+     */
+    var miniProgressStyle: Int
+        get() = sp.getInt(KEY_MINI_PROGRESS, MiniProgressStyle.RING.ordinal)
+        set(v) = sp.edit().putInt(KEY_MINI_PROGRESS, v).apply()
+
+    /**
+     * 左右滑动切歌的触发阈值，单位是**卡宽的百分比**。
+     *
+     * 两个方向分开存，因为手感本来就不不对称：大多数人右手持机，
+     * "从右往左"（左滑）顺手，拇指一摆就到；反过来"从左往右"要往回够，
+     * 同样的距离划不满 —— 所以右滑的默认阈值比左滑低。
+     */
+    var miniSwipeLeftPct: Int
+        get() = sp.getInt(KEY_MINI_SWIPE_LEFT, 20).coerceIn(5, 60)
+        set(v) = sp.edit().putInt(KEY_MINI_SWIPE_LEFT, v.coerceIn(5, 60)).apply()
+
+    var miniSwipeRightPct: Int
+        get() = sp.getInt(KEY_MINI_SWIPE_RIGHT, 12).coerceIn(5, 60)
+        set(v) = sp.edit().putInt(KEY_MINI_SWIPE_RIGHT, v.coerceIn(5, 60)).apply()
+
+    /** 悬浮条高度倍数（×100，100~200）。只加高卡片，不改里面的元素 */
+    var miniHeightScale: Int
+        get() = sp.getInt(KEY_MINI_HEIGHT, 100).coerceIn(100, 200)
+        set(v) = sp.edit().putInt(KEY_MINI_HEIGHT, v.coerceIn(100, 200)).apply()
+
+    /** 悬浮条里封面的大小倍数（×100，100~200） */
+    var miniCoverScale: Int
+        get() = sp.getInt(KEY_MINI_COVER, 100).coerceIn(100, 200)
+        set(v) = sp.edit().putInt(KEY_MINI_COVER, v.coerceIn(100, 200)).apply()
+
+    // ===== 列表外观 =====
+
+    /** 列表行的分隔方式：[ListRowStyle] 的 ordinal。默认保持原来的"无分界线" */
+    var listRowStyle: Int
+        get() = sp.getInt(KEY_LIST_ROW_STYLE, ListRowStyle.NONE.ordinal)
+        set(v) = sp.edit().putInt(KEY_LIST_ROW_STYLE, v).apply()
+
+    /** 列表封面的缩放倍数：[ListCoverScale] 的 ordinal。默认 1 倍 */
+    var listCoverScale: Int
+        get() = sp.getInt(KEY_LIST_COVER_SCALE, ListCoverScale.X1.ordinal)
+        set(v) = sp.edit().putInt(KEY_LIST_COVER_SCALE, v).apply()
+
+    // ===== 顶栏品牌 =====
+
+    /**
+     * 顶栏标题左边那个小方块的图案（[AppIcons] 的 id）。
+     *
+     * ⚠️ 和 [appIconId] 不是一回事：那个换的是**桌面启动器**图标，
+     * 这个只换应用内部的顶栏 logo，不影响桌面。
+     */
+    var topBarLogoId: String
+        get() = sp.getString(KEY_TOP_BAR_LOGO, null) ?: ""
+        set(v) = sp.edit().putString(KEY_TOP_BAR_LOGO, v).apply()
+
     // ===== 在线封面（默认关闭，与在线歌词同一原则）=====
 
     var onlineCoverEnabled: Boolean
@@ -321,6 +445,40 @@ class Prefs(context: Context) {
     var onlineMusicEnabled: Boolean
         get() = sp.getBoolean(KEY_ONLINE_MUSIC, false)
         set(v) = sp.edit().putBoolean(KEY_ONLINE_MUSIC, v).apply()
+
+    /**
+     * 是否已经给用户看过「左右滑动切换」的提示。
+     *
+     * 只提示一次：滑动是隐藏功能，新用户第一次进来不给提示就永远发现不了；
+     * 但每次进来都提示又很烦，所以只记一个"已看过"。
+     */
+    var pagerHintShown: Boolean
+        get() = sp.getBoolean(KEY_PAGER_HINT, false)
+        set(v) = sp.edit().putBoolean(KEY_PAGER_HINT, v).apply()
+
+    /**
+     * 三页列表（全部 / 最近 / 收藏）各自的滚动位置。
+     *
+     * 形如 `"12:340|0:0|3:18"` = 每页的「首个可见项下标 : 像素偏移」。
+     * 跨进程重启也要留住 —— 否则杀掉应用再进来，列表又从头开始，
+     * 而用户明明是听着歌翻到中间才退出的。
+     *
+     * 存首项而不是"当前歌曲"：用户自己滚到哪就是哪，这是他上一次真正的位置。
+     */
+    var libraryScroll: String
+        get() = sp.getString(KEY_LIBRARY_SCROLL, "") ?: ""
+        set(v) = sp.edit().putString(KEY_LIBRARY_SCROLL, v).apply()
+
+    /**
+     * 顶栏标题显示的应用名。
+     *
+     * 顶栏原来跟着页签走（"全部歌曲 · 共 N 首 · 21 小时"），每次切页文字都在变；
+     * 固定成应用名之后它才是"这是哪个应用"的锚点。允许用户改 —— 想显示
+     * 自己起的名字（比如"我的音乐"）也随他。空值回退到 "Sonance"。
+     */
+    var appDisplayName: String
+        get() = sp.getString(KEY_APP_NAME, null)?.takeIf { it.isNotBlank() } ?: "Sonance"
+        set(v) = sp.edit().putString(KEY_APP_NAME, v.trim()).apply()
 
     /**
      * 选中的音源 id（见 [OnlineSources]）。
@@ -739,6 +897,9 @@ class Prefs(context: Context) {
         private const val KEY_ONLINE_LYRICS = "online_lyrics_enabled"
         private const val KEY_LYRICS_API = "lyrics_api_base"
         private const val KEY_ONLINE_MUSIC = "online_music_enabled"
+        private const val KEY_PAGER_HINT = "pager_hint_shown"
+        private const val KEY_LIBRARY_SCROLL = "library_scroll"
+        private const val KEY_APP_NAME = "app_display_name"
         private const val KEY_ONLINE_SOURCE = "online_music_source"
         private const val KEY_ONLINE_HIDE_UNPLAYABLE = "online_hide_unplayable"
         private const val KEY_ONLINE_HISTORY = "online_search_history"
@@ -757,6 +918,23 @@ class Prefs(context: Context) {
         private const val KEY_GLASS_STYLE = "glass_style"
         private const val KEY_GLASS_BLUR = "glass_blur_dp"
         private const val KEY_GLASS_VIS = "glass_visibility"
+        private const val KEY_VIZ_GLASS_STYLE = "viz_glass_style"
+        private const val KEY_VIZ_GLASS_BLUR = "viz_glass_blur_dp"
+        private const val KEY_VIZ_GLASS_VIS = "viz_glass_visibility"
+        private const val KEY_MINI_STYLE = "mini_player_style"
+        private const val KEY_MINI_GLASS_STYLE = "mini_glass_style"
+        private const val KEY_MINI_GLASS_BLUR = "mini_glass_blur_dp"
+        private const val KEY_MINI_GLASS_VIS = "mini_glass_visibility"
+        private const val KEY_MINI_OPACITY = "mini_card_opacity"
+        private const val KEY_MINI_PROGRESS = "mini_progress_style"
+        private const val KEY_LOCK_LYRICS = "lock_screen_lyrics"
+        private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
+        private const val KEY_MINI_SWIPE_RIGHT = "mini_swipe_right_pct"
+        private const val KEY_MINI_HEIGHT = "mini_height_scale"
+        private const val KEY_MINI_COVER = "mini_cover_scale"
+        private const val KEY_LIST_ROW_STYLE = "list_row_style"
+        private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
+        private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"
         private const val KEY_COVER_ENABLED = "online_cover_enabled"
         private const val KEY_COVER_PIN = "cover_pin_"
         private const val KEY_EQ_ENABLED = "eq_enabled"

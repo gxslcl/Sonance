@@ -65,12 +65,20 @@ fun SongRow(
      * 列表里没有"曲库"这个概念，摆一个"从列表移除"只会让人以为能删远程数据。
      */
     onRemoveFromLibrary: (() -> Unit)? = null,
-    trailing: @Composable (() -> Unit)? = null
+    trailing: @Composable (() -> Unit)? = null,
+    /**
+     * 封面放大倍数（设置里的「封面大小」，1 / 1.2 / 1.5 / 2）。
+     *
+     * 只影响封面那一格：行高由封面撑开，**文字区完全不动** ——
+     * 外层 Row 是 `CenterVertically`，标题/副标题会跟着封面一起在垂直方向居中，
+     * 左起位置、字号、行距都不变，所以放大之后不会"重新排过一遍"。
+     */
+    coverScale: Float = 1f
 ) {
     val skin = LocalSkin.current
     var menuOpen by remember { mutableStateOf(false) }
 
-    val thumb = if (compact) 38.dp else 44.dp
+    val thumb = (if (compact) 38.dp else 44.dp) * coverScale
 
     Row(
         modifier = modifier
@@ -106,8 +114,10 @@ fun SongRow(
             albumId = song.albumId,
             seed = song.album + song.artist,
             modifier = Modifier.size(thumb),
-            cornerRadius = if (compact) 6.dp else 7.dp,
-            sizePx = 200,
+            // 圆角跟着封面等比走：2 倍大还挂 6dp 小圆角会显得很方
+            cornerRadius = (if (compact) 6.dp else 7.dp) * coverScale,
+            // 解码尺寸也要跟着放大，否则 2 倍下拿到的是一张被拉糊的 200px 小图
+            sizePx = (200 * coverScale).toInt(),
             sourceUri = song.uri,
             songId = song.id,
             coverKey = OnlineCover.keyOf(song.title, song.artist)

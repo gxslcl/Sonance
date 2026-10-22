@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,6 +32,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.ui.icon.SonanceIcons
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.res.painterResource
+import com.sonance.player.ui.theme.AppIcons
 import com.sonance.player.ui.theme.LocalSkin
 
 private data class NavEntry(
@@ -360,10 +364,41 @@ fun AppTopBar(
      * 可能很长，和副标题挤一行会把标题截得只剩几个字。
      */
     subtitleInline: Boolean = false,
-    actions: @Composable (() -> Unit)? = null
+    actions: @Composable (() -> Unit)? = null,
+    /**
+     * 标题左边那个小方块的图案（`AppIcons` 的 id）。空串 = 内置的 Logo 矢量图。
+     *
+     * ⚠️ 这是**应用内**的顶栏图标，和桌面启动器图标是两码事
+     * （那个走 `AppIconSwitcher` / `activity-alias`）。
+     */
+    logoId: String = "",
+    /**
+     * **双击**标题（或左侧 logo）触发的动作，null 就没有这个手势。
+     *
+     * 主列表页用它打开"应用名 / 桌面图标"编辑面板 —— 这两样是应用的门面，
+     * 藏在设置深处没人会去改；顶栏标题就是门面本身，双击它是最近的路。
+     * 详情页不传：那里的双击没有语义，反而容易误触。
+     */
+    onTitleDoubleTap: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
+
+    // 双击检测：自己比时间戳（800ms），**没有单击动作**所以不需要延迟判定 ——
+    // 单击只是记一笔，第二次点击落进来就触发。
+    val lastTitleTap = remember { longArrayOf(0L) }
+    val titleDoubleTap: (() -> Unit)? = onTitleDoubleTap?.let { action ->
+        {
+            val now = System.currentTimeMillis()
+            if (now - lastTitleTap[0] < 800L) {
+                lastTitleTap[0] = 0L
+                action()
+            } else {
+                lastTitleTap[0] = now
+            }
+        }
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -385,15 +420,34 @@ fun AppTopBar(
                     .padding(start = 10.dp)
                     .size(if (dense) 26.dp else 30.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(skin.surface2),
+                    .background(skin.surface2)
+                    .then(
+                        if (titleDoubleTap != null) {
+                            Modifier.clickable(onClick = titleDoubleTap)
+                        } else {
+                            Modifier
+                        }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                androidx.compose.material3.Icon(
-                    imageVector = SonanceIcons.Logo,
-                    contentDescription = null,
-                    tint = skin.accent,
-                    modifier = Modifier.size(if (dense) 15.dp else 17.dp)
-                )
+                if (logoId.isNotBlank()) {
+                    // 用户挑的图案：直接用 AppIcons 里那份预览图，
+                    // 和设置页 / 编辑面板里看到的是同一张
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(AppIcons.byId(logoId).preview),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                } else {
+                    androidx.compose.material3.Icon(
+                        imageVector = SonanceIcons.Logo,
+                        contentDescription = null,
+                        tint = skin.accent,
+                        modifier = Modifier.size(if (dense) 15.dp else 17.dp)
+                    )
+                }
             }
         }
         Spacer(Modifier.width(6.dp))
@@ -415,6 +469,13 @@ fun AppTopBar(
                     modifier = Modifier
                         .weight(1f, fill = false)
                         .alignByBaseline()
+                        .then(
+                            if (titleDoubleTap != null) {
+                                Modifier.clickable(onClick = titleDoubleTap)
+                            } else {
+                                Modifier
+                            }
+                        )
                 )
                 Text(
                     text = "· $subtitle",
@@ -435,7 +496,14 @@ fun AppTopBar(
                     fontWeight = FontWeight.Bold,
                     color = skin.text,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.then(
+                        if (titleDoubleTap != null) {
+                            Modifier.clickable(onClick = titleDoubleTap)
+                        } else {
+                            Modifier
+                        }
+                    )
                 )
                 if (subtitle != null && !dense) {
                     Text(

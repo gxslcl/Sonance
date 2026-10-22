@@ -169,8 +169,13 @@ fun CoverPickerDialog(vm: SonanceViewModel) {
                 }
 
                 if (vm.coverResults.isNotEmpty()) {
+                    val from = vm.coverResults.firstOrNull()?.source.orEmpty()
                     Text(
-                        "找到 ${vm.coverResults.size} 个结果，点一个应用",
+                        buildString {
+                            append("找到 ").append(vm.coverResults.size).append(" 个结果")
+                            if (from.isNotBlank()) append("（来自 ").append(from).append("）")
+                            append("，点一个应用")
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = skin.textMuted
                     )

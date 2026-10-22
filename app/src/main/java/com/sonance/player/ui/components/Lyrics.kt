@@ -226,7 +226,10 @@ fun LyricsOverlay(
             art = art,
             style = glassStyle,
             blurDp = glassBlur,
-            visibility = glassVisibility
+            visibility = glassVisibility,
+            modifier = Modifier
+                .fillMaxSize()
+                .clipToBounds()
         )
 
         // ===== 三段式内容 =====
@@ -470,108 +473,13 @@ fun LyricsOverlay(
  *
  * API 31+ 才有 RenderEffect 真模糊；低于 31 只能靠降不透明度 + 加厚遮罩近似。
  */
-@Composable
-private fun GlassBackdrop(
-    /**
-     * 已经加载好的封面。**由调用方加载**，不是这里自己取 ——
-     * 因为「歌词自动适配背景」也要用这张图算色带，两边必须是同一张，
-     * 否则用户手动换过在线封面时会算出色不对版的歌词颜色。
-     *
-     * 取图链路：专辑封面 → 歌曲内嵌 → 之前下载落盘的封面（在 [LyricsOverlay] 里）。
-     */
-    art: ImageBitmap?,
-    style: GlassStyle,
-    blurDp: Int,
-    visibility: Int,
-    modifier: Modifier = Modifier
-) {
-    val skin = LocalSkin.current
-
-    if (style == GlassStyle.OFF) {
-        // 「关闭」就是真的什么都不画：歌词页只有纯背景色，连渐变也不留
-        return
-    }
-
-    val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-    val artAlpha = GlassStyle.artAlpha(visibility)
-    val scrim = GlassStyle.scrimAlpha(visibility)
-
-    art?.let { bmp ->
-        val matrix = remember(style.liquid, visibility) {
-            ColorMatrix().apply {
-                setToSaturation(GlassStyle.saturation(style.liquid, visibility))
-            }
-        }
-        Image(
-            bitmap = bmp,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            colorFilter = if (style.liquid) ColorFilter.colorMatrix(matrix) else null,
-            // clipToBounds 必须放在 scale **之前**：1.35 倍放大是为了把模糊后发虚的边缘
-            // 推出可视区，但 Modifier.scale 默认**不裁剪**内容，于是图会向左右各溢出
-            // 17.5% 的页面宽度。播放页三层横向轮播时相邻层同时参与组合，这些溢出就盖到了
-            // 邻层上（表现为一条只在中途出现的竖条）。裁剪矩形就是本层页面矩形，
-            // 所以落定后的观感和原来完全一致。
-            modifier = modifier
-                .fillMaxSize()
-                .clipToBounds()
-                .scale(ART_ZOOM)
-                .then(if (canBlur && blurDp > 0) Modifier.blur(blurDp.dp) else Modifier)
-                .alpha(if (canBlur) artAlpha else (artAlpha * 0.45f))
-        )
-    }
-
-    // 遮罩
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        skin.bg.copy(alpha = scrim),
-                        skin.bg.copy(alpha = (scrim + 0.10f).coerceAtMost(0.97f)),
-                        skin.bg.copy(alpha = (scrim + 0.22f).coerceAtMost(0.99f))
-                    )
-                )
-            )
-    )
-
-    if (style.liquid) {
-        // 顶部镜面高光
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to Color.White.copy(alpha = 0.20f),
-                        0.18f to Color.White.copy(alpha = 0.07f),
-                        0.40f to Color.Transparent,
-                        1.0f to Color.Transparent
-                    )
-                )
-        )
-        // 上边缘折射亮线
-        Box(
-            Modifier
-                .fillMaxSize()
-                .drawBehind {
-                    drawLine(
-                        brush = Brush.horizontalGradient(
-                            listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.30f),
-                                Color.White.copy(alpha = 0.42f),
-                                Color.Transparent
-                            )
-                        ),
-                        start = Offset(0f, 0.5f),
-                        end = Offset(size.width, 0.5f),
-                        strokeWidth = 1.2.dp.toPx()
-                    )
-                }
-        )
-    }
-}
+/**
+ * 歌词页的玻璃背景就是公共实现 [GlassBackdrop] 铺满整页。
+ *
+ * 封面由本页加载后传进去（「歌词自动适配背景」要用同一张图算色带）；
+ * `clipToBounds` 不能省 —— 封面放大 1.35 倍后的溢出要裁在本页矩形内，
+ * 否则会盖到播放页左右相邻的层上。
+ */
 
 /* ============================================================
  * 背景玻璃调节行（样式 + 模糊 + 可见度）
@@ -636,7 +544,7 @@ fun GlassControls(
 }
 
 @Composable
-private fun SliderLine(
+internal fun SliderLine(
     label: String,
     valueText: String,
     value: Float,

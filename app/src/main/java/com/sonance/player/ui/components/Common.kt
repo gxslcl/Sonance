@@ -98,8 +98,10 @@ fun CoverArt(
     // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
     //   表现就是"滚回来还要等半秒"。）
     // sizePx 也进 key：尺寸档变了要重新 peek，否则播放页会拿到列表留下的缩略图。
+    // peekAny（不是 peek）：本尺寸档没现成的就先用缩略图档那份顶上，
+    // 免得播放页在解码 900px 的那几百毫秒里先闪一张占位图。
     var bitmap by remember(albumId, sizePx, sourceUri, coverKey) {
-        mutableStateOf(ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey))
+        mutableStateOf(ArtworkLoader.peekAny(albumId, sizePx, sourceUri, coverKey))
     }
 
     // 这里**故意不把 ArtworkLoader.paused 放进 key**：放进去的话，滚动开始和结束

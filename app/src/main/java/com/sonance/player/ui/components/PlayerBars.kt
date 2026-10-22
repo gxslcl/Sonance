@@ -1,12 +1,22 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,25 +33,46 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.MiniPlayerStyle
+import com.sonance.player.ui.theme.MiniProgressStyle
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /* ============================================================
  * 传输控制（上一首 / 播放 / 下一首 / 随机 / 循环）
@@ -132,6 +164,17 @@ private fun progressFraction(state: PlayerUiState): Float {
  * 迷你播放条（手机 / 中等宽度）
  * ============================================================ */
 
+/**
+ * 列表页底部那个「正在播放」。
+ *
+ * 两种形态（[MiniPlayerStyle]），设置里可切：
+ *  - [MiniPlayerStyle.CLASSIC]：贴底通栏，顶部一条进度线 —— 原来那副样子；
+ *  - [MiniPlayerStyle.FLOAT]：离屏边有间距的**大圆角悬浮卡片**，带投影，
+ *    可以叠毛玻璃 / 液态玻璃（[glass]），底色实不实由 [cardOpacity] 决定。
+ *
+ * 悬浮时它**叠在内容上**（由调用方决定要不要给内容留出底边距），
+ * 经典时是内容下面的一条，两种都不改内容自身的高度。
+ */
 @Composable
 fun MiniPlayer(
     state: PlayerUiState,
@@ -140,95 +183,397 @@ fun MiniPlayer(
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    style: MiniPlayerStyle = MiniPlayerStyle.CLASSIC,
+    glass: GlassStyle = GlassStyle.OFF,
+    glassBlur: Int = 0,
+    glassVisibility: Int = 0,
+    cardOpacity: Int = 100,
+    /** 悬浮卡片上进度用环还是用线（见 [MiniProgressStyle]） */
+    progressStyle: MiniProgressStyle = MiniProgressStyle.RING,
+    /** 左滑（下一首）阈值，百分比卡宽 */
+    swipeLeftPct: Int = 20,
+    /** 右滑（上一首）阈值。默认比左滑低：右手持机时"往回够"划不满同样的距离 */
+    swipeRightPct: Int = 12,
+    /** 卡片高度倍数（1.0 = 现在） */
+    heightScale: Float = 1f,
+    /** 卡片里封面倍数（1.0 = 现在） */
+    coverScale: Float = 1f
 ) {
+    val skin = LocalSkin.current
+    val frac = progressFraction(state)
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
     val coverUri = remember(state.sourceUri) {
         state.sourceUri?.let { android.net.Uri.parse(it) }
     }
+    // 内容要放在 Row 里（中间那列文字要吃掉剩余宽度），所以带上 RowScope
+    val body: @Composable RowScope.() -> Unit = {
+        MiniPlayerBody(
+            state = state,
+            song = song,
+            coverUri = coverUri,
+            frac = frac,
+            coverScale = coverScale,
+            // 环形进度只给悬浮卡片（经典贴底那条通栏本来就只有线），
+            // 具体显示环还是线由用户在设置里定，见 MiniProgressStyle
+            progressRing = style == MiniPlayerStyle.FLOAT && progressStyle.showsRing,
+            onPrev = onPrev,
+            onPlayPause = onPlayPause,
+            onNext = onNext
+        )
+    }
 
+    when (style) {
+        MiniPlayerStyle.CLASSIC -> {
+            Column(
+                modifier = modifier
+                    .fillMaxWidth()
+                    .background(skin.surface2)
+            ) {
+                // 顶部进度线
+                MiniProgressLine(frac = frac, thickness = 2.dp, rounded = false)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpen)
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) { body() }
+            }
+        }
+
+        MiniPlayerStyle.FLOAT -> {
+            val shape = RoundedCornerShape(20.dp)
+
+            // ---- 轮播式左右滑动切歌 ----
+            //
+            // 手感三条铁律（上一版踩过的坑）：
+            //  ① **1:1 跟手**，不加阻尼。阻尼会让手指走一半卡片只走 0.6 倍，
+            //     这就是"慢半拍"的来源。
+            //  ② **任何动画都可打断**。上一版用 `busy` 锁住手势，连划要等上一段动画
+            //     跑完（390ms）才响应，所以连续滑动特别粘。
+            //     现在新的一次按下会直接 cancel 掉正在跑的动画，从当前位置接着走。
+            //  ③ **不用弹簧**。Spring 一定会过冲（那是它的天性），用户明确说不要回弹；
+            //     全部换成 `tween` + ease-out 曲线，到位就停。
+            //
+            // 换歌用一个连续运动完成：滑出 → 换歌 → 从另一侧滑入。
+            // 两段同向、中间那一帧卡片在屏外（看不见），所以没有跳变。
+            var dragX by remember { mutableFloatStateOf(0f) }
+            var cardW by remember { mutableFloatStateOf(1f) }
+            val scope = rememberCoroutineScope()
+            // 正在跑的位移动画。新手势按下时取消它 —— 这就是"可打断"
+            val animJob = remember { arrayOfNulls<Job>(1) }
+            // pointerInput(Unit) 的 lambda **只在第一次组合时创建**，里面读到的
+            // 外部变量会被永久冻结 —— 阈值必须走 rememberUpdatedState 取最新一份，
+            // 否则设置里怎么调都不生效（这就是"阈值设置无效"的根因）。
+            val nextNow = rememberUpdatedState(onNext)
+            val prevNow = rememberUpdatedState(onPrev)
+            val leftPctNow = rememberUpdatedState(swipeLeftPct)
+            val rightPctNow = rememberUpdatedState(swipeRightPct)
+
+            Box(
+                modifier = modifier
+                    // 16dp 与列表高亮框、搜索框同一条边线 —— 12dp 的时候
+                    // 三个"左右边界"是三套数，纵着看下来是歪的
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 10.dp)
+                    .fillMaxWidth()
+                    .onSizeChanged { cardW = it.width.toFloat().coerceAtLeast(1f) }
+                    // 投影必须在 clip 之前：先画外发光，再把内容裁成圆角
+                    .shadow(elevation = 14.dp, shape = shape, clip = false)
+                    .clip(shape)
+                    .background(skin.surface2.copy(alpha = cardOpacity / 100f))
+                    // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——
+                    // 浅色主题下白描边会直接消失，深色主题下它就是那条立体高光
+                    .border(1.dp, skin.text.copy(alpha = 0.10f), shape)
+                    .graphicsLayer {
+                        translationX = dragX
+                        // 位移越大越淡：滑到边缘时卡片自然"化"进背景，
+                        // 换歌那一帧就看不出切换
+                        alpha = 1f - (kotlin.math.abs(dragX) / cardW).coerceIn(0f, 0.5f)
+                    }
+                    .pointerInput(Unit) {
+                        // 位移动画：总是先停掉上一条，保证永远只有一条在跑
+                        fun slideTo(target: Float, spec: AnimationSpec<Float>) {
+                            animJob[0]?.cancel()
+                            val from = dragX
+                            animJob[0] = scope.launch {
+                                animate(from, target, animationSpec = spec) { v, _ -> dragX = v }
+                                animJob[0] = null
+                            }
+                        }
+
+                        detectHorizontalDragGestures(
+                            // 手指一落下就接管：正在跑的归位/入场动画立刻停住，
+                            // 从卡片当前的位置继续跟手（**不清零** —— 清零就是"弹一下"）
+                            onDragStart = {
+                                animJob[0]?.cancel()
+                                animJob[0] = null
+                            },
+                            onDragEnd = {
+                                val w = cardW
+                                // 左右阈值分开：右手持机时左滑顺手、右滑要往回够，
+                                // 同一个百分比会让右滑经常划不满
+                                val pct = if (dragX < 0) leftPctNow.value else rightPctNow.value
+                                val threshold = w * pct / 100f
+                                val dir = when {
+                                    dragX <= -threshold -> -1
+                                    dragX >= threshold -> 1
+                                    else -> 0
+                                }
+                                if (dir == 0) {
+                                    // 没过阈值：快速平滑归位（ease-out，无过冲）
+                                    slideTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                } else {
+                                    // ① 滑出：100ms，只走剩下这点距离
+                                    animJob[0]?.cancel()
+                                    val outFrom = dragX
+                                    val out = scope.launch {
+                                        animate(
+                                            outFrom, dir * w * 1.2f,
+                                            animationSpec = tween(100, easing = FastOutLinearInEasing)
+                                        ) { v, _ -> dragX = v }
+                                    }
+                                    animJob[0] = out
+                                    // ② 精确等①跑完（不用写死的 delay），再换歌接力滑入
+                                    scope.launch {
+                                        out.join()
+                                        // 被新手势打断了就别换歌 —— 用户又抓住卡片了
+                                        if (out.isCancelled) return@launch
+                                        if (dir < 0) nextNow.value() else prevNow.value()
+                                        // 此刻卡片在屏外：直接摆到另一侧屏外，看不见跳变
+                                        dragX = -dir * w * 1.2f
+                                        val inJob = scope.launch {
+                                            animate(
+                                                -dir * w * 1.2f, 0f,
+                                                animationSpec = tween(170, easing = FastOutSlowInEasing)
+                                            ) { v, _ -> dragX = v }
+                                        }
+                                        animJob[0] = inJob
+                                    }
+                                }
+                            },
+                            onDragCancel = { slideTo(0f, tween(140, easing = FastOutSlowInEasing)) }
+                        ) { change, delta ->
+                            change.consume()
+                            // 1:1 跟手；只夹住"别拖出屏外太远"，不做阻尼
+                            dragX = (dragX + delta).coerceIn(-cardW * 1.2f, cardW * 1.2f)
+                        }
+                    }
+                    .clickable(onClick = onOpen)
+            ) {
+                // 玻璃：卡片自己的封面糊开铺底。压暗幅度刻意比整页小
+                // （scrimSpread 0.10），压太狠这块玻璃就看不出是玻璃了。
+                // edgeHighlight 打开：上边缘一条折射亮线，滑过深色列表项时
+                // 卡片不至于"融"进背景里。
+                GlassBackdrop(
+                    art = miniGlassArt(state, coverUri),
+                    style = glass,
+                    blurDp = glassBlur,
+                    visibility = glassVisibility,
+                    modifier = Modifier.matchParentSize(),
+                    scrimColor = skin.surface2,
+                    edgeHighlight = true,
+                    scrimSpread = 0.10f
+                )
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                horizontal = 12.dp,
+                                // 高度倍数只加"上下留白"，不动内部元素 ——
+                                // 这样调高度不会把字挤小、也不会把按钮撑变形
+                                vertical = 10.dp * heightScale
+                            ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) { body() }
+                    // 进度线收进卡片下沿。设成"只用圆环"时这里不画 ——
+                    // 同一个进度说两遍，看着就是重复
+                    if (progressStyle.showsBar) {
+                        MiniProgressLine(frac = frac, thickness = 2.5.dp, rounded = true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniProgressLine(frac: Float, thickness: Dp, rounded: Boolean) {
     val skin = LocalSkin.current
-    val frac = progressFraction(state)
-
-    Column(
-        modifier = modifier
+    // 圆角只在悬浮卡片里用；经典模式那条线本来就是通栏的，
+    // 圆角反而让它两头缩进去
+    val shape = if (rounded) RoundedCornerShape(50) else RoundedCornerShape(0)
+    Box(
+        Modifier
             .fillMaxWidth()
-            .background(skin.surface2)
+            .height(thickness)
+            .background(if (rounded) Color.Transparent else skin.surface3)
     ) {
-        // 顶部进度线
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(2.dp)
-                .background(skin.surface3)
-        ) {
-            if (frac > 0f) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(frac)
-                        .height(2.dp)
-                        .background(skin.accent)
-                )
-            }
+        if (frac > 0f) {
+            Box(
+                Modifier
+                    .fillMaxWidth(frac)
+                    .height(thickness)
+                    .clip(shape)
+                    .background(skin.accent)
+            )
         }
+    }
+}
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onOpen)
-                .padding(horizontal = 12.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            CoverArt(
-                albumId = state.albumId,
-                seed = state.title + state.artist,
-                modifier = Modifier.size(42.dp),
-                cornerRadius = 7.dp,
-                sizePx = 200,
-                sourceUri = coverUri,
-                songId = state.mediaId,
-                coverKey = OnlineCover.keyOf(state.title, state.artist)
+/**
+ * 悬浮卡片玻璃层用的封面。
+ *
+ * 和列表里那张缩略图分开加载：玻璃要的是一张够大、糊开后还认得出的图，
+ * 复用 200px 的缩略图放大再糊会全是色块。只在卡片真的叠玻璃时才加载。
+ */
+@Composable
+private fun miniGlassArt(
+    state: PlayerUiState,
+    coverUri: android.net.Uri?
+): androidx.compose.ui.graphics.ImageBitmap? {
+    val context = LocalContext.current
+    var art by remember(state.mediaId, state.albumId, coverUri) {
+        mutableStateOf(ArtworkLoader.peek(state.albumId, 320, coverUri, OnlineCover.keyOf(state.title, state.artist)))
+    }
+    LaunchedEffect(state.albumId, coverUri, state.title, state.artist) {
+        art = ArtworkLoader.load(
+            context = context,
+            albumId = state.albumId,
+            sizePx = 320,
+            sourceUri = coverUri,
+            coverKey = OnlineCover.keyOf(state.title, state.artist)
+        ) ?: ArtworkLoader.online(state.mediaId)
+    }
+    return art
+}
+
+@Composable
+private fun RowScope.MiniPlayerBody(
+    state: PlayerUiState,
+    song: Song?,
+    coverUri: android.net.Uri?,
+    /** 播放进度 0~1，环形进度用。CLASSIC 不用它 */
+    frac: Float = 0f,
+    /** 封面大小倍数（设置里可调） */
+    coverScale: Float = 1f,
+    /** 播放键外圈套环形进度（悬浮玻璃卡片专用） */
+    progressRing: Boolean = false,
+    onPrev: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit
+) {
+    val skin = LocalSkin.current
+    CoverArt(
+        albumId = state.albumId,
+        seed = state.title + state.artist,
+        modifier = Modifier.size(42.dp * coverScale),
+        cornerRadius = 7.dp * coverScale,
+        // 解码尺寸跟着放大，不然 2 倍下是拉糊的 200px
+        sizePx = (200 * coverScale).toInt(),
+        sourceUri = coverUri,
+        songId = state.mediaId,
+        coverKey = OnlineCover.keyOf(state.title, state.artist)
+    )
+    Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+        Text(
+            text = state.title.ifBlank { song?.title ?: "未在播放" },
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = state.artist.ifBlank { song?.artist ?: "—" },
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+    CtrlButton(
+        icon = SonanceIcons.Prev,
+        contentDescription = "上一首",
+        onClick = onPrev,
+        size = 36.dp,
+        iconSize = 17.dp
+    )
+    if (progressRing) {
+        PlayPauseRing(
+            frac = frac,
+            isPlaying = state.isPlaying,
+            onClick = onPlayPause
+        )
+    } else {
+        PlayPauseButton(
+            isPlaying = state.isPlaying,
+            onClick = onPlayPause,
+            size = 40.dp,
+            iconSize = 18.dp
+        )
+    }
+    CtrlButton(
+        icon = SonanceIcons.Next,
+        contentDescription = "下一首",
+        onClick = onNext,
+        size = 36.dp,
+        iconSize = 17.dp
+    )
+}
+
+/**
+ * 套着环形进度的播放键（悬浮玻璃卡片用）。
+ *
+ * 进度贴在卡片底边的那种线，在 20dp 大圆角 + 液态玻璃透出深色列表时
+ * 几乎不可见 —— 环绕着播放键转，玻璃卡片上才"看得见"进度。
+ *
+ * 环的直径与原来 40dp 的按钮完全一致，键体缩到 32dp 让出环的厚度：
+ * 行高不变，卡片不会因此变高。
+ */
+@Composable
+private fun PlayPauseRing(
+    frac: Float,
+    isPlaying: Boolean,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 2.dp.toPx()
+            val d = size.minDimension - stroke
+            val tl = Offset(stroke / 2f, stroke / 2f)
+            // 轨道：主题文字色的低透明版 —— 深浅主题下都可见，又不会抢过内容
+            drawArc(
+                color = skin.text.copy(alpha = 0.18f),
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = tl,
+                size = Size(d, d),
+                style = Stroke(width = stroke, cap = StrokeCap.Round)
             )
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = state.title.ifBlank { song?.title ?: "未在播放" },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = skin.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = state.artist.ifBlank { song?.artist ?: "—" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            if (frac > 0f) {
+                drawArc(
+                    color = skin.accent,
+                    startAngle = -90f,
+                    sweepAngle = 360f * frac.coerceIn(0f, 1f),
+                    useCenter = false,
+                    topLeft = tl,
+                    size = Size(d, d),
+                    style = Stroke(width = stroke, cap = StrokeCap.Round)
                 )
             }
-            CtrlButton(
-                icon = SonanceIcons.Prev,
-                contentDescription = "上一首",
-                onClick = onPrev,
-                size = 36.dp,
-                iconSize = 17.dp
-            )
-            PlayPauseButton(
-                isPlaying = state.isPlaying,
-                onClick = onPlayPause,
-                size = 40.dp,
-                iconSize = 18.dp
-            )
-            CtrlButton(
-                icon = SonanceIcons.Next,
-                contentDescription = "下一首",
-                onClick = onNext,
-                size = 36.dp,
-                iconSize = 17.dp
-            )
         }
+        PlayPauseButton(
+            isPlaying = isPlaying,
+            onClick = onClick,
+            size = 32.dp,
+            iconSize = 14.dp
+        )
     }
 }
 

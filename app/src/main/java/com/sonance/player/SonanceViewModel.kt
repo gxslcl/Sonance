@@ -1,7 +1,11 @@
 package com.sonance.player
 
+import android.Manifest
 import android.app.Application
 import android.content.IntentSender
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -18,6 +22,7 @@ import com.sonance.player.data.Artist
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
+import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTagWriter
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
@@ -27,6 +32,7 @@ import com.sonance.player.data.NeteaseSource
 import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
+import com.sonance.player.data.ShuffleOrder
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
@@ -42,6 +48,7 @@ import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
 import com.sonance.player.data.LyricAdaptMode
+import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.LyricsCache
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.MediaRepository
@@ -57,6 +64,8 @@ import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongStats
 import com.sonance.player.data.SortField
+import com.sonance.player.ui.screens.LIST_COVER_PX
+import com.sonance.player.ui.screens.PAGE_COUNT
 import com.sonance.player.data.UnplayableFileScanner
 import com.sonance.player.data.UnplayableScanResult
 import com.sonance.player.data.ViewMode
@@ -70,6 +79,10 @@ import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerController
 import com.sonance.player.playback.RepeatMode
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.ListCoverScale
+import com.sonance.player.ui.theme.ListRowStyle
+import com.sonance.player.ui.theme.MiniPlayerStyle
+import com.sonance.player.ui.theme.MiniProgressStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import kotlinx.coroutines.Job
@@ -178,6 +191,72 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         excludeUnsupported = scanExcludeUnsupported,
         excludeNonSongFolders = scanExcludeNonSongFolders
     )
+    /**
+     * 「左右滑动切换」提示是否已经展示过。
+     *
+     * 只展示一次：滑动是隐藏功能，第一次不给提示用户永远发现不了；
+     * 每次都给又很烦。状态放在内存里即可，落盘只是为了让"已看过"跨启动保留。
+     */
+    var pagerHintShown by mutableStateOf(prefs.pagerHintShown)
+        private set
+
+    fun markPagerHintShown() {
+        if (pagerHintShown) return
+        pagerHintShown = true
+        prefs.pagerHintShown = true
+    }
+
+    /* ============================================================
+     * 三页列表的滚动位置（**只存数值，不存 LazyListState**）
+     * ============================================================ */
+
+    /**
+     * 读上一次存下的三页滚动位置：`[第0页(下标, 偏移), 第1页, 第2页]`。
+     *
+     * ⚠️ 这里刻意**不缓存 `LazyListState` 对象**。
+     *
+     * 曾经为了"进出设置页也保留位置"，把三页的 `LazyListState` 提升到 ViewModel 里常驻。
+     * 结果是偶发的**列表纵向彻底滑不动**（横向翻页、点浮窗都正常）——
+     * 一个 `LazyListState` 被反复从组合里摘下来、过一会再挂到新的 LazyColumn 上，
+     * 内部 measure / scrollPosition 的那套状态会错乱，滚动就此哑掉。
+     *
+     * 现在滚动状态留在组合内（`remember`），位置只以"下标 + 像素偏移"的形式存取，
+     * 进组合时当初始值用 —— 效果一样，但不会再出现跨生命周期的状态错乱。
+     */
+    fun readLibraryScroll(): List<Pair<Int, Int>> {
+        val saved = prefs.libraryScroll.split('|')
+        return List(PAGE_COUNT) { i ->
+            saved.getOrNull(i)?.split(':')?.let {
+                (it.getOrNull(0)?.toIntOrNull() ?: 0) to (it.getOrNull(1)?.toIntOrNull() ?: 0)
+            } ?: (0 to 0)
+        }
+    }
+
+    /** 离开曲库页时把三页的位置写进 Prefs（下标 + 偏移，不含任何状态对象） */
+    fun saveLibraryScroll(positions: List<Pair<Int, Int>>) {
+        prefs.libraryScroll = positions.joinToString("|") { (idx, off) -> "$idx:$off" }
+    }
+
+    /**
+     * 冷启动封面预热。
+     *
+     * 进程重启后内存缓存是空的，只靠"滚到哪解到哪"会有那么一两秒满屏占位图 ——
+     * 用户看到的就是"重启后封面没了，得播一会才回来"。曲库一就位就把开头
+     * 这些歌的封面提前解出来（命中磁盘缓存时几乎不花钱）。
+     */
+    private fun warmUpCovers() {
+        val app = getApplication<Application>()
+        // 够铺满第一屏再往下翻两三屏就够了，剩下的交给列表滚动时的预取
+        val list = songs.take(80)
+        if (list.isEmpty()) return
+        ArtworkLoader.warmUp(
+            context = app,
+            requests = list.map { CoverRequest(it.albumId, it.uri, OnlineCover.keyOf(it.title, it.artist)) },
+            sizePx = LIST_COVER_PX
+        )
+    }
+
+
     var favorites by mutableStateOf(prefs.favorites)
         private set
     var recentIds by mutableStateOf(prefs.recentIds())
@@ -214,8 +293,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var playbackRestored = false
 
-    /** 恢复完成、等播放器报出 mediaId 后要请求一次列表定位 */
+    /**
+     * 恢复完成、等播放器报出 mediaId 后要请求一次列表定位。
+     *
+     * **只有上次没留下滚动位置时才做**：存的那个位置是用户上一次真正翻到的地方，
+     * 比"正在播放那首"更贴近他的预期；两边都要的话，存档就白存了。
+     */
     private var pendingStartupScroll = false
+
+    private fun armStartupScroll() {
+        pendingStartupScroll = prefs.libraryScroll.isBlank()
+    }
 
     init {
         pushSkinToWidget()
@@ -280,6 +368,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 ensureCover(it)
                 // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
                 maybeDownload(it)
+                // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
+                publishLockScreenLyrics(it)
             }
         }
 
@@ -297,6 +387,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     artists = MediaRepository.groupArtists(visible)
                     folders = MediaRepository.groupFolders(visible)
                     scanState = ScanState.READY
+                    // 曲库就位 → 提前把开头这些歌的封面解出来，
+                    // 免得重启后第一屏全是占位图（见 warmUpCovers 的说明）
+                    warmUpCovers()
                 }
             }
         }
@@ -349,7 +442,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (list.isEmpty()) return false
 
         playbackRestored = true
-        pendingStartupScroll = true
+        armStartupScroll()
         // autoplay=false：冷启动就出声很吓人，摆成"暂停在这首歌"等用户按播放。
         // notifyStart=false：这只是把上次的歌摆回来，不该给播放次数 +1。
         player.play(
@@ -400,7 +493,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val index = resolved?.second ?: 0
 
         playbackRestored = true
-        pendingStartupScroll = true
+        armStartupScroll()
         // autoplay = false：冷启动就出声很吓人。摆成「暂停在这首歌上」，按播放键才继续。
         // notifyStart = false：这只是把上次的歌摆回来，不该给播放次数 +1。
         player.play(
@@ -637,6 +730,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyScanOutcome(outcome: ScanOutcome) {
         songs = filterHidden(outcome.songs)
+        // 扫描会清掉封面缓存，这里重新预热一遍（见 warmUpCovers 的说明）
+        warmUpCovers()
         albums = MediaRepository.groupAlbums(songs)
         artists = MediaRepository.groupArtists(songs)
         folders = MediaRepository.groupFolders(songs)
@@ -749,6 +844,44 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 冷启动的自动刷新只做一次（PermissionGate 每次重组都可能再叫它） */
+    private var startupRefreshStarted = false
+
+    /**
+     * 冷启动自动刷新曲库 —— 取代原来的下拉刷新。
+     *
+     * 几个刻意的取舍：
+     * - **不把 scanState 置成 SCANNING**（已经有缓存时）：那样列表会闪一下加载态；
+     * - **不清封面缓存**（`clearArtwork = false`）：清了每次启动封面都要重新解一遍，
+     *   正是之前"重启后封面要等一会才出来"的老毛病；
+     * - **没权限就不扫**：拿不到 READ_MEDIA_AUDIO 时 scan 会返回空结果，
+     *   把空结果写进缓存等于把用户的曲库抹了。
+     */
+    fun refreshOnStart() {
+        if (startupRefreshStarted) return
+        startupRefreshStarted = true
+        if (!hasAudioPermission()) return
+        viewModelScope.launch {
+            val hadSongs = songs.isNotEmpty()
+            if (!hadSongs) scanState = ScanState.SCANNING
+            runCatching { runScan(clearArtwork = false) }
+                .onFailure { android.util.Log.w("SonanceScan", "启动刷新失败: ${it.message}") }
+            scanState = ScanState.READY
+            if (!hadSongs) restorePlaybackState()
+        }
+    }
+
+    private fun hasAudioPermission(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(
+            getApplication(), permission
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     /**
      * 下载成功之后把新文件并进曲库。**必须做** ——
      *
@@ -789,14 +922,29 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scan()
     }
 
+    /**
+     * 切换标签页。
+     *
+     * @param scrollToCurrent 切回「全部歌曲」时是否把正在播放那首滚进可视区。
+     *   左右滑动切页时必须传 false —— 滑动只是"看看另一页"，不该把用户在
+     *   全部歌曲里的滚动位置重置到正在播放处。
+     */
+    /**
+     * 切换主标签页。
+     *
+     * ⚠️ 这里**不再**自动"滚到正在播放的歌"。
+     *
+     * 原来只要切回「全部歌曲」就会滚一次，于是从设置页返回时，
+     * 用户翻到一半的列表被硬拽到正在播放那首 —— 他自己的位置就这么丢了。
+     * 定位改成**只有显式操作才做**（顶栏/迷你条上的"回到正在播放"），
+     * 见 [requestScrollToCurrent]。
+     */
     fun selectTab(value: LibraryTab) {
         val changed = tab != value
         tab = value
         // 不把「皮肤与设置」记成上次的标签页：它在导航结构里是附属页（齿轮进入、
         // 返回回到主页面），记住了会导致下次冷启动直接停在设置页。
         if (value != LibraryTab.SETTINGS) prefs.lastTab = value.id
-        // 切回「全部歌曲」时把正在播放的那首滚进可视区
-        if (value == LibraryTab.SONGS && changed) requestScrollToCurrent()
     }
 
     // ===== 在线歌词 =====
@@ -888,6 +1036,208 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeGlassVisibility(value: Int) {
         glassVisibility = value.coerceIn(0, 100)
         prefs.glassVisibility = glassVisibility
+    }
+
+    // ===== 迷你播放条（列表页底部那个「正在播放」）=====
+
+    var miniPlayerStyle by mutableStateOf(MiniPlayerStyle.of(prefs.miniPlayerStyle))
+        private set
+    var miniGlassStyle by mutableStateOf(GlassStyle.of(prefs.miniGlassStyle))
+        private set
+    var miniGlassBlur by mutableIntStateOf(prefs.miniGlassBlurDp)
+        private set
+    var miniGlassVisibility by mutableIntStateOf(prefs.miniGlassVisibility)
+        private set
+    var miniCardOpacity by mutableIntStateOf(prefs.miniCardOpacity)
+        private set
+
+    fun changeMiniPlayerStyle(value: MiniPlayerStyle) {
+        miniPlayerStyle = value
+        prefs.miniPlayerStyle = value.ordinal
+    }
+
+    /** 换样式时把模糊 / 可见度一起带到该样式的预设值（和歌词页一个路子） */
+    fun applyMiniGlassStyle(style: GlassStyle) {
+        miniGlassStyle = style
+        miniGlassBlur = style.defaultBlurDp
+        miniGlassVisibility = style.defaultVisibility
+        prefs.miniGlassStyle = style.ordinal
+        prefs.miniGlassBlurDp = style.defaultBlurDp
+        prefs.miniGlassVisibility = style.defaultVisibility
+    }
+
+    fun changeMiniGlassBlur(value: Int) {
+        miniGlassBlur = value.coerceIn(0, 80)
+        prefs.miniGlassBlurDp = miniGlassBlur
+    }
+
+    fun changeMiniGlassVisibility(value: Int) {
+        miniGlassVisibility = value.coerceIn(0, 100)
+        prefs.miniGlassVisibility = miniGlassVisibility
+    }
+
+    fun changeMiniCardOpacity(value: Int) {
+        miniCardOpacity = value.coerceIn(0, 100)
+        prefs.miniCardOpacity = miniCardOpacity
+    }
+
+    /** 悬浮卡片上进度用环还是用线（两者都开就重复，所以做成三选一） */
+    var miniProgressStyle by mutableStateOf(MiniProgressStyle.of(prefs.miniProgressStyle))
+        private set
+
+    fun changeMiniProgressStyle(value: MiniProgressStyle) {
+        miniProgressStyle = value
+        prefs.miniProgressStyle = value.ordinal
+    }
+
+    /** 左滑（下一首）/ 右滑（上一首）的触发阈值，百分比卡宽 */
+    var miniSwipeLeftPct by mutableIntStateOf(prefs.miniSwipeLeftPct)
+        private set
+    var miniSwipeRightPct by mutableIntStateOf(prefs.miniSwipeRightPct)
+        private set
+
+    fun changeMiniSwipeLeftPct(value: Int) {
+        miniSwipeLeftPct = value.coerceIn(5, 60)
+        prefs.miniSwipeLeftPct = miniSwipeLeftPct
+    }
+
+    fun changeMiniSwipeRightPct(value: Int) {
+        miniSwipeRightPct = value.coerceIn(5, 60)
+        prefs.miniSwipeRightPct = miniSwipeRightPct
+    }
+
+    /** 悬浮条高度 / 封面大小，百分比（100 = 现在的样子） */
+    var miniHeightScale by mutableIntStateOf(prefs.miniHeightScale)
+        private set
+    var miniCoverScale by mutableIntStateOf(prefs.miniCoverScale)
+        private set
+
+    fun changeMiniHeightScale(value: Int) {
+        miniHeightScale = value.coerceIn(100, 200)
+        prefs.miniHeightScale = miniHeightScale
+    }
+
+    fun changeMiniCoverScale(value: Int) {
+        miniCoverScale = value.coerceIn(100, 200)
+        prefs.miniCoverScale = miniCoverScale
+    }
+
+    /**
+     * 锁屏歌词（ColorOS / OPlus 原生锁屏歌词页）。
+     *
+     * 系统读的是我们 MediaSession 上 `MediaMetadata["lyricInfo"]` 里的时间轴，
+     * 所以只要在换歌时把它写进去就行。**只为它做本地读取**（内嵌标签 / 本地缓存），
+     * 不联网 —— 锁屏歌词是"顺手显示"，不该因为它在后台发请求。
+     */
+    var lockScreenLyrics by mutableStateOf(prefs.lockScreenLyrics)
+        private set
+
+    /** 换歌代次：迟到的旧歌词结果靠它丢弃 */
+    private var lockLyricsGeneration = 0
+
+    fun changeLockScreenLyrics(value: Boolean) {
+        lockScreenLyrics = value
+        prefs.lockScreenLyrics = value
+        if (!value) {
+            player.publishLyricsInfo(null)
+        } else {
+            val id = player.state.value.mediaId
+            songById(id)?.let { publishLockScreenLyrics(it) }
+        }
+    }
+
+    /**
+     * 给当前这首发布 / 清除锁屏歌词。
+     *
+     * 三种情况都要处理：
+     * - 在线歌：没有本地时间轴 → **清除**，免得锁屏挂着上一首的句子；
+     * - 本地歌有歌词 → 写 `lyricInfo`；
+     * - 本地歌没歌词 → 写一份 `noLyric = true` 的 payload（不带 `lyric` 字段），
+     *   让系统知道"这首确实没有"，而不是继续显示上一首。
+     */
+    private fun publishLockScreenLyrics(song: Song) {
+        if (!prefs.lockScreenLyrics) return
+        if (isRemoteSongId(song.id)) {
+            lockLyricsGeneration++
+            player.publishLyricsInfo(null)
+            return
+        }
+        val gen = ++lockLyricsGeneration
+        viewModelScope.launch {
+            val result = runCatching {
+                LyricsRepository.load(
+                    context = getApplication(),
+                    songId = song.id,
+                    uri = song.uri,
+                    title = song.title,
+                    artist = song.artist,
+                    album = song.album,
+                    // 锁屏歌词**不联网**：只用内嵌标签和本地缓存
+                    onlineEnabled = false,
+                    convertToSimplified = false,
+                    durationMs = song.durationMs,
+                    neteaseEnabled = false
+                )
+            }.onFailure {
+                android.util.Log.w("SonanceLyrics", "读取锁屏歌词失败: ${it.message}")
+            }.getOrNull()
+            // 回来时可能已经换歌了：代次或当前歌对不上就丢弃
+            if (gen != lockLyricsGeneration) return@launch
+            if (player.state.value.mediaId != song.id) return@launch
+            player.publishLyricsInfo(LockScreenLyrics.buildJson(song, result?.lyrics, gen))
+        }
+    }
+
+    // ===== 列表外观 =====
+
+    var listRowStyle by mutableStateOf(ListRowStyle.of(prefs.listRowStyle))
+        private set
+
+    fun changeListRowStyle(value: ListRowStyle) {
+        listRowStyle = value
+        prefs.listRowStyle = value.ordinal
+    }
+
+    /** 列表封面倍数（1 / 1.2 / 1.5 / 2 倍）。只放大封面，文字布局不变 */
+    var listCoverScale by mutableStateOf(ListCoverScale.of(prefs.listCoverScale))
+        private set
+
+    fun changeListCoverScale(value: ListCoverScale) {
+        listCoverScale = value
+        prefs.listCoverScale = value.ordinal
+    }
+
+    // ===== 顶栏品牌 =====
+
+    /**
+     * 顶栏标题左边那个小方块的图案（`AppIcons` 的 id，空串 = 内置 Logo 矢量图）。
+     *
+     * 和 [appIconId] 分开：那个换桌面启动器图标，这个只换应用内的顶栏 logo。
+     */
+    var topBarLogoId by mutableStateOf(prefs.topBarLogoId)
+        private set
+
+    fun changeTopBarLogo(id: String) {
+        if (id == topBarLogoId) return
+        topBarLogoId = id
+        prefs.topBarLogoId = id
+        showToast("已更换顶栏图标")
+    }
+
+    /**
+     * 把一套玻璃样式**同时**铺到歌词页 / 律动柱页 / 悬浮迷你播放条。
+     *
+     * 玻璃主题（[Skin.glass] 非 null）选中时走这里：主题是一整套观感，
+     * 只换颜色令牌而让三处玻璃保持原样，看上去就是"换了个配色，别的没变"。
+     *
+     * 律动柱页没有对应的 VM 状态（它在页面里直接读 prefs），这里只写盘。
+     */
+    private fun applyGlassEverywhere(style: GlassStyle) {
+        changeGlassStyle(style)
+        prefs.vizGlassStyle = style.ordinal
+        prefs.vizGlassBlurDp = style.defaultBlurDp
+        prefs.vizGlassVisibility = style.defaultVisibility
+        applyMiniGlassStyle(style)
     }
 
     // ===== 在线封面 =====
@@ -1235,8 +1585,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             coverResults = list.orEmpty()
             coverSearching = false
             coverNotice = when {
-                list == null -> "搜索失败，检查一下网络，或稍后再试"
-                list.isEmpty() -> "没搜到「$title${if (artist.isNotBlank()) " - $artist" else ""}」的封面，换个写法试试"
+                list == null -> "搜索词是空的，至少填个歌名"
+                list.isEmpty() -> "iTunes 和网易云都没搜到「$title${if (artist.isNotBlank()) " - $artist" else ""}」。" +
+                    "试试只留歌名，或去掉 (Live) / 抖音版 这类后缀"
                 else -> null
             }
         }
@@ -1412,6 +1763,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeSkin(value: Skin) {
         skin = value
         prefs.skinId = value.id
+        // 玻璃主题：颜色之外还要把三处玻璃铺开，并顺手把迷你播放条换成悬浮卡片
+        // （贴底通栏没有"一块玻璃"的观感，配玻璃主题说不通）
+        val bundledGlass = value.glass
+        if (bundledGlass != null) {
+            applyGlassEverywhere(bundledGlass)
+            miniPlayerStyle = MiniPlayerStyle.FLOAT
+            prefs.miniPlayerStyle = MiniPlayerStyle.FLOAT.ordinal
+        }
         // 桌面小组件也跟着换色。它在**另一个进程上下文**里渲染，
         // 不会自己感知到皮肤变了，必须应用侧把颜色写过去并请求重画。
         val app = getApplication<Application>()
@@ -1423,7 +1782,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             accent = value.accent.toArgb(),
             onAccent = value.onAccent.toArgb()
         )
-        showToast("已切换皮肤 · ${value.name}")
+        showToast(
+            if (value.glass != null) "已切换皮肤 · ${value.name}（含玻璃背景）"
+            else "已切换皮肤 · ${value.name}"
+        )
     }
 
     /** 当前选中的应用图标（id 对应 manifest 里的 activity-alias 后缀） */
@@ -1436,6 +1798,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         appIconId = id
         prefs.appIconId = id
         showToast("已更换图标 · 桌面稍后刷新")
+    }
+
+    /** 顶栏显示的应用名（双击顶栏标题可改） */
+    var appDisplayName by mutableStateOf(prefs.appDisplayName)
+        private set
+
+    fun changeDisplayName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || trimmed == appDisplayName) return
+        appDisplayName = trimmed
+        prefs.appDisplayName = trimmed
+        showToast("已改名为「$trimmed」")
     }
 
     /**
@@ -2833,12 +3207,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val q = currentQueue()
             if (q.size > 1) {
                 preShuffleOrder = q
-                val cur = q.getOrNull(st.queueIndex)
-                val rest = q.filter { it.id != cur?.id }.shuffled()
-                val shuffled = if (cur != null) listOf(cur) + rest else rest
-                player.toggleShuffle()
-                // 保住进度：重排队列不等于重头播
-                player.play(shuffled, 0, autoplay = st.isPlaying, startPositionMs = st.positionMs)
+                val idx = st.queueIndex.coerceIn(0, q.lastIndex)
+                val shuffled = ShuffleOrder.build(q, idx, recentWindowFor(q.size))
+                player.setShuffle(true)
+                // 保住进度：重排队列不等于重头播。
+                // notifyStart = false —— 还是同一首歌，不该再记一次「播放次数」。
+                player.play(
+                    shuffled, idx,
+                    autoplay = st.isPlaying,
+                    startPositionMs = st.positionMs,
+                    notifyStart = false
+                )
                 if (!quiet) showToast("随机播放已开启")
                 return
             }
@@ -2846,15 +3225,32 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val orig = preShuffleOrder
             if (orig != null) {
                 val idx = orig.indexOfFirst { it.id == st.mediaId }.coerceAtLeast(0)
-                player.toggleShuffle()
-                player.play(orig, idx, autoplay = st.isPlaying, startPositionMs = st.positionMs)
+                player.setShuffle(false)
+                player.play(
+                    orig, idx,
+                    autoplay = st.isPlaying,
+                    startPositionMs = st.positionMs,
+                    notifyStart = false
+                )
                 preShuffleOrder = null
                 if (!quiet) showToast("随机播放已关闭")
                 return
             }
         }
         // 队列只有一首 / 没有记录过原顺序：只切标志
-        player.toggleShuffle()
+        player.setShuffle(!st.shuffle)
+    }
+
+    /**
+     * 洗牌时要避开的「最近听过」。
+     *
+     * 窗口取队列长度的一半（6~60 之间）：太小挡不住刚放过的那几首，
+     * 太大则一轮里「没听过」的歌太少，反而听不出新鲜感。
+     */
+    private fun recentWindowFor(queueSize: Int): Set<Long> {
+        if (recentIds.isEmpty()) return emptySet()
+        val window = (queueSize / 2).coerceIn(6, 60)
+        return recentIds.take(window).toHashSet()
     }
 
     /**
@@ -2867,8 +3263,32 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 中间态会短暂出现"随机 + 单曲循环"这种矛盾组合，播放器可能刚好在那一瞬
      * 决定下一首放什么。
      */
-    fun cyclePlayMode() {
+    fun cyclePlayMode(list: List<Song> = emptyList()) {
         val st = player.state.value
+
+        // 还没在播 → 先定模式，再用这一页的歌开播。
+        //
+        // 原来的行为是"点一下就重排整条队列"，哪怕什么都没在播；
+        // 而列表表头那个位置，用户的预期是"从这里放起来"。
+        // 所以没在播时按目标模式把队列排好再从第一首开始。
+        if (!st.hasItem && list.isNotEmpty()) {
+            val next = PlayMode.of(st.shuffle, st.repeat).next()
+            val shuffled = next == PlayMode.SHUFFLE
+            // 走 [ShuffleOrder] 而不是 [List.shuffled]：后者一轮之内会重复，
+            // 和播放页那个模式按钮必须是同一套排序
+            val ordered = if (shuffled) {
+                ShuffleOrder.build(list, 0, recentWindowFor(list.size))
+            } else {
+                list
+            }
+            preShuffleOrder = if (shuffled) list else null
+            player.play(ordered, 0)
+            player.setShuffle(shuffled)
+            player.setRepeat(if (next == PlayMode.REPEAT_ONE) RepeatMode.ONE else RepeatMode.ALL)
+            showToast(next.label)
+            return
+        }
+
         val next = PlayMode.of(st.shuffle, st.repeat).next()
         when (next) {
             PlayMode.SHUFFLE -> {
@@ -2893,19 +3313,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // ===== 播放入口 =====
 
     fun playFrom(list: List<Song>, song: Song) {
-        val idx = list.indexOfFirst { it.id == song.id }
-        player.play(list, if (idx < 0) 0 else idx)
-        // 换了播放列表，之前记的原顺序就失效了
-        preShuffleOrder = null
+        val idx = list.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
+        // 随机开着的时候，点一首歌也要按"洗牌袋"来排 ——
+        // 否则队列回到曲库顺序，而模式按钮还亮着"随机"，两边说的不是一回事。
+        val on = player.state.value.shuffle
+        val ordered = if (on) ShuffleOrder.build(list, idx, recentWindowFor(list.size)) else list
+        // 换了播放列表，之前记的原顺序就换成这一份（随机开着时它才是"还原"的基准）
+        preShuffleOrder = if (on) list else null
+        player.play(ordered, idx)
         showToast("正在播放 · ${song.title}")
     }
 
     fun playAll(list: List<Song>, shuffled: Boolean = false) {
         if (list.isEmpty()) return
-        val ordered = if (shuffled) list.shuffled() else list
+        // 同上：只要最终是随机序，就用洗牌袋而不是 `shuffled()`（后者会重复）
+        val on = shuffled || player.state.value.shuffle
+        val ordered = if (on) ShuffleOrder.build(list, 0, recentWindowFor(list.size)) else list
+        preShuffleOrder = if (on) list else null
         player.play(ordered, 0)
-        preShuffleOrder = null
-        showToast(if (shuffled) "随机播放 ${list.size} 首" else "播放全部 ${list.size} 首")
+        showToast(if (on) "随机播放 ${list.size} 首" else "播放全部 ${list.size} 首")
     }
 
     fun playNext(song: Song) {

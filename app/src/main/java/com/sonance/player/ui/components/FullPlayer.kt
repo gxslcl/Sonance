@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -90,6 +91,8 @@ import com.sonance.player.playback.PlayMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.floor
@@ -267,7 +270,18 @@ fun FullPlayer(
         if (queue.isEmpty()) return@LaunchedEffect
         val target = state.queueIndex.coerceIn(0, queue.lastIndex)
         if (pagerState.settledPage != target && !pagerState.isScrollInProgress) {
-            pagerState.animateScrollToPage(target)
+            //
+            // 开/关随机会**重排队列**，同一首歌因此换了个下标（例如从第 12 页挪到第 0 页）。
+            // 这时候必须直接跳过去，不能 animate —— 一路滚过去会把中间十几页全扫一遍，
+            // 就是用户说的"切随机时闪一下"。
+            //
+            // 直接跳之所以看不见：目标页摆的还是**同一首歌**，封面、标题、进度全一样，
+            // 分页器瞬间换页在屏幕上看不出任何变化（变化的只有视口外的相邻页）。
+            if (queue.getOrNull(target)?.id == state.mediaId) {
+                pagerState.scrollToPage(target)
+            } else {
+                pagerState.animateScrollToPage(target)
+            }
         }
     }
 
@@ -828,30 +842,26 @@ private fun glowTintAt(colors: List<Color>, t: Float): Color {
 }
 
 /**
- * 双击手势（用来打开晕染面板）。
+ * 封面的手势：**长按换封面、双击开晕染**。
  *
- * 自己比两次点击的时间戳，**不用** `detectTapGestures(onDoubleTap=)` ——
- * 后者的判定窗口是系统写死的 300ms，且实测用 `adb shell input tap` 注入的
- * 两次点击根本挤不进这个窗口，模拟器和真机上都很难触发。
- * 800ms 对真人双击（通常 100~250ms）绰绰有余，也不会把两次无关点击算成双击。
+ * 上一版是"单击换封面"，太容易误触 —— 播放页上点封面本就是最随手的动作。
+ * 换成长按之后单击完全空着，误触就没有了。
  *
- * 用 `clickable` 而不是自己写 `pointerInput`：后者实测 up 事件会被判成
- * 「已被消费」直接返回 null，一次都不触发。
+ * 这里不用 `detectTapGestures`：它的双击窗口只有 300ms，而且早先实测
+ * `pointerInput` 那条路上 up 事件会被判成"已消费"（见 git 历史里的注释）。
+ * 用 `combinedClickable` 最稳：长按/双击/单击都是系统标准判定。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun Modifier.onDoubleTapGlow(action: () -> Unit): Modifier {
-    val lastTap = remember { longArrayOf(0L) }
-    val source = remember { MutableInteractionSource() }
-    return this.clickable(interactionSource = source, indication = null) {
-        val now = System.currentTimeMillis()
-        if (now - lastTap[0] < 800L) {
-            lastTap[0] = 0L
-            action()
-        } else {
-            lastTap[0] = now
-        }
-    }
-}
+private fun Modifier.onCoverGesture(
+    onLongPress: () -> Unit,
+    onDoubleTap: () -> Unit
+): Modifier = this.combinedClickable(
+    // 单击什么都不做 —— 这是刻意的，播放页最容易误碰的就是封面
+    onClick = {},
+    onDoubleClick = onDoubleTap,
+    onLongClick = onLongPress
+)
 
 /**
  * 一页的晕染素材：三个取样色 + **已经烘好**的渐变位图。
@@ -1246,7 +1256,7 @@ private fun PlayerPage(
                                     .size(landscapeSide)
                                     .clip(RoundedCornerShape(16.dp))
                                     // 位置由左栏那一层上报（见上面的注释）
-                                    .onDoubleTapGlow(onOpenGlow),
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
                                 sourceUri = song.uri,
@@ -1288,7 +1298,7 @@ private fun PlayerPage(
                     Spacer(Modifier.height(16.dp))
                     BottomRow(
                         isFavorite, volume, onToggleFavorite, onVolume,
-                        onOpenCover, onOpenEqualizer, eqEnabled
+                        onOpenEqualizer, eqEnabled
                     )
                 }
             }
@@ -1337,7 +1347,7 @@ private fun PlayerPage(
                                     .clip(RoundedCornerShape(16.dp))
                                     // 位置由主区域那一层上报（见上面的注释）——
                                     // 挂在这里的话歌词态就断了
-                                    .onDoubleTapGlow(onOpenGlow),
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow),
                                 cornerRadius = 16.dp,
                                 sizePx = 900,
                                 sourceUri = song.uri,
@@ -1373,7 +1383,7 @@ private fun PlayerPage(
                 Spacer(Modifier.height(14.dp))
                 BottomRow(
                     isFavorite, volume, onToggleFavorite, onVolume,
-                    onOpenCover, onOpenEqualizer, eqEnabled
+                    onOpenEqualizer, eqEnabled
                 )
                 // 距底部 20dp（再叠加系统导航栏安全区）
                 Spacer(Modifier.height(BottomGap))
@@ -1446,13 +1456,20 @@ private fun ProgressBlock(
     }
 }
 
+/**
+ * 播放键下面那一排：**收藏 + 音量 + 均衡器**。
+ *
+ * 原来「更换封面」也挤在这里，左边 1 个图标、右边 2 个，音量条被顶得偏左。
+ * 换封面的入口挪到了封面上（单击封面，见 [onCoverTap]）——
+ * 它本来作用的就是封面，贴着封面比挤在一排按钮里更直觉，
+ * 这一行也随之对称：♥ ｜ 音量 ｜ 均衡器。
+ */
 @Composable
 private fun BottomRow(
     isFavorite: Boolean,
     volume: Float,
     onFavorite: () -> Unit,
     onVolume: (Float) -> Unit,
-    onOpenCover: () -> Unit,
     onOpenEqualizer: () -> Unit,
     eqEnabled: Boolean
 ) {
@@ -1482,13 +1499,6 @@ private fun BottomRow(
             onClick = onOpenEqualizer,
             iconSize = 20.dp,
             tint = if (eqEnabled) skin.accent else skin.textMuted
-        )
-        IconAction(
-            icon = SonanceIcons.Image,
-            contentDescription = "更换封面",
-            onClick = onOpenCover,
-            iconSize = 20.dp,
-            tint = skin.textMuted
         )
     }
 }

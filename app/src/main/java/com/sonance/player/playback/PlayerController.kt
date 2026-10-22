@@ -13,6 +13,7 @@ import androidx.media3.session.SessionToken
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.Song
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -113,6 +114,12 @@ class PlayerController(private val context: Context) {
     /** 歌曲真正开始播放时回调（用于记录最近播放） */
     var onSongStarted: ((Long) -> Unit)? = null
 
+    /**
+     * App 侧的「随机」开关。[PlayerUiState.shuffle] 读的是它，不是播放器的标志 ——
+     * 播放器那个标志一直关着，见 [setShuffle]。
+     */
+    private var shuffleState: Boolean = false
+
     private var pendingRequest: PlayRequest? = null
     private var controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
 
@@ -208,7 +215,7 @@ class PlayerController(private val context: Context) {
                 sourceUri = meta?.extras?.getString(EXTRA_URI),
                 durationMs = duration,
                 positionMs = if (id != old.mediaId) 0L else player.currentPosition.coerceAtLeast(0L),
-                shuffle = player.shuffleModeEnabled,
+                shuffle = shuffleState,
                 repeat = when (player.repeatMode) {
                     Player.REPEAT_MODE_ALL -> RepeatMode.ALL
                     Player.REPEAT_MODE_ONE -> RepeatMode.ONE
@@ -280,6 +287,35 @@ class PlayerController(private val context: Context) {
         if (current.mediaMetadata.artworkUri == wanted) return
         runCatching { c.replaceMediaItem(idx, song.toMediaItem(context)) }
             .onFailure { android.util.Log.w("SonanceCover", "刷新通知栏封面失败: ${it.message}") }
+    }
+
+    /**
+     * 把**锁屏歌词**写进当前 MediaItem 的 metadata。
+     *
+     * ColorOS / OPlus 的锁屏歌词读的是 `MediaMetadata["lyricInfo"]`（一段 JSON），
+     * 所以这里只改 extras，其余字段（标题、歌手、封面、时长）全部原样带回 ——
+     * 换掉整个 metadata 会把封面和身份一起丢了。
+     *
+     * 用 `replaceMediaItem` 而不是重建 MediaItem：这条路径本来就在给通知栏刷封面
+     * （见 [refreshCurrentArtwork]），实测不会打断播放。
+     *
+     * @param json null = 清除（换到没有歌词的歌时要把上一首的歌词收掉，
+     *   否则锁屏会一直挂着上一首的句子）
+     */
+    fun publishLyricsInfo(json: String?) {
+        val c = controller ?: return
+        val idx = c.currentMediaItemIndex
+        if (idx !in 0 until c.mediaItemCount) return
+        val current = runCatching { c.getMediaItemAt(idx) }.getOrNull() ?: return
+
+        val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle())
+        if (json == null) extras.remove(LockScreenLyrics.EXTRA_KEY)
+        else extras.putString(LockScreenLyrics.EXTRA_KEY, json)
+        if (current.mediaMetadata.extras?.getString(LockScreenLyrics.EXTRA_KEY) == json) return
+
+        val metadata = current.mediaMetadata.buildUpon().setExtras(extras).build()
+        runCatching { c.replaceMediaItem(idx, current.buildUpon().setMediaMetadata(metadata).build()) }
+            .onFailure { android.util.Log.w("SonanceLyrics", "发布锁屏歌词失败: ${it.message}") }
     }
 
     /**
@@ -447,19 +483,26 @@ class PlayerController(private val context: Context) {
     }
 
     /**
-     * 切换随机播放。
+     * 直接设定「随机」开关。
      *
-     * 只切 [Player.setShuffleModeEnabled] 就够了 —— ExoPlayer 在 setMediaItems 时
-     * 会用一个**随机种子**生成 shuffle order（DefaultShuffleOrder），开启后
-     * 自动续播和 [next]/[previous] 都会按那份随机序走。
+     * ⚠️ 播放器的 `shuffleModeEnabled` **始终保持关闭** —— 随机由 App 自己重排队列
+     * 实现（见 `SonanceViewModel.toggleShuffle` / `ShuffleOrder`）。
      *
-     * 注意 media3 1.5 的 `Player` 接口没有 `setShuffleOrder`（那是 `ExoPlayer` 才有的），
-     * MediaController 用不了，所以没法在每次开启时强制换一份新随机序；
-     * 但每次重新播放（setMediaItems）都会重新生成，实际体验没问题。
+     * 为什么不能交给播放器：播放顺序和界面上那份队列会变成**两套**。
+     * 播放页的上下滑走的是队列下标（分页器），自动续播走的是播放器的 shuffle order。
+     * 于是手动滑到某一首之后，自动续播会按它自己的序跳到别处 ——
+     * 用户来回几次就会撞上刚听过的歌，表现就是"老是那几首、重复概率高"。
+     * 让两者共用一条队列，随机才真的是"一轮之内不重复"。
      */
-    fun toggleShuffle() {
-        val c = controller ?: return
-        c.shuffleModeEnabled = !c.shuffleModeEnabled
+    fun setShuffle(on: Boolean) {
+        shuffleState = on
+        val c = controller
+        if (c == null) {
+            _state.update { it.copy(shuffle = on) }
+            return
+        }
+        // 兜底：万一别处把它打开了（比如系统媒体通知），这里按回来
+        if (c.shuffleModeEnabled) c.shuffleModeEnabled = false
         sync(c, null)
     }
 

@@ -42,8 +42,10 @@ import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.input.pointer.pointerInput
 
 @Composable
 fun SearchField(
@@ -135,21 +137,23 @@ fun SortButton(
                 .background(skin.surface)
                 .border(1.dp, skin.border, RoundedCornerShape(9.dp))
                 .clickable { open = true }
-                .padding(horizontal = 12.dp, vertical = 11.dp),
+                // 瘦身成 图标+小箭头（≈52dp）：原来带着「添加时间」全称
+                // 要占掉搜索框近 1/3 宽度。当前是哪种排序收进下拉菜单里看 ——
+                // 排序是低频确认项，不值得常驻一个文字标签。
+                .padding(horizontal = 10.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Icon(
                 imageVector = SonanceIcons.Sort,
-                contentDescription = "排序",
+                contentDescription = "排序方式",
                 tint = skin.textDim,
                 modifier = Modifier.size(15.dp)
             )
             Text(
-                text = field.label + if (ascending) " ↑" else " ↓",
+                text = if (ascending) "↑" else "↓",
                 style = MaterialTheme.typography.labelLarge,
-                color = skin.textDim,
-                maxLines = 1
+                color = skin.textDim
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -288,7 +292,15 @@ fun ListHeader(
     /** 第二行右侧：播放全部 / 随机 / 重新扫描 等 */
     actions: @Composable ((Modifier) -> Unit)? = null,
     /** ⁝ 溢出菜单的内容。传 null 就不显示这个按钮 */
-    overflow: (@Composable ColumnScope.() -> Unit)? = null
+    overflow: (@Composable ColumnScope.() -> Unit)? = null,
+    /**
+     * 双击第二行左侧的**空白**（「全部 / 最近 / 收藏」指示器右边、右侧图标左边的
+     * 那一大片空地）→ 列表回到顶部。
+     *
+     * 双击而不是单击：这一行同时是分类切换的操作区，单击很容易误触
+     * （比如想点「最近」却把列表拽回顶部）。
+     */
+    onDoubleTapToTop: (() -> Unit)? = null
 ) {
     val dense = LocalDenseLayout.current
 
@@ -320,7 +332,15 @@ fun ListHeader(
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .horizontalScroll(rememberScrollState()),
+                        .horizontalScroll(rememberScrollState())
+                        // 挂在这一整条上（而不只是缝隙里）：它本来就是 weight(1f)，
+                        // 指示器靠左排完之后剩下的一大片空地都归它，双击命中区域足够大。
+                        .then(
+                            if (onDoubleTapToTop == null) Modifier
+                            else Modifier.pointerInput(onDoubleTapToTop) {
+                                detectTapGestures(onDoubleTap = { onDoubleTapToTop.invoke() })
+                            }
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {

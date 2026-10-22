@@ -3,6 +3,7 @@ package com.sonance.player.ui.components
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import com.sonance.player.data.LyricAdaptMode
+import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -42,6 +43,23 @@ class LyricsContrastTest {
         return if (d > 180f) 360f - d else d
     }
 
+    /**
+     * 造一条色带。方向走的是线上同一条路径（[pickLighten]），所以这些用例验的是
+     * "选方向 + 走明度"合起来的结果，不是单独验某一个函数。
+     */
+    private fun profileOf(
+        bgs: List<Color>,
+        skin: Skin = ocean,
+        target: Float = TARGET_OTHER
+    ): BgProfile = BgProfile(
+        bgs,
+        pickLighten(listOf(skin.textDim, skin.textMuted, skin.accent), bgs, target)
+    )
+
+    /** 一行歌词的颜色 —— 和线上一样，经 [lyricColor]。 */
+    private fun lineOf(base: Color, bg: Color, isCurrent: Boolean, skin: Skin = ocean): Color =
+        lyricColor(base, 0.5f, isCurrent, profileOf(listOf(bg), skin))
+
     // ===== 对比度公式 =====
 
     @Test
@@ -60,8 +78,9 @@ class LyricsContrastTest {
 
     @Test
     fun `本来就看得清的颜色原样返回`() {
-        // 深色皮肤底色 + 亮强调色：本来就够清楚，不许动
-        assertTrue(ocean.accent == ensureReadable(ocean.accent, ocean.bg, TARGET_CURRENT))
+        // 深色皮肤底色 + 亮强调色：本来就够清楚，不许动。方向给哪个都不许动
+        assertTrue(ocean.accent == ensureReadable(ocean.accent, ocean.bg, TARGET_CURRENT, true))
+        assertTrue(ocean.accent == ensureReadable(ocean.accent, ocean.bg, TARGET_CURRENT, false))
     }
 
     @Test
@@ -73,7 +92,7 @@ class LyricsContrastTest {
             contrastRatio(ocean.accent, bg) < TARGET_CURRENT
         )
 
-        val after = ensureReadable(ocean.accent, bg, TARGET_CURRENT)
+        val after = lineOf(ocean.accent, bg, isCurrent = true)
         assertTrue(
             "调完必须达标，实际 ${contrastRatio(after, bg)}",
             contrastRatio(after, bg) >= TARGET_CURRENT
@@ -87,7 +106,7 @@ class LyricsContrastTest {
     @Test
     fun `亮背景上的强调色被压暗`() {
         val bg = Color(0xFFEDE3D2)   // 封面透出来的暖米色
-        val after = ensureReadable(ocean.accent, bg, TARGET_CURRENT)
+        val after = lineOf(ocean.accent, bg, isCurrent = true)
         assertTrue(contrastRatio(after, bg) >= TARGET_CURRENT)
         assertTrue("亮背景上只能压暗", valueOf(after) < valueOf(ocean.accent))
         assertTrue(hueGap(hueOf(ocean.accent), hueOf(after)) < 2f)
@@ -98,7 +117,7 @@ class LyricsContrastTest {
         // 中灰是最难办的一种：往白往黑都够呛。两段式走法要能一路走到纯白 / 纯黑，
         // 否则这里就会卡在"够不到目标"。
         val midGray = Color(0xFF808080)
-        val after = ensureReadable(ocean.textMuted, midGray, TARGET_CURRENT)
+        val after = lineOf(ocean.textMuted, midGray, isCurrent = true)
         assertTrue(
             "实际 ${contrastRatio(after, midGray)}",
             contrastRatio(after, midGray) >= TARGET_CURRENT
@@ -109,7 +128,7 @@ class LyricsContrastTest {
     @Test
     fun `浅色皮肤的字在浅色封面上也会被调暗`() {
         val bg = Color(0xFFF3DFC0)
-        val after = ensureReadable(ivory.accent, bg, TARGET_CURRENT)
+        val after = lineOf(ivory.accent, bg, isCurrent = true, skin = ivory)
         assertTrue(contrastRatio(after, bg) >= TARGET_CURRENT)
         assertTrue(valueOf(after) < valueOf(ivory.accent))
     }
@@ -118,14 +137,14 @@ class LyricsContrastTest {
     fun `浅色皮肤的字压在偏暗的封面上会被调亮`() {
         // 「亮背景调暗」的镜像那一半：浅色皮肤的文字本身是深色，
         // 封面透出来偏暗时它会和背景糊在一起，这时必须往**亮**走。
-        // 两个方向都要扫、取改动最小的那个，就是为了这一对能同时成立。
+        // 方向是整页按背景选的，所以这一对能同时成立。
         val darkBg = Color(0xFF4A4A4A)
         assertTrue(
             "这个用例的前提是原本不达标，实际 ${contrastRatio(ivory.accent, darkBg)}",
             contrastRatio(ivory.accent, darkBg) < TARGET_CURRENT
         )
 
-        val after = ensureReadable(ivory.accent, darkBg, TARGET_CURRENT)
+        val after = lineOf(ivory.accent, darkBg, isCurrent = true, skin = ivory)
         assertTrue(
             "调完必须达标，实际 ${contrastRatio(after, darkBg)}",
             contrastRatio(after, darkBg) >= TARGET_CURRENT
@@ -158,7 +177,7 @@ class LyricsContrastTest {
 
     @Test
     fun `色带按位置取值、段间插值、越界夹住`() {
-        val p = BgProfile(listOf(Color.Black, Color.White))
+        val p = BgProfile(listOf(Color.Black, Color.White), true)
         assertTrue(Color.Black == p.at(0f))
         assertTrue(Color.White == p.at(1f))
         val mid = p.at(0.5f)
@@ -167,8 +186,79 @@ class LyricsContrastTest {
         assertTrue(Color.Black == p.at(-3f))
         assertTrue(Color.White == p.at(9f))
         // 单段 / 空段都不能崩
-        assertTrue(Color.Red == BgProfile(listOf(Color.Red)).at(0.7f))
-        assertTrue(Color.Black == BgProfile(emptyList()).at(0.5f))
+        assertTrue(Color.Red == BgProfile(listOf(Color.Red), true).at(0.7f))
+        assertTrue(Color.Black == BgProfile(emptyList(), true).at(0.5f))
+    }
+
+    // ===== 调色方向：整页只选一次 =====
+
+    @Test
+    fun `背景偏暗就往亮走，背景偏亮就往暗走`() {
+        val bases = listOf(ocean.textDim, ocean.textMuted, ocean.accent)
+        val dark = listOf(Color(0xFF12202C))
+        val light = listOf(Color(0xFFEDE3D2))
+        assertTrue("暗背景上歌词只能往亮走", pickLighten(bases, dark, TARGET_OTHER))
+        assertTrue("亮背景上歌词只能往暗走", !pickLighten(bases, light, TARGET_OTHER))
+    }
+
+    @Test
+    fun `只有当前句撞色时，方向要照顾到当前句`() {
+        // 浅色皮肤配亮封面：其它行（textDim）本来就够清楚，只有强调色的当前句糊了。
+        // 方向如果只看 textDim，就会"一票都没有"随手选一个 —— 实测那样会把当前句
+        // 推成白色，越调越糊。强调色必须一起参与选方向。
+        val bg = Color(0xFFF3DFC0)
+        assertTrue(
+            "前提：其它行本来就够清楚",
+            contrastRatio(ivory.textDim, bg) >= TARGET_OTHER
+        )
+        assertTrue(
+            "前提：当前句不达标",
+            contrastRatio(ivory.accent, bg) < TARGET_CURRENT
+        )
+
+        val after = lineOf(ivory.accent, bg, isCurrent = true, skin = ivory)
+        assertTrue(
+            "当前句必须被调暗，实际对比度 ${contrastRatio(after, bg)}",
+            contrastRatio(after, bg) >= TARGET_CURRENT
+        )
+        assertTrue(valueOf(after) < valueOf(ivory.accent))
+    }
+
+    @Test
+    fun `一页之内方向统一，不会上半截近黑、中间近白`() {
+        // 就是真机那次翻车：封面顶部一条亮带、往下越来越暗。旧版每行各自挑
+        // "改动更小的方向"，结果背景跨过中灰的那一行成了分水岭 —— 上面近黑、
+        // 下面近白，两行紧挨着，屏幕上就是"一页三种颜色、中间硬跳一下"。
+        // 这里直接照抄真机实测到的那条背景色带（顶部 (131,138,142) → 底部 (14,21,26)）。
+        val stops = listOf(
+            0xFF838A8E, 0xFF7C8489, 0xFF767E83, 0xFF70787D,
+            0xFF6A7277, 0xFF646C71, 0xFF5E666B, 0xFF4F585E,
+            0xFF3C4449, 0xFF2D353A, 0xFF212830, 0xFF181F26,
+            0xFF121920, 0xFF0E151C, 0xFF0D1319, 0xFF0D1319
+        ).map { Color(it) }
+        val profile = BgProfile(
+            stops,
+            pickLighten(listOf(ocean.textDim, ocean.textMuted, ocean.accent), stops, TARGET_OTHER)
+        )
+
+        val cols = (0..15).map { lyricColor(ocean.textDim, it / 15f, false, profile) }
+        val adjusted = cols.filter { it != ocean.textDim }
+        assertTrue("这一页应该有行被调过（否则用例没意义）", adjusted.isNotEmpty())
+
+        val lighter = adjusted.count { valueOf(it) > valueOf(ocean.textDim) }
+        assertTrue(
+            "方向必须统一：被调的 ${adjusted.size} 行里，往亮走的有 $lighter 行",
+            lighter == 0 || lighter == adjusted.size
+        )
+
+        // 相邻两行之间不许跳变 —— 这是用户看得见的那个"跳一下"
+        for (i in 1 until cols.size) {
+            val d = kotlin.math.abs(valueOf(cols[i]) - valueOf(cols[i - 1]))
+            assertTrue(
+                "第 $i 行和上一行的明度跳了 $d（${valueOf(cols[i - 1])} → ${valueOf(cols[i])}）",
+                d < 0.25f
+            )
+        }
     }
 
     @Test
@@ -287,10 +377,10 @@ class LyricsContrastTest {
 
     @Test
     fun `液态玻璃下压在亮带上的歌词也能调到达标`() {
-        // 复刻真机上那次实测：封面顶部一条亮带、下半深色，液态玻璃档。
-        // 漏掉高光时，顶部那几行只能调到 2.5 左右（实测），差一口气。
+        // 复刻真机上那次实测：封面顶部一条亮带（透出来约 0.24 亮度）、下半深色，
+        // 液态玻璃档。漏掉高光时，顶部那几行只能调到 2.5 左右（实测），差一口气。
         val bands = List(PROFILE_BANDS) { i ->
-            if (i < PROFILE_BANDS / 2) Color(0xFFEAF4FF) else Color(0xFF0E1A24)
+            if (i < PROFILE_BANDS / 2) Color(0xFFD8E9F6) else Color(0xFF0E1A24)
         }
         val profile = buildBgProfile(
             bands = bands,

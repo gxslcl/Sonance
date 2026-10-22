@@ -135,8 +135,20 @@ object ArtworkLoader {
     private fun localKeyOf(albumId: Long, size: Int, sourceUri: Uri?): Key =
         Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), null)
 
-    /** 尺寸档 ≤ 它算「缩略图」，走独立的小图缓存，也只有它值得落盘（见 [ArtworkThumbCache]） */
+    /** 尺寸档 ≤ 它算「缩略图」，和小图缓存分开算（见 [thumbCache]） */
     private const val THUMB_BUCKET = 256
+
+    /**
+     * 大图缓存进内存前缩到的边长上限。
+     *
+     * 播放页要 900px（归一到 1024 档），单张 ARGB_8888 就是 **4MB**。
+     * 而播放页的分页器同时组合着 3 页 —— 三张就是 12MB，正好把大图 LRU 撑爆，
+     * 于是左右滑一次就把刚解好的封面挤出去，滑回来又是占位图 ——
+     * 这就是"列表里有封面、进播放页却没有"的直接成因。
+     * 缩到 768（2.3MB/张）之后三页加一起也才 7MB，翻页不再互相顶掉。
+     * 屏幕上一个封面最多也就 400 多 dp，768px 完全够看。
+     */
+    private const val LARGE_PX = 768
 
     /** 按**字节**算上限，不是按条数 —— 80 张 900px 位图能吃掉一百多 MB */
     private val maxBytes: Int = run {
@@ -153,12 +165,17 @@ object ArtworkLoader {
      * 全部挤出去 —— 于是"明明加载过的封面，滚回来还要重新解码"，
      * 这正是快速滑动时占位图迟迟不消的原因之一。分开之后大图只会挤掉大图。
      */
-    private val thumbCache = object : LruCache<Key, ImageBitmap>(maxBytes * 3 / 5) {
+    private val thumbCache = object : LruCache<Key, ImageBitmap>(maxBytes * 5 / 8) {
         override fun sizeOf(key: Key, value: ImageBitmap): Int = value.width * value.height * 4
     }
 
-    /** 大图数量少但每张贵，剩下的预算够放几张就够用 */
-    private val largeCache = object : LruCache<Key, ImageBitmap>(maxBytes * 2 / 5) {
+    /**
+     * 大图：数量少但每张贵。
+     *
+     * 预算从 2/5 提到 3/8 之外另说——真正关键的是 [LARGE_PX] 把单张成本砍掉一半，
+     * 否则"3 页 × 4MB"刚好卡在容量线上，翻一次页就全军覆没。
+     */
+    private val largeCache = object : LruCache<Key, ImageBitmap>(maxBytes * 3 / 8) {
         override fun sizeOf(key: Key, value: ImageBitmap): Int = value.width * value.height * 4
     }
 
@@ -494,6 +511,29 @@ object ArtworkLoader {
     }
 
     /**
+     * 同 [peek]，但**本尺寸档没有时退到缩略图档**。
+     *
+     * 这是"列表里有封面、进播放页却先闪一张占位图"的最后一公里：
+     * 900px 那张要重新探一次 MediaStore（一轮 binder IPC + 解码），
+     * 而列表滚过的时候 256 档早就躺在内存里了。先拿真图顶上，
+     * 等大图解好再换，比先闪占位图强得多。
+     *
+     * 只给 **首帧** 用（`CoverArt` 的 `remember` 初值）。调用方随后还是会
+     * 发起一次 [load] 去取本尺寸档的图 —— 所以这里返回小图不会让大图永远不加载。
+     */
+    fun peekAny(
+        albumId: Long,
+        sizePx: Int,
+        sourceUri: Uri? = null,
+        coverKey: String? = null
+    ): ImageBitmap? {
+        peek(albumId, sizePx, sourceUri, coverKey)?.let { return it }
+        if (bucketOf(sizePx) <= THUMB_BUCKET) return null
+        peek(albumId, THUMB_BUCKET, sourceUri, coverKey)?.let { return it }
+        return null
+    }
+
+    /**
      * 预取用的独立作用域。
      *
      * 不能挂在 `LaunchedEffect` 上：预取是"顺手提前做"的事，而滚动中列表项的 effect
@@ -541,6 +581,21 @@ object ArtworkLoader {
         }
     }
 
+    /**
+     * 冷启动预热。
+     *
+     * 进程重启后内存缓存是空的，光靠"列表滚到哪解到哪"就会有那么一两秒
+     * 满屏占位图 —— 用户看到的就是"重启后封面没了，要等一会才回来"。
+     * 曲库就位后把开头这些歌的封面提前解出来（命中的多半只是读一次磁盘文件），
+     * 第一屏就能直接出图。
+     *
+     * 不阻塞调用方、也不受调用方生命周期影响（走的还是 [prefetch] / [workScope]）。
+     */
+    fun warmUp(context: Context, requests: List<CoverRequest>, sizePx: Int, limit: Int = 80) {
+        if (requests.isEmpty()) return
+        prefetch(context, requests.take(limit), sizePx)
+    }
+
     suspend fun load(
         context: Context,
         albumId: Long,
@@ -570,7 +625,11 @@ object ArtworkLoader {
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
         val localGone = isMissingKey(missingKeyOf(albumId, sourceUri))
         val coverGone = coverKey == null || synchronized(coverMiss) { coverMiss.contains(coverKey) }
-        if (localGone && coverGone) return null
+        // 磁盘缓存有货就**不能**短路：那个"没有"是上一次探测的结论，
+        // 而磁盘上的图是那之后才写进去的（比如上次播放时解出来的大图）。
+        // 漏掉这一条就是"明明加载过，重启后又是空的"之一。
+        val diskHas = ArtworkThumbCache.exists(context, missingKeyOf(albumId, sourceUri), size)
+        if (localGone && coverGone && !diskHas) return null
 
         return decodeShared(context, albumId, size, key, localKey, sourceUri, coverKey)
     }
@@ -629,10 +688,13 @@ object ArtworkLoader {
         val localSource = albumId > 0 || (sourceUri != null && !sourceUri.isRemote())
         var bitmap: Bitmap? = null
 
-        // ---- 0) 磁盘缩略图缓存 ----
-        // 进程重启后内存缓存是空的，但磁盘上还留着上次解码好的小图。
+        // ---- 0) 磁盘封面缓存 ----
+        // 进程重启后内存缓存是空的，但磁盘上还留着上次解码好的图。
         // 读它只要一次文件 IO，能整段跳过 MediaStore 的 binder IPC —— 首屏慢的大头。
-        if (localSource && size <= THUMB_BUCKET) {
+        //
+        // ⚠️ 这里**不再限制只查缩略图档**：播放页的 900px 之前被排除在外，
+        // 于是每次进播放页都要重新探一遍 MediaStore，慢的时候就是"没有封面"。
+        if (localSource) {
             ArtworkThumbCache.lookup(context, missKey, size)?.let { bytes ->
                 val cached = runCatching {
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -686,12 +748,14 @@ object ArtworkLoader {
         if (bitmap != null) {
             // 解码已经发生过了，顺手把色卡算出来 —— 不额外解码，也不额外读文件
             rememberTint("t:$missKey", bitmap)
-            val image = bitmap.asImageBitmap()
+            // 大图压到 [LARGE_PX]：不压的话三页分页器就能把大图 LRU 撑爆（见它的注释）
+            val fitted = if (size > THUMB_BUCKET) fitLarge(bitmap) else bitmap
+            val image = fitted.asImageBitmap()
             cache.put(localKey, image)
             // 顺手落盘：下次冷启动滚到这里就不用再探 MediaStore 了。
-            // 只存小档 —— 1024 档一张 4MB，落盘不划算。
-            if (localSource && size <= THUMB_BUCKET) {
-                ArtworkThumbCache.store(context, missKey, size, bitmap)
+            // 两个档位都存（大图档落盘时会自己缩到 768），播放页重启后也能立刻出图。
+            if (localSource) {
+                ArtworkThumbCache.store(context, missKey, size, fitted)
             }
             return image
         }
@@ -706,11 +770,41 @@ object ArtworkLoader {
             if (bitmap == null) markCoverMiss(coverKey)
         }
 
-        if (bitmap == null) return null
+        if (bitmap == null) {
+            // 最后一重兜底：本地探测失败、磁盘缓存里也没有在线下载封面，
+            // 但缩略图档的磁盘缓存里**有**这张图 —— 那就先拿来用。
+            // 大图档是后来才加的，老用户磁盘上只有 256 档那份；
+            // 与其给占位图，不如给一张稍软的真实封面。
+            if (localSource && size > THUMB_BUCKET) {
+                ArtworkThumbCache.lookup(context, missKey, THUMB_BUCKET)?.let { bytes ->
+                    val small = runCatching {
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }.getOrNull()
+                    if (small != null) {
+                        rememberTint("t:$missKey", small)
+                        val image = small.asImageBitmap()
+                        cache.put(localKey, image)
+                        return image
+                    }
+                    ArtworkThumbCache.remove(context, missKey, THUMB_BUCKET)
+                }
+            }
+            return null
+        }
         if (coverKey != null) rememberTint("t:c$coverKey", bitmap)
-        val image = bitmap.asImageBitmap()
+        val image = if (size > THUMB_BUCKET) fitLarge(bitmap).asImageBitmap() else bitmap.asImageBitmap()
         cache.put(key, image)
         return image
+    }
+
+    /** 等比缩到边长不超过 [LARGE_PX]；本来就小就原样返回，不做无谓的有损放大 */
+    private fun fitLarge(src: Bitmap): Bitmap {
+        val biggest = maxOf(src.width, src.height)
+        if (biggest <= LARGE_PX) return src
+        val scale = LARGE_PX.toFloat() / biggest
+        return runCatching {
+            Bitmap.createScaledBitmap(src, (src.width * scale).toInt(), (src.height * scale).toInt(), true)
+        }.getOrDefault(src)
     }
 
     /**
