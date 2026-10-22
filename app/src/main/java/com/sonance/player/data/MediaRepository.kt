@@ -176,7 +176,7 @@ class MediaRepository(private val context: Context) {
             // 权限缺失或媒体库异常时返回空表
         }
 
-        // 第二轮：只对可疑项读 44 字节文件头，按魔数定生死。
+        // 第二轮：只对可疑项读 64 字节文件头，按魔数定生死。
         // 名字带加密标记但能正常解出时长（= 已转换的成品）会被放行。
         for ((song, duration) in suspicious) {
             val byMagic = readIsLockedContainer(song.uri)
@@ -193,17 +193,25 @@ class MediaRepository(private val context: Context) {
         )
     }
 
-    /** 读文件头 44 字节判断是否为受支持的加密容器（KGM/KGMA/VPR）。读不到一律按「不是」处理。 */
+    /**
+     * 读文件头 64 字节，按魔数判断是否为已知加密容器（KGM/KGMA/KGG/VPR、NCM、KWM）。
+     *
+     * 这里只做 `startsWith` 比对，不做完整解析 —— 扫描要遍历整个曲库，
+     * 每首都跑一遍 NCM 的两轮 AES 是不可接受的。真正的完整探测留给
+     * [ContainerRestorer.probe]（还原流程才用）。
+     *
+     * 读不到一律按「不是」处理：宁可让可疑文件留在库里，也不要误删用户的歌。
+     */
     private fun readIsLockedContainer(uri: Uri): Boolean = try {
         context.contentResolver.openInputStream(uri)?.use { input ->
-            val header = ByteArray(PrivateAudioRestorer.HEADER_MIN)
+            val header = ByteArray(AudioDecoder.HEADER_MIN)
             var off = 0
             while (off < header.size) {
                 val n = input.read(header, off, header.size - off)
                 if (n < 0) break
                 off += n
             }
-            off == header.size && PrivateAudioRestorer.parseHeader(header) != null
+            off == header.size && ContainerRestorer.looksLocked(header)
         } ?: false
     } catch (_: Exception) {
         false

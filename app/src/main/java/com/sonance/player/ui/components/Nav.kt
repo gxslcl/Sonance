@@ -287,64 +287,6 @@ private fun NavRow(
 }
 
 /* ============================================================
- * 底部导航（手机）
- * ============================================================ */
-
-@Composable
-fun AppBottomBar(
-    selected: LibraryTab,
-    onSelect: (LibraryTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val skin = LocalSkin.current
-    val items = LibraryTab.bottomBar
-    val icons = mapOf(
-        LibraryTab.SONGS to SonanceIcons.Music,
-        LibraryTab.ALBUMS to SonanceIcons.Album,
-        LibraryTab.ARTISTS to SonanceIcons.Users,
-        LibraryTab.RECENT to SonanceIcons.Clock,
-        LibraryTab.ONLINE to SonanceIcons.Search,
-        LibraryTab.FAVORITES to SonanceIcons.Heart,
-        LibraryTab.SETTINGS to SonanceIcons.Palette
-    )
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(skin.surface)
-            .padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        items.forEach { tab ->
-            val isSel = selected == tab
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onSelect(tab) }
-                    .padding(vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                androidx.compose.material3.Icon(
-                    imageVector = icons[tab] ?: SonanceIcons.Music,
-                    contentDescription = tab.label,
-                    tint = if (isSel) skin.accent else skin.textMuted,
-                    modifier = Modifier.size(21.dp)
-                )
-                Text(
-                    text = tab.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isSel) skin.accent else skin.textMuted,
-                    maxLines = 1
-                )
-            }
-        }
-    }
-}
-
-/* ============================================================
  * 顶栏（手机）
  * ============================================================ */
 

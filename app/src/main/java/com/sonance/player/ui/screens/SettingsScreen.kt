@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.OnlineSources
@@ -92,6 +95,16 @@ fun SettingsScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val skin = LocalSkin.current
+
+    // 解锁窗口到点自动收起。放一个 5 秒的轻量轮询，而不是在 ViewModel 里挂常驻定时器 ——
+    // 这个区块只在设置页可见时才有意义，离开设置页就该停下
+    LaunchedEffect(Unit) {
+        while (true) {
+            vm.refreshConversionUnlock()
+            kotlinx.coroutines.delay(5_000L)
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -179,7 +192,9 @@ fun SettingsScreen(
         DuplicateCleanupSection(vm = vm)
 
         // ===== 私有格式还原 =====
-        RestoreSection(vm = vm)
+        // 默认隐藏。在「关于」里连点署名 10 次才会出现，且只保持一小时
+        // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
+        if (vm.conversionUnlocked) RestoreSection(vm = vm)
 
         // ===== 统计 =====
         SettingsSection(title = "曲库概览") {
@@ -229,14 +244,26 @@ fun SettingsScreen(
         // ===== 关于 =====
         SettingsSection(title = "关于") {
             Column(Modifier.padding(vertical = 6.dp)) {
-                Text("山水有清音 · 本地音乐播放器", style = MaterialTheme.typography.titleSmall, color = skin.text)
-                Spacer(Modifier.height(4.dp))
                 Text(
-                    "版本 1.0.0 · 播放、封面、歌词全部本地解析，不上传任何数据。\n" +
-                        onlineNotice(vm),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (vm.onlineLyricsEnabled || vm.onlineMusicEnabled) skin.accent else skin.textMuted
+                    "山水有清音 · 本地音乐播放器",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = skin.text
                 )
+                Spacer(Modifier.height(10.dp))
+                // 署名。连点 10 次会解锁「私有格式还原」区块 —— 彩蛋，界面上不做任何暗示：
+                // 不加下划线、不加点击水波，看起来就是一行普通的落款
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Text(
+                        "陈陆",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.textMuted,
+                        letterSpacing = 2.sp,
+                        modifier = Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { vm.tapAuthor() }
+                    )
+                }
             }
         }
 
@@ -1254,29 +1281,6 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
                 color = skin.textDim
             )
         }
-    }
-}
-
-/**
- * 「关于」里那句联网状态说明。
- *
- * 必须把三个开关都算上。原来只判断在线歌词 —— 加了在线音乐之后，
- * 一个开着在线音乐、关着在线歌词的用户会看到「当前处于完全离线状态」，
- * 那是句明显的假话。
- */
-private fun onlineNotice(vm: SonanceViewModel): String {
-    val on = buildList {
-        if (vm.onlineLyricsEnabled) add("在线歌词")
-        if (vm.onlineCoverEnabled) add("在线封面")
-        if (vm.onlineMusicEnabled) add("在线音乐")
-        if (vm.neteaseFillEnabled) add("网易云补全")
-    }
-    return if (on.isEmpty()) {
-        "联网只在你手动开启「在线歌词」「在线封面」「在线音乐」「网易云补全」后才会发生，" +
-            "当前处于完全离线状态。"
-    } else {
-        "⚠️ 你已开启「${on.joinToString("」「")}」，相关功能会联网。" +
-            "搜索只发送你输入的关键词，不发送任何本地路径或文件。"
     }
 }
 

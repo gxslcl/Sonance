@@ -659,6 +659,18 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_RESTORE_OUT_LABEL, null)
         set(v) = sp.edit().putString(KEY_RESTORE_OUT_LABEL, v).apply()
 
+    /**
+     * 「私有格式还原」入口的解锁截止时间（epoch 毫秒）。
+     *
+     * 这个区块默认不出现在设置里：在「关于」里连点署名 10 次才解锁，
+     * 解锁后只保持一小时，之后自动回到隐藏状态。
+     * 存的是**截止时间点**而不是布尔值 —— 这样即使进程被杀、App 重启，
+     * 也不会把一小时的窗口重置成「永远解锁」。
+     */
+    var conversionUnlockUntil: Long
+        get() = sp.getLong(KEY_CONVERSION_UNLOCK_UNTIL, 0L)
+        set(v) = sp.edit().putLong(KEY_CONVERSION_UNLOCK_UNTIL, v).apply()
+
     // ===== 收藏 =====
     private fun favSet(): MutableSet<String> =
         (sp.getStringSet(KEY_FAV, emptySet()) ?: emptySet()).toMutableSet()
@@ -952,6 +964,7 @@ class Prefs(context: Context) {
         private const val KEY_COMPAT_TREE_LABEL = "compat_tree_label"
         private const val KEY_RESTORE_OUT_URI = "restore_out_uri"
         private const val KEY_RESTORE_OUT_LABEL = "restore_out_label"
+        private const val KEY_CONVERSION_UNLOCK_UNTIL = "conversion_unlock_until"
     }
 }
 

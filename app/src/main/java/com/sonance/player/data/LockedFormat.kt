@@ -4,7 +4,12 @@ package com.sonance.player.data
  * 已知的加密 / DRM 音乐容器格式登记表。
  *
  * 这些格式是把原始音频套了一层厂商私有加密壳，只有对应厂商的客户端才能解密播放。
- * 本播放器只做**识别与说明**，不会去解密它们。
+ *
+ * 本播放器对它们分两步走：
+ *  1. **识别与说明**（本文件 + 扫描时的拦截，见 UnplayableFileScanner）；
+ *  2. 「私有格式还原」（RestoreEngine + ContainerRestorer）：酷狗 KGM/KGMA/KGG/VPR、
+ *     网易云 NCM、酷我 KWM 已支持**本机解密还原**为标准 flac/mp3，算法与密钥内置；
+ *     QQ 音乐 QMC/MFLAC 系列目前只识别，解码暂未支持（见 ContainerRestorer）。
  */
 object LockedFormat {
 
@@ -68,7 +73,7 @@ object LockedFormat {
      *
      * 注意：命中只代表**可疑**，不能当最终判定 —— 转换后的成品常常长这样：
      * `X.kgm.flac`（加密，要排除）vs `X.kgm.mp3`（已转换，要保留），
-     * 两者名字一模一样。最终判定必须读文件头（见 [PrivateAudioRestorer.parseHeader]）。
+     * 两者名字一模一样。最终判定必须读文件头（见 [ContainerRestorer.looksLocked]）。
      */
     fun looksLikeLockedContainer(fileName: String): Boolean {
         val lower = fileName.lowercase()

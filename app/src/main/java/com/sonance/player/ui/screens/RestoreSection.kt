@@ -118,8 +118,12 @@ fun RestoreSection(vm: SonanceViewModel) {
                 .padding(12.dp)
         ) {
             Text(
-                "自动识别并还原酷狗私有容器：.kgm / .kgma / .vpr（加密版本 3）。\n" +
-                    "解密密钥来自每个文件自己的头部，无需手动配置。",
+                "自动识别并还原：\n" +
+                    "· 酷狗 .kgm / .kgma / .kgg / .vpr（加密版本 3）\n" +
+                    "· 网易云 .ncm（含内嵌封面与歌名 / 歌手 / 专辑）\n" +
+                    "· 酷我 .kwm\n" +
+                    "解密密钥来自每个文件自己的头部，无需手动配置。\n" +
+                    "QQ 音乐 .qmc* / .mflac / .mgg 目前只识别、不解密。",
                 style = MaterialTheme.typography.bodySmall,
                 color = skin.textMuted
             )

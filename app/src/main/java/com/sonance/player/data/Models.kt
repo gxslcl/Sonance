@@ -180,9 +180,6 @@ enum class LibraryTab(val id: String, val label: String) {
     SETTINGS("settings", "皮肤与设置");
 
     companion object {
-        /** 手机底部导航（5 项）。设置不放这里 —— 走右上角齿轮。 */
-        val bottomBar = listOf(SONGS, ALBUMS, ARTISTS, ONLINE, FAVORITES)
-
         /** 侧边导航（完整） */
         val rail = listOf(SONGS, ALBUMS, ARTISTS, FOLDERS, RECENT, ONLINE, FAVORITES, SETTINGS)
 

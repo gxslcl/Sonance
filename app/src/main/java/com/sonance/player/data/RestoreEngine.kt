@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.io.InputStream
 import kotlin.coroutines.coroutineContext
 
 /** 一次批量还原的结果汇总 */
@@ -53,13 +52,17 @@ private class RestoreStats {
 }
 
 /**
- * 把酷狗私有容器（KGM / KGMA / VPR）批量还原为可播放的 flac / mp3。
+ * 把私有加密容器批量还原为可播放的标准音频。
+ *
+ * 支持的格式由 [ContainerRestorer] 决定（目前是酷狗 KGM/KGMA/KGG/VPR、
+ * 网易云 NCM、酷我 KWM），算法与密钥全部内置 / 从文件头自读取，用户无需配置。
  *
  * 与 [UnplayableFileScanner] 一样走 SAF：从用户授权的 sourceTree 递归收集文件，
- * 还原结果按相对路径镜像写入 outputTree。整条管线流式处理，不会把整个文件读进内存；
- * dryRun 时只读首个数据块用来嗅探格式，不写盘。
+ * 还原结果按相对路径镜像写入 outputTree。整条管线流式处理，不会把整个文件读进内存。
  *
- * 算法见 [PrivateAudioRestorer]：密钥来自每个文件自己的头部，无需用户配置。
+ * 本类只负责**跟 Android 打交道**的部分（SAF 遍历、建目录、开输出流、统计）；
+ * 真正的「探测 → 解密 → 嗅探 → 组标签 → 泵数据」在 [RestorePlanner] / [RestorePlan] 里，
+ * 那部分是纯 JVM 逻辑，有单测覆盖。
  */
 class RestoreEngine(private val context: Context) {
 
@@ -173,7 +176,7 @@ class RestoreEngine(private val context: Context) {
         )
     }
 
-    /** 处理单个文件：读头 -> 校验版本 -> 流式解密 -> （可选）写盘。失败抛异常由外层统计。 */
+    /** 处理单个文件：探测 -> 决定是否写 -> 泵数据。失败抛异常由外层统计。 */
     private suspend fun processOne(
         doc: DocumentFile,
         name: String,
@@ -185,100 +188,82 @@ class RestoreEngine(private val context: Context) {
         stats: RestoreStats
     ) {
         val size = doc.length()
-        if (size < PrivateAudioRestorer.HEADER_MIN) {
-            stats.skip("文件过小")
-            return
-        }
-
         val input = context.contentResolver.openInputStream(doc.uri)
             ?: throw IOException("无法打开输入流")
+        val scopeContext = coroutineContext
+
+        // QMC 没有魔数、密钥挂在尾部，探测前要先单独读一次尾部窗口
+        val qmcTail = if (QmcDecoder.looksLikeName(name)) readTail(doc.uri, size) else null
+
         input.use { stream ->
-            // 只读 44 字节头部，不整读文件
-            val header = ByteArray(PrivateAudioRestorer.HEADER_MIN)
-            if (!readFully(stream, header, header.size)) throw IOException("读取头部失败")
-
-            val parsed = PrivateAudioRestorer.parseHeader(header)
-            if (parsed == null) {
-                stats.skip("非受支持的加密容器")
+            val probe = RestorePlanner.plan(stream, size, name, qmcTail)
+            if (probe is RestoreProbe.Skip) {
+                stats.skip(probe.reason)
                 return
             }
-            if (parsed.version != PrivateAudioRestorer.SUPPORTED_VERSION) {
-                stats.skip("加密版本 ${parsed.version} 不支持")
-                return
-            }
-            if (parsed.payloadOffset > size) {
-                stats.skip("载荷偏移非法")
-                return
-            }
-
-            val payloadSize = size - parsed.payloadOffset
-            skipFully(stream, (parsed.payloadOffset - PrivateAudioRestorer.HEADER_MIN).toLong())
-
-            // 先读第一块用于嗅探格式
-            val buffer = ByteArray(CHUNK_SIZE)
-            val firstLen = minOf(payloadSize, CHUNK_SIZE.toLong()).toInt()
-            if (!readFully(stream, buffer, firstLen)) throw IOException("读取数据失败")
-            PrivateAudioRestorer.xorChunk(buffer, firstLen, 0, parsed.key, parsed.isVpr)
-
-            val ext = PrivateAudioRestorer.sniffExtension(buffer)
-            // 剥掉加密容器标记（.kgm/.kgma/.vpr/.ncm/…），只按真实内容定后缀
-            val outName = PrivateAudioRestorer.outputStem(name) + ext
+            val plan = (probe as RestoreProbe.Ready).plan
 
             if (dryRun) {
                 // 预演：只统计，不建目录不写文件
                 stats.converted++
-                if (ext == ".flac") stats.flacCount++ else stats.mp3Count++
-                stats.bytesIn += firstLen
+                if (plan.ext == ".flac") stats.flacCount++ else stats.mp3Count++
+                stats.bytesIn += plan.payloadSize
                 return
             }
 
             val outRoot = outputRoot ?: throw IOException("输出文件夹不可用")
             val dirPath = relPath.substringBeforeLast('/', "")
-            val outRel = if (dirPath.isEmpty()) outName else "$dirPath/$outName"
+            val outRel = if (dirPath.isEmpty()) plan.outName else "$dirPath/${plan.outName}"
 
-            // 已经转换过：输出目录里已有同名文件、且大小与本次要写的载荷一致 -> 跳过。
+            // 已经转换过：输出目录里已有同名文件、且大小与本次要写的一致 -> 跳过。
             // 这是「重跑一遍不再重复转换」的关键，否则会一直堆出 "X (1).mp3"。
             val prior = existingOutputs[outRel]
-            if (prior != null && prior.size == payloadSize) {
+            if (prior != null && prior.size == plan.expectedSize) {
                 stats.skip("已转换过")
                 return
             }
 
             val parent = resolveDir(outRoot, dirPath, dirCache)
                 ?: throw IOException("创建目录失败")
-            val mime = if (ext == ".flac") "audio/flac" else "audio/mpeg"
             // 同名但大小对不上 = 上次中途取消留下的半截文件：复用同一个 Uri 覆盖重写，
             // 而不是再 createDocument 出一个 "X (1).mp3"
             val newUri = prior?.uri
-                ?: DocumentsContract.createDocument(context.contentResolver, parent.uri, mime, outName)
+                ?: DocumentsContract.createDocument(
+                    context.contentResolver, parent.uri, mimeOf(plan.ext), plan.outName
+                )
                 ?: throw IOException("创建文件失败")
-            existingOutputs[outRel] = OutputFile(newUri, payloadSize)
+            existingOutputs[outRel] = OutputFile(newUri, plan.expectedSize)
             val output = context.contentResolver.openOutputStream(newUri, "wt")
                 ?: throw IOException("打开输出流失败")
 
-            output.use { out ->
-                out.write(buffer, 0, firstLen)
-                stats.bytesOut += firstLen
+            output.use { out -> plan.writeTo(out) { scopeContext.ensureActive() } }
 
-                // 继续流式处理剩余块；pos 必须跨块连续递增，掩码才接得上
-                var pos = firstLen
-                var remaining = payloadSize - firstLen
-                while (remaining > 0) {
-                    coroutineContext.ensureActive()
-                    val want = minOf(remaining, CHUNK_SIZE.toLong()).toInt()
-                    if (!readFully(stream, buffer, want)) throw IOException("读取数据失败")
-                    PrivateAudioRestorer.xorChunk(buffer, want, pos, parsed.key, parsed.isVpr)
-                    out.write(buffer, 0, want)
-                    stats.bytesOut += want
-                    pos += want
-                    remaining -= want
-                }
-            }
+            // 封面落进缓存：刚还原出来的歌立刻有封面，不用等联网匹配
+            storeCover(plan.info, plan.cover)
 
             stats.converted++
-            if (ext == ".flac") stats.flacCount++ else stats.mp3Count++
-            stats.bytesIn += payloadSize
+            if (plan.ext == ".flac") stats.flacCount++ else stats.mp3Count++
+            stats.bytesIn += plan.payloadSize
+            stats.bytesOut += plan.written
         }
+    }
+
+    /** 把容器里带的封面存进 [CoverCache]，键与在线封面一致，播放管线会自动捡起来 */
+    private fun storeCover(info: HeaderInfo, cover: ByteArray?) {
+        if (cover == null || cover.isEmpty()) return
+        val title = info.title
+        val artist = info.artist
+        if (title.isBlank() && artist.isBlank()) return
+        val key = OnlineCover.keyOf(title, artist) ?: return
+        runCatching { CoverCache.store(context, key, cover) }
+    }
+
+    private fun mimeOf(ext: String): String = when (ext) {
+        ".flac" -> "audio/flac"
+        ".ogg" -> "audio/ogg"
+        ".m4a" -> "audio/mp4"
+        ".wav" -> "audio/wav"
+        else -> "audio/mpeg"
     }
 
     /**
@@ -336,37 +321,49 @@ class RestoreEngine(private val context: Context) {
         return current
     }
 
-    /** 读满 buffer 的前 count 字节；提前 EOF 返回 false */
-    private fun readFully(input: InputStream, buffer: ByteArray, count: Int): Boolean {
-        var off = 0
-        while (off < count) {
-            val n = input.read(buffer, off, count - off)
-            if (n < 0) return false
-            off += n
-        }
-        return true
-    }
-
-    /** 跳过 count 字节；skip 不生效时退化为逐字节读 */
-    private fun skipFully(input: InputStream, count: Long) {
-        var remaining = count
-        while (remaining > 0) {
-            val skipped = input.skip(remaining)
-            if (skipped > 0) {
-                remaining -= skipped
-            } else {
-                if (input.read() < 0) return
-                remaining--
-            }
-        }
-    }
-
-    /** 输出目录里已存在的一个成品文件：Uri + 载荷大小，用于判断「是否已转换过」 */
+    /** 输出目录里已存在的一个成品文件：Uri + 大小，用于判断「是否已转换过」 */
     private data class OutputFile(val uri: Uri, val size: Long)
+
+    /**
+     * 读文件末尾的 [QmcDecoder.TAIL_WINDOW] 字节（不足取全部）。
+     *
+     * 为什么要单独开一条流：探测用的输入流是顺序读的，已经消费了头部；
+     * 而 QMC 的密钥在尾部。SAF 的流基于文件描述符，skip 是真 seek，开销可忽略。
+     * 读取失败返回 null —— 上层会让这个文件带着准确原因跳过，而不是整批失败。
+     */
+    private fun readTail(uri: Uri, size: Long): ByteArray? {
+        if (size < 8) return null
+        return try {
+            val len = minOf(QmcDecoder.TAIL_WINDOW.toLong(), size).toInt()
+            val input = context.contentResolver.openInputStream(uri) ?: return null
+            input.use { s ->
+                var remaining = size - len
+                while (remaining > 0) {
+                    val n = s.skip(remaining)
+                    if (n > 0) {
+                        remaining -= n
+                    } else {
+                        if (s.read() < 0) return@use null
+                        remaining--
+                    }
+                }
+                val buf = ByteArray(len)
+                var off = 0
+                while (off < len) {
+                    val n = s.read(buf, off, len - off)
+                    if (n < 0) return@use null
+                    off += n
+                }
+                buf
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     companion object {
         private const val MAX_FILES = 40_000
         private const val MAX_FOLDERS = 4_000
-        private const val CHUNK_SIZE = 64 * 1024
     }
 }
+

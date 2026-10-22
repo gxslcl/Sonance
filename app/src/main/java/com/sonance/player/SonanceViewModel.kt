@@ -609,6 +609,46 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 私有格式还原 =====
 
+    /**
+     * 「私有格式还原」区块是否可见。
+     *
+     * 默认隐藏：在设置页「关于」里连点署名 [AUTHOR_TAP_TARGET] 次才出现，
+     * 出现后只保持 [CONVERSION_UNLOCK_MS]，到点自动收起，要再点一次才会回来。
+     * 截止时间落盘（[Prefs.conversionUnlockUntil]），所以重启 App 不会把它变成永久解锁。
+     */
+    var conversionUnlocked by mutableStateOf(false)
+        private set
+
+    /** 连续点击署名的计数；解锁一次后归零，避免第二次点一下就又触发 */
+    private var authorTaps = 0
+
+    init {
+        refreshConversionUnlock()
+    }
+
+    /** 按落盘的截止时间重新判定可见性；界面每隔几秒调一次，到点就自动隐藏 */
+    fun refreshConversionUnlock() {
+        val unlocked = prefs.conversionUnlockUntil > System.currentTimeMillis()
+        if (unlocked != conversionUnlocked) conversionUnlocked = unlocked
+    }
+
+    /**
+     * 点一下「陈陆」。
+     *
+     * 前 9 次完全静默 —— 这是彩蛋，给提示就等于把彩蛋提前剧透了。
+     * 第 10 次解锁并弹一条 toast，告诉用户东西出来了、以及它一小时后会消失。
+     */
+    fun tapAuthor() {
+        refreshConversionUnlock()
+        if (conversionUnlocked) return // 已经解锁，重复点击不再延长
+        authorTaps++
+        if (authorTaps < AUTHOR_TAP_TARGET) return
+        authorTaps = 0
+        prefs.conversionUnlockUntil = System.currentTimeMillis() + CONVERSION_UNLOCK_MS
+        conversionUnlocked = true
+        showToast("已解锁私有格式还原，1 小时后自动隐藏")
+    }
+
     private var restoreDryRunState by mutableStateOf(false)
 
     /** 仅预览：只分析不写盘。对外只读，统一通过 setRestoreDryRun 修改 */
@@ -3349,6 +3389,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     val totalSizeBytes: Long get() = songs.sumOf { it.sizeBytes }
 
     companion object {
+        /** 「关于」里点多少下署名才解锁私有格式还原 */
+        private const val AUTHOR_TAP_TARGET = 10
+
+        /** 解锁后保持多久（一小时），到点自动回到隐藏状态 */
+        private const val CONVERSION_UNLOCK_MS = 60L * 60L * 1000L
+
         /**
          * 一次搜索要多少条。
          *

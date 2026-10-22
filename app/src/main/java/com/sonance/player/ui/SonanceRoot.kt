@@ -61,7 +61,6 @@ import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.playback.PlayerUiState
-import com.sonance.player.ui.components.AppBottomBar
 import com.sonance.player.ui.components.AppTopBar
 import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.FullPlayer
