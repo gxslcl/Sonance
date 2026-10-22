@@ -114,7 +114,11 @@ class RestorePlannerTest {
     @Test
     fun `普通文件与 qmc 文件给出各自的跳过原因`() {
         val junk = ByteArray(4096) { (it * 5).toByte() }
-        assertEquals("非受支持的加密容器", skipReason(junk, "普通.mp3"))
+        // 标准音频（.mp3）不需要还原 —— 必须和"加密容器不支持"区分开，
+        // 否则用户会以为自己的歌坏了
+        assertEquals("已是标准音频，无需还原", skipReason(junk, "普通.mp3"))
+        // 扩展名既不是标准音频、也没有已知魔数 → 才是"非受支持的加密容器"
+        assertEquals("非受支持的加密容器", skipReason(junk, "神秘文件.bin"))
 
         // QMC 没有魔数，只能靠文件名给出准确原因
         assertEquals(QmcDecoder.MISSING_TAIL_REASON, skipReason(junk, "某首歌.mflac"))

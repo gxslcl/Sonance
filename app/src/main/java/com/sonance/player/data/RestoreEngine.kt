@@ -23,6 +23,8 @@ data class RestoreResult(
     val totalFiles: Int,
     val failures: List<String>,
     val skipReasons: Map<String, Int>,
+    /** 被跳过的文件样本（最多 20 个），用于让用户看清「到底哪些没处理」 */
+    val skippedSamples: List<String>,
     val dryRun: Boolean
 )
 
@@ -37,12 +39,14 @@ private class RestoreStats {
     var bytesOut = 0L
     val failures = mutableListOf<String>()
     val skipReasons = mutableMapOf<String, Int>()
+    val skippedSamples = mutableListOf<String>()
 
     /** 跳过计数，原因取第一个全角冒号之前的部分做归一化 */
-    fun skip(reason: String) {
+    fun skip(reason: String, name: String? = null) {
         skipped++
         val key = reason.substringBefore('：')
         skipReasons[key] = (skipReasons[key] ?: 0) + 1
+        if (name != null && skippedSamples.size < 20) skippedSamples += "$name — $reason"
     }
 
     fun fail(relPath: String, reason: String) {
@@ -92,6 +96,7 @@ class RestoreEngine(private val context: Context) {
                 totalFiles = 0,
                 failures = listOf("输出文件夹无法访问"),
                 skipReasons = emptyMap(),
+                skippedSamples = emptyList(),
                 dryRun = dryRun
             )
         }
@@ -103,6 +108,7 @@ class RestoreEngine(private val context: Context) {
                 totalFiles = 0,
                 failures = listOf("源文件夹无法访问"),
                 skipReasons = emptyMap(),
+                skippedSamples = emptyList(),
                 dryRun = dryRun
             )
 
@@ -172,6 +178,7 @@ class RestoreEngine(private val context: Context) {
             totalFiles = total,
             failures = stats.failures.toList(),
             skipReasons = stats.skipReasons.toMap(),
+            skippedSamples = stats.skippedSamples.toList(),
             dryRun = dryRun
         )
     }
@@ -198,7 +205,7 @@ class RestoreEngine(private val context: Context) {
         input.use { stream ->
             val probe = RestorePlanner.plan(stream, size, name, qmcTail)
             if (probe is RestoreProbe.Skip) {
-                stats.skip(probe.reason)
+                stats.skip(probe.reason, relPath)
                 return
             }
             val plan = (probe as RestoreProbe.Ready).plan

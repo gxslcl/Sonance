@@ -334,6 +334,23 @@ private fun RestoreResultBlock(result: RestoreResult, onClear: () -> Unit) {
             }
         }
 
+        if (result.skippedSamples.isNotEmpty()) {
+            Text(
+                "跳过样本",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.textDim,
+                modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+            )
+            result.skippedSamples.take(6).forEach { line ->
+                Text(
+                    "· $line",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    modifier = Modifier.padding(vertical = 1.dp)
+                )
+            }
+        }
+
         if (result.failures.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Text("失败明细", style = MaterialTheme.typography.labelSmall, color = skin.danger)

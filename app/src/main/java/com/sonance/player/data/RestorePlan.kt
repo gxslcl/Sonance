@@ -145,6 +145,12 @@ internal object RestorePlanner {
         if (!readFully(stream, head, 0, head.size)) throw IOException("读取头部失败")
         // QMC 没有魔数，靠文件名放行 —— 它的探测在尾部窗口里做
         if (!ContainerRestorer.looksLocked(head) && !QmcDecoder.looksLikeName(name)) {
+            // 先分清两种情况：已经是标准音频（mp3/flac/m4a…）根本不需要还原，
+            // 报成"非受支持的加密容器"会让用户以为文件有问题
+            val ext = LockedFormat.extensionOf(name)
+            if (ext in LockedFormat.supportedExtensions) {
+                return RestoreProbe.Skip("已是标准音频，无需还原")
+            }
             return RestoreProbe.Skip(ContainerRestorer.unsupportedReason(name) ?: "非受支持的加密容器")
         }
 
