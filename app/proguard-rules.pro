@@ -37,3 +37,9 @@
 -keep class com.sonance.player.ui.icon.SonanceIcons$* { *; }
 
 # 别再 -keep 整个项目，让 R8 真正起作用。
+# Shizuku：newProcess 在 13.x 里是 private，我们靠反射按名字调它。
+# R8 会把没被直接引用的 private 方法改名，反射就找不到了 —— 整个类保住。
+-keep class rikka.shizuku.Shizuku { *; }
+-keep class rikka.shizuku.ShizukuProvider { *; }
+-keep interface rikka.shizuku.Shizuku$OnRequestPermissionResultListener { *; }
+-keep class rikka.shizuku.ShizukuRemoteProcess { *; }

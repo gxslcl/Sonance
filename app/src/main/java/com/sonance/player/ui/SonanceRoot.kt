@@ -75,6 +75,7 @@ import com.sonance.player.ui.components.ToastHost
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.screens.AlbumsScreen
 import com.sonance.player.ui.screens.ArtistsScreen
+import com.sonance.player.ui.screens.BiliCacheScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
 import com.sonance.player.ui.screens.LibraryPagerScreen
@@ -109,6 +110,14 @@ sealed interface Detail {
     data class AlbumDetail(val albumId: Long) : Detail
     data class ArtistDetail(val name: String) : Detail
     data class FolderDetail(val path: String) : Detail
+
+    /**
+     * B 站离线缓存（平板布局专有）。
+     *
+     * 不用 LibraryTab 是有意的：它只存在于宽屏侧栏，如果做成 tab，`lastTab`
+     * 就会把一个手机布局下不存在的值持久化下来，下次在手机上冷启动会落到空页面。
+     */
+    data object BiliCache : Detail
 
     /**
      * 在线歌单详情。
@@ -870,6 +879,10 @@ private fun ExpandedLayout(
             storageFraction = runCatching {
                 vm.totalSizeBytes.toFloat() / (24f * 1024f * 1024f * 1024f)
             }.getOrDefault(0f),
+            // 平板布局专有入口：读 B 站离线缓存（需要 Shizuku）
+            biliVisible = true,
+            biliSelected = detail is Detail.BiliCache,
+            onOpenBili = { onOpenDetail(Detail.BiliCache) },
             modifier = Modifier.systemBarsPadding()
         )
         Row(Modifier.width(1.dp).fillMaxHeight().background(skin.border)) {}
@@ -1015,6 +1028,8 @@ private fun ScreenBody(
                 vm = vm,
                 playerState = playerState
             )
+
+            Detail.BiliCache -> BiliCacheScreen()
         }
         return
     }
@@ -1085,6 +1100,7 @@ private fun detailTitle(vm: SonanceViewModel, detail: Detail): String = when (de
     is Detail.ArtistDetail -> detail.name
     is Detail.FolderDetail -> vm.folderByPath(detail.path)?.name ?: "文件夹"
     is Detail.PlaylistDetail -> detail.playlist.name
+    Detail.BiliCache -> "B站缓存"
 }
 
 private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when (detail) {
@@ -1098,4 +1114,6 @@ private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when 
         if (detail.playlist.creatorName.isNotBlank()) append("${detail.playlist.creatorName} · ")
         append("${detail.playlist.trackCount} 首")
     }
+
+    Detail.BiliCache -> "本机离线缓存"
 }

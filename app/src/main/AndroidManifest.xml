@@ -35,6 +35,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!--
+      Shizuku：以 shell 身份读 B 站缓存目录（Android/data/tv.danmaku.bilibilihd）。
+      Android 11+ 普通应用无法访问其他应用的 Android/data，shell 是免 root 的唯一通道。
+      没有装 Shizuku 或没授权时这条权限不生效，功能会自动降级为「未就绪」提示。
+    -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+
     <uses-feature
         android:name="android.hardware.audio.output"
         android:required="false" />
@@ -76,6 +84,27 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!--
+          B 站缓存的全屏播放页。
+          独立 Activity 而不是在主界面里翻横屏：主界面是三档布局（手机 / 中屏 / 平板），
+          跟着转会把整套侧栏和播放面板一起横过来；独立页只关心一块 Surface 和一层控制条。
+        -->
+        <activity
+            android:name=".ui.VideoPlayerActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+            android:theme="@style/Theme.Sonance"
+            android:supportsPictureInPicture="true" />
+
+        <!-- Shizuku 的权限回调 provider。authorities 必须带包名前缀，不能和别的应用冲突 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false" />
 
         <!--
           把下载的封面交给通知栏 / 锁屏用的 FileProvider。

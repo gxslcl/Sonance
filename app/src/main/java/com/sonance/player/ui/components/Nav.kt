@@ -71,7 +71,16 @@ fun SideNavigation(
     favoriteCount: Int,
     storageText: String,
     storageFraction: Float,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * 是否显示「B 站缓存」这一项。
+     *
+     * 只有平板（EXPANDED）布局才为 true：手机布局没有侧栏，而这个功能依赖
+     * Shizuku 与 B 站缓存目录，属于重度本地媒体管理，塞进手机主流程只会碍事。
+     */
+    biliVisible: Boolean = false,
+    biliSelected: Boolean = false,
+    onOpenBili: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -143,6 +152,9 @@ fun SideNavigation(
         }
 
         var lastSection = -1
+        // 停在「B站缓存」时，下面那些 tab 一个都不该高亮：它不属于任何一个 tab，
+        // 若沿用 vm.tab，"我的收藏"会和它一起亮着（用户看到的是「同时选中两项」）
+        val activeTab: LibraryTab? = if (biliSelected) null else selected
         navEntries.forEach { entry ->
             if (entry.section != lastSection) {
                 lastSection = entry.section
@@ -172,11 +184,25 @@ fun SideNavigation(
             NavRow(
                 icon = entry.icon,
                 label = entry.tab.label,
-                selected = selected == entry.tab,
+                selected = activeTab == entry.tab,
                 expanded = expanded,
                 badge = badge,
                 onClick = { onSelect(entry.tab) }
             )
+
+            // 紧跟在「我的收藏」下面（同属「播放列表」这一组）。
+            // 它不是 LibraryTab：内容来自本机 B 站缓存目录，走 Detail 路由而不是 tab 切换，
+            // 这样不会污染 tab 的持久化（lastTab 万一存了个只有平板才有的值，手机端会打不开）。
+            if (entry.tab == LibraryTab.FAVORITES && biliVisible) {
+                NavRow(
+                    icon = SonanceIcons.Download,
+                    label = "B站缓存",
+                    selected = biliSelected,
+                    expanded = expanded,
+                    badge = null,
+                    onClick = onOpenBili
+                )
+            }
         }
 
         Spacer(Modifier.weight(1f, fill = true))

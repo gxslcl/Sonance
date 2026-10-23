@@ -1,0 +1,364 @@
+package com.sonance.player.ui.screens
+
+import android.app.Activity
+import android.content.Intent
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.sonance.player.data.bili.BiliCoverLoader
+import com.sonance.player.data.bili.BiliEntry
+import com.sonance.player.data.bili.BiliRepository
+import com.sonance.player.data.bili.BiliScanResult
+import com.sonance.player.data.bili.ShizukuShell
+import com.sonance.player.data.formatSize
+import com.sonance.player.ui.VideoPlayerActivity
+import com.sonance.player.ui.components.EmptyState
+import com.sonance.player.ui.components.LoadingState
+import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.LocalSkin
+import kotlinx.coroutines.launch
+
+/**
+ * B 站离线缓存列表。
+ *
+ * 只在**平板（宽屏）布局**下出现：侧栏「我的收藏」下面一项。手机布局没有侧栏，
+ * 而且这个功能依赖 Shizuku + B 站缓存目录，属于「重度本地媒体管理」，
+ * 放手机上只会挤占主流程。
+ *
+ * 数据来源全部是本机的 `Android/data/tv.danmaku.bilibilihd/download/`，
+ * 通过 Shizuku 以 shell 身份读取，不联网、不碰账号。
+ */
+@Composable
+fun BiliCacheScreen(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val skin = LocalSkin.current
+    val scope = rememberCoroutineScope()
+    val repo = remember { BiliRepository(context) }
+
+    // null 表示正在扫描
+    var result by remember { mutableStateOf<BiliScanResult?>(null) }
+    var preparingKey by remember { mutableStateOf<String?>(null) }
+    var prepareProgress by remember { mutableStateOf(0f) }
+    var hint by remember { mutableStateOf<String?>(null) }
+
+    suspend fun rescan() {
+        result = null
+        hint = null
+        result = repo.scan()
+    }
+
+    LaunchedEffect(Unit) { rescan() }
+
+    val entries = (result as? BiliScanResult.Ok)?.entries.orEmpty()
+
+    fun play(entry: BiliEntry) {
+        if (!entry.playable) {
+            hint = "这条缓存没有独立的音视频轨（旧版缓存格式），暂不支持"
+            return
+        }
+        if (preparingKey != null) return
+        preparingKey = entry.key
+        prepareProgress = 0f
+        hint = null
+        scope.launch {
+            val outcome = repo.prepare(entry) { prepareProgress = it }
+            preparingKey = null
+            outcome.onSuccess { media ->
+                context.startActivity(
+                    Intent(context, VideoPlayerActivity::class.java)
+                        .putExtra(VideoPlayerActivity.EXTRA_VIDEO, media.file.absolutePath)
+                        .putExtra(VideoPlayerActivity.EXTRA_TITLE, entry.displayTitle)
+                        .putExtra(VideoPlayerActivity.EXTRA_OWNER, entry.owner)
+                )
+            }.onFailure {
+                hint = it.message ?: "准备视频失败"
+            }
+        }
+    }
+
+    Column(modifier.fillMaxSize()) {
+        when (val r = result) {
+            null -> LoadingState(
+                title = "正在读取 B 站缓存…",
+                subtitle = "通过 Shizuku 以 shell 身份访问缓存目录"
+            )
+
+            BiliScanResult.NoShizuku -> EmptyState(
+                icon = SonanceIcons.Download,
+                title = "还没有安装 Shizuku",
+                subtitle = "B 站的缓存放在 Android/data 里，Android 11 起普通应用读不到。" +
+                    "装一个 Shizuku，用无线调试启动服务后就能读；不需要 root。",
+                actionLabel = "打开 Shizuku",
+                onAction = {
+                    val intent = context.packageManager
+                        .getLaunchIntentForPackage(ShizukuShell.SHIZUKU_PACKAGE)
+                    if (intent != null) {
+                        runCatching { context.startActivity(intent) }
+                    } else {
+                        hint = "没有找到 Shizuku，请先从应用商店或官网安装"
+                    }
+                }
+            )
+
+            BiliScanResult.NotRunning -> EmptyState(
+                icon = SonanceIcons.Download,
+                title = "Shizuku 服务没有运行",
+                subtitle = "打开 Shizuku，按提示用无线调试启动服务（每次重启手机后需要重新启动一次），" +
+                    "然后回到这里刷新。",
+                actionLabel = "去启动",
+                onAction = {
+                    val intent = context.packageManager
+                        .getLaunchIntentForPackage(ShizukuShell.SHIZUKU_PACKAGE)
+                    if (intent != null) runCatching { context.startActivity(intent) }
+                }
+            )
+
+            BiliScanResult.NoPermission -> EmptyState(
+                icon = SonanceIcons.Download,
+                title = "需要授予 Shizuku 权限",
+                subtitle = "Sonance 只读取缓存目录里的视频文件与 entry.json，不会修改或删除 B 站的任何数据。",
+                actionLabel = "去授权",
+                onAction = {
+                    // 必须是用户点击触发：系统弹窗拦一道，先解释清楚再问
+                    if (context is Activity) {
+                        ShizukuShell.requestPermission { granted ->
+                            if (granted) scope.launch { rescan() }
+                        }
+                    } else {
+                        hint = "请在应用内操作"
+                    }
+                }
+            )
+
+            is BiliScanResult.Failed -> EmptyState(
+                icon = SonanceIcons.Download,
+                title = "读取失败",
+                subtitle = r.message,
+                actionLabel = "重试",
+                onAction = { scope.launch { rescan() } }
+            )
+
+            is BiliScanResult.Ok -> {
+                if (entries.isEmpty()) {
+                    EmptyState(
+                        icon = SonanceIcons.Download,
+                        title = "还没有离线缓存",
+                        subtitle = "先在 B 站里缓存视频，回到这里点右上角刷新。",
+                        actionLabel = "刷新",
+                        onAction = { scope.launch { rescan() } }
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 16.dp, end = 16.dp, top = 6.dp, bottom = 16.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        item {
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "共 ${entries.size} 个缓存",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = skin.textMuted,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "刷新",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = skin.accent,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { scope.launch { rescan() } }
+                                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        items(entries, key = { it.key }) { entry ->
+                            BiliRow(
+                                entry = entry,
+                                preparing = preparingKey == entry.key,
+                                progress = if (preparingKey == entry.key) prepareProgress else 0f,
+                                enabled = preparingKey == null,
+                                onClick = { play(entry) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        hint?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.accent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BiliRow(
+    entry: BiliEntry,
+    preparing: Boolean,
+    progress: Float,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled && entry.playable, onClick = onClick)
+            .padding(vertical = 6.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .width(112.dp)
+                .height(63.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(skin.surface3)
+        ) {
+            BiliCover(entry.cover, Modifier.fillMaxSize())
+            if (!entry.playable) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(skin.bg.copy(alpha = 0.55f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "不支持",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.text
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = entry.displayTitle,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = if (entry.playable) skin.text else skin.textMuted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = buildString {
+                    if (entry.owner.isNotBlank()) append(entry.owner).append(" · ")
+                    append(entry.qualityLabel)
+                    if (entry.frameNote.isNotBlank()) append(' ').append(entry.frameNote)
+                    append(" · ").append(entry.durationText)
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Spacer(Modifier.width(10.dp))
+
+        if (preparing) {
+            Box(Modifier.width(56.dp), contentAlignment = Alignment.CenterEnd) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = skin.accent
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "${(progress * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = formatSize(entry.sizeBytes),
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted
+            )
+        }
+    }
+}
+
+@Composable
+private fun BiliCover(url: String, modifier: Modifier = Modifier) {
+    val skin = LocalSkin.current
+    var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(url) { bitmap = BiliCoverLoader.load(url, 240) }
+
+    val bmp = bitmap
+    if (bmp != null) {
+        Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Crop
+        )
+    } else {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = SonanceIcons.Play,
+                contentDescription = null,
+                tint = skin.textMuted,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
