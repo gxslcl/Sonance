@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 默认图标 = 设置里「应用图标」第 4 排第 1 个（耳机 · 原版耳机）。
+     改这里等于换掉 App 的默认图标；单色层复用同一路径，保证 Android 13 主题图标也是耳机。 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+    <background android:drawable="@color/ic_bg_s4_1" />
+    <foreground android:drawable="@drawable/logo_s4_1" />
+    <monochrome android:drawable="@drawable/logo_s4_1" />
 </adaptive-icon>

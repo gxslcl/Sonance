@@ -32,7 +32,7 @@ object AppIcons {
         )
 
     val all: List<AppIconVariant> = listOf(
-        v("default", "原版 · Sonance", R.drawable.ic_launcher_foreground, R.mipmap.ic_launcher, 0xFF121212),
+        v("default", "原版 · 耳机", R.drawable.logo_s4_1, R.mipmap.ic_launcher, 0xFF162032),
         v("s1_1", "播放圆环 · 原版线条", R.drawable.logo_s1_1, R.mipmap.ic_launcher_s1_1, 0xFF0A0A0A),
         v("s1_2", "播放圆环 · 实心填充", R.drawable.logo_s1_2, R.mipmap.ic_launcher_s1_2, 0xFF121212),
         v("s1_3", "播放圆环 · 半切拼接", R.drawable.logo_s1_3, R.mipmap.ic_launcher_s1_3, 0xFFF0EBE0),

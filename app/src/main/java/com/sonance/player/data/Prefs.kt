@@ -420,6 +420,16 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_TOP_BAR_LOGO, null) ?: ""
         set(v) = sp.edit().putString(KEY_TOP_BAR_LOGO, v).apply()
 
+    /**
+     * 拖动右侧快速滚动条时是否给震动反馈。
+     *
+     * 默认开启：长列表里拖滚动条是"盲操作"，没有触觉反馈很难判断拖了多远。
+     * 关掉它的人通常是嫌震动烦，或者手机马达是转子式的（手感差）。
+     */
+    var scrollHapticEnabled: Boolean
+        get() = sp.getBoolean(KEY_SCROLL_HAPTIC, true)
+        set(v) = sp.edit().putBoolean(KEY_SCROLL_HAPTIC, v).apply()
+
     // ===== 在线封面（默认关闭，与在线歌词同一原则）=====
 
     var onlineCoverEnabled: Boolean
@@ -947,6 +957,7 @@ class Prefs(context: Context) {
         private const val KEY_LIST_ROW_STYLE = "list_row_style"
         private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
         private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"
+        private const val KEY_SCROLL_HAPTIC = "scroll_haptic_enabled"
         private const val KEY_COVER_ENABLED = "online_cover_enabled"
         private const val KEY_COVER_PIN = "cover_pin_"
         private const val KEY_EQ_ENABLED = "eq_enabled"

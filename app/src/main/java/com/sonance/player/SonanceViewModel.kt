@@ -1254,6 +1254,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      *
      * 和 [appIconId] 分开：那个换桌面启动器图标，这个只换应用内的顶栏 logo。
      */
+    /** 拖动快速滚动条时的震动反馈开关 */
+    var scrollHaptic by mutableStateOf(prefs.scrollHapticEnabled)
+        private set
+
+    fun changeScrollHaptic(enabled: Boolean) {
+        if (scrollHaptic == enabled) return
+        scrollHaptic = enabled
+        prefs.scrollHapticEnabled = enabled
+    }
+
     var topBarLogoId by mutableStateOf(prefs.topBarLogoId)
         private set
 

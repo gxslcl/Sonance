@@ -525,6 +525,18 @@ private fun ListAppearanceSection(vm: SonanceViewModel) {
                 }
             }
         }
+
+        // ---- 滚动条震动反馈 ----
+        //
+        // 拖动右侧快速滚动条时，每跨过一段给一次轻触感（HapticFeedbackType.TextHandleMove），
+        // 让"拖了多远"能被手指感知到，不用一直盯着滑块。
+        Spacer(Modifier.height(16.dp))
+        SettingsSwitchRow(
+            title = "滚动条震动",
+            subtitle = "按住右侧滑块上下拖动时，每跨过一段轻震一下",
+            checked = vm.scrollHaptic,
+            onCheckedChange = vm::changeScrollHaptic
+        )
     }
 }
 

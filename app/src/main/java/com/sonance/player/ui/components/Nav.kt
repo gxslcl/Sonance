@@ -102,14 +102,15 @@ fun SideNavigation(
                     Modifier
                         .size(34.dp)
                         .clip(RoundedCornerShape(9.dp))
-                        .background(skin.bg),
+                        // 用 AppIcons 的默认图标（和桌面图标同一张图）当品牌标，
+                        // 保证「桌面看到的」与「应用里看到的」是同一个图案
+                        .background(AppIcons.byId(AppIcons.DEFAULT_ID).bgColor),
                     contentAlignment = Alignment.Center
                 ) {
-                    androidx.compose.material3.Icon(
-                        imageVector = SonanceIcons.Logo,
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(AppIcons.byId(AppIcons.DEFAULT_ID).preview),
                         contentDescription = null,
-                        tint = skin.accent,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
                 if (expanded) {
@@ -362,7 +363,12 @@ fun AppTopBar(
                     .padding(start = 10.dp)
                     .size(if (dense) 26.dp else 30.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(skin.surface2)
+                    // 未自定义图案时，底色取默认图标自己的底色 —— 这样左上角
+                    // 看起来就是桌面那个图标的缩小版
+                    .background(
+                        if (logoId.isNotBlank()) skin.surface2
+                        else AppIcons.byId(AppIcons.DEFAULT_ID).bgColor
+                    )
                     .then(
                         if (titleDoubleTap != null) {
                             Modifier.clickable(onClick = titleDoubleTap)
@@ -383,11 +389,12 @@ fun AppTopBar(
                             .clip(RoundedCornerShape(8.dp))
                     )
                 } else {
-                    androidx.compose.material3.Icon(
-                        imageVector = SonanceIcons.Logo,
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(AppIcons.byId(AppIcons.DEFAULT_ID).preview),
                         contentDescription = null,
-                        tint = skin.accent,
-                        modifier = Modifier.size(if (dense) 15.dp else 17.dp)
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
                     )
                 }
             }

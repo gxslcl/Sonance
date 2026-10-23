@@ -63,7 +63,9 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -1396,6 +1398,7 @@ fun LibraryPagerScreen(
                     if (barOnGrid) gridStateNow.firstVisibleItemIndex
                     else barState.firstVisibleItemIndex
                 },
+                hapticEnabled = vm.scrollHaptic,
                 onSeek = { index ->
                     scope.launch {
                         if (barOnGrid) gridStateNow.scrollToItem(index)
@@ -1430,7 +1433,9 @@ private fun FastScrollBar(
     visibleCount: () -> Int,
     firstIndex: () -> Int,
     onSeek: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 拖动时是否给震动反馈（设置里可关） */
+    hapticEnabled: Boolean = true
 ) {
     val skin = LocalSkin.current
     val total = itemCount()
@@ -1444,6 +1449,13 @@ private fun FastScrollBar(
 
     var trackPx by remember { mutableIntStateOf(1) }
     var dragging by remember { mutableStateOf(false) }
+
+    // 触觉反馈：按"跨过多少行"节流，而不是每帧都震 ——
+    // 每帧震会连成一片嗡嗡声，反而分不清拖动距离。
+    // 步长按列表长度自适应：长曲库 1262 首时约每 15 行一下，短列表则更密。
+    val haptics = LocalHapticFeedback.current
+    var lastTickIndex by remember(total) { mutableIntStateOf(-1) }
+    val hapticStep = (total / 80).coerceAtLeast(3)
     val barW by animateDpAsState(
         targetValue = if (dragging) 11.dp else 5.dp,
         animationSpec = tween(120),
@@ -1460,7 +1472,17 @@ private fun FastScrollBar(
         val thumbPx = trackPx * ratio
         val span = (trackPx - thumbPx).coerceAtLeast(1f)
         val p = ((y - thumbPx / 2f) / span).coerceIn(0f, 1f)
-        onSeek((p * (total - visible)).roundToInt())
+        val target = (p * (total - visible)).roundToInt()
+        onSeek(target)
+
+        // 跨过 hapticStep 行才震一次；第一次按下（lastTickIndex < 0）也给一下，
+        // 让"抓住滑块了"这个动作有确认感
+        if (hapticEnabled) {
+            if (lastTickIndex < 0 || kotlin.math.abs(target - lastTickIndex) >= hapticStep) {
+                lastTickIndex = target
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+        }
     }
 
     Box(
@@ -1472,9 +1494,19 @@ private fun FastScrollBar(
             .onSizeChanged { trackPx = it.height.coerceAtLeast(1) }
             .pointerInput(total, ratio) {
                 detectVerticalDragGestures(
-                    onDragStart = { o -> dragging = true; seekAt(o.y) },
-                    onDragEnd = { dragging = false },
-                    onDragCancel = { dragging = false }
+                    onDragStart = { o ->
+                        dragging = true
+                        lastTickIndex = -1
+                        seekAt(o.y)
+                    },
+                    onDragEnd = {
+                        dragging = false
+                        lastTickIndex = -1
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        lastTickIndex = -1
+                    }
                 ) { change, _ -> seekAt(change.position.y) }
             }
             .pointerInput(total, ratio) {
