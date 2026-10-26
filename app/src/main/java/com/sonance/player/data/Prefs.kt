@@ -82,7 +82,7 @@ class Prefs(context: Context) {
             .apply()
 
     var skinId: String
-        get() = sp.getString(KEY_SKIN, null) ?: "midnight_amber"
+        get() = sp.getString(KEY_SKIN, null) ?: "immersive"
         set(v) = sp.edit().putString(KEY_SKIN, v).apply()
 
     var sortField: String
@@ -235,11 +235,10 @@ class Prefs(context: Context) {
     // ===== 在线歌词 =====
 
     /**
-     * 是否允许联网取歌词。**默认关闭** —— 这个播放器的定位是纯本地、不联网，
-     * 联网取词必须由用户显式打开。
+     * 是否允许联网取歌词。默认打开。
      */
     var onlineLyricsEnabled: Boolean
-        get() = sp.getBoolean(KEY_ONLINE_LYRICS, false)
+        get() = sp.getBoolean(KEY_ONLINE_LYRICS, true)
         set(v) = sp.edit().putBoolean(KEY_ONLINE_LYRICS, v).apply()
 
     /** 歌词服务地址，默认 LrcAPI 的公开实例；可改成自建地址 */
@@ -399,6 +398,23 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_GLASS_VIS, GlassStyle.NORMAL.defaultVisibility).coerceIn(0, 100)
         set(v) = sp.edit().putInt(KEY_GLASS_VIS, v.coerceIn(0, 100)).apply()
 
+    // ===== 沉浸皮肤主界面背景（与歌词页那套玻璃设置相互独立）=====
+
+    /** 沉浸主界面玻璃样式：[GlassStyle] 的 ordinal（OFF = 不铺封面背景，退回纯色深底） */
+    var shellGlassStyle: Int
+        get() = sp.getInt(KEY_SHELL_GLASS_STYLE, GlassStyle.LIQUID.ordinal)
+        set(v) = sp.edit().putInt(KEY_SHELL_GLASS_STYLE, v).apply()
+
+    /** 沉浸主界面模糊半径 0~80dp（默认 40 = 原写死值） */
+    var shellGlassBlurDp: Int
+        get() = sp.getInt(KEY_SHELL_GLASS_BLUR, 40).coerceIn(0, 80)
+        set(v) = sp.edit().putInt(KEY_SHELL_GLASS_BLUR, v.coerceIn(0, 80)).apply()
+
+    /** 沉浸主界面背景可见度 0~100（默认 100 = 原写死值） */
+    var shellGlassVisibility: Int
+        get() = sp.getInt(KEY_SHELL_GLASS_VIS, 100).coerceIn(0, 100)
+        set(v) = sp.edit().putInt(KEY_SHELL_GLASS_VIS, v.coerceIn(0, 100)).apply()
+
     // ===== 律动柱页背景（与歌词页同一套玻璃参数，但各自独立可调）=====
 
     /**
@@ -497,14 +513,14 @@ class Prefs(context: Context) {
 
     // ===== 列表外观 =====
 
-    /** 列表行的分隔方式：[ListRowStyle] 的 ordinal。默认保持原来的"无分界线" */
+    /** 列表行的分隔方式：[ListRowStyle] 的 ordinal。默认细分隔线 */
     var listRowStyle: Int
-        get() = sp.getInt(KEY_LIST_ROW_STYLE, ListRowStyle.NONE.ordinal)
+        get() = sp.getInt(KEY_LIST_ROW_STYLE, ListRowStyle.DIVIDER.ordinal)
         set(v) = sp.edit().putInt(KEY_LIST_ROW_STYLE, v).apply()
 
-    /** 列表封面的缩放倍数：[ListCoverScale] 的 ordinal。默认 1 倍 */
+    /** 列表封面的缩放倍数：[ListCoverScale] 的 ordinal。默认 1.2 倍 */
     var listCoverScale: Int
-        get() = sp.getInt(KEY_LIST_COVER_SCALE, ListCoverScale.X1.ordinal)
+        get() = sp.getInt(KEY_LIST_COVER_SCALE, ListCoverScale.X12.ordinal)
         set(v) = sp.edit().putInt(KEY_LIST_COVER_SCALE, v).apply()
 
     // ===== 顶栏品牌 =====
@@ -541,10 +557,10 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_BILI_PLAY_MODE, 1)
         set(v) = sp.edit().putInt(KEY_BILI_PLAY_MODE, v).apply()
 
-    // ===== 在线封面（默认关闭，与在线歌词同一原则）=====
+    // ===== 在线封面（默认打开，与在线歌词同一步调）=====
 
     var onlineCoverEnabled: Boolean
-        get() = sp.getBoolean(KEY_COVER_ENABLED, false)
+        get() = sp.getBoolean(KEY_COVER_ENABLED, true)
         set(v) = sp.edit().putBoolean(KEY_COVER_ENABLED, v).apply()
 
     /** 手动指定过的封面：songId → 图片 URL（覆盖自动匹配的结果） */
@@ -555,16 +571,15 @@ class Prefs(context: Context) {
         else sp.edit().putString("$KEY_COVER_PIN$songId", url).apply()
     }
 
-    // ===== 在线音乐（默认关闭，与在线歌词 / 在线封面同一原则）=====
+    // ===== 在线音乐（默认打开，与在线歌词 / 在线封面同一步调）=====
 
     /**
-     * 是否启用在线音源（搜索 + 播放）。**默认关闭**。
+     * 是否启用在线音源（搜索 + 播放）。默认打开。
      *
      * 关掉时「在线音乐」页只显示一个开启入口，**不发任何网络请求**。
-     * 和在线歌词、在线封面保持一致的原则：联网必须由用户显式打开。
      */
     var onlineMusicEnabled: Boolean
-        get() = sp.getBoolean(KEY_ONLINE_MUSIC, false)
+        get() = sp.getBoolean(KEY_ONLINE_MUSIC, true)
         set(v) = sp.edit().putBoolean(KEY_ONLINE_MUSIC, v).apply()
 
     /**
@@ -1071,6 +1086,9 @@ class Prefs(context: Context) {
         private const val KEY_GLASS_STYLE = "glass_style"
         private const val KEY_GLASS_BLUR = "glass_blur_dp"
         private const val KEY_GLASS_VIS = "glass_visibility"
+        private const val KEY_SHELL_GLASS_STYLE = "shell_glass_style"
+        private const val KEY_SHELL_GLASS_BLUR = "shell_glass_blur_dp"
+        private const val KEY_SHELL_GLASS_VIS = "shell_glass_visibility"
         private const val KEY_VIZ_GLASS_STYLE = "viz_glass_style"
         private const val KEY_VIZ_GLASS_BLUR = "viz_glass_blur_dp"
         private const val KEY_VIZ_GLASS_VIS = "viz_glass_visibility"

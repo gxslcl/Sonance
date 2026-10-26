@@ -102,6 +102,16 @@ object SonanceIcons {
     val ArrowLeft by o("ArrowLeft", "M19 12H5", "M12 19l-7-7 7-7")
     /** 「回到顶部」按钮的箭头。实心向上，比 chevron 在小尺寸下更好认 */
     val ArrowUp by o("ArrowUp", "M12 20V6", "M6 12l6-6 6 6")
+    /** 「定位到正在播放」按钮：准星（外圈 + 四向短线 + 中心点） */
+    val Locate by o(
+        "Locate",
+        circle(12.0, 12.0, 7.0),
+        dot(12.0, 12.0),
+        "M12 2v3",
+        "M12 19v3",
+        "M2 12h3",
+        "M19 12h3"
+    )
     val MoreVertical by o("MoreVertical", dot(12.0, 12.0), dot(12.0, 5.0), dot(12.0, 19.0))
     val Check by o("Check", "M20 6L9 17l-5-5")
     val Refresh by o(

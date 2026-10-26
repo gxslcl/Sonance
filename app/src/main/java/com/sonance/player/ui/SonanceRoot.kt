@@ -15,6 +15,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
@@ -77,6 +79,7 @@ import com.sonance.player.ui.components.GlassBackdrop
 import com.sonance.player.ui.components.artBandColors
 import com.sonance.player.ui.components.buildBgProfile
 import com.sonance.player.ui.components.ensureReadable
+import com.sonance.player.ui.components.equalizeScrimAlphas
 import com.sonance.player.ui.components.IconAction
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.MiniPlayer
@@ -406,19 +409,27 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 状态**不按歌曲 id 重置** —— 换歌时旧图保留到新图加载完成，GlassBackdrop 才能做
     // 一次连贯的滑动过渡；若在这里清空，背景会「先消失、再淡入」两段闪变
     var shellArt by remember { mutableStateOf<ImageBitmap?>(null) }
+    // 封面的分段平均色：**与封面同一帧换上**（先算色带、再换图）——
+    // 均衡遮罩由色带算出，两者错帧的话新封面会顶着旧遮罩闪一帧错误的亮度
+    var shellBands by remember { mutableStateOf<List<Color>?>(null) }
     LaunchedEffect(skin.immersive, currentSong?.albumId, currentSong?.id, currentSong?.title, currentSong?.artist) {
         val s = currentSong
         if (!skin.immersive || s == null) {
             shellArt = null
+            shellBands = null
             return@LaunchedEffect
         }
-        shellArt = ArtworkLoader.load(
+        val bmp = ArtworkLoader.load(
             context = context,
             albumId = s.albumId,
             sizePx = 320,
             sourceUri = s.uri,
             coverKey = OnlineCover.keyOf(s.title, s.artist)
         ) ?: ArtworkLoader.online(s.id)
+        // 像素读取放后台线程（320px 位图几千次采样，毫秒级）；色带先就位、
+        // 封面后换，两个赋值在同一次重组里一起生效
+        shellBands = if (bmp == null) null else withContext(Dispatchers.Default) { artBandColors(bmp) }
+        shellArt = bmp
     }
 
     // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
@@ -432,17 +443,30 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         lastQueueIndex = idx
     }
 
-    // 封面的分段平均色：像素读取放后台线程，只在换图时算一次。
-    // 同样不按歌曲重置：换图瞬间先用旧色带顶住，字色不至于闪回未适配的默认值
-    var shellBands by remember { mutableStateOf<List<Color>?>(null) }
-    LaunchedEffect(shellArt) {
-        val bmp = shellArt
-        shellBands = if (bmp == null) null else withContext(Dispatchers.Default) { artBandColors(bmp) }
+    // 方案 C「统一压暗」：先用色带算出每个停靠点的均衡遮罩 —— 把「底色 × 封面 ×
+    // 遮罩」的合成亮度钉在恒定深色区间（封面越亮遮罩越浓、越暗越薄）。
+    // 这份值同时交给 GlassBackdrop 画背景和 buildBgProfile 折算字色，画和算同参。
+    // 玻璃「关闭」档不铺封面背景，遮罩和字色 profile 一起退到皮肤兜底
+    val shellGlassOn = vm.shellGlassStyle != GlassStyle.OFF
+    val equalScrims = remember(shellBands, shellArt, screenW, screenH, skin, shellGlassOn, vm.shellGlassVisibility) {
+        if (!shellGlassOn) return@remember null
+        val bands = shellBands ?: return@remember null
+        equalizeScrimAlphas(
+            bands = bands,
+            artW = shellArt?.width ?: 0,
+            artH = shellArt?.height ?: 0,
+            boxW = screenW,
+            boxH = screenH,
+            skin = skin,
+            visibility = vm.shellGlassVisibility,
+            canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        )
     }
 
-    // 按 GlassBackdrop 的真实画法（Crop → 放大 1.35 → 遮罩 → 高光）折算等效背景色带。
-    // 画和算必须是同一套参数（液态玻璃 / 模糊 40 / 透出 100），字色才对得准
-    val bgProfile = remember(shellBands, shellArt, screenW, screenH, skin) {
+    // 按 GlassBackdrop 的真实画法（Crop → 放大 1.35 → 遮罩）折算等效背景色带。
+    // 画和算必须是同一套参数（同一样式 / 同一可见度 / 同一份均衡遮罩），字色才对得准
+    val bgProfile = remember(shellBands, shellArt, screenW, screenH, skin, equalScrims, shellGlassOn, vm.shellGlassVisibility) {
+        if (!shellGlassOn) return@remember null
         val bands = shellBands ?: return@remember null
         buildBgProfile(
             bands = bands,
@@ -451,44 +475,34 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             boxW = screenW,
             boxH = screenH,
             skin = skin,
-            visibility = 100,
+            visibility = vm.shellGlassVisibility,
             canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
             liquid = true,
             // 与上面 GlassBackdrop 的画法严格同参，字色才对得准
             scrimSpread = 0.10f,
-            topHighlight = false
+            topHighlight = false,
+            scrimAlphas = equalScrims
         )
     }
-    // 用「对当前方向最不利的那一段」做调色基准：提亮时最怕特别亮的段（顶部），
-    // 压暗时最怕特别暗的段 —— 取头部/中部/底部三个采样点里的最坏值，一处达标全程达标
+    // 方案 C：背景亮度恒定深色 → 组件 / 文字固定一套深色样式，**不再随封面明暗翻转**
+    //（旧的 pickLighten / 白霜分支已删）。ensureReadable 只作兜底：个别停靠点
+    // 没压到位（无封面 / 极暗封面遮罩趋零）或强调色与封面色相撞时，把字色朝亮推
+    // 到刚好达标 —— 背景亮度钉死，推出来的颜色逐歌几乎不变，观感上就是"一套固定的色"。
     val adaptedSkin = if (skin.immersive && bgProfile != null) {
-        val lighten = bgProfile.lighten
-        val picks = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
-        val rep = if (lighten) picks.maxBy { it.luminance() } else picks.minBy { it.luminance() }
-
-        // 玻璃卡片跟随背景方向：背景偏暗维持深玻璃；背景偏亮换「白霜」——
-        // 往封面平均色里掺一点白再半透明，浅封面上就不会是一块块突兀的深色补丁
-        val frost = if (lighten) skin else skin.copy(
-            surface = frostTint(rep, 0.68f),
-            surface2 = frostTint(rep, 0.78f),
-            surface3 = frostTint(rep, 0.86f),
-            border = Color.Black.copy(alpha = 0.10f),
-            border2 = Color.Black.copy(alpha = 0.06f)
-        )
-        val accent = ensureReadable(skin.accent, rep, 3.2f, lighten)
-        frost.copy(
-            text = ensureReadable(skin.text, rep, 4.5f, lighten),
-            textDim = ensureReadable(skin.textDim, rep, 3.8f, lighten),
-            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, lighten),
+        // 亮文字最怕最亮的那段：取三个采样点里最亮的做基准
+        val rep = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
+            .maxBy { it.luminance() }
+        val accent = ensureReadable(skin.accent, rep, 3.2f, true)
+        skin.copy(
+            text = ensureReadable(skin.text, rep, 4.5f, true),
+            textDim = ensureReadable(skin.textDim, rep, 3.8f, true),
+            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, true),
             accent = accent,
-            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, lighten),
+            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, true),
             // onAccent 是「accent 实底上的字/图标」——开关圆点、实心按钮、播放键。
-            // 亮背景时 accent 会被压成深青，onAccent 若还保持近黑就是深底叠深字
-            // （开关糊成一团、暂停键图标看不见）。方向必须与 accent 相反：
-            // accent 往黑推它就往白推。目标给 4.5：深色 accent 底上白字才够跳。
-            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, !lighten),
-            danger = ensureReadable(skin.danger, rep, 3.0f, lighten),
-            isLight = !lighten
+            // 与 accent 相反方向适配（accent 亮它就暗），保证实底上永远看得清
+            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false),
+            danger = ensureReadable(skin.danger, rep, 3.0f, true)
         )
     } else skin
 
@@ -506,15 +520,16 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     CompositionLocalProvider(LocalDenseLayout provides dense) {
         Box(Modifier.fillMaxSize()) {
 
-        // 沉浸皮肤：整块主界面铺「当前播放封面的液态玻璃」（模糊 40 / 透出 100）。
+        // 沉浸皮肤：整块主界面铺「当前播放封面的玻璃背景」。样式 / 模糊 / 透出强度
+        // 由设置页「主界面背景」区块控制（默认 = 原写死的液态玻璃 40 / 100）。
         // 画在根上 —— 列表 / 详情页 / 设置页都叠在它上面；下面那层 skin.bg 实底
         // 在沉浸模式下跳过，否则会把封面盖死。没有封面时只剩遮罩，仍然成立
         if (skin.immersive) {
             GlassBackdrop(
                 art = shellArt,
-                style = GlassStyle.LIQUID,
-                blurDp = 40,
-                visibility = 100,
+                style = vm.shellGlassStyle,
+                blurDp = vm.shellGlassBlur,
+                visibility = vm.shellGlassVisibility,
                 modifier = Modifier
                     .matchParentSize()
                     // 1.35 倍放大的封面会溢出边界，裁掉（歌词页同款）
@@ -530,10 +545,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 transition = if (vm.artTransitionMode == "fade") ArtTransition.FADE
                 else ArtTransition.SLIDE,
                 transitionMs = if (vm.artTransitionMode == "fade") vm.artFadeMs else 380,
-                slideDir = artSlideDir
+                slideDir = artSlideDir,
+                // 方案 C：均衡遮罩 —— 背景合成亮度钉在恒定深色区间，
+                // 与下面 buildBgProfile 用的是同一份值（画和算同参）
+                scrimAlphas = equalScrims
             )
         }
-        Box(Modifier.fillMaxSize().then(if (!skin.immersive) Modifier.background(skin.bg) else Modifier)) {
+        // 沉浸模式下封面玻璃负责整页背景；玻璃「关闭」档没有这层，
+        // 退回 skin.bg 实底（深色，和不铺背景时的观感一致）
+        Box(Modifier.fillMaxSize().then(if (!skin.immersive || vm.shellGlassStyle == GlassStyle.OFF) Modifier.background(skin.bg) else Modifier)) {
 
         // 沉浸皮肤的字色随封面明暗逐歌重算 —— 只包住主界面子树；
         // 全屏播放页有自己的晕染背景与调色逻辑，维持原皮肤
@@ -689,17 +709,6 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
  */
 private val MINI_FLOAT_RESERVE = 76.dp
 
-/**
- * 沉浸皮肤的「白霜」玻璃卡：封面平均色往白里掺 18%（保住封面气质、不变成死白），
- * 再压上半透明 —— 叠在糊开的浅封面上才是玻璃的观感，而不是深色补丁。
- */
-private fun frostTint(rep: Color, alpha: Float): Color = Color(
-    red = rep.red + (1f - rep.red) * 0.82f,
-    green = rep.green + (1f - rep.green) * 0.82f,
-    blue = rep.blue + (1f - rep.blue) * 0.82f,
-    alpha = alpha
-)
-
 /* ============================================================
  * 手机布局：顶栏 + 内容 + 迷你播放条 + 底部导航
  * ============================================================ */
@@ -851,6 +860,32 @@ private fun CompactLayout(
                             onOpenDetail = onOpenDetail,
                             onOpenEqualizer = onOpenEqualizer
                         )
+                    }
+
+                    // 「定位到正在播放」：只在曲库三页的列表视图显示。
+                    // 内容区已为悬浮卡让位 8dp，这里再补 2dp —— 正好「距悬浮播放窗
+                    // 上方 10dp、距屏幕右缘 15dp」；经典贴底时内容区不让位，改贴 10dp。
+                    // 点击走 requestScrollToCurrent，滚动逻辑复用 SongList 里的定位 effect。
+                    // 只画图标不带底/边框，44dp 的 Box 保留完整点击面积；
+                    // 圆形裁剪让点击水波纹也按圆扩散，不露方框。
+                    if (detail == null && vm.tab.inPager && playerState.hasItem) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 15.dp)
+                                .padding(bottom = if (floating) 2.dp else 10.dp)
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .clickable { vm.requestScrollToCurrent() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.material3.Icon(
+                                imageVector = SonanceIcons.Locate,
+                                contentDescription = "定位到正在播放的歌曲",
+                                tint = skin.text.copy(alpha = 0.62f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }

@@ -1288,6 +1288,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.glassVisibility = glassVisibility
     }
 
+    // ===== 沉浸皮肤主界面背景（与歌词页 / 律动柱 / 迷你条的玻璃设置相互独立）=====
+
+    var shellGlassStyle by mutableStateOf(GlassStyle.of(prefs.shellGlassStyle))
+        private set
+    var shellGlassBlur by mutableIntStateOf(prefs.shellGlassBlurDp)
+        private set
+    var shellGlassVisibility by mutableIntStateOf(prefs.shellGlassVisibility)
+        private set
+
+    /** 换样式时把模糊 / 可见度一起带到该样式的预设值（与歌词页同款手感） */
+    fun changeShellGlassStyle(style: GlassStyle) {
+        shellGlassStyle = style
+        shellGlassBlur = style.defaultBlurDp
+        shellGlassVisibility = style.defaultVisibility
+        prefs.shellGlassStyle = style.ordinal
+        prefs.shellGlassBlurDp = style.defaultBlurDp
+        prefs.shellGlassVisibility = style.defaultVisibility
+    }
+
+    fun changeShellGlassBlur(value: Int) {
+        shellGlassBlur = value.coerceIn(0, 80)
+        prefs.shellGlassBlurDp = shellGlassBlur
+    }
+
+    fun changeShellGlassVisibility(value: Int) {
+        shellGlassVisibility = value.coerceIn(0, 100)
+        prefs.shellGlassVisibility = shellGlassVisibility
+    }
+
     // ===== 迷你播放条（列表页底部那个「正在播放」）=====
 
     var miniPlayerStyle by mutableStateOf(MiniPlayerStyle.of(prefs.miniPlayerStyle))

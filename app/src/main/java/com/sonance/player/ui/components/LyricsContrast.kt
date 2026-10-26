@@ -187,6 +187,10 @@ internal fun artBandColors(art: ImageBitmap, bandCount: Int = PROFILE_BANDS): Li
  *   否则算出来的色带和真实背景对不上。
  * @param topHighlight 顶部镜面高光开关，同样必须和画的那边一致（主界面关掉了它，
  *   这里的色带也不能把它算进来）。
+ * @param scrimAlphas 均衡遮罩的逐停靠点不透明度（[equalizeScrimAlphas] 的返回值）。
+ *   非空时遮罩不再用 scrim/scrim+spread 三档，而是按这份值做均匀停靠点的
+ *   分段线性插值 —— 与 [GlassBackdrop] 画的多档渐变严格同参。沉浸皮肤主界面
+ *   传这份值（方案 C：合成亮度钉在 [EQUALIZE_TARGET_LUM]）；歌词页不传，走老画法。
  */
 internal fun buildBgProfile(
     bands: List<Color>,
@@ -199,7 +203,8 @@ internal fun buildBgProfile(
     canBlur: Boolean,
     liquid: Boolean = false,
     scrimSpread: Float = 0.22f,
-    topHighlight: Boolean = true
+    topHighlight: Boolean = true,
+    scrimAlphas: List<Float>? = null
 ): BgProfile? {
     if (bands.isEmpty() || artW <= 0 || artH <= 0 || boxW <= 0f || boxH <= 0f) return null
 
@@ -209,21 +214,25 @@ internal fun buildBgProfile(
 
     // 和 GlassBackdrop 一致：拿不到真模糊时封面只有 45% 的不透明度
     val artAlpha = GlassStyle.artAlpha(visibility) * if (canBlur) 1f else 0.45f
-    val scrim = GlassStyle.scrimAlpha(visibility)
-    val scrimMid = (scrim + scrimSpread * 0.45f).coerceAtMost(0.97f)
-    val scrimBottom = (scrim + scrimSpread).coerceAtMost(0.99f)
+    val eqScrims = scrimAlphas?.takeIf { it.size >= 2 }
+
+    // 屏幕纵向 f 处的遮罩不透明度。均衡遮罩按停靠点插值（和画的那边同一条曲线）；
+    // 没传时退回固定三档（老画法）
+    fun scrimAt(f: Float): Float {
+        if (eqScrims != null) return interpStops(eqScrims, f)
+        val scrim = GlassStyle.scrimAlpha(visibility)
+        val scrimMid = (scrim + scrimSpread * 0.45f).coerceAtMost(0.97f)
+        val scrimBottom = (scrim + scrimSpread).coerceAtMost(0.99f)
+        return if (f <= 0.5f) scrim + (scrimMid - scrim) * (f / 0.5f)
+        else scrimMid + (scrimBottom - scrimMid) * ((f - 0.5f) / 0.5f)
+    }
 
     val out = ArrayList<Color>(PROFILE_BANDS)
     for (i in 0 until PROFILE_BANDS) {
         val f = (i + 0.5f) / PROFILE_BANDS
         val artColor = sampleBands(bands, ((topInArt + f * visibleH) / artH).coerceIn(0f, 1f))
         val overArt = mix(skin.bg, artColor, artAlpha)
-        val s = if (f <= 0.5f) {
-            scrim + (scrimMid - scrim) * (f / 0.5f)
-        } else {
-            scrimMid + (scrimBottom - scrimMid) * ((f - 0.5f) / 0.5f)
-        }
-        val masked = mix(overArt, skin.bg, s)
+        val masked = mix(overArt, skin.bg, scrimAt(f))
         // 液态玻璃的最后一道：顶部镜面高光（白光，从上往下衰减）。画在遮罩**之后**，
         // 所以顺序上必须放在最后一步，否则会把遮罩的压暗算反。
         out += if (liquid && topHighlight) mix(masked, Color.White, liquidHighlightAlpha(f)) else masked
@@ -234,6 +243,98 @@ internal fun buildBgProfile(
         out,
         pickLighten(listOf(skin.textDim, skin.textMuted, skin.accent), out, TARGET_OTHER)
     )
+}
+
+/* ============================================================
+ * 均衡遮罩（沉浸皮肤主界面专用，方案 C「统一压暗」）
+ * ============================================================ */
+
+/** 均衡遮罩的停靠点数。越多越贴合封面的明暗起伏；5 档对模糊后的封面已经够密。 */
+internal const val EQUALIZE_STOPS = 5
+
+/**
+ * 均衡遮罩的**目标合成亮度**（WCAG 相对亮度 0~1）。
+ *
+ * 这是方案 C 的「钉子」：不管封面多亮，叠完遮罩后背景亮度都被钉在这一档 ——
+ * 换歌时只有色相在动、亮度不动，主界面的组件 / 文字不再需要亮暗两套样式。
+ *
+ * 取值权衡：太暗（<0.03）亮封面得压很狠、色相会被洗掉；太亮（>0.12）整套界面
+ * 就成了"灰底"，不像深色主题。0.065 大约是 #48484A 那一档的观感 —— 深灰、
+ * 白字对比 ≈10、强调色对比 ≈4.7，都稳稳达标；暗封面本来就比这暗，遮罩趋零，
+ * 前后两首歌都落在"深色"区间里，跳变感知很小。
+ */
+internal const val EQUALIZE_TARGET_LUM = 0.065f
+
+/** 均衡遮罩单个停靠点的不透明度上限（与旧画法的 0.97/0.99 上限同一量级）。 */
+internal const val SCRIM_ALPHA_MAX = 0.95f
+
+/**
+ * 为每个停靠点算出让「底色 × 封面 × 遮罩」的合成亮度钉在 [EQUALIZE_TARGET_LUM]
+ * 的遮罩不透明度。
+ *
+ * 封面越亮遮罩越浓、越暗遮罩越薄（已经比目标暗时干脆为 0）—— 遮罩色是皮肤底色
+ * （近黑），所以合成结果永远 ≤ 封面亮度：只压不抬，暗封面保住自己的深。
+ *
+ * 折算方式与 [buildBgProfile] 完全同参（Crop 填满 → 放大 [ART_ZOOM] → 取可见段），
+ * 算出来的停靠点交给 [GlassBackdrop] 画、再原样交给 [buildBgProfile] 折算字色，
+ * 三边对齐才不会"画的是一套、算的是另一套"。
+ *
+ * @return [EQUALIZE_STOPS] 个不透明度（0~1，对应屏幕纵向均匀分布的停靠点）；
+ *   入参不成立时返回 null，调用方退回固定遮罩的老画法。
+ */
+internal fun equalizeScrimAlphas(
+    bands: List<Color>,
+    artW: Int,
+    artH: Int,
+    boxW: Float,
+    boxH: Float,
+    skin: Skin,
+    visibility: Int,
+    canBlur: Boolean
+): List<Float>? {
+    if (bands.isEmpty() || artW <= 0 || artH <= 0 || boxW <= 0f || boxH <= 0f) return null
+
+    val scale = maxOf(boxW / artW, boxH / artH) * ART_ZOOM
+    val visibleH = boxH / scale
+    val topInArt = (artH - visibleH) / 2f
+    val artAlpha = GlassStyle.artAlpha(visibility) * if (canBlur) 1f else 0.45f
+
+    val out = ArrayList<Float>(EQUALIZE_STOPS)
+    for (i in 0 until EQUALIZE_STOPS) {
+        val f = i.toFloat() / (EQUALIZE_STOPS - 1)
+        val artColor = sampleBands(bands, ((topInArt + f * visibleH) / artH).coerceIn(0f, 1f))
+        val overArt = mix(skin.bg, artColor, artAlpha)
+        out += solveScrimAlpha(overArt, skin.bg, EQUALIZE_TARGET_LUM)
+    }
+    return out
+}
+
+/**
+ * 二分求 s：lum(mix(overArt, scrim, s)) = [target]。
+ *
+ * [scrim]（皮肤底色，近黑）比 [overArt] 暗时，合成亮度随 s 单调下降 ——
+ * 二分对真实的 [mix] + [Color.luminance] 求解，不靠线性近似，算出来的就是
+ * 画出来的那个值。封面本身已比目标暗时返回 0（没有可压的余地）。
+ */
+private fun solveScrimAlpha(overArt: Color, scrim: Color, target: Float): Float {
+    if (overArt.luminance() <= target) return 0f
+    var lo = 0f
+    var hi = SCRIM_ALPHA_MAX
+    repeat(12) {
+        val mid = (lo + hi) / 2f
+        if (mix(overArt, scrim, mid).luminance() > target) lo = mid else hi = mid
+    }
+    return (lo + hi) / 2f
+}
+
+/** 均匀停靠点的分段线性插值：[stops] 依次对应屏幕纵向 0、1/(n-1) … 1 处的值。 */
+internal fun interpStops(stops: List<Float>, fraction: Float): Float {
+    val n = stops.size
+    if (n == 0) return 0f
+    if (n == 1) return stops[0]
+    val x = fraction.coerceIn(0f, 1f) * (n - 1)
+    val i = x.toInt().coerceAtMost(n - 2)
+    return stops[i] + (stops[i + 1] - stops[i]) * (x - i)
 }
 
 /**

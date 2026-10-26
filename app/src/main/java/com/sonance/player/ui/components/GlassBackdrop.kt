@@ -97,7 +97,16 @@ fun GlassBackdrop(
      * 切换方向：+1 = 下一首（新图从右滑入），-1 = 上一首（从左滑入）。
      * 渐变模式忽略方向。
      */
-    slideDir: Int = 1
+    slideDir: Int = 1,
+    /**
+     * 均衡遮罩的逐停靠点不透明度（[equalizeScrimAlphas] 的返回值，均匀纵向分布）。
+     *
+     * 非空时遮罩不再是固定的三档，而是按这份值画多档渐变 —— 沉浸皮肤主界面
+     * 用它把合成亮度钉在恒定深色区间，换歌只有色相在动。每组「封面+遮罩」
+     * 在各自的离屏图层里先合成钉亮，再整层混合（见下方过渡结构注释）。
+     * 歌词页 / 律动柱页 / 迷你播放条不传，维持原画法。
+     */
+    scrimAlphas: List<Float>? = null
 ) {
     if (style == GlassStyle.OFF) {
         // 「关闭」就是真的什么都不画：只剩调用方自己的底色
@@ -118,14 +127,30 @@ fun GlassBackdrop(
         // 每一帧都在重画模糊缓冲（卡顿根源）；挂在外面，模糊纹理只算一次，
         // 动画只是搬运缓存纹理。
         //
-        //  ** 形态：漂移淡化（取代 40% 宽硬边横扫）** —— 硬边横扫在整页模糊背景
-        //  上方向感太重、观感生硬。现在改为：新图带 10% 宽的方向性位移**缓缓淡入**，
-        //  旧图静止垫底、反向轻漂 4% 做视差纵深。旧图全程满盖，任何时刻都不会露
-        //  底色；没有硬边 wipe，每帧只有一层的位移+透明度在动，自然和流畅都要。
+        //  ** 组化合成（钉亮的关键）**：每组「封面+遮罩」在各自的 graphicsLayer
+        //  里先合成（组内 scrim 盖住自己的封面，合成亮度钉在目标 L），整层再按
+        //  组透明度混合 —— p·L + (1-p)·L = L，过渡全程数学上精确钉亮。
+        //  之前的做法是「遮罩按进度插值盖在混合中的封面上」：两组各自单独标定
+        //  的遮罩插值后盖在 p·新 + (1-p)·旧的混合色上，中段合成亮度偏离目标
+        //  （暗→亮封面切换冲高、亮→暗切换凹谷），真机录屏实测过冲 +7~+10、
+        //  凹谷深 10~14 个灰度级 —— 观感就是「闪一下」。
+        //  位移也挂在组层上（组内图有 1.35 倍溢出 + 模糊，位移 ≤10% 宽不会露洞；
+        //  纵向渐变遮罩不受横移影响）。每帧只有组层的位移+透明度在动。
         var currArt by remember { mutableStateOf(art) }
         var prevArt by remember { mutableStateOf<ImageBitmap?>(null) }
         var slideFrom by remember { mutableStateOf(1) } // 本次过渡的方向快照
         val slide = remember { Animatable(1f) }
+
+        // —— 均衡遮罩的新旧值快照 ——
+        // 遮罩不透明度由封面色带算出（随封面同帧换上）。换歌时旧值快照进
+        // prevScrims，**和旧封面编进同一组**（同组内自洽钉亮）；新值进 curr 组。
+        var currScrims by remember { mutableStateOf(scrimAlphas) }
+        var prevScrims by remember { mutableStateOf<List<Float>?>(null) }
+        LaunchedEffect(scrimAlphas) {
+            if (scrimAlphas == currScrims) return@LaunchedEffect
+            prevScrims = currScrims
+            currScrims = scrimAlphas
+        }
         LaunchedEffect(art) {
             if (art == currArt) return@LaunchedEffect
             prevArt = currArt
@@ -144,7 +169,16 @@ fun GlassBackdrop(
             )
             prevArt = null
         }
-        if (currArt != null || prevArt != null) {
+        if (currArt == null && prevArt == null) {
+            // 无封面兜底：只剩遮罩（均衡值随封面一起没了，走固定三档）
+            ScrimLayer(
+                scrims = currScrims,
+                scrimColor = scrimColor,
+                scrim = scrim,
+                scrimSpread = scrimSpread,
+                modifier = Modifier.matchParentSize()
+            )
+        } else {
             val matrix = remember(style.liquid, visibility) {
                 ColorMatrix().apply {
                     setToSaturation(GlassStyle.saturation(style.liquid, visibility))
@@ -156,63 +190,77 @@ fun GlassBackdrop(
             // 动画帧不触发重组，boxW 首次测量后也能即时生效。
             // 只有单侧有图（无封面 / 首帧）时退化为纯淡化。
             prevArt?.let { bmp ->
-                Image(
-                    bitmap = bmp,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    colorFilter = colorFilter,
-                    modifier = Modifier
+                Box(
+                    Modifier
                         .matchParentSize()
                         .graphicsLayer {
                             val p = slide.value
+                            // ** 覆盖式淡化（滑动/渐变共用）**：只要新图存在，旧组就全程
+                            // 满不透明度、被新组盖上来 —— 旧组自己淡出的「真交叉淡化」
+                            // 会在中段把底色透出来。只在换到「没有封面的歌」时才淡出
+                            alpha = if (currArt != null) 1f else 1f - p
                             val sliding = transition == ArtTransition.SLIDE &&
-                                prevArt != null && currArt != null && boxW > 0f
+                                currArt != null && boxW > 0f
                             translationX = if (sliding) -slideFrom * 0.04f * boxW * p else 0f
-                            alpha = if (sliding) artAlpha else artAlpha * (1f - p)
                         }
-                        .scale(ART_ZOOM)
-                        .then(blurMod)
-                )
+                ) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        colorFilter = colorFilter,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .graphicsLayer { alpha = artAlpha } // API<31 无真模糊，降不透明度近似
+                            .scale(ART_ZOOM)
+                            .then(blurMod)
+                    )
+                    ScrimLayer(
+                        scrims = prevScrims,
+                        scrimColor = scrimColor,
+                        scrim = scrim,
+                        scrimSpread = scrimSpread,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
             }
             currArt?.let { bmp ->
-                Image(
-                    bitmap = bmp,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    colorFilter = colorFilter,
-                    // 1.35 倍放大是为了把模糊后发虚的边缘推出可视区。
-                    // 溢出部分由调用方给的 clip / clipToBounds 裁掉 —— 之前漏了这一步时，
-                    // 图会向左右各溢出 17.5% 的宽度，播放页三层横向轮播时盖到邻层上，
-                    // 表现为"一条只在中途出现的竖条"。
-                    modifier = Modifier
+                Box(
+                    Modifier
                         .matchParentSize()
                         .graphicsLayer {
                             val p = slide.value
                             val sliding = transition == ArtTransition.SLIDE &&
-                                prevArt != null && currArt != null && boxW > 0f
+                                prevArt != null && boxW > 0f
                             translationX = if (sliding) slideFrom * 0.10f * boxW * (1f - p) else 0f
-                            alpha = artAlpha * p
+                            alpha = p
                         }
-                        .scale(ART_ZOOM)
-                        .then(blurMod)
-                )
+                ) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        colorFilter = colorFilter,
+                        // 1.35 倍放大是为了把模糊后发虚的边缘推出可视区。
+                        // 溢出部分由调用方给的 clip / clipToBounds 裁掉 —— 之前漏了这一步时，
+                        // 图会向左右各溢出 17.5% 的宽度，播放页三层横向轮播时盖到邻层上，
+                        // 表现为"一条只在中途出现的竖条"。
+                        modifier = Modifier
+                            .matchParentSize()
+                            .graphicsLayer { alpha = artAlpha } // API<31 无真模糊，降不透明度近似
+                            .scale(ART_ZOOM)
+                            .then(blurMod)
+                    )
+                    ScrimLayer(
+                        scrims = currScrims,
+                        scrimColor = scrimColor,
+                        scrim = scrim,
+                        scrimSpread = scrimSpread,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
             }
         }
-
-        // 遮罩：上浅下深，保证叠在它上面的文字始终可读
-        Box(
-            Modifier
-                .matchParentSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            scrimColor.copy(alpha = scrim),
-                            scrimColor.copy(alpha = (scrim + scrimSpread * 0.45f).coerceAtMost(0.97f)),
-                            scrimColor.copy(alpha = (scrim + scrimSpread).coerceAtMost(0.99f))
-                        )
-                    )
-                )
-        )
 
         if (style.liquid && topHighlight) {
             // 顶部镜面高光
@@ -252,4 +300,39 @@ fun GlassBackdrop(
             }
         }
     }
+}
+
+/**
+ * 遮罩层：上浅下深，保证叠在它上面的文字始终可读。
+ *
+ * 均衡模式（[scrims] 非空且 ≥2 档）画多档停靠点渐变 —— 值由
+ * [equalizeScrimAlphas] 按当前封面单独标定，组内合成亮度钉在目标区间；
+ * 固定模式（null）维持原来的三档。不参与新旧值插值 —— 插值语义已由
+ * 「新旧两组各自钉亮后整层混合」取代。
+ */
+@Composable
+private fun ScrimLayer(
+    scrims: List<Float>?,
+    scrimColor: Color,
+    scrim: Float,
+    scrimSpread: Float,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier.drawBehind {
+            val stops: List<Pair<Float, Color>> = if (scrims == null || scrims.size < 2) {
+                listOf(
+                    0f to scrimColor.copy(alpha = scrim),
+                    0.5f to scrimColor.copy(alpha = (scrim + scrimSpread * 0.45f).coerceAtMost(0.97f)),
+                    1f to scrimColor.copy(alpha = (scrim + scrimSpread).coerceAtMost(0.99f))
+                )
+            } else {
+                val n = scrims.size
+                List(n) { i ->
+                    (i.toFloat() / (n - 1)) to scrimColor.copy(alpha = scrims[i].coerceIn(0f, 1f))
+                }
+            }
+            drawRect(Brush.verticalGradient(*stops.toTypedArray()))
+        }
+    )
 }

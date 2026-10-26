@@ -305,6 +305,32 @@ fun SettingsScreen(
             }
         }
 
+        // ===== 主界面背景（沉浸皮肤）=====
+        // 沉浸皮肤主界面那层「封面玻璃」的样式 / 模糊 / 透出强度 ——
+        // 与歌词页背景的玻璃设置相互独立，只在沉浸皮肤下出现
+        if (skin.immersive) {
+            Spacer(Modifier.height(12.dp))
+            SettingsSection(title = "主界面背景") {
+                Text(
+                    "主界面铺的这层封面玻璃：样式决定质感（液态玻璃 = 更强模糊 + 更饱和），" +
+                        "模糊调细节，可见度调封面透出来的浓淡。\n" +
+                        "选「关闭」退回纯色深底。无论怎么调，背景亮度都会被统一压到恒定的深色档，" +
+                        "组件和文字不会跟着变。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+                Spacer(Modifier.height(8.dp))
+                GlassControls(
+                    style = vm.shellGlassStyle,
+                    blurDp = vm.shellGlassBlur,
+                    visibility = vm.shellGlassVisibility,
+                    onStyleChange = { vm.changeShellGlassStyle(it) },
+                    onBlurChange = { vm.changeShellGlassBlur(it) },
+                    onVisibilityChange = { vm.changeShellGlassVisibility(it) }
+                )
+            }
+        }
+
         // ===== 在线音乐 =====
         OnlineMusicSettingsSection(vm = vm)
 
