@@ -25,12 +25,13 @@ object ContainerRestorer {
         { h, s, t -> KgmDecoder.probe(h, s) },
         { h, s, t -> KwmDecoder.probe(h, s) },
         { h, s, t -> NcmDecoder.probe(h, s) },
+        { h, s, t -> NmsDecoder.probe(h, s) },
         { h, s, t -> QmcDecoder.probe(h, s, t) }
     )
 
     /** 支持的格式标识，供界面展示 */
     val supportedFormats: List<String> = listOf(
-        KgmDecoder.FORMAT, NcmDecoder.FORMAT, KwmDecoder.FORMAT, QmcDecoder.FORMAT
+        KgmDecoder.FORMAT, NcmDecoder.FORMAT, KwmDecoder.FORMAT, NmsDecoder.FORMAT, QmcDecoder.FORMAT
     )
 
     /**
@@ -62,7 +63,8 @@ object ContainerRestorer {
     fun looksLocked(header: ByteArray): Boolean =
         KgmDecoder.looksLike(header) ||
             KwmDecoder.looksLike(header) ||
-            NcmDecoder.looksLike(header)
+            NcmDecoder.looksLike(header) ||
+            NmsDecoder.looksLike(header)
 
     /**
      * 探测不到时，按文件名给出**准确**的跳过原因。

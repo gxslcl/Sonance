@@ -19,7 +19,12 @@ data class AppIconVariant(
 
 object AppIcons {
 
-    const val DEFAULT_ID = "default"
+    /**
+     * 默认图标：s2_4「均衡器 · 圆弧波形」（深墨绿底 + 青绿三圆弧）。
+     * manifest 里默认启用的 alias 与 [com.sonance.player.data.Prefs.appIconId]
+     * 的兜底值都以它为准 —— 三处要一起改。
+     */
+    const val DEFAULT_ID = "s2_4"
 
     private fun v(id: String, label: String, preview: Int, icon: Int, bgArgb: Long) =
         AppIconVariant(
@@ -75,5 +80,8 @@ object AppIcons {
         v("s5_8", "声波 · App图标", R.drawable.logo_s5_8, R.mipmap.ic_launcher_s5_8, 0xFFEDE8DC),
     )
 
-    fun byId(id: String?): AppIconVariant = all.firstOrNull { it.id == id } ?: all.first()
+    fun byId(id: String?): AppIconVariant =
+        all.firstOrNull { it.id == id } ?: byIdDefault()
+
+    private fun byIdDefault(): AppIconVariant = all.first { it.id == DEFAULT_ID }
 }

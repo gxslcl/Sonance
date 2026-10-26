@@ -124,6 +124,25 @@ enum class LyricAdaptMode(val id: String, val label: String, val hint: String) {
 }
 
 /**
+ * 歌词页的**展现模式**。
+ *
+ * 同一份歌词、同一套调色逻辑，两种排版：
+ * - [CLASSIC] 现在的样子：逐行列表，当前句高亮，跟着唱；
+ * - [TILTED] 「圆盘」：圆心在屏幕左侧，歌词贴在大圆的右侧弧面上绕着圆心
+ *   逆时针转，当前句放得特别大、远处的行淡化模糊，更偏"看"而不是"跟"。
+ *   （id 用 "tilted" 是历史原因 —— 最早的版本是整页倾斜 5° 的排版，后来
+ *   按用户反馈改成了圆盘转动，id 不变是为了不丢已保存的设置。）
+ */
+enum class LyricStyle(val id: String, val label: String) {
+    CLASSIC("classic", "经典"),
+    TILTED("tilted", "圆盘");
+
+    companion object {
+        fun fromId(id: String?): LyricStyle = entries.firstOrNull { it.id == id } ?: CLASSIC
+    }
+}
+
+/**
  * 播放页封面颜色的「包裹方式」—— 决定颜色从封面的哪一侧向外晕开。
  *
  * 默认 [AROUND]：这是最初的需求本身（「图片四周的颜色渐变到背景上」），
@@ -133,7 +152,8 @@ enum class GlowMode(val id: String, val label: String, val hint: String) {
     BOTTOM("bottom", "下方", "只从封面下边缘向外晕开"),
     SIDES("sides", "左右", "从封面左右两侧向外晕开"),
     AROUND("around", "四周", "封面四条边都向外晕开，上方也带一点"),
-    FULL("full", "全屏", "扩散到屏幕边缘才淡出，范围最大");
+    FULL("full", "全屏", "扩散到屏幕边缘才淡出，范围最大"),
+    IMMERSIVE("immersive", "沉浸", "整屏铺满封面主色，浓度更深，底部按钮区自动减淡");
 
     companion object {
         fun fromId(id: String?): GlowMode = entries.firstOrNull { it.id == id } ?: AROUND

@@ -183,6 +183,10 @@ internal fun artBandColors(art: ImageBitmap, bandCount: Int = PROFILE_BANDS): Li
  * @param liquid 液态玻璃。这一档在封面和遮罩之上**还叠了一道顶部镜面高光**，
  *   屏幕最上面那 40% 会被白光提亮。不把它算进来的话，顶部那几行的背景亮度会被
  *   低估约 0.07（实测），调出来的歌词颜色就浅一档 —— 屏幕上看着"调了，但还是发灰"。
+ * @param scrimSpread 遮罩纵向加厚幅度，必须和 [GlassBackdrop] 传的同一个值，
+ *   否则算出来的色带和真实背景对不上。
+ * @param topHighlight 顶部镜面高光开关，同样必须和画的那边一致（主界面关掉了它，
+ *   这里的色带也不能把它算进来）。
  */
 internal fun buildBgProfile(
     bands: List<Color>,
@@ -193,7 +197,9 @@ internal fun buildBgProfile(
     skin: Skin,
     visibility: Int,
     canBlur: Boolean,
-    liquid: Boolean = false
+    liquid: Boolean = false,
+    scrimSpread: Float = 0.22f,
+    topHighlight: Boolean = true
 ): BgProfile? {
     if (bands.isEmpty() || artW <= 0 || artH <= 0 || boxW <= 0f || boxH <= 0f) return null
 
@@ -204,8 +210,8 @@ internal fun buildBgProfile(
     // 和 GlassBackdrop 一致：拿不到真模糊时封面只有 45% 的不透明度
     val artAlpha = GlassStyle.artAlpha(visibility) * if (canBlur) 1f else 0.45f
     val scrim = GlassStyle.scrimAlpha(visibility)
-    val scrimMid = (scrim + 0.10f).coerceAtMost(0.97f)
-    val scrimBottom = (scrim + 0.22f).coerceAtMost(0.99f)
+    val scrimMid = (scrim + scrimSpread * 0.45f).coerceAtMost(0.97f)
+    val scrimBottom = (scrim + scrimSpread).coerceAtMost(0.99f)
 
     val out = ArrayList<Color>(PROFILE_BANDS)
     for (i in 0 until PROFILE_BANDS) {
@@ -220,7 +226,7 @@ internal fun buildBgProfile(
         val masked = mix(overArt, skin.bg, s)
         // 液态玻璃的最后一道：顶部镜面高光（白光，从上往下衰减）。画在遮罩**之后**，
         // 所以顺序上必须放在最后一步，否则会把遮罩的压暗算反。
-        out += if (liquid) mix(masked, Color.White, liquidHighlightAlpha(f)) else masked
+        out += if (liquid && topHighlight) mix(masked, Color.White, liquidHighlightAlpha(f)) else masked
     }
     // 方向整页定一次 —— 三种歌词色都参与（当前句的强调色也算），用非当前句的目标
     // （页面上绝大多数行是它）。
@@ -241,6 +247,37 @@ private fun liquidHighlightAlpha(f: Float): Float = when {
     f < 0.18f -> 0.20f + (0.07f - 0.20f) * (f / 0.18f)
     f < 0.40f -> 0.07f * (1f - (f - 0.18f) / 0.22f)
     else -> 0f
+}
+
+/**
+ * 内嵌歌词（播放页点「歌词」按钮、封面那块换出来的歌词）的等效背景色带。
+ *
+ * 与全屏歌词页（[buildBgProfile]）的差别：这里的背景不是「封面模糊」，
+ * 而是**晕染层** —— 播放页的晕染已经整张烘焙成位图（[GlowFrame].image），
+ * 再叠在皮肤底色 skin.bg 上。晕染有十几种模式、强度和蒙版的组合，
+ * 与其把整套绘制管线复刻一遍，不如直接**采样成品位图**：取中轴一列
+ * （内嵌歌词横跨全宽，中轴就是它的平均处境），自上而下取 [PROFILE_BANDS] 个点，
+ * 按各自的不透明度折算成不透明背景色 —— 和歌词真正叠上去的那层颜色一致。
+ *
+ * 晕染关闭（image 为 null）时返回 null —— 维持皮肤原本的配色。
+ */
+internal fun buildInlineBgProfile(glowImage: ImageBitmap?, skin: Skin): BgProfile? {
+    if (glowImage == null || glowImage.width <= 0 || glowImage.height <= 0) return null
+    val px = runCatching { glowImage.toPixelMap() }.getOrNull() ?: return null
+    val x = glowImage.width / 2
+    val out = ArrayList<Color>(PROFILE_BANDS)
+    for (i in 0 until PROFILE_BANDS) {
+        val f = (i + 0.5f) / PROFILE_BANDS
+        val y = (f * (glowImage.height - 1)).toInt()
+        val c = px[x, y]
+        // 晕染位图带 alpha：真实屏幕颜色 = 皮肤底色上 source-over 这一层
+        out += mix(skin.bg, Color(c.red, c.green, c.blue, 1f), c.alpha)
+    }
+    // 方向整页定一次，与全屏歌词页同一套目标值 —— 两边的「看得清」必须是同一个标准
+    return BgProfile(
+        out,
+        pickLighten(listOf(skin.textDim, skin.textMuted, skin.accent), out, TARGET_OTHER)
+    )
 }
 
 /* ============================================================

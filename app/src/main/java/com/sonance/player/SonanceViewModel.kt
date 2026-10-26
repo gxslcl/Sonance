@@ -26,6 +26,7 @@ import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTagWriter
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
+import com.sonance.player.data.MediaFileDeleter
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.NeteaseSource
@@ -61,6 +62,9 @@ import com.sonance.player.data.encodeSongsToJson
 import com.sonance.player.data.ScanOutcome
 import com.sonance.player.data.RestoreEngine
 import com.sonance.player.data.RestoreResult
+import com.sonance.player.data.netease.NcConvertSummary
+import com.sonance.player.data.netease.NeteaseCacheRepository
+import com.sonance.player.data.netease.NeteaseScanResult
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongStats
 import com.sonance.player.data.SortField
@@ -749,6 +753,115 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         restoreResult = null
     }
 
+    // ===== 网易云缓存嗅探与转换 =====
+
+    // 与「私有格式还原」共用 conversionUnlocked 彩蛋开关与输出文件夹，
+    // 不再单独做一套授权 / 目录选择
+    private val neteaseRepo by lazy { NeteaseCacheRepository(getApplication()) }
+
+    var neteaseScanState by mutableStateOf<NeteaseScanResult?>(null)
+        private set
+    var neteaseScanning by mutableStateOf(false)
+        private set
+    var neteaseConverting by mutableStateOf(false)
+        private set
+    var neteaseDone by mutableStateOf(0)
+        private set
+    var neteaseTotal by mutableStateOf(0)
+        private set
+    var neteaseCurrent by mutableStateOf("")
+        private set
+    var neteaseResult by mutableStateOf<NcConvertSummary?>(null)
+        private set
+
+    /** 已转换成功的条目 key（持久化在仓库的记录文件里），列表用来打「已转换」标记 */
+    var neteaseConvertedKeys by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    private var neteaseJob: Job? = null
+
+    /** 首次进区块时用上次扫描结果铺列表（可能为 null，表示还没扫过） */
+    fun neteaseLoadCached() {
+        neteaseConvertedKeys = neteaseRepo.loadDoneMap().keys
+        if (neteaseScanState != null) return
+        val cached = neteaseRepo.loadCached() ?: return
+        neteaseScanState = NeteaseScanResult.Ok(cached)
+    }
+
+    fun neteaseScan() {
+        neteaseJob?.cancel()
+        neteaseJob = viewModelScope.launch {
+            neteaseScanning = true
+            val result = neteaseRepo.scan()
+            neteaseScanState = result
+            neteaseScanning = false
+            when (result) {
+                is NeteaseScanResult.Ok ->
+                    showToast(if (result.entries.isEmpty()) "没有发现可识别的音乐缓存" else "发现 ${result.entries.size} 个缓存音频")
+                is NeteaseScanResult.Failed -> showToast(result.message)
+                else -> {}
+            }
+        }
+    }
+
+    /**
+     * 转换指定条目（全部或单条，由调用方传 key 列表决定）。
+     * 成品写进「私有格式还原」的输出文件夹，没有选过就直接拦下。
+     */
+    fun neteaseConvert(keys: List<String>) {
+        if (keys.isEmpty()) return
+        val entries = (neteaseScanState as? NeteaseScanResult.Ok)
+            ?.entries
+            ?.filter { it.key in keys }
+            .orEmpty()
+        if (entries.isEmpty()) return
+        val outputStr = restoreOutputUri
+        if (outputStr == null) {
+            showToast("请先选择输出文件夹")
+            return
+        }
+        neteaseJob?.cancel()
+        neteaseJob = viewModelScope.launch {
+            neteaseConverting = true
+            neteaseDone = 0
+            neteaseTotal = entries.size
+            neteaseCurrent = ""
+            try {
+                val summary = neteaseRepo.convertAll(
+                    entries,
+                    android.net.Uri.parse(outputStr)
+                ) { done, total, current ->
+                    neteaseDone = done
+                    neteaseTotal = total
+                    neteaseCurrent = current
+                }
+                neteaseResult = summary
+                neteaseConvertedKeys = neteaseConvertedKeys + summary.doneKeys
+                showToast(
+                    when {
+                        summary.converted > 0 -> "转换完成：成功 ${summary.converted} 个，跳过 ${summary.skipped} 个，失败 ${summary.failed} 个"
+                        summary.failed > 0 -> "转换失败：${summary.failed} 个文件处理出错"
+                        else -> "没有可转换的内容"
+                    }
+                )
+                if (summary.converted > 0) scan()
+            } finally {
+                neteaseConverting = false
+            }
+        }
+    }
+
+    fun cancelNetease() {
+        neteaseJob?.cancel()
+        neteaseJob = null
+        neteaseConverting = false
+        showToast("已取消转换")
+    }
+
+    fun clearNeteaseResult() {
+        neteaseResult = null
+    }
+
     // ===== 行为 =====
 
     /**
@@ -807,26 +920,36 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 把重复曲目从列表隐藏。
+     * 清理重复曲目。
      * @param includeSameName 是否连"同名但时长不同"的一起处理
+     * @param deleteFiles **true 时把对应的音频文件从设备上删掉**（走 [deleteSongFiles]，
+     *   系统还会再要一次确认）；false 保持原行为——只从列表隐藏，文件不动。
      */
-    fun cleanDuplicates(includeSameName: Boolean) {
+    fun cleanDuplicates(includeSameName: Boolean, deleteFiles: Boolean = false) {
         val report = duplicateReport ?: return
-        val victims = HashSet<Long>()
-        report.exactGroups.forEach { g -> g.duplicates.forEach { victims.add(it.id) } }
+        val victims = LinkedHashSet<Song>()
+        report.exactGroups.forEach { g -> g.duplicates.forEach { victims.add(it) } }
         if (includeSameName) {
-            report.sameNameGroups.forEach { g -> g.duplicates.forEach { victims.add(it.id) } }
+            report.sameNameGroups.forEach { g -> g.duplicates.forEach { victims.add(it) } }
         }
         if (victims.isEmpty()) {
             showToast("没有需要清理的曲目")
             return
         }
-        val merged = prefs.hiddenIdSet() + victims
+
+        if (deleteFiles) {
+            // 文件删除是另一条链路（含系统授权确认），落地时自己会清 duplicateReport
+            deleteSongFiles(victims.toList())
+            return
+        }
+
+        val ids = victims.mapTo(HashSet()) { it.id }
+        val merged = prefs.hiddenIdSet() + ids
         prefs.hiddenSongIds = merged.joinToString(",")
         hiddenCount = merged.size
 
         // 只改内存里的曲库列表，文件一个都没动
-        songs = songs.filter { it.id !in victims }
+        songs = songs.filter { it.id !in ids }
         albums = MediaRepository.groupAlbums(songs)
         artists = MediaRepository.groupArtists(songs)
         folders = MediaRepository.groupFolders(songs)
@@ -859,6 +982,84 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         folders = MediaRepository.groupFolders(songs)
         prefs.songsCacheJson = encodeSongsToJson(songs)
         showToast("已从列表移除「${song.title}」（文件未删除）")
+    }
+
+    // ===== 删除音频文件（列表菜单 / 去重清理共用）=====
+
+    /**
+     * 一次「等用户点头」的文件删除。
+     */
+    class PendingSongDelete(
+        /** 计划删除的歌（都已过滤成本地歌） */
+        val songs: List<Song>,
+        /**
+         * 非空 → API 29+ 的系统确认框；**用户同意后文件已被系统删掉**，直接落地即可。
+         * 为空 → API 28 及以下，先授予 `WRITE_EXTERNAL_STORAGE`，同意后要**重新执行删除**。
+         */
+        val intentSender: IntentSender?
+    ) {
+        val songIds: Set<Long> = songs.mapTo(HashSet()) { it.id }
+    }
+
+    /** 待用户确认的删除请求；null 表示没有。界面据此拉起系统弹窗 */
+    var pendingSongDelete by mutableStateOf<PendingSongDelete?>(null)
+        private set
+
+    /**
+     * 把一批歌曲的**音频文件**从设备上删掉。
+     *
+     * 应用内二次确认由调用方的对话框负责；这里负责真正的删除动作，
+     * 以及系统（MediaStore）自己的那一次确认：被拦下时把请求挂进
+     * [pendingSongDelete]，由界面拉起系统弹窗，结果回到 [onSongDeletePermissionResult]。
+     */
+    fun deleteSongFiles(songsToDelete: List<Song>) {
+        val targets = songsToDelete.filter { it.isLocal }
+        if (targets.isEmpty()) {
+            showToast("没有可删除的本地文件")
+            return
+        }
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            when (val r = withContext(Dispatchers.IO) { MediaFileDeleter.request(app, targets) }) {
+                is MediaFileDeleter.Result.Deleted ->
+                    finalizeSongFileDeletion(targets.mapTo(HashSet()) { it.id }, targets.size)
+                is MediaFileDeleter.Result.NeedsPermission ->
+                    pendingSongDelete = PendingSongDelete(targets, r.intentSender)
+                MediaFileDeleter.Result.Failed ->
+                    showToast("删除失败：文件可能正被其它应用占用")
+            }
+        }
+    }
+
+    /** 系统弹窗 / 权限申请的结果回到这里 */
+    fun onSongDeletePermissionResult(approved: Boolean) {
+        val pending = pendingSongDelete ?: return
+        pendingSongDelete = null
+        if (!approved) {
+            showToast("已取消删除")
+            return
+        }
+        if (pending.intentSender == null) {
+            // 老权限模型：刚拿到 WRITE 权限，现在才真正执行删除
+            deleteSongFiles(pending.songs)
+            return
+        }
+        // createDeleteRequest 路径：用户同意时系统已经把文件删掉了
+        finalizeSongFileDeletion(pending.songIds, pending.songs.size)
+    }
+
+    /**
+     * 文件删掉之后把曲库收干净。**不走 hiddenSongIds** —— 文件已经不存在，
+     * 把 id 塞进隐藏表只会让「恢复隐藏曲目」的计数说谎。
+     */
+    private fun finalizeSongFileDeletion(ids: Set<Long>, count: Int) {
+        songs = songs.filter { it.id !in ids }
+        albums = MediaRepository.groupAlbums(songs)
+        artists = MediaRepository.groupArtists(songs)
+        folders = MediaRepository.groupFolders(songs)
+        prefs.songsCacheJson = encodeSongsToJson(songs)
+        duplicateReport = null
+        showToast("已删除 $count 个文件")
     }
 
     /** 恢复所有被隐藏的曲目 */
@@ -1035,6 +1236,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 LyricAdaptMode.ALL -> "歌词会按所在区域自动调色"
             }
         )
+    }
+
+    /** 歌词页底部的三个播放按钮（上一曲 / 播放暂停 / 下一曲）显不显示，经典 / 倾斜两种模式共用 */
+    var lyricsPlaybarEnabled by mutableStateOf(prefs.lyricsPlaybar)
+        private set
+
+    fun changeLyricsPlaybar(value: Boolean) {
+        lyricsPlaybarEnabled = value
+        prefs.lyricsPlaybar = value
     }
 
     fun changeLyricsT2S(value: Boolean) {
@@ -1356,6 +1566,26 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var glowFadeMs by mutableIntStateOf(prefs.glowFadeMs)
         private set
 
+    // ===== 主界面背景：封面切换的过渡方式（设置页「背景切换」）=====
+
+    /** "slide" = 左右滑动（播放页轮播同款），"fade" = 直接渐变过去 */
+    var artTransitionMode by mutableStateOf(prefs.artTransitionMode)
+        private set
+
+    /** 「渐变」模式的过渡时长（毫秒） */
+    var artFadeMs by mutableIntStateOf(prefs.artFadeMs)
+        private set
+
+    fun changeArtTransitionMode(v: String) {
+        artTransitionMode = v
+        prefs.artTransitionMode = v
+    }
+
+    fun changeArtFadeMs(v: Int) {
+        artFadeMs = v
+        prefs.artFadeMs = v
+    }
+
     fun changeGlowMode(mode: GlowMode) {
         glowMode = mode
         prefs.glowMode = mode.id
@@ -1374,6 +1604,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeGlowFadeMs(ms: Int) {
         glowFadeMs = ms
         prefs.glowFadeMs = ms
+    }
+
+    /** 播放页封面是否用「黑碟播放器」样式（黑胶圆盘 + 播放时缓慢旋转） */
+    var vinylMode by mutableStateOf(prefs.vinylMode)
+        private set
+
+    fun changeVinylMode(enabled: Boolean) {
+        vinylMode = enabled
+        prefs.vinylMode = enabled
     }
 
     fun changeOnlineCover(enabled: Boolean) {

@@ -38,9 +38,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,6 +73,7 @@ import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.Prefs
+import com.sonance.player.R
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.AppIconVariant
@@ -196,6 +199,10 @@ fun SettingsScreen(
         // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
         if (vm.conversionUnlocked) RestoreSection(vm = vm)
 
+        // ===== 网易云缓存嗅探并转换 =====
+        // 与「私有格式还原」共用同一个彩蛋开关
+        if (vm.conversionUnlocked) NeteaseCacheSection(vm = vm)
+
         // ===== 统计 =====
         SettingsSection(title = "曲库概览") {
             Row(
@@ -238,6 +245,66 @@ fun SettingsScreen(
         // ===== 封面 =====
         CoverSettingsSection(vm = vm)
 
+        // ===== 背景切换 =====
+        // 换歌时主界面玻璃背景怎么过渡：左右滑动（播放页轮播同款）或直接渐变。
+        // 渐变模式下还可以调过渡时长，滑动立即生效
+        SettingsSection(title = "背景切换") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf("slide" to "滑动切换", "fade" to "渐变切换").forEach { (id, label) ->
+                    val on = vm.artTransitionMode == id
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (on) skin.accentGlow else skin.surface2)
+                            .clickable { vm.changeArtTransitionMode(id) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (on) skin.accent else skin.textMuted
+                        )
+                    }
+                }
+            }
+            if (vm.artTransitionMode == "fade") {
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "渐变过渡时长：${vm.artFadeMs} 毫秒",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+                SonanceSlider(
+                    // SonanceSlider 只吃 0~1 归一化值 —— 之前直接传毫秒被钳到 1.0，
+                    // 拖动换算回 0 又被 coerce 弹回下限，表现为「滑杆无法调整」
+                    value = (vm.artFadeMs - Prefs.MIN_ART_FADE_MS).toFloat() /
+                        (Prefs.MAX_ART_FADE_MS - Prefs.MIN_ART_FADE_MS).toFloat(),
+                    onValueChange = { f ->
+                        val ms = Prefs.MIN_ART_FADE_MS +
+                            (f * (Prefs.MAX_ART_FADE_MS - Prefs.MIN_ART_FADE_MS)).toInt()
+                        vm.changeArtFadeMs(ms / 50 * 50) // 步进 50ms，数值干净
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    activeColor = skin.accent,
+                    inactiveColor = skin.surface3
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        "快（200ms）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                    Text(
+                        "慢（1500ms）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+            }
+        }
+
         // ===== 在线音乐 =====
         OnlineMusicSettingsSection(vm = vm)
 
@@ -265,6 +332,12 @@ fun SettingsScreen(
                     )
                 }
             }
+        }
+
+        // ===== 支持作者（打赏）=====
+        // 设置最底下放赞赏码 —— 想支持、或想联系作者的人会翻到这里
+        SettingsSection(title = "支持作者") {
+            DonateCard()
         }
 
         Spacer(Modifier.height(24.dp))
@@ -768,6 +841,13 @@ private fun LyricsSettingsSection(vm: SonanceViewModel) {
 
     SettingsSection(title = "歌词") {
         SettingsSwitchRow(
+            title = "歌词页播放按钮",
+            subtitle = "在歌词页底部显示上一曲 / 播放暂停 / 下一曲三个按钮。" +
+                "经典和圆盘两种歌词模式都遵循这一个开关。",
+            checked = vm.lyricsPlaybarEnabled,
+            onCheckedChange = { vm.changeLyricsPlaybar(it) }
+        )
+        SettingsSwitchRow(
             title = "在线歌词（LrcAPI）",
             subtitle = "本地内嵌歌词找不到时，联网向歌词接口要一份。默认关闭 —— 打开后才会联网，" +
                 "只发送歌名 / 歌手 / 专辑，不发送任何本地路径或文件。",
@@ -1070,6 +1150,16 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
             Spacer(Modifier.height(10.dp))
         }
 
+        // ===== 黑碟播放器 =====
+        // 双击封面那个面板里也有同一个开关，两处写的是同一份配置
+        SettingsSwitchRow(
+            title = "黑碟播放器",
+            subtitle = "封面变圆形黑胶唱片（原色），外圈裹一层黑色黑碟，播放时缓慢旋转，" +
+                "参考网易云音乐的黑胶样式。关闭则恢复方角封面。",
+            checked = vm.vinylMode,
+            onCheckedChange = { vm.changeVinylMode(it) }
+        )
+
         SettingsSwitchRow(
             title = "在线补全封面（iTunes Search API）",
             subtitle = "本地没有内嵌封面时，联网按「歌名 + 歌手」搜一张。默认关闭 —— " +
@@ -1304,11 +1394,13 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
 private fun DuplicateCleanupSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val report = vm.duplicateReport
+    // 点「清理」先弹这里选处理方式。null=没弹；true=连同名一起；false=只清重复
+    var cleanDialog by remember { mutableStateOf<Boolean?>(null) }
 
     SettingsSection(title = "重复与同名歌曲") {
         Column(Modifier.padding(vertical = 4.dp)) {
             Text(
-                "只从曲库列表里隐藏，**不会删除或改动任何文件**，随时可以恢复。",
+                "默认只从曲库列表里隐藏，随时可以恢复；点「清理」时也可以选择删除文件。",
                 style = MaterialTheme.typography.bodySmall,
                 color = skin.textMuted
             )
@@ -1341,14 +1433,14 @@ private fun DuplicateCleanupSection(vm: SonanceViewModel) {
             SettingsActionRow(
                 title = "清理重复文件",
                 subtitle = "标题、歌手、时长完全一致的多份文件，保留体积最大的那份",
-                onClick = { vm.cleanDuplicates(includeSameName = false) },
+                onClick = { cleanDialog = false },
                 actionLabel = "清理"
             )
 
             SettingsActionRow(
                 title = "清理同名歌曲",
                 subtitle = "同名但时长不同（可能是不同版本），保留时长最长的那份 —— 请先检测确认",
-                onClick = { vm.cleanDuplicates(includeSameName = true) },
+                onClick = { cleanDialog = true },
                 actionLabel = "清理"
             )
 
@@ -1363,6 +1455,36 @@ private fun DuplicateCleanupSection(vm: SonanceViewModel) {
                 actionLabel = "恢复"
             )
         }
+    }
+
+    // 清理方式二选一：仅隐藏（原行为，可恢复）或删除文件（不可恢复，
+    // 删除前系统还会再弹一次「允许删除？」，那是最后一道闸）。
+    cleanDialog?.let { includeSameName ->
+        val count = if (includeSameName) report?.sameNameCount ?: 0 else report?.exactCount ?: 0
+        val kind = if (includeSameName) "同名歌曲" else "重复文件"
+        AlertDialog(
+            onDismissRequest = { cleanDialog = null },
+            title = { Text(if (includeSameName) "清理同名歌曲" else "清理重复文件") },
+            text = {
+                Text(
+                    "发现 $count 首$kind。\n\n" +
+                        "· 仅从列表隐藏 —— 文件保留，随时可在下方恢复\n" +
+                        "· 删除文件 —— 从设备上永久删除，不可恢复"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    cleanDialog = null
+                    vm.cleanDuplicates(includeSameName = includeSameName, deleteFiles = true)
+                }) { Text("删除文件") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    cleanDialog = null
+                    vm.cleanDuplicates(includeSameName = includeSameName)
+                }) { Text("仅隐藏") }
+            }
+        )
     }
 }
 
@@ -1746,6 +1868,35 @@ private fun SettingsActionRow(
         }
         Spacer(Modifier.width(12.dp))
         PillButton(label = actionLabel, onClick = onClick, filled = false)
+    }
+}
+
+/**
+ * 「支持作者」：赞赏码卡片。
+ *
+ * 图片本身就是一张完整的分享卡（码 + 寄语 + 落款），整张圆角展示即可，
+ * 不再叠加任何装饰 —— 微信扫一扫扫的就是这张图。
+ */
+@Composable
+private fun DonateCard() {
+    val skin = LocalSkin.current
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Image(
+            painter = painterResource(R.drawable.donate_qrcode),
+            contentDescription = "微信赞赏码",
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "微信扫一扫，请作者喝杯饮料",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
     }
 }
 

@@ -15,6 +15,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,17 +31,20 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,12 +52,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -147,6 +153,10 @@ fun FullPlayer(
     onGlowTransitionChange: (GlowTransition) -> Unit = {},
     /** 双击封面那个面板改了补间时长 */
     onGlowFadeMsChange: (Int) -> Unit = {},
+    /** 封面是否用「黑碟播放器」样式（黑胶圆盘，播放时缓慢旋转） */
+    vinylMode: Boolean = false,
+    /** 双击封面那个面板切黑碟模式 */
+    onVinylModeChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -524,6 +534,16 @@ fun FullPlayer(
                         onOpenEqualizer = onOpenEqualizer,
                         eqEnabled = eqEnabled,
                         prefs = prefs,
+                        // 内嵌歌词自动调色的素材：SWIPE 下三帧按页对号入座（[上一页,当前页,下一页]），
+                        // FADE 下只有当前页有；非当前页传 null，歌词维持皮肤配色
+                        glowImage = if (isSwipeGlow) {
+                            glowFrames.getOrNull(page - pagerState.currentPage + 1)?.image
+                        } else if (isCurrent) {
+                            glowFrames[0].image
+                        } else {
+                            null
+                        },
+                        vinylMode = vinylMode,
                         lyricsExpanded = lyricsExpanded,
                         onToggleLyrics = { lyricsExpanded = !lyricsExpanded },
                         onOpenGlow = { showGlowSheet = true },
@@ -564,6 +584,10 @@ fun FullPlayer(
                 positionMs = state.positionMs,
                 prefs = prefs,
                 onSeek = onSeek,
+                isPlaying = state.isPlaying,
+                onPrev = onPrev,
+                onPlayPause = onPlayPause,
+                onNext = onNext,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -598,6 +622,8 @@ fun FullPlayer(
             onStrengthChange = onGlowStrengthChange,
             onTransitionChange = onGlowTransitionChange,
             onFadeMsChange = onGlowFadeMsChange,
+            vinylMode = vinylMode,
+            onVinylModeChange = onVinylModeChange,
             onDismiss = { showGlowSheet = false }
         )
     }
@@ -674,6 +700,30 @@ private const val GLOW_FADE = 0.18f
 private const val GLOW_BITMAP_W = 64
 private const val GLOW_BITMAP_H = 128
 
+/* ---- 「沉浸」模式 ---- */
+
+/**
+ * 沉浸模式里色块保持**满色**的部分（按屏幕高度的比例）。
+ * 从这里往下开始为底部按钮区减淡 —— 上面铺满、下面让位。
+ *
+ * 起点要对在**歌曲名称上方一点**：歌名/歌手文字大约落在屏幕 50%~55% 处，
+ * 满色区太靠下的话文字正好泡在浓色里，浅色封面时和字色撞在一起看不清
+ * （用户反馈）—— 所以从 0.55 提前到 0.45，让文字区域已经进入过渡段。
+ */
+private const val IMMERSIVE_HOLD = 0.45f
+
+/**
+ * 沉浸模式底部减淡的**保底浓度**：不降到零，按钮区还留一层薄底色 ——
+ * 全降为零的话底部会像被挖掉一块，和上面浓色形成断层。
+ */
+private const val IMMERSIVE_BOTTOM_FLOOR = 0.18f
+
+/**
+ * 沉浸模式的浓度增益：同样的滑杆值下比其它模式更深（这是"沉浸"的本意）。
+ * 0.60 的默认浓度在这里表现为 0.81 的铺色，滑到上限时封顶在 1.0。
+ */
+private const val IMMERSIVE_BOOST = 1.35f
+
 /**
  * 换歌时晕染颜色的补间时长。
  *
@@ -709,6 +759,13 @@ private fun glowVerticalCurve(mode: GlowMode, v: Float): Float = when (mode) {
     }
     // 全屏：顶部最浓，向下线性淡到没有（底部按钮区应该几乎看不见颜色）
     GlowMode.FULL -> (1f - v) * 0.92f
+    // 沉浸：单色铺满、不做四周渐变 —— 主体恒定满色，只有底部按钮区那一段
+    // 从满色线性降到保底值（位图按屏幕高度整张铺，v 就是屏幕高度的占比）
+    GlowMode.IMMERSIVE -> when {
+        v < IMMERSIVE_HOLD -> 1f
+        else -> 1f - (v - IMMERSIVE_HOLD) / (1f - IMMERSIVE_HOLD) *
+            (1f - IMMERSIVE_BOTTOM_FLOOR)
+    }
     // 四周模式用径向渐变（见 buildGlowImage 对它提前 return null），压根不会走到这里。
     // 真被问到也只返回 0（全透明）—— 万一哪天位图那条路改了，最坏是画不出颜色，
     // 而不是按 FULL 的曲线糊出一层莫名其妙的东西。
@@ -728,16 +785,20 @@ private fun buildGlowImage(
 ): ImageBitmap? {
     if (colors.isEmpty() || strength <= 0f) return null
     if (mode == GlowMode.AROUND) return null
+    // 沉浸模式：只取封面正中**一个**主色铺满（不做横向取色），并且浓度整体加深
+    val immersive = mode == GlowMode.IMMERSIVE
+    val single = if (immersive) glowTintAt(colors, 0.5f) else null
+    val s = if (immersive) (strength * IMMERSIVE_BOOST).coerceIn(0f, 1f) else strength
     val w = GLOW_BITMAP_W
     val h = GLOW_BITMAP_H
     val px = IntArray(w * h)
     for (y in 0 until h) {
         val v = y / (h - 1f)
-        val a = (glowVerticalCurve(mode, v) * strength).coerceIn(0f, 1f)
+        val a = (glowVerticalCurve(mode, v) * s).coerceIn(0f, 1f)
         val ai = (a * 255f + 0.5f).toInt()
         if (ai == 0) continue   // 全透明，留 0 就行
         for (x in 0 until w) {
-            val argb = glowTintAt(colors, x / (w - 1f)).toArgb()
+            val argb = (single ?: glowTintAt(colors, x / (w - 1f))).toArgb()
             px[y * w + x] = (ai shl 24) or (argb and 0x00FFFFFF)
         }
     }
@@ -860,8 +921,95 @@ private fun Modifier.onCoverGesture(
     // 单击什么都不做 —— 这是刻意的，播放页最容易误碰的就是封面
     onClick = {},
     onDoubleClick = onDoubleTap,
-    onLongClick = onLongPress
+    onLongClick = onLongPress,
+    // 不画涟漪：封面是圆的、手势挂在方形容器上，默认 ripple 会闪出一个半透明方框
+    interactionSource = remember { MutableInteractionSource() },
+    indication = null
 )
+
+/* ============================================================
+ * 黑碟播放器（黑胶唱片样式，参考网易云）
+ * ============================================================ */
+
+/** 黑碟转速：每秒转过的角度。24 秒一整圈，和网易云的黑胶速度一个量级 */
+private const val VINYL_DEG_PER_SEC = 360f / 24f
+
+/** 封面圆相对整个唱片直径的比例：外圈留出一环黑色黑胶 */
+private const val VINYL_COVER_FRACTION = 0.74f
+
+/**
+ * 黑胶盘面：深底 + 两圈细高光模拟唱片的沟槽。
+ * 中心比外缘略亮一点；沟槽高光跟着盘面一起转，唱片"在转"的感觉主要来自这里。
+ */
+private val VINYL_BRUSH = Brush.radialGradient(
+    0.00f to Color(0xFF2E2E2E),
+    0.11f to Color(0xFF191919),
+    0.56f to Color(0xFF141414),
+    0.58f to Color(0xFF343434),   // 沟槽高光 1：贴着封面外缘
+    0.62f to Color(0xFF121212),
+    0.82f to Color(0xFF101010),
+    0.84f to Color(0xFF2B2B2B),   // 沟槽高光 2：接近盘边
+    0.88f to Color(0xFF0D0D0D),
+    1.00f to Color(0xFF060606)
+)
+
+/**
+ * 「黑碟播放器」封面：封面变回**圆形原色**，外面裹一圈黑色黑胶，
+ * 播放时整张唱片（盘面 + 封面）缓慢旋转，暂停就停在原地 —— 不回弹、不重置。
+ *
+ * 长按换封面、双击开晕染面板的手势由调用方挂在外层（[onCoverGesture]），照旧可用。
+ */
+@Composable
+private fun VinylCover(
+    song: Song,
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier
+) {
+    // 自己拿 withFrameNanos 累加角度，而不是 infiniteRepeatable：
+    // 后者在 isPlaying 翻转时会把动画整个换掉、角度归零，唱片会"咣当"跳回 12 点。
+    var angle by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        var last = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now ->
+                angle = (angle + (now - last) / 1_000_000_000f * VINYL_DEG_PER_SEC) % 360f
+                last = now
+            }
+        }
+    }
+
+    Box(modifier, contentAlignment = Alignment.Center) {
+        // 外层容器给的宽高可能不相等：`size(portraitSide)` 会被父约束逐维压缩，
+        // 宽度常被内边距压小、高度却没动，CircleShape 按非正方形边界裁出来就是椭圆。
+        // 这里强制取短边成正方形、居中放，唱片在任何布局下都是正圆。
+        Box(
+            Modifier
+                .aspectRatio(1f)
+                .rotate(angle),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(VINYL_BRUSH)
+            )
+            CoverArt(
+                albumId = song.albumId,
+                seed = song.title + song.artist,
+                modifier = Modifier
+                    .fillMaxSize(VINYL_COVER_FRACTION)
+                    .clip(CircleShape),
+                cornerRadius = 0.dp,
+                sizePx = 900,
+                sourceUri = song.uri,
+                songId = song.id,
+                coverKey = OnlineCover.keyOf(song.title, song.artist)
+            )
+        }
+    }
+}
 
 /**
  * 一页的晕染素材：三个取样色 + **已经烘好**的渐变位图。
@@ -960,6 +1108,17 @@ private fun DrawScope.drawGlow(
                         height = h * 3.4f,
                         alpha = alpha
                     )
+
+                    // ── 沉浸：单一主色铺满整屏，不做四周渐变 ──
+                    //
+                    // 位图正好按屏幕高度铺（top=0、height=整页），纵向曲线里
+                    // "v 即屏幕高度占比"，所以底部的按钮区减淡就是按屏幕位置精确生效的。
+                    GlowMode.IMMERSIVE -> drawGlowImage(
+                        image = image,
+                        top = 0f,
+                        height = size.height,
+                        alpha = alpha
+                    )
                 }
 }
 
@@ -1008,6 +1167,8 @@ private fun GlowSheet(
     onStrengthChange: (Float) -> Unit,
     onTransitionChange: (GlowTransition) -> Unit,
     onFadeMsChange: (Int) -> Unit,
+    vinylMode: Boolean,
+    onVinylModeChange: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -1023,13 +1184,13 @@ private fun GlowSheet(
                 .padding(bottom = 28.dp)
         ) {
             Text(
-                "封面颜色晕染",
+                "封面显示",
                 style = MaterialTheme.typography.titleMedium,
                 color = skin.text
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "把封面的颜色往背景上渗一点。以后想调，双击封面就行。",
+                "晕染与黑碟。以后想调，双击封面就行。",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textMuted
             )
@@ -1128,6 +1289,27 @@ private fun GlowSheet(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+
+            Spacer(Modifier.height(18.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "黑碟播放器",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.text
+                    )
+                    Text(
+                        "封面变圆形黑胶唱片，播放时缓慢旋转",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+                Switch(checked = vinylMode, onCheckedChange = onVinylModeChange)
+            }
         }
     }
 }
@@ -1160,6 +1342,10 @@ private fun PlayerPage(
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean,
     prefs: Prefs,
+    /** 当前页的晕染烘焙位图：内嵌歌词据此折算背景色带（跟随全屏歌词的调色设置）；非当前页传 null */
+    glowImage: ImageBitmap?,
+    /** 封面是否用「黑碟播放器」样式 */
+    vinylMode: Boolean,
     /** 「歌词」那一行是否已展开成单行滚动歌词 */
     lyricsExpanded: Boolean,
     /** 展开 / 收起那一行（不切页、不改布局） */
@@ -1246,7 +1432,16 @@ private fun PlayerPage(
                                 positionMs = positionMs,
                                 prefs = prefs,
                                 onSeek = onSeek,
+                                glowImage = glowImage,
                                 modifier = Modifier.fillMaxSize()
+                            )
+                        } else if (vinylMode) {
+                            VinylCover(
+                                song = song,
+                                isPlaying = isPlaying,
+                                modifier = Modifier
+                                    .size(landscapeSide)
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow)
                             )
                         } else {
                             CoverArt(
@@ -1336,7 +1531,16 @@ private fun PlayerPage(
                                 positionMs = positionMs,
                                 prefs = prefs,
                                 onSeek = onSeek,
+                                glowImage = glowImage,
                                 modifier = Modifier.fillMaxSize()
+                            )
+                        } else if (vinylMode) {
+                            VinylCover(
+                                song = song,
+                                isPlaying = isPlaying,
+                                modifier = Modifier
+                                    .size(portraitSide)
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow)
                             )
                         } else {
                             CoverArt(

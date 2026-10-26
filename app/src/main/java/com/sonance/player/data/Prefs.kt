@@ -3,6 +3,7 @@ package com.sonance.player.data
 import android.content.Context
 import android.content.SharedPreferences
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.ui.theme.AppIcons
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
@@ -21,6 +22,14 @@ class Prefs(context: Context) {
     var glowMode: String
         get() = sp.getString(KEY_GLOW_MODE, null) ?: GlowMode.AROUND.id
         set(v) = sp.edit().putString(KEY_GLOW_MODE, v).apply()
+
+    /**
+     * 播放页封面的「黑碟播放器」样式：封面变圆形原色、外圈包一层黑色黑胶，
+     * 播放时缓慢旋转。双击封面打开的面板和设置页里都能切。
+     */
+    var vinylMode: Boolean
+        get() = sp.getBoolean(KEY_VINYL_MODE, false)
+        set(v) = sp.edit().putBoolean(KEY_VINYL_MODE, v).apply()
 
     /**
      * 晕染浓度。
@@ -50,6 +59,26 @@ class Prefs(context: Context) {
             .coerceIn(MIN_GLOW_FADE_MS, MAX_GLOW_FADE_MS)
         set(v) = sp.edit()
             .putInt(KEY_GLOW_FADE_MS, v.coerceIn(MIN_GLOW_FADE_MS, MAX_GLOW_FADE_MS))
+            .apply()
+
+    /**
+     * 主界面玻璃背景的封面切换过渡："slide" = 左右滑动（播放页轮播同款），
+     * "fade" = 直接渐变过去（不左右滑）。设置页「背景切换」里选。
+     */
+    var artTransitionMode: String
+        get() = sp.getString(KEY_ART_TRANSITION, "slide") ?: "slide"
+        set(v) = sp.edit()
+            .putString(KEY_ART_TRANSITION, if (v == "fade") "fade" else "slide")
+            .apply()
+
+    /**
+     * 「渐变」模式的过渡时长（毫秒）。只在新封面淡入旧封面淡出这条路径上生效。
+     */
+    var artFadeMs: Int
+        get() = sp.getInt(KEY_ART_FADE_MS, DEFAULT_ART_FADE_MS)
+            .coerceIn(MIN_ART_FADE_MS, MAX_ART_FADE_MS)
+        set(v) = sp.edit()
+            .putInt(KEY_ART_FADE_MS, v.coerceIn(MIN_ART_FADE_MS, MAX_ART_FADE_MS))
             .apply()
 
     var skinId: String
@@ -117,9 +146,9 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_EXCLUDE_NON_SONG, true)
         set(v) = sp.edit().putBoolean(KEY_EXCLUDE_NON_SONG, v).apply()
 
-    /** 当前选中的应用图标（对应 manifest 里的 activity-alias 后缀） */
+    /** 当前选中的应用图标（对应 manifest 里的 activity-alias 后缀）；没选过时用全局默认（s2_4） */
     var appIconId: String
-        get() = sp.getString(KEY_APP_ICON, null) ?: "default"
+        get() = sp.getString(KEY_APP_ICON, null) ?: AppIcons.DEFAULT_ID
         set(v) = sp.edit().putString(KEY_APP_ICON, v).apply()
 
     // ===== 律动柱（音频可视化）=====
@@ -241,6 +270,76 @@ class Prefs(context: Context) {
     var lyricsAdaptMode: LyricAdaptMode
         get() = LyricAdaptMode.fromId(sp.getString(KEY_LYRICS_ADAPT, null))
         set(v) = sp.edit().putString(KEY_LYRICS_ADAPT, v.id).apply()
+
+    /** 歌词页的展现模式（经典 / 倾斜），全局设置 */
+    var lyricsStyle: LyricStyle
+        get() = LyricStyle.fromId(sp.getString(KEY_LYRICS_STYLE, null))
+        set(v) = sp.edit().putString(KEY_LYRICS_STYLE, v.id).apply()
+
+    /**
+     * 歌词页底部的三个播放按钮（上一曲 / 播放暂停 / 下一曲）显不显示。
+     * 独立于展现模式 —— 经典 / 倾斜两种模式都遵循这一个开关。
+     */
+    var lyricsPlaybar: Boolean
+        get() = sp.getBoolean(KEY_LYRICS_PLAYBAR, false)
+        set(v) = sp.edit().putBoolean(KEY_LYRICS_PLAYBAR, v).apply()
+
+    /**
+     * 圆盘歌词的圆盘半径（屏宽的倍数）。越大弧面越平、行越不倾斜；
+     * 全屏歌词页外观面板的「圆盘大小」滑杆可调。
+     */
+    var lyricsDiscRadius: Float
+        get() = sp.getFloat(KEY_LYRICS_DISC_RADIUS, DEFAULT_LYRICS_DISC_RADIUS)
+            .coerceIn(MIN_LYRICS_DISC_RADIUS, MAX_LYRICS_DISC_RADIUS)
+        set(v) = sp.edit()
+            .putFloat(KEY_LYRICS_DISC_RADIUS, v.coerceIn(MIN_LYRICS_DISC_RADIUS, MAX_LYRICS_DISC_RADIUS))
+            .apply()
+
+    /**
+     * 歌词进度偏移，**按歌记忆**：不同歌的歌词源不同、偏差方向也不同，
+     * 全局一个值会互相打架。正数 = 歌词比音频慢（提前显示），负数 = 歌词快了（推迟显示）。
+     *
+     * 渲染侧用 `positionMs - offset`，歌词整体提前/延后，不碰真实播放进度。
+     * 存储是一张「歌名|歌手 → 毫秒」的表，落在一个 SP key 里；
+     * 内存缓存一份：播放页的内嵌歌词每 500ms 随进度重组时都要读一次，不能每次都解析文本。
+     */
+    fun lyricsOffsetMs(title: String, artist: String): Long {
+        loadOffsetsOnce()
+        return offsetsCache[offsetKey(title, artist)] ?: 0L
+    }
+
+    /** 写入某首歌的歌词偏移；0 表示清除该歌的条目（防止表无限膨胀） */
+    fun setLyricsOffsetMs(title: String, artist: String, ms: Long) {
+        loadOffsetsOnce()
+        val key = offsetKey(title, artist)
+        val v = ms.coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
+        if (v == 0L) offsetsCache.remove(key) else offsetsCache[key] = v
+        val text = offsetsCache.entries.joinToString("\n") { "${it.key}\t${it.value}" }
+        sp.edit().putString(KEY_LYRICS_OFFSETS, text).apply()
+    }
+
+    private fun offsetKey(title: String, artist: String) =
+        "${title.trim().replace('\t', ' ').replace('\n', ' ')}|${artist.trim().replace('\t', ' ').replace('\n', ' ')}"
+
+    @Volatile
+    private var offsetsLoaded = false
+    private val offsetsCache = HashMap<String, Long>()
+
+    private fun loadOffsetsOnce() {
+        if (offsetsLoaded) return
+        synchronized(offsetsCache) {
+            if (offsetsLoaded) return
+            sp.getString(KEY_LYRICS_OFFSETS, null)?.let { text ->
+                for (line in text.split('\n')) {
+                    val tab = line.indexOf('\t')
+                    if (tab <= 0) continue
+                    val ms = line.substring(tab + 1).trim().toLongOrNull() ?: continue
+                    offsetsCache[line.substring(0, tab)] = ms
+                }
+            }
+            offsetsLoaded = true
+        }
+    }
 
     // ===== 一次性迁移 =====
 
@@ -885,11 +984,17 @@ class Prefs(context: Context) {
         const val MIN_GLOW_FADE_MS = 120
         const val MAX_GLOW_FADE_MS = 1500
         const val DEFAULT_GLOW_FADE_MS = 420
+        const val MIN_ART_FADE_MS = 200
+        const val MAX_ART_FADE_MS = 1500
+        const val DEFAULT_ART_FADE_MS = 500
 
         private const val KEY_GLOW_MODE = "glow_mode"
         private const val KEY_GLOW_STRENGTH = "glow_strength"
         private const val KEY_GLOW_TRANSITION = "glow_transition"
         private const val KEY_GLOW_FADE_MS = "glow_fade_ms"
+        private const val KEY_ART_TRANSITION = "art_transition_mode"
+        private const val KEY_ART_FADE_MS = "art_fade_ms"
+        private const val KEY_VINYL_MODE = "player_vinyl_mode"
         private const val KEY_SKIN = "skin_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"
@@ -948,6 +1053,20 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
         private const val KEY_LYRICS_ADAPT = "lyrics_adapt_mode"
         private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"
+        private const val KEY_LYRICS_STYLE = "lyrics_style"
+        private const val KEY_LYRICS_PLAYBAR = "lyrics_playbar"
+        private const val KEY_LYRICS_OFFSETS = "lyrics_offsets"
+        private const val KEY_LYRICS_DISC_RADIUS = "lyrics_disc_radius"
+
+        /** 歌词偏移的步进与上限。0.1 秒的细步长（0.5 太粗，副歌前奏常常就差两三拍）；±10 秒之外基本是歌词匹配错了，调也没用 */
+        const val LYRICS_OFFSET_STEP_MS = 100L
+        const val MAX_LYRICS_OFFSET_MS = 10_000L
+
+        /** 圆盘半径的默认值与可调范围（屏宽的倍数） */
+        const val DEFAULT_LYRICS_DISC_RADIUS = 5.5f
+        const val MIN_LYRICS_DISC_RADIUS = 3.0f
+        const val MAX_LYRICS_DISC_RADIUS = 10.0f
+
         private const val KEY_GLASS_CLEARED = "glass_cleared"
         private const val KEY_GLASS_STYLE = "glass_style"
         private const val KEY_GLASS_BLUR = "glass_blur_dp"

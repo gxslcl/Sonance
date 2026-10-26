@@ -233,7 +233,7 @@ fun RestoreSection(vm: SonanceViewModel) {
 }
 
 @Composable
-private fun FolderPickerRow(
+internal fun FolderPickerRow(
     title: String,
     hint: String,
     value: String?,
@@ -264,7 +264,7 @@ private fun FolderPickerRow(
 }
 
 @Composable
-private fun RestoreProgressBar(done: Int, total: Int, skin: Skin) {
+internal fun RestoreProgressBar(done: Int, total: Int, skin: Skin) {
     val fraction = if (total > 0) (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
     Box(
         Modifier

@@ -65,6 +65,11 @@ fun SongRow(
      * 列表里没有"曲库"这个概念，摆一个"从列表移除"只会让人以为能删远程数据。
      */
     onRemoveFromLibrary: (() -> Unit)? = null,
+    /**
+     * 删除这一首的**音频文件**。**传 null 就不显示这一项**（在线歌、队列等场景）。
+     * 二次确认对话框由调用方负责 —— 这里只负责把"用户想删"这件事报上去。
+     */
+    onDeleteFile: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
     /**
      * 封面放大倍数（设置里的「封面大小」，1 / 1.2 / 1.5 / 2）。
@@ -204,6 +209,12 @@ fun SongRow(
                         // DropdownMenuItem 没有 supportingText，只能并进一行。
                         text = { Text("从列表移除（不删文件）", color = skin.text) },
                         onClick = { menuOpen = false; onRemoveFromLibrary() }
+                    )
+                }
+                if (onDeleteFile != null) {
+                    DropdownMenuItem(
+                        text = { Text("删除文件…", color = skin.text) },
+                        onClick = { menuOpen = false; onDeleteFile() }
                     )
                 }
             }

@@ -44,6 +44,11 @@ data class Skin(
      * 选主题 = 一次点完整套观感，不用再去三个地方各调一次。
      */
     val glass: GlassStyle? = null,
+    /**
+     * 沉浸皮肤：主界面没有自己的底色，背景就是当前播放封面的液态玻璃
+     * （模糊 40 / 透出 100，见 SonanceRoot.Shell），文字颜色按封面明暗逐歌自适应。
+     */
+    val immersive: Boolean = false,
 ) {
     /**
      * 依据种子取一组稳定的占位渐变。
@@ -491,10 +496,27 @@ object Skins {
         glass = GlassStyle.LIQUID
     )
 
+    /** 23 · 沉浸 —— 主界面即封面：液态玻璃铺底，字色随封面明暗逐歌自适应 */
+    val Immersive = Skin(
+        id = "immersive",
+        name = "沉浸",
+        tagline = "封面铺底 · 随歌换妆",
+        isLight = false,
+        // 底色只是遮罩基调（中性深灰，压什么封面都不偏色）；surface 全部带透明度，
+        // 叠在糊开的封面上才是「玻璃卡片」的观感
+        bg = c(0xFF17181C), surface = c(0xCC22242A), surface2 = c(0xCC2A2C33), surface3 = c(0xB332343C),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFF2F2F3), textDim = c(0xFFB9B9C0), textMuted = c(0xFF8B8B93),
+        accent = c(0xFF4ECDC4), accentDim = c(0xFF2FA69E), onAccent = c(0xFF0A0F0E),
+        accentGlow = c(0x2E4ECDC4), danger = c(0xFFFF6B7A),
+        gradients = listOf(listOf(c(0xFF2A2C34), c(0xFF17181C))),
+        immersive = true
+    )
+
     val all: List<Skin> = listOf(
         // ---- 深色 ----
         MidnightAmber, Graphite, Ocean, NeonViolet, Forest, Crimson,
-        NeonLime, CyberMagenta, ElectricCyan, SunsetBlaze, LiquidGlass,
+        NeonLime, CyberMagenta, ElectricCyan, SunsetBlaze, LiquidGlass, Immersive,
         // ---- 浅色 ----
         Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay,
         Tropical, SkyLemon, FrostedGlass

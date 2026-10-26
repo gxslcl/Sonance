@@ -199,14 +199,14 @@
                 android:resource="@xml/widget_large_info" />
         </receiver>
     <!-- ===== 应用图标变体：同一 MainActivity 的多个别名，运行时只启用一个 ===== -->
-        <!-- 原版 · Sonance -->
+        <!-- 原版 · Sonance（默认图标已换成 s2_4 圆弧波形，此条默认停用） -->
         <activity-alias
             android:name=".alias.Icon_default"
             android:targetActivity=".MainActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher"
             android:label="@string/app_name"
-            android:enabled="true"
+            android:enabled="false"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -398,7 +398,7 @@
             android:icon="@mipmap/ic_launcher_s2_4"
             android:roundIcon="@mipmap/ic_launcher_s2_4"
             android:label="@string/app_name"
-            android:enabled="false"
+            android:enabled="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

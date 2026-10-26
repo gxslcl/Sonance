@@ -7,7 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** 一行带时间轴的歌词 */
-data class LyricLine(val timeMs: Long, val text: String)
+data class LyricLine(val timeMs: Long, val text: String, val translation: String? = null)
 
 /** 歌词内容：可能是带时间轴的（能跟着播滚动），也可能只有纯文本 */
 sealed interface Lyrics {
@@ -106,9 +106,18 @@ object LyricsRepository {
                 //
                 // 匹配带**时长校验**很关键 —— 网易云搜"晴天"第一条是「晴天(深情版)」，
                 // 直接取第一条会拿到完全不同版本的歌词、时间轴整体错位。
-                if (online.isNullOrBlank() && neteaseEnabled) {
-                    online = NeteaseSource.findTrackFor(title, artist, durationMs)
+                //
+                // LrcAPI 是纯 LRC 文本、永远没有翻译；拿到了歌词但**不含译文**
+                // 时也要再问一次网易云 —— 它的歌词接口带 tlyric（逐行中文翻译），
+                // 拿得到带翻译的版本就整体替换。否则外文歌永远只有原文。
+                if (neteaseEnabled && (online.isNullOrBlank() || !online.contains(TRANSLATION_SEP))) {
+                    val withTr = NeteaseSource.findTrackFor(title, artist, durationMs)
                         ?.let { NeteaseSource.lyrics(it.remoteId) }
+                    if (!withTr.isNullOrBlank() &&
+                        (online.isNullOrBlank() || withTr.contains(TRANSLATION_SEP))
+                    ) {
+                        online = withTr
+                    }
                 }
 
                 if (!online.isNullOrBlank()) {
@@ -233,12 +242,14 @@ object LyricsRepository {
             if (times.isEmpty()) {
                 // 没有时间标签：纯文本行（onlyMeta 的行是元信息，丢掉）
                 if (!onlyMeta && content.isNotEmpty()) {
-                    out.add(LyricLine(-1L, content))
+                    val (main, tr) = splitTranslation(content)
+                    out.add(LyricLine(-1L, main, tr))
                 }
                 continue
             }
             if (content.isEmpty()) continue
-            for (t in times) out.add(LyricLine((t + offsetMs).coerceAtLeast(0L), content))
+            val (main, tr) = splitTranslation(content)
+            for (t in times) out.add(LyricLine((t + offsetMs).coerceAtLeast(0L), main, tr))
         }
 
         if (out.isEmpty()) return null
@@ -249,6 +260,20 @@ object LyricsRepository {
         } else {
             Lyrics.Plain(text, plainLines(out))
         }
+    }
+
+    /**
+     * 把「原文 / 译文」拆开（[TRANSLATION_SEP] 是网易云 tlyric 合并时写入的）。
+     * 只在**第一个**分隔符处拆：译文自己再含斜杠时，剩下的整段都归译文。
+     * 拆出来任何一边为空都不算翻译行，保持原文原样。
+     */
+    private fun splitTranslation(content: String): Pair<String, String?> {
+        val sep = content.indexOf(TRANSLATION_SEP)
+        if (sep <= 0 || sep + TRANSLATION_SEP.length >= content.length) return content to null
+        val main = content.substring(0, sep).trim()
+        val tr = content.substring(sep + TRANSLATION_SEP.length).trim()
+        if (main.isEmpty() || tr.isEmpty()) return content to null
+        return main to tr
     }
 
     private fun plainLines(lines: List<LyricLine>): List<String> = lines.map { it.text }

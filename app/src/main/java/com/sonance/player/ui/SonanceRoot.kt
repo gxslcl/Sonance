@@ -43,7 +43,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -51,19 +55,28 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.LibraryTab
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.AppTopBar
+import com.sonance.player.ui.components.ArtTransition
 import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.FullPlayer
+import com.sonance.player.ui.components.GlassBackdrop
+import com.sonance.player.ui.components.artBandColors
+import com.sonance.player.ui.components.buildBgProfile
+import com.sonance.player.ui.components.ensureReadable
 import com.sonance.player.ui.components.IconAction
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.MiniPlayer
@@ -89,6 +102,7 @@ import com.sonance.player.ui.screens.inPager
 import com.sonance.player.ui.sheets.EqualizerSheet
 import com.sonance.player.ui.sheets.QueueSheet
 import com.sonance.player.ui.sheets.SleepTimerSheet
+import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.SonanceTheme
@@ -275,6 +289,45 @@ private fun CoverWritePermissionGate(vm: SonanceViewModel) {
 }
 
 /* ============================================================
+ * 删除音频文件的授权
+ * ============================================================ */
+
+/**
+ * 删除歌曲文件被系统拦下时，把确认框拉起来。结构照着 [CoverWritePermissionGate] 来：
+ * - `intentSender` 非空：`StartIntentSenderForResult` 拉起「允许删除这些文件？」，
+ *   用户同意后**系统已把文件删掉**；
+ * - 为空（API 28 及以下）：先要 `WRITE_EXTERNAL_STORAGE`，拿到后 ViewModel 会重新执行删除。
+ */
+@Composable
+private fun SongDeletePermissionGate(vm: SonanceViewModel) {
+    val pending = vm.pendingSongDelete
+
+    val senderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        vm.onSongDeletePermissionResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    val storageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> vm.onSongDeletePermissionResult(granted) }
+
+    LaunchedEffect(pending) {
+        val request = pending ?: return@LaunchedEffect
+        val sender = request.intentSender
+        if (sender != null) {
+            val launched = runCatching {
+                senderLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }.isSuccess
+            // 拉不起来也要收尾，否则 pendingSongDelete 会一直挂着
+            if (!launched) vm.onSongDeletePermissionResult(false)
+        } else {
+            storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+}
+
+/* ============================================================
  * 自适应外壳
  * ============================================================ */
 
@@ -343,6 +396,102 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
     val currentSong = songMap[playerState.mediaId]
 
+    // ===== 沉浸皮肤：背景 = 当前播放封面的液态玻璃，字色随封面明暗自适应 =====
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val screenW = with(density) { configuration.screenWidthDp.dp.toPx() }
+    val screenH = with(density) { configuration.screenHeightDp.dp.toPx() }
+
+    // 封面与歌词页同一来源、同一张图：背景画它，字色也从它算，两边不能各拿各的。
+    // 状态**不按歌曲 id 重置** —— 换歌时旧图保留到新图加载完成，GlassBackdrop 才能做
+    // 一次连贯的滑动过渡；若在这里清空，背景会「先消失、再淡入」两段闪变
+    var shellArt by remember { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(skin.immersive, currentSong?.albumId, currentSong?.id, currentSong?.title, currentSong?.artist) {
+        val s = currentSong
+        if (!skin.immersive || s == null) {
+            shellArt = null
+            return@LaunchedEffect
+        }
+        shellArt = ArtworkLoader.load(
+            context = context,
+            albumId = s.albumId,
+            sizePx = 320,
+            sourceUri = s.uri,
+            coverKey = OnlineCover.keyOf(s.title, s.artist)
+        ) ?: ArtworkLoader.online(s.id)
+    }
+
+    // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
+    var artSlideDir by remember { mutableStateOf(1) }
+    var lastQueueIndex by remember { mutableStateOf(Int.MIN_VALUE) }
+    LaunchedEffect(playerState.queueIndex) {
+        val idx = playerState.queueIndex
+        if (lastQueueIndex != Int.MIN_VALUE && idx >= 0 && idx != lastQueueIndex) {
+            artSlideDir = if (idx > lastQueueIndex) 1 else -1
+        }
+        lastQueueIndex = idx
+    }
+
+    // 封面的分段平均色：像素读取放后台线程，只在换图时算一次。
+    // 同样不按歌曲重置：换图瞬间先用旧色带顶住，字色不至于闪回未适配的默认值
+    var shellBands by remember { mutableStateOf<List<Color>?>(null) }
+    LaunchedEffect(shellArt) {
+        val bmp = shellArt
+        shellBands = if (bmp == null) null else withContext(Dispatchers.Default) { artBandColors(bmp) }
+    }
+
+    // 按 GlassBackdrop 的真实画法（Crop → 放大 1.35 → 遮罩 → 高光）折算等效背景色带。
+    // 画和算必须是同一套参数（液态玻璃 / 模糊 40 / 透出 100），字色才对得准
+    val bgProfile = remember(shellBands, shellArt, screenW, screenH, skin) {
+        val bands = shellBands ?: return@remember null
+        buildBgProfile(
+            bands = bands,
+            artW = shellArt?.width ?: 0,
+            artH = shellArt?.height ?: 0,
+            boxW = screenW,
+            boxH = screenH,
+            skin = skin,
+            visibility = 100,
+            canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
+            liquid = true,
+            // 与上面 GlassBackdrop 的画法严格同参，字色才对得准
+            scrimSpread = 0.10f,
+            topHighlight = false
+        )
+    }
+    // 用「对当前方向最不利的那一段」做调色基准：提亮时最怕特别亮的段（顶部），
+    // 压暗时最怕特别暗的段 —— 取头部/中部/底部三个采样点里的最坏值，一处达标全程达标
+    val adaptedSkin = if (skin.immersive && bgProfile != null) {
+        val lighten = bgProfile.lighten
+        val picks = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
+        val rep = if (lighten) picks.maxBy { it.luminance() } else picks.minBy { it.luminance() }
+
+        // 玻璃卡片跟随背景方向：背景偏暗维持深玻璃；背景偏亮换「白霜」——
+        // 往封面平均色里掺一点白再半透明，浅封面上就不会是一块块突兀的深色补丁
+        val frost = if (lighten) skin else skin.copy(
+            surface = frostTint(rep, 0.68f),
+            surface2 = frostTint(rep, 0.78f),
+            surface3 = frostTint(rep, 0.86f),
+            border = Color.Black.copy(alpha = 0.10f),
+            border2 = Color.Black.copy(alpha = 0.06f)
+        )
+        val accent = ensureReadable(skin.accent, rep, 3.2f, lighten)
+        frost.copy(
+            text = ensureReadable(skin.text, rep, 4.5f, lighten),
+            textDim = ensureReadable(skin.textDim, rep, 3.8f, lighten),
+            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, lighten),
+            accent = accent,
+            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, lighten),
+            // onAccent 是「accent 实底上的字/图标」——开关圆点、实心按钮、播放键。
+            // 亮背景时 accent 会被压成深青，onAccent 若还保持近黑就是深底叠深字
+            // （开关糊成一团、暂停键图标看不见）。方向必须与 accent 相反：
+            // accent 往黑推它就往白推。目标给 4.5：深色 accent 底上白字才够跳。
+            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, !lighten),
+            danger = ensureReadable(skin.danger, rep, 3.0f, lighten),
+            isLight = !lighten
+        )
+    } else skin
+
     fun openAlbum(albumId: Long) {
         detail = Detail.AlbumDetail(albumId)
         fullPlayerOpen = false
@@ -355,8 +504,40 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
 
     CompositionLocalProvider(LocalDenseLayout provides dense) {
-        Box(Modifier.fillMaxSize().background(skin.bg)) {
+        Box(Modifier.fillMaxSize()) {
 
+        // 沉浸皮肤：整块主界面铺「当前播放封面的液态玻璃」（模糊 40 / 透出 100）。
+        // 画在根上 —— 列表 / 详情页 / 设置页都叠在它上面；下面那层 skin.bg 实底
+        // 在沉浸模式下跳过，否则会把封面盖死。没有封面时只剩遮罩，仍然成立
+        if (skin.immersive) {
+            GlassBackdrop(
+                art = shellArt,
+                style = GlassStyle.LIQUID,
+                blurDp = 40,
+                visibility = 100,
+                modifier = Modifier
+                    .matchParentSize()
+                    // 1.35 倍放大的封面会溢出边界，裁掉（歌词页同款）
+                    .clipToBounds(),
+                scrimColor = skin.bg,
+                // 整页铺底不描边：顶部那道折射亮线在列表页太抢戏
+                edgeHighlight = false,
+                // 遮罩压平 + 关顶部高光：让背景亮度上下均匀，字色按一处算全程有效。
+                // 之前浅色封面上，顶部被高光提得比中部亮一大截，标题和搜索框全糊掉
+                scrimSpread = 0.10f,
+                topHighlight = false,
+                // 换歌时的背景过渡：滑动（随切歌方向）/ 渐变 + 时长，设置页可选
+                transition = if (vm.artTransitionMode == "fade") ArtTransition.FADE
+                else ArtTransition.SLIDE,
+                transitionMs = if (vm.artTransitionMode == "fade") vm.artFadeMs else 380,
+                slideDir = artSlideDir
+            )
+        }
+        Box(Modifier.fillMaxSize().then(if (!skin.immersive) Modifier.background(skin.bg) else Modifier)) {
+
+        // 沉浸皮肤的字色随封面明暗逐歌重算 —— 只包住主界面子树；
+        // 全屏播放页有自己的晕染背景与调色逻辑，维持原皮肤
+        CompositionLocalProvider(LocalSkin provides adaptedSkin) {
         when (layout) {
             LayoutMode.COMPACT -> CompactLayout(
                 vm = vm,
@@ -394,6 +575,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer
             )
+        }
         }
 
         // ===== 全屏播放页 =====
@@ -435,7 +617,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onGlowModeChange = { vm.changeGlowMode(it) },
                 onGlowStrengthChange = { vm.changeGlowStrength(it) },
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
-                onGlowFadeMsChange = { vm.changeGlowFadeMs(it) }
+                onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
+                vinylMode = vm.vinylMode,
+                onVinylModeChange = { vm.changeVinylMode(it) }
             )
         }
 
@@ -450,12 +634,16 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         )
     }
     }
+    }
 
     // 手动选封面（设置页和播放页的入口都汇到这里，避免同时渲染两个对话框）
     CoverPickerDialog(vm = vm)
 
     // 把封面写进原文件时，系统可能要用户点一下「允许修改此文件？」
     CoverWritePermissionGate(vm)
+
+    // 删除歌曲文件被系统拦下时，拉起「允许删除这些文件？」
+    SongDeletePermissionGate(vm)
 
     if (queueOpen) {
         QueueSheet(
@@ -501,6 +689,17 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
  */
 private val MINI_FLOAT_RESERVE = 76.dp
 
+/**
+ * 沉浸皮肤的「白霜」玻璃卡：封面平均色往白里掺 18%（保住封面气质、不变成死白），
+ * 再压上半透明 —— 叠在糊开的浅封面上才是玻璃的观感，而不是深色补丁。
+ */
+private fun frostTint(rep: Color, alpha: Float): Color = Color(
+    red = rep.red + (1f - rep.red) * 0.82f,
+    green = rep.green + (1f - rep.green) * 0.82f,
+    blue = rep.blue + (1f - rep.blue) * 0.82f,
+    alpha = alpha
+)
+
 /* ============================================================
  * 手机布局：顶栏 + 内容 + 迷你播放条 + 底部导航
  * ============================================================ */
@@ -544,7 +743,8 @@ private fun CompactLayout(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(skin.bg)
+                // 沉浸模式下不画实底：让根部的封面玻璃背景透出来
+                .then(if (!skin.immersive) Modifier.background(skin.bg) else Modifier)
                 .navigationBarsPadding()
         ) {
             Column(Modifier.fillMaxSize()) {

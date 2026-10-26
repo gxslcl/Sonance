@@ -21,6 +21,7 @@ object LockedFormat {
         "vpr" to "酷狗音乐",
         "kwm" to "酷我音乐",
         "ncm" to "网易云音乐",
+        "nmsf" to "网易云音乐",
         "qmc0" to "QQ 音乐",
         "qmc2" to "QQ 音乐",
         "qmc3" to "QQ 音乐",

@@ -1,6 +1,8 @@
 package com.sonance.player.ui.components
 
 import android.os.Build
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,18 +27,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -43,7 +53,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
@@ -54,18 +63,33 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.LyricLine
 import com.sonance.player.data.LyricAdaptMode
+import com.sonance.player.data.LyricStyle
 import com.sonance.player.data.Lyrics
+import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.ceil
+import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.min
+import kotlin.math.sin
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.LyricsResult
 import com.sonance.player.data.LyricsSource
@@ -99,6 +123,11 @@ fun LyricsOverlay(
     prefs: Prefs,
     /** 点歌词某一行时把播放进度跳到那一句 */
     onSeek: (Long) -> Unit,
+    /** 底部播放按钮栏（设置里开）用的三个控制回调与播放状态 */
+    isPlaying: Boolean,
+    onPrev: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -146,6 +175,23 @@ fun LyricsOverlay(
     // 自动适配档位。和字号不一样，它是**全局设置**、和当前这首歌无关，
     // 所以不用 song.id 当 key（换歌时不该重新读一遍、也不该丢掉页面里的改动）。
     var adaptMode by remember { mutableStateOf(prefs.lyricsAdaptMode) }
+
+    // 展现模式（经典 / 圆盘）：也是全局设置，页内切换即时生效
+    var style by remember { mutableStateOf(prefs.lyricsStyle) }
+
+    // 圆盘半径（屏宽倍数）：全局设置，滑杆即时生效
+    var discRadius by remember { mutableFloatStateOf(prefs.lyricsDiscRadius) }
+
+    // 歌词进度偏移：**按歌记忆**。页内 ± 调整即时生效并写回 prefs，
+    // 换歌时回到这首歌自己的偏移值
+    var offsetMs by remember(song.id) {
+        mutableLongStateOf(prefs.lyricsOffsetMs(song.title, song.artist))
+    }
+    fun stepOffset(dir: Int) {
+        offsetMs = (offsetMs + dir * Prefs.LYRICS_OFFSET_STEP_MS)
+            .coerceIn(-Prefs.MAX_LYRICS_OFFSET_MS, Prefs.MAX_LYRICS_OFFSET_MS)
+        prefs.setLyricsOffsetMs(song.title, song.artist, offsetMs)
+    }
 
     // 开关进 key：用户在设置里打开「网易云补全」后回到歌词页要能立刻生效
     LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
@@ -285,14 +331,15 @@ fun LyricsOverlay(
 
             // ---- 外观调节面板（背景玻璃 + 字号 / 简繁，合成一个）----
             //
-            // 加了高度上限 + 可滚动：两个面板叠起来约 300dp，矮屏（横屏、小屏手机）
-            // 上会把下面的歌词区挤到几乎没有。这里不滚动的话用户只能靠关掉面板
-            // 才能看歌词 —— 而调字号时恰恰需要边看歌词边调。
+            // 加了高度上限 + 可滚动：面板里的行数一直在涨（玻璃、字号、调色、模式、偏移…），
+            // 不设上限时矮屏（横屏、小屏手机）会把歌词区挤到几乎没有。这里不滚动的话
+            // 用户只能靠关掉面板才能看歌词 —— 而调字号时恰恰需要边看歌词边调。
+            // 上限给到 480dp：再高就一屏放不下「面板 + 当前句预览」了。
             if (showAppearance) {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 320.dp)
+                        .heightIn(max = 480.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
                     GlassControls(
@@ -327,6 +374,34 @@ fun LyricsOverlay(
                         onModeChange = {
                             adaptMode = it
                             prefs.lyricsAdaptMode = it
+                        },
+                        skin = skin
+                    )
+                    StyleRow(
+                        style = style,
+                        onStyleChange = {
+                            style = it
+                            prefs.lyricsStyle = it
+                        },
+                        skin = skin
+                    )
+                    // 圆盘模式的「圆盘大小」：只在圆盘模式下显示
+                    if (style == LyricStyle.TILTED) {
+                        DiscRadiusRow(
+                            radiusX = discRadius,
+                            onRadiusChange = {
+                                discRadius = it
+                                prefs.lyricsDiscRadius = it
+                            },
+                            skin = skin
+                        )
+                    }
+                    OffsetRow(
+                        offsetMs = offsetMs,
+                        onStep = ::stepOffset,
+                        onReset = {
+                            offsetMs = 0L
+                            prefs.setLyricsOffsetMs(song.title, song.artist, 0L)
                         },
                         skin = skin
                     )
@@ -375,14 +450,27 @@ fun LyricsOverlay(
                         onManualSearch = { showSearch = true }
                     )
 
-                    lyrics is Lyrics.Synced -> SyncedLyrics(
-                        lines = lyrics.lines,
-                        positionMs = positionMs,
-                        fontSizeSp = fontSize,
-                        onSeek = onSeek,
-                        bgProfile = bgProfile,
-                        adaptMode = adaptMode
-                    )
+                    lyrics is Lyrics.Synced -> if (style == LyricStyle.TILTED) {
+                        TiltedLyrics(
+                            lines = lyrics.lines,
+                            positionMs = positionMs - offsetMs,
+                            fontSizeSp = fontSize,
+                            onSeek = onSeek,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode,
+                            skin = skin,
+                            discRadiusX = discRadius
+                        )
+                    } else {
+                        SyncedLyrics(
+                            lines = lyrics.lines,
+                            positionMs = positionMs - offsetMs,
+                            fontSizeSp = fontSize,
+                            onSeek = onSeek,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode
+                        )
+                    }
 
                     else -> PlainLyrics(
                         lines = (lyrics as Lyrics.Plain).lines,
@@ -393,7 +481,7 @@ fun LyricsOverlay(
                 }
             }
 
-            // ---- 底部歌名 ----
+            // ---- 底部歌名（设置里开了「歌词页播放按钮」时，歌名上方是三个控制按钮）----
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -402,6 +490,19 @@ fun LyricsOverlay(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
+                // 播放按钮栏：全局开关，经典 / 倾斜两种模式都遵循它。
+                // 直接读 prefs（每 500ms 随进度重组重读一次）—— 在设置页开了开关，
+                // 回到歌词页最多半秒就会出现，不需要专门的状态管道。
+                if (prefs.lyricsPlaybar) {
+                    LyricsPlayBar(
+                        isPlaying = isPlaying,
+                        onPrev = onPrev,
+                        onPlayPause = onPlayPause,
+                        onNext = onNext,
+                        skin = skin
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
                 Text(
                     text = song.title,
                     style = MaterialTheme.typography.titleSmall,
@@ -678,6 +779,406 @@ fun AdaptModeRow(
     }
 }
 
+/**
+ * 「展现模式」两档：经典（逐行列表跟着唱）/ 倾斜（歌词墙，当前句特别大、远处淡化模糊）。
+ * 同一份歌词、同一套调色逻辑，只是排版不同。
+ */
+@Composable
+private fun StyleRow(
+    style: LyricStyle,
+    onStyleChange: (LyricStyle) -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp)
+    ) {
+        ChipsRow(
+            chips = LyricStyle.entries.map { it.label to (it == style) },
+            onSelect = { onStyleChange(LyricStyle.entries[it]) }
+        )
+        Text(
+            if (style == LyricStyle.TILTED) "歌词贴在大圆边缘，换句时向上转一格，当前句放大；圆盘大小可调"
+            else "逐行列表，当前句高亮滚动，偏「跟唱」",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted,
+            fontSize = 10.sp
+        )
+    }
+}
+
+/**
+ * 圆盘模式的「圆盘大小」滑杆：半径按屏宽的倍数算，越大弧面越平、行越不倾斜。
+ * 只在圆盘模式下显示。
+ */
+@Composable
+private fun DiscRadiusRow(
+    radiusX: Float,
+    onRadiusChange: (Float) -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("圆盘大小", style = MaterialTheme.typography.labelLarge, color = skin.text)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "半径 %.1f 倍屏宽".format(radiusX),
+                style = MaterialTheme.typography.labelLarge,
+                color = skin.accent,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Slider(
+            value = radiusX,
+            onValueChange = onRadiusChange,
+            valueRange = Prefs.MIN_LYRICS_DISC_RADIUS..Prefs.MAX_LYRICS_DISC_RADIUS,
+            steps = ((Prefs.MAX_LYRICS_DISC_RADIUS - Prefs.MIN_LYRICS_DISC_RADIUS) / 0.1f).toInt() - 1
+        )
+        Text(
+            "调大弧面更平、行更不倾斜；调小圆盘感更明显",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted,
+            fontSize = 10.sp
+        )
+    }
+}
+
+/**
+ * 「歌词偏移」微调行：歌词和音频对不上时整体提前 / 推迟。
+ * ±0.1 秒步进，**按歌记忆** —— 这首歌调好了，别的歌不受影响。
+ * 「复原」一键归零（只在调过的时候出现）。
+ */
+@Composable
+private fun OffsetRow(
+    offsetMs: Long,
+    onStep: (Int) -> Unit,
+    onReset: () -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("歌词偏移", style = MaterialTheme.typography.labelLarge, color = skin.text)
+            Text(
+                "歌词慢了往提前调，快了往推迟调；只对这首歌生效",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                fontSize = 10.sp
+            )
+        }
+        // − / +：0.1 秒步进。用文字而不是图标 —— 加减号本身就够清楚
+        StepDot("−", skin) { onStep(-1) }
+        Text(
+            text = String.format("%+.1fs", offsetMs / 1000.0),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (offsetMs == 0L) skin.textMuted else skin.accent,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 10.dp)
+        )
+        StepDot("+", skin) { onStep(1) }
+        if (offsetMs != 0L) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "复原",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.accent,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onReset() }
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+/** 偏移行的 ± 小圆钮 */
+@Composable
+private fun StepDot(symbol: String, skin: Skin, onClick: () -> Unit) {
+    Text(
+        text = symbol,
+        fontSize = 18.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = skin.text,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(skin.surface3)
+            .clickable { onClick() }
+            .wrapContentSize(Alignment.Center)
+    )
+}
+
+/**
+ * 歌词页底部的三个播放按钮（上一曲 / 播放暂停 / 下一曲）。
+ * 显不显示由设置里的「歌词页播放按钮」开关控制，经典 / 倾斜两种模式共用。
+ */
+@Composable
+private fun LyricsPlayBar(
+    isPlaying: Boolean,
+    onPrev: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onPrev, modifier = Modifier.size(52.dp)) {
+            Icon(SonanceIcons.Prev, "上一曲", tint = skin.text, modifier = Modifier.size(24.dp))
+        }
+        Spacer(Modifier.width(18.dp))
+        IconButton(onClick = onPlayPause, modifier = Modifier.size(60.dp)) {
+            Icon(
+                if (isPlaying) SonanceIcons.Pause else SonanceIcons.Play,
+                if (isPlaying) "暂停" else "播放",
+                tint = skin.text,
+                modifier = Modifier.size(30.dp)
+            )
+        }
+        Spacer(Modifier.width(18.dp))
+        IconButton(onClick = onNext, modifier = Modifier.size(52.dp)) {
+            Icon(SonanceIcons.Next, "下一曲", tint = skin.text, modifier = Modifier.size(24.dp))
+        }
+    }
+}
+
+/**
+ * 「圆盘」展现模式的歌词：**圆心在屏幕左侧（外），所有歌词行贴在一个大圆的右侧弧面上**。
+ *
+ * 当前句停在圆弧的最右端（约等于钟面 3 点的位置）；随着播放推进，
+ * 唱过的行沿弧面向上让位、没唱的行从下面上来 —— 也就是整面歌词绕左侧圆心
+ * **逆时针**转动（右下 → 右上），像一条绕在大圆盘边缘的字带。
+ * 方向为什么必须是逆时针：顺时针的话唱完的行会从下面冒出来、未唱的反而往上走，
+ * 和「歌词向上滚动」的直觉正好相反。
+ *
+ * 当前句放大一点（1.3 倍）并高亮，译文跟在下面；离当前句越远的行淡化越深。
+ * 半径取到 4.6 倍屏宽（直径 9 倍多），弧面非常平缓；行距不是固定角度，而是按
+ * 「当前句的实际高度」自适应换算 —— 字号调多大，相邻行都压不到一起。
+ *
+ * 转动方式是**逐格切换**：句内完全静止，只在换句时整面歌词沿弧面向上转一格
+ * （逆时针、一次短动画）。句内由进度驱动的连续旋转会导致换句时进度从 ~1 归零、
+ * 动画目标倒退，整面歌词「回头抽动一下」—— 逐格切换目标永远向前，没有这个问题。
+ *
+ * 两个容易踩的坑都在这里处理了：
+ * 1. 文本宽度按「锚点行到屏幕右缘」的可用宽度固定下来 —— 之前用固定 0.88 倍屏宽
+ *    再往右平移，文本框右边界超出屏幕，长句会被右边缘裁掉还奇怪换行；
+ * 2. 还没唱到第一句时（indexAt = -1）没有「已唱行」，按真实锚点排会全堆在中线以下、
+ *    上半屏全空 —— 用一个虚拟锚点把第一行顶到弧顶，队列沿弧面铺满整屏。
+ *
+ * 和 [SyncedLyrics] 共用同一份数据、同一套调色逻辑（[lyricColor] 按行位置取背景色），
+ * 差别只在排版。
+ */
+@Composable
+private fun TiltedLyrics(
+    lines: List<LyricLine>,
+    positionMs: Long,
+    fontSizeSp: Int,
+    onSeek: (Long) -> Unit,
+    bgProfile: BgProfile?,
+    adaptMode: LyricAdaptMode,
+    skin: Skin,
+    /** 圆盘半径 = 屏宽 × 这个倍数，外观面板「圆盘大小」滑杆可调 */
+    discRadiusX: Float
+) {
+    val density = LocalDensity.current
+    val current = remember(positionMs, lines) { lines.indexAt(positionMs) }
+
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .clipToBounds()
+    ) {
+        val w = maxWidth
+        val h = maxHeight
+        // 全部按像素算 —— graphicsLayer 的 translation/rotation 只认 Float（px）
+        val wPx = with(density) { w.toPx() }
+        val hPx = with(density) { h.toPx() }.coerceAtLeast(1f)
+        // 半径：屏宽 × 可调倍数（外观面板「圆盘大小」）。半径越大弧面越平、
+        // 倾斜越轻微；竖直方向的覆盖也越大
+        val radius = wPx * discRadiusX
+        // 圆弧最右端（当前句锚点）落在屏幕左侧约 12% 处 —— 歌词整体尽量靠左
+        val anchorX = wPx * 0.12f
+        val centerX = anchorX - radius
+        val centerY = hPx / 2f
+
+        // 行距按「当前句的实际高度」自适应算：放大 1.3 倍的正文 + 译文行 + 6dp 间隙，
+        // 就是相邻两行的最小间距 —— 字号调多大行都压不到一起，同时比"满高"紧凑一档。
+        // 间距换算成圆心角：弧长 = 半径 × 角度（弧度）；下限放宽到 0.5°，
+        // 半径调到很大（弧面近乎平直）时行距也不会被撑开
+        val fPx = with(density) { fontSizeSp.sp.toPx() }
+        val slotPx = fPx * (1.2f * 1.2f + 0.83f * 1.35f) + with(density) { 6.dp.toPx() }
+        val stepDeg = Math.toDegrees((slotPx / radius).toDouble()).toFloat().coerceIn(0.5f, 3.4f)
+        // 上下各铺多少行：铺到弧面越过屏幕上下边缘为止（sin(φ) × 半径 ≥ 半屏）
+        val phiMax = Math.toDegrees(asin((hPx / 2f / radius).coerceAtMost(1f).toDouble()))
+        val vis = ceil(phiMax / stepDeg).toInt() + 1
+
+        // 文本可用宽度：弧面上 x 最大的是锚点行，按它算「不超出屏幕右缘」的宽度，
+        // 所有行共用 —— 固定宽度避免随动画逐帧重排，也彻底告别右边缘裁字
+        val textWidthDp = with(density) { (wPx - anchorX - 20.dp.toPx()).toDp() }
+
+        // 长句自适应：量出每行文本在 1.0 倍字号下的单行宽度，按比例缩字号把长句压回单行。
+        // 除数带上当前句的放大倍数 1.3 —— 保证句子被高亮放大后也恰好单行放下
+        //（上一版漏了这一步，导致"没放大不换行、一放大就换行压到邻行"）；
+        // 非当前句只有 0.95 倍，自然更放得下。再留 2% 渲染余量。
+        // 测量只随歌词 / 宽度 / 字号设置变，换句动画不触发重新测量
+        val textMeasurer = rememberTextMeasurer()
+        val fitScales = remember(lines, textWidthDp, fontSizeSp) {
+            val availPx = with(density) { textWidthDp.toPx() } * 0.98f
+            lines.map { ln ->
+                if (ln.text.isBlank()) 1f
+                else {
+                    // 按最坏情况（SemiBold 略宽）测量，非粗体行只会更窄
+                    val singlePx = textMeasurer.measure(
+                        text = AnnotatedString(ln.text),
+                        style = TextStyle(fontSize = fontSizeSp.sp, fontWeight = FontWeight.SemiBold),
+                        softWrap = false,
+                        maxLines = 1,
+                        constraints = Constraints()
+                    ).size.width
+                    (availPx / (singlePx * 1.2f)).coerceIn(0.55f, 1f)
+                }
+            }
+        }
+
+        val containerPx = hPx
+
+        // ===== 逐格切换 =====
+        // 锚点（当前句所在格位）平时完全静止，只在换句时向上一格做一次短动画。
+        // 之前由"句内进度"驱动连续旋转：换句瞬间进度从 ~1 归零，动画目标倒退，
+        // 整面歌词先回卷再前进 —— 看起来就是「回头抽动一下」；逐格切换目标永远
+        // 向前，不存在回卷，平时也不耗任何帧。
+        val anchorAnim = remember { Animatable(-1f) }
+        LaunchedEffect(current) {
+            // 还没唱到第一句时锚点就停在 0：第一句候场在圆弧最右端（屏幕中部），
+            // 后续行向下排，不铺满整屏
+            val target = current.coerceAtLeast(0).toFloat()
+            if (anchorAnim.value < 0f) {
+                anchorAnim.snapTo(target) // 首帧直接就位，不做进场动画
+            } else {
+                // 临界阻尼 spring（无回弹）：换句来得快、上一步还没走完时，
+                // spring 会带着当前速度平滑改道；tween 是从零重启 —— 速度不连续，
+                // 看起来就「咯噔」一下。步进风格不变，只是每一步的曲线更顺。
+                anchorAnim.animateTo(target, spring(dampingRatio = 1f, stiffness = 300f))
+            }
+        }
+        val animAnchor = anchorAnim.value
+
+        if (animAnchor >= 0f) {
+            Box(Modifier.fillMaxSize()) {
+                // 动画过程中锚点在旧格位和新格位之间走，渲染范围按当前动画值
+                // 上下各多留 1 行，保证途中的行都已就位、不闪现
+                val from = maxOf(0, floor(animAnchor).toInt() - vis - 1)
+                val to = minOf(lines.lastIndex, ceil(animAnchor).toInt() + vis + 1)
+                for (index in from..to) {
+                    // 行的位置只由「锚点格位」决定：换句 → 锚点 +1 → 整面歌词沿弧面
+                    // 向上转一格（逆时针）；句内不转
+                    val phi = (index - animAnchor) * stepDeg
+                val rad = Math.toRadians(phi.toDouble())
+                val x = centerX + (radius * cos(rad)).toFloat()
+                val y = centerY + (radius * sin(rad)).toFloat()
+                val isCurrent = index == current && current >= 0
+                val line = lines[index]
+                val seekable = line.timeMs >= 0
+                // 本行的长句缩放系数（≤1）：超宽的句子按它缩字号压回单行
+                val fit = fitScales[index]
+
+                // 强调系数：行序离锚点格位越近越接近 1。换句动画进行时锚点在两个
+                // 格位之间连续滑动 —— 新句平滑长大、旧句平滑缩回，字号 / 颜色 /
+                // 透明度全部跟着转盘同步过渡，没有「瞬间变大变小」的突跳。
+                // 句内静止时只有当前句是 1、其余全是 0，各值恒定不触发重排。
+                val tRaw = (1f - abs(index - animAnchor)).coerceIn(0f, 1f)
+                val emph = tRaw * tRaw * (3f - 2f * tRaw) // smoothstep：两端更缓
+
+                val baseColor = lerp(skin.textDim, skin.accent, emph)
+                val color = if (bgProfile == null || !shouldAdapt(isCurrent, adaptMode)) {
+                    baseColor
+                } else {
+                    lyricColor(
+                        base = baseColor,
+                        // 调色用的"行位置"按行在屏幕上的实际高度取 —— 弧面上的行
+                        // 高低不同，取色跟着真实位置走，和经典模式同一套逻辑
+                        screenFraction = y / containerPx,
+                        isCurrent = isCurrent,
+                        profile = bgProfile
+                    )
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.Start,
+                    modifier = Modifier
+                        .width(textWidthDp)
+                        .graphicsLayer {
+                            translationX = x
+                            translationY = y
+                            rotationZ = phi
+                            // 淡化：锚点上的行 1.0，其余按距离压暗 —— 弧面上离得越远越淡。
+                            // 不做实时模糊：逐行 RenderEffect 是 GPU 掉帧主因，淡化足够区分层级
+                            alpha = 0.32f + 0.68f * emph
+                        }
+                        .zIndex(emph)
+                        .then(
+                            if (seekable) {
+                                Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) { onSeek(line.timeMs) }
+                            } else {
+                                Modifier
+                            }
+                        )
+                ) {
+                    Text(
+                        text = line.text,
+                        // 当前句放大 1.2 倍（随 emph 连续过渡）；超宽句再乘 fit 缩回单行
+                        fontSize = (fontSizeSp * (0.95f + 0.25f * emph) * fit).sp,
+                        lineHeight = (fontSizeSp * (1.33f + 0.11f * emph) * fit).sp,
+                        // 字重没有中间值：放在过渡中点切换，此时两句字号几乎一样大，最不显眼
+                        fontWeight = if (emph > 0.5f) FontWeight.SemiBold else FontWeight.Normal,
+                        color = color
+                    )
+                    line.translation?.let { tr ->
+                        Text(
+                            text = tr,
+                            fontSize = (fontSizeSp * (0.6f + 0.23f * emph) * fit).sp,
+                            lineHeight = (fontSizeSp * (0.84f + 0.2805f * emph) * fit).sp,
+                            fontWeight = if (emph > 0.5f) FontWeight.Medium else FontWeight.Normal,
+                            color = color.copy(alpha = 0.5f + 0.3f * emph)
+                        )
+                    }
+                }
+            }
+        }
+        }
+    }
+}
+
 /* ============================================================
  * 播放页主区域内的歌词（不是全屏歌词页）
  * ============================================================ */
@@ -696,6 +1197,8 @@ fun InlineLyrics(
     positionMs: Long,
     prefs: Prefs,
     onSeek: (Long) -> Unit,
+    /** 当前页的晕染烘焙位图 —— 歌词颜色跟随全屏歌词页的调色设置时，拿它折算背景色带 */
+    glowImage: ImageBitmap? = null,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -730,6 +1233,16 @@ fun InlineLyrics(
 
     val lyrics = result?.lyrics
 
+    // 字体大小、调色档位都跟全屏歌词页的设置走。这里的背景是晕染层不是封面模糊，
+    // 色带从晕染烘焙位图直接采样（见 [buildInlineBgProfile]），档位关了就不调。
+    val adaptMode = prefs.lyricsAdaptMode
+    val bgProfile = remember(glowImage, skin, adaptMode) {
+        if (adaptMode == LyricAdaptMode.OFF) null else buildInlineBgProfile(glowImage, skin)
+    }
+    // 歌词偏移同样跟全屏歌词页按歌记忆的值走。直接读 prefs（走内存缓存）：
+    // positionMs 每 500ms 驱动重组，在歌词页调完关掉这里最多半秒就跟上
+    val offsetMs = prefs.lyricsOffsetMs(song.title, song.artist)
+
     Box(modifier.fillMaxSize()) {
         when {
             loading -> Text(
@@ -760,12 +1273,14 @@ fun InlineLyrics(
 
             lyrics is Lyrics.Synced -> SyncedLyrics(
                 lines = lyrics.lines,
-                positionMs = positionMs,
+                positionMs = positionMs - offsetMs,
                 fontSizeSp = fontSize,
-                onSeek = onSeek
+                onSeek = onSeek,
+                bgProfile = bgProfile,
+                adaptMode = adaptMode
             )
 
-            else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize)
+            else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize, bgProfile, adaptMode)
         }
     }
 }
@@ -884,13 +1399,8 @@ internal fun SyncedLyrics(
                         profile = bgProfile
                     )
                 }
-                Text(
-                    text = line.text,
-                    fontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp,
-                    lineHeight = (fontSizeSp * 1.5f).sp,
-                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
-                    color = color,
-                    textAlign = TextAlign.Center,
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .fillMaxWidth()
                         .then(
@@ -903,7 +1413,28 @@ internal fun SyncedLyrics(
                             }
                         )
                         .padding(vertical = 2.dp)
-                )
+                ) {
+                    Text(
+                        text = line.text,
+                        fontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp,
+                        lineHeight = (fontSizeSp * 1.5f).sp,
+                        fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                        color = color,
+                        textAlign = TextAlign.Center
+                    )
+                    // 译文：网易云 tlyric 拆出来的（见 LyricLine.translation），
+                    // 画在原文下方、小一号、淡一档 —— 当前句最清楚，远处几乎隐去
+                    line.translation?.let { tr ->
+                        Text(
+                            text = tr,
+                            fontSize = (fontSizeSp * 0.72f).sp,
+                            lineHeight = (fontSizeSp * 0.72f * 1.4f).sp,
+                            fontWeight = if (isCurrent) FontWeight.Medium else FontWeight.Normal,
+                            color = color.copy(alpha = if (isCurrent) 0.85f else 0.55f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
             }
         }
     }

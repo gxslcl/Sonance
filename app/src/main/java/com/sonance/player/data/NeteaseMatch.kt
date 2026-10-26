@@ -304,8 +304,8 @@ private fun timeKeyMs(tag: String): Int? {
 }
 
 /**
- * 原文和译文之间的分隔符。
+ * 原文和译文之间的分隔符（[mergeTranslation] 写入，解析端按它拆出译文）。
  *
  * 用 ` / ` 而不是换行 —— 换行会让解析器把译文当成"没有时间戳的裸行"丢掉。
  */
-private const val TRANSLATION_SEP = " / "
+internal const val TRANSLATION_SEP = " / "

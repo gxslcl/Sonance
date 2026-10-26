@@ -125,4 +125,42 @@ class LyricsParseTest {
         val cr = LyricsRepository.parse("[00:01.00]甲\r[00:02.00]乙") as Lyrics.Synced
         assertEquals(2, cr.lines.size)
     }
+
+    // ===== 翻译（网易云 tlyric 以 " / " 合并在同一行，解析时拆出）=====
+
+    @Test
+    fun `带翻译分隔符的行拆出 translation`() {
+        val text = """
+            [00:10.00]でももし生まれ変わったら / 如果还有下辈子
+            [00:15.00]その時は探すからね / 那时我一定会去找你
+        """.trimIndent()
+        val lyrics = LyricsRepository.parse(text) as Lyrics.Synced
+        assertEquals(2, lyrics.lines.size)
+        assertEquals("でももし生まれ変わったら", lyrics.lines[0].text)
+        assertEquals("如果还有下辈子", lyrics.lines[0].translation)
+        assertEquals("その時は探すからね", lyrics.lines[1].text)
+        assertEquals("那时我一定会去找你", lyrics.lines[1].translation)
+    }
+
+    @Test
+    fun `没有分隔符的行 translation 为 null`() {
+        val lyrics = LyricsRepository.parse("[00:10.00]普通的一行\n[00:12.00]第二行") as Lyrics.Synced
+        assertEquals("普通的一行", lyrics.lines[0].text)
+        assertEquals(null, lyrics.lines[0].translation)
+    }
+
+    @Test
+    fun `译文里再含斜杠时整段归译文`() {
+        val lyrics = LyricsRepository.parse("[00:10.00]原文 / 是 / 否\n[00:12.00]下一行") as Lyrics.Synced
+        assertEquals("原文", lyrics.lines[0].text)
+        assertEquals("是 / 否", lyrics.lines[0].translation)
+    }
+
+    @Test
+    fun `分隔符两边有一边为空则不拆`() {
+        val lyrics = LyricsRepository.parse("[00:10.00]开头就是分隔符 / \n[00:12.00]下一行") as Lyrics.Synced
+        // 行尾的孤立斜杠凑不齐 " / " 两侧内容 → 整行保留原样、不当翻译
+        assertEquals("开头就是分隔符 /", lyrics.lines[0].text)
+        assertEquals(null, lyrics.lines[0].translation)
+    }
 }

@@ -781,6 +781,20 @@ object NeteaseSource : OnlineSource {
     // ===== 给**本地歌**补封面 / 歌词 =====
 
     /**
+     * 按歌曲 ID 精确取**单首**歌的完整元数据（给网易云缓存转换补全信息用）。
+     *
+     * 与 [findTrackFor] 的搜索-打分路线不同：NMSF 缓存文件名里带的就是歌曲 ID，
+     * 直接走详情接口是**零歧义**的，不需要打分也不需要防同名翻唱。
+     *
+     * @return 元数据；请求失败 / ID 无效 / 平台查无此歌返回 null
+     */
+    suspend fun songDetail(remoteId: String): RemoteTrack? =
+        withContext(Dispatchers.IO) {
+            if (remoteId.isBlank()) return@withContext null
+            fetchTrackDetails(listOf(remoteId))?.firstOrNull()
+        }
+
+    /**
      * 给一首本地歌找它在网易云上的对应条目。
      *
      * 本地曲库的封面和歌词经常取不到（内嵌标签缺失、iTunes 对华语歌命中率低、

@@ -31,18 +31,53 @@ internal class RestorePlan(
     private var pendingPos: Int,
     private val firstChunk: ByteArray,
     private val firstLen: Int,
-    private val firstSkip: Int,
-    val headPrefix: ByteArray,
+    var firstSkip: Int,
+    var headPrefix: ByteArray,
     val ext: String,
-    val outName: String,
+    var outName: String,
     val payloadSize: Long,
-    val expectedSize: Long,
-    val cover: ByteArray?,
-    val info: HeaderInfo
+    var expectedSize: Long,
+    var cover: ByteArray?,
+    var info: HeaderInfo
 ) {
     /** 已写入输出的字节数（含前置标签），供调用方统计 */
     var written: Long = 0
         private set
+
+    /**
+     * 用在线查到的元数据覆盖容器自带的信息（网易云缓存转换专用）。
+     *
+     * 前置标签（mp3 的 ID3 / flac 的 PICTURE）在这里**按新信息重新组装**；
+     * m4a 没有可前置的标签位，由 [Mp4TagWriter] 在写盘后就地补写。
+     *
+     * @param newInfo 覆盖了 title / artist / album 的头部信息
+     * @param newCover 在线封面字节；null / 空表示没拉到，保留容器自带的
+     * @param outStem 新输出名 stem（已按文件系统规则清洗）；null 表示沿用原名
+     */
+    fun applyMeta(newInfo: HeaderInfo, newCover: ByteArray?, outStem: String?) {
+        info = newInfo
+        if (newCover != null && newCover.isNotEmpty()) cover = newCover
+        if (!outStem.isNullOrBlank()) outName = outStem + ext
+        val effectiveCover = cover
+        when (ext) {
+            ".flac" -> if (effectiveCover != null && effectiveCover.isNotEmpty()) {
+                RestoreTagWriter.flacPrefix(firstChunk, effectiveCover)?.let { p ->
+                    headPrefix = p
+                    firstSkip = RestoreTagWriter.FLAC_HEAD_BYTES
+                }
+            }
+            ".mp3" -> {
+                val tag = RestoreTagWriter.mp3Tag(info, effectiveCover)
+                if (tag.isNotEmpty()) {
+                    headPrefix = tag
+                    // 旧标签（若文件自带）照旧跳过，避免「标签里套标签」
+                    val oldTag = Id3Writer.existingTagSize(firstChunk)
+                    if (oldTag in 1..firstLen) firstSkip = oldTag
+                }
+            }
+        }
+        expectedSize = payloadSize - firstSkip + headPrefix.size
+    }
 
     /**
      * 把解密后的音频泵进 [out]。

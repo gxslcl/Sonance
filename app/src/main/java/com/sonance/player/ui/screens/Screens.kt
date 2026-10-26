@@ -37,9 +37,11 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -166,6 +168,11 @@ fun SongList(
     val isPlaying = playerState.isPlaying
     val favorites = vm.favorites
 
+    // 「删除文件」的二次确认。状态放在**列表这一层**而不是每一行里：
+    // 对话框要盖住整个列表；确认后把目标歌交给 vm，真正的删除还要过
+    // MediaStore 那一关（系统自己的「允许删除？」弹窗）。
+    var deleteTarget by remember { mutableStateOf<Song?>(null) }
+
     // 滚动期间**降低**封面解码并发（不是停掉，见 ArtworkLoader.withDecodeGate）。
     // 这一句同时被下面几个列表复用，所以放在 SongList 里，不散到每个调用点。
     LaunchedEffect(listState) {
@@ -267,6 +274,9 @@ fun SongList(
                     onRemoveFromLibrary = onRemoveFromLibrary?.let { remove ->
                         { remove(song) }
                     },
+                    onDeleteFile = if (song.isLocal) {
+                        { deleteTarget = song }
+                    } else null,
                     compact = compact || dense,
                     coverScale = coverScale
                 )
@@ -284,6 +294,30 @@ fun SongList(
                 }
             }
         }
+    }
+
+    // 删除文件的**应用内二次确认**。文案把后果说满 —— 文件级删除没有后悔药，
+    // 「仅从列表移除」才是可恢复的那一档（就在同一个菜单里）。
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除文件") },
+            text = {
+                Text(
+                    "将「${target.title} - ${target.artist}」的音频文件从设备上永久删除。" +
+                        "此操作不可恢复；删除前系统可能还会再确认一次。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteTarget = null
+                    vm.deleteSongFiles(listOf(target))
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            }
+        )
     }
 }
 
@@ -867,7 +901,9 @@ fun SongCollectionScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .background(skin.bg)
+                // 沉浸模式：用玻璃卡色（跟随背景明暗换深玻璃/白霜），
+                // 列表从它底下滚过时「曲目」这一行仍看得清
+                .background(if (skin.immersive) skin.surface else skin.bg)
                 .padding(horizontal = 16.dp, vertical = if (dense) 2.dp else 6.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
