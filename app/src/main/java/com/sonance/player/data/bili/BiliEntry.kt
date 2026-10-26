@@ -70,6 +70,63 @@ data class BiliEntry(
  * 各版本字段有出入（有的叫 `owner_name`，有的在 `user_info.uname`；
  * 清晰度有的只在 `type_tag`），所以全部走 `opt*` 兜底，缺字段不抛异常。
  */
+/**
+ * 条目的本地序列化（一行一条，短键）。
+ *
+ * 用途：把上次扫描结果存下来，进页面先显示、后台再刷新 ——
+ * 不用每次切到这一页都等几秒的 shell 扫描。
+ *
+ * 用 JSON 而不是 `|` 拼接：标题里什么都有（竖线、引号、换行），
+ * 分隔符方案迟早会撞上一条把文件搞坏的条目。
+ */
+object BiliEntryCodec {
+
+    fun toLine(e: BiliEntry): String = JSONObject().apply {
+        put("k", e.key)
+        put("a", e.avid)
+        put("c", e.cid)
+        put("t", e.title)
+        put("p", e.part)
+        put("o", e.owner)
+        put("cv", e.cover)
+        put("q", e.qualityLabel)
+        put("f", e.frameNote)
+        put("d", e.durationMs)
+        put("s", e.sizeBytes)
+        put("ch", e.chargeVideo)
+        put("da", e.dashAudio)
+        put("ct", e.createdAt)
+        put("dr", e.dir)
+        put("v", e.videoPath)
+        put("au", e.audioPath ?: "")
+    }.toString()
+
+    fun fromLine(line: String): BiliEntry? = runCatching {
+        val o = JSONObject(line)
+        val key = o.optString("k")
+        if (key.isBlank()) return null
+        BiliEntry(
+            key = key,
+            avid = o.optLong("a"),
+            cid = o.optLong("c"),
+            title = o.optString("t"),
+            part = o.optString("p"),
+            owner = o.optString("o"),
+            cover = o.optString("cv"),
+            qualityLabel = o.optString("q"),
+            frameNote = o.optString("f"),
+            durationMs = o.optLong("d"),
+            sizeBytes = o.optLong("s"),
+            chargeVideo = o.optBoolean("ch"),
+            dashAudio = o.optBoolean("da", true),
+            createdAt = o.optLong("ct"),
+            dir = o.optString("dr"),
+            videoPath = o.optString("v"),
+            audioPath = o.optString("au").takeIf { it.isNotBlank() }
+        )
+    }.getOrNull()
+}
+
 object BiliEntryParser {
 
     /**

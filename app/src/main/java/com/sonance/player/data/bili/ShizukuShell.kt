@@ -143,11 +143,34 @@ object ShizukuShell {
     }
 
     /**
-     * 把 shell 能读、但我们读不到的文件拷到自己的目录。
+     * 让 shell **在自己那边**把文件复制过去（内核态 `cp`）。
      *
-     * 用 `cat` 流式读而不是 `cp`：`cp` 的目标得是 shell 可写的位置，
-     * 而应用私有目录（`/data/data/<pkg>`）shell 是写不进去的（SELinux）。
-     * 走 stdout 回来由应用自己落盘，两个限制都绕开了。
+     * 这是准备阶段提速的关键：走 [copyTo] 时每个字节都要经过
+     * `sh → Shizuku binder → 我们的进程 → 落盘`，实测只有 ~30MB/s，
+     * 400MB 的视频光复制就要十几秒。改成 shell 内部 `cp` 之后数据完全
+     * 不经过我们的进程，实测 36MB 只用了 144ms（≈250MB/s）。
+     *
+     * 前提：目标必须是 **shell 可写**的位置 —— 我们自己的外部私有目录
+     * （`/sdcard/Android/data/<pkg>/cache/...`）满足条件，内部私有目录
+     * （`/data/data/<pkg>/`）不行（SELinux 挡住）。不满足时返回 false，
+     * 由上层退回 [copyTo]。
+     *
+     * `cp` 不给进度，想要进度就轮询目标文件大小（见 BiliRepository.prepare）。
+     */
+    fun copyLocal(srcPath: String, dstPath: String): Boolean {
+        if (!hasPermission()) return false
+        val out = exec(
+            "cp -f ${quote(srcPath)} ${quote(dstPath)} 2>/dev/null && echo OK",
+            limitBytes = 64
+        )
+        return out?.trim()?.endsWith("OK") == true
+    }
+
+    /**
+     * 把 shell 能读、但我们读不到的文件拷到自己的目录（经 stdout 管道）。
+     *
+     * 只在 [copyLocal] 不可用（目标目录 shell 写不进去）时才用这条兜底：
+     * 数据要经过一层进程间管道，慢得多，但好在什么地方都能落盘。
      */
     fun copyTo(srcPath: String, dst: File, onProgress: ((Long) -> Unit)? = null): Boolean {
         if (!hasPermission()) return false

@@ -2,6 +2,11 @@ package com.sonance.player.data.bili
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -45,6 +50,17 @@ class BiliRepository(context: Context) {
         "bili"
     )
 
+    /** 扫描结果的本地副本（内部目录，几百 KB） */
+    private val metaFile = File(appContext.cacheDir, "bili_entries.txt")
+
+    /**
+     * 产物目录是不是在**外部**私有目录。
+     *
+     * 只有外部目录 shell 才写得进去，也才能走 `cp` 那条快路 ——
+     * 退化到内部目录（没插存储的机型）时只能退回管道复制。
+     */
+    private val shellCanWrite = appContext.externalCacheDir != null
+
     /** 缓存上限：超过就按最久未播放淘汰。视频动辄几百 MB，2GB 是个不激进的上限 */
     private val maxCacheBytes = 2L * 1024 * 1024 * 1024
 
@@ -60,11 +76,43 @@ class BiliRepository(context: Context) {
                 if (entries.isEmpty() && raw.isBlank()) {
                     BiliScanResult.Failed("缓存目录为空或不可读")
                 } else {
+                    lastEntries = entries
+                    saveCache(entries)
                     BiliScanResult.Ok(entries)
                 }
             }
         }
     }
+
+    /**
+     * 上次扫描结果，用于**进页面先出列表、再后台刷新**。
+     *
+     * 扫 300 多个条目要把每个 entry.json 都 `cat` 一遍，实测 2~8 秒。
+     * 每次切到这一页都等这么久，体验上就是「点了没反应」。
+     * 缓存落在内部目录（几百 KB），读出来几十毫秒。
+     */
+    fun loadCached(): List<BiliEntry>? = runCatching {
+        if (!metaFile.exists()) return null
+        val list = metaFile.readLines().mapNotNull { BiliEntryCodec.fromLine(it) }
+        if (list.isEmpty()) return null
+        if (lastEntries.isEmpty()) lastEntries = list
+        list
+    }.getOrNull()
+
+    private fun saveCache(entries: List<BiliEntry>) {
+        runCatching {
+            val tmp = File(metaFile.parentFile, metaFile.name + ".tmp")
+            tmp.writeText(entries.joinToString("\n") { BiliEntryCodec.toLine(it) } + "\n")
+            if (tmp.renameTo(metaFile)) Unit else {
+                // 有些机型 rename 跨不了，退一步直接覆盖写
+                metaFile.writeText(entries.joinToString("\n") { BiliEntryCodec.toLine(it) } + "\n")
+                tmp.delete()
+            }
+        }
+    }
+
+    /** 播放页按 key 取条目（上一首/下一首要用） */
+    fun entryByKey(key: String): BiliEntry? = lastEntries.firstOrNull { it.key == key }
 
     /**
      * 把某条缓存变成**一个可播放的 MP4**。
@@ -109,35 +157,42 @@ class BiliRepository(context: Context) {
 
             val total = entry.sizeBytes.takeIf { it > 0 } ?: 0L
 
-            // 先按「entry.json 目录/type_tag/audio.m4s」来；老版本缓存把 m4s
-            // 直接放在 entry.json 旁边，所以失败后用同级路径再试一次
-            val audioOk = ShizukuShell.copyTo(entry.audioPath.orEmpty(), audioFile) { done ->
-                if (total > 0) onProgress((done.toFloat() / total * 0.8f).coerceIn(0f, 0.8f))
-            } || ShizukuShell.copyTo("${entry.dir}/audio.m4s", audioFile) { done ->
-                if (total > 0) onProgress((done.toFloat() / total * 0.8f).coerceIn(0f, 0.8f))
-            }
-            if (!audioOk) {
-                dir.deleteRecursively()
-                error("音频轨复制失败，缓存可能不完整")
+            // 两条轨**同时**起 cp。串行的话要等音频读完才开始读视频，
+            // 哪怕单条很快，两个 400MB 加起来还是肉眼可见。
+            var audioOk = false
+            var videoOk = false
+            coroutineScope {
+                val audio = async(Dispatchers.IO) {
+                    copyTrack(entry.audioPath.orEmpty(), audioFile) ||
+                        // 老版本缓存把 m4s 直接放在 entry.json 旁边，同级再试一次
+                        copyTrack("${entry.dir}/audio.m4s", audioFile)
+                }
+                val video = async(Dispatchers.IO) {
+                    copyTrack(entry.videoPath, videoFile) ||
+                        copyTrack("${entry.dir}/video.m4s", videoFile)
+                }
+
+                // cp 不报进度，轮询两个目标文件的大小折算
+                val poller = launch(Dispatchers.IO) {
+                    while (isActive) {
+                        val bytes = runCatching {
+                            audioFile.length() + videoFile.length()
+                        }.getOrDefault(0L)
+                        if (total > 0) {
+                            onProgress((bytes.toFloat() / total * 0.8f).coerceIn(0f, 0.8f))
+                        }
+                        delay(150)
+                    }
+                }
+
+                audioOk = audio.await()
+                videoOk = video.await()
+                poller.cancel()
             }
 
-            val audioBytes = audioFile.length()
-            val videoOk = ShizukuShell.copyTo(entry.videoPath, videoFile) { done ->
-                if (total > 0) {
-                    onProgress(((audioBytes + done).toFloat() / total * 0.8f).coerceIn(0f, 0.8f))
-                } else {
-                    onProgress(0.4f)
-                }
-            } || ShizukuShell.copyTo("${entry.dir}/video.m4s", videoFile) { done ->
-                if (total > 0) {
-                    onProgress(((audioBytes + done).toFloat() / total * 0.8f).coerceIn(0f, 0.8f))
-                } else {
-                    onProgress(0.4f)
-                }
-            }
-            if (!videoOk) {
+            if (!audioOk || !videoOk) {
                 dir.deleteRecursively()
-                error("视频轨复制失败，缓存可能不完整")
+                error("缓存文件复制失败，可能已被 B 站清理")
             }
 
             onProgress(0.82f)
@@ -161,6 +216,23 @@ class BiliRepository(context: Context) {
             BiliMedia(merged)
         }
     }
+
+    /**
+     * 拷一条轨。
+     *
+     * 优先 shell 内部 `cp`（数据不经过我们的进程），目标目录 shell 写不进去
+     * 时退回管道复制。两条路对上层等价，只是快慢不同。
+     */
+    private suspend fun copyTrack(srcPath: String, dst: File): Boolean =
+        withContext(Dispatchers.IO) {
+            if (srcPath.isBlank()) return@withContext false
+            dst.parentFile?.mkdirs()
+            if (shellCanWrite && ShizukuShell.copyLocal(srcPath, dst.absolutePath)) {
+                dst.length() > 0
+            } else {
+                ShizukuShell.copyTo(srcPath, dst)
+            }
+        }
 
     /** 已缓存到本地的占用大小 */
     fun cachedBytes(): Long = cacheRoot.walkTopDown()
@@ -224,6 +296,16 @@ class BiliRepository(context: Context) {
          * 否则用户已经存在的 `playable.mp4` 会被一直复用，修复永远到不了设备上。
          */
         const val MUX_VERSION = "v5-audiofix"
+
+        /**
+         * 最近一次扫描到的条目，供播放页取上下首。
+         *
+         * 只在同一进程内共享，所以不需要跨进程序列化 —— 播放页和列表页
+         * 本来就跑在一个进程里。空的话播放页拿不到上下首，退化成「单条播放」，
+         * 不会崩。
+         */
+        @Volatile
+        var lastEntries: List<BiliEntry> = emptyList()
 
         /**
          * 一次扫完两个包名的缓存目录。

@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -51,7 +52,9 @@ import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.LoadingState
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * B 站离线缓存列表。
@@ -76,15 +79,32 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
     var prepareProgress by remember { mutableStateOf(0f) }
     var hint by remember { mutableStateOf<String?>(null) }
 
+    /** 后台正在刷新（列表已经用缓存铺出来了，不动它） */
+    var refreshing by remember { mutableStateOf(false) }
+
+    // 本地转存量。要遍历目录，只能在 IO 线程算，别拿去卡重组
+    var localBytes by remember { mutableLongStateOf(0L) }
+
     suspend fun rescan() {
-        result = null
         hint = null
+        refreshing = true
         result = repo.scan()
+        refreshing = false
     }
 
-    LaunchedEffect(Unit) { rescan() }
+    LaunchedEffect(Unit) {
+        // 先用上次的结果把列表铺出来：扫 300 多条要几秒，
+        // 而本地缓存读出来只要几十毫秒。之后后台扫描完成再悄悄换掉。
+        val cached = repo.loadCached()
+        if (cached != null) result = BiliScanResult.Ok(cached)
+        rescan()
+    }
 
     val entries = (result as? BiliScanResult.Ok)?.entries.orEmpty()
+
+    LaunchedEffect(entries.size) {
+        localBytes = withContext(Dispatchers.IO) { repo.cachedBytes() }
+    }
 
     fun play(entry: BiliEntry) {
         if (!entry.playable) {
@@ -102,6 +122,11 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
                 context.startActivity(
                     Intent(context, VideoPlayerActivity::class.java)
                         .putExtra(VideoPlayerActivity.EXTRA_VIDEO, media.file.absolutePath)
+                        .putExtra(VideoPlayerActivity.EXTRA_KEY, entry.key)
+                        .putStringArrayListExtra(
+                            VideoPlayerActivity.EXTRA_KEYS,
+                            ArrayList(entries.map { it.key })
+                        )
                         .putExtra(VideoPlayerActivity.EXTRA_TITLE, entry.displayTitle)
                         .putExtra(VideoPlayerActivity.EXTRA_OWNER, entry.owner)
                 )
@@ -195,20 +220,32 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
                                 Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        text = "共 ${entries.size} 个缓存",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = skin.textMuted
+                                    )
+                                    // 总大小：这些缓存一共占了多少空间。
+                                    // 用户关心的就是这个 —— 手机上几百个缓存动辄几十 GB，
+                                    // 得先看见才知道该不该清理。
+                                    Text(
+                                        text = "占用 ${formatSize(entries.sumOf { it.sizeBytes })}" +
+                                            (if (localBytes > 0) " · 已转存 ${formatSize(localBytes)}" else ""),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = skin.textMuted.copy(alpha = 0.75f)
+                                    )
+                                }
                                 Text(
-                                    text = "共 ${entries.size} 个缓存",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = skin.textMuted,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    text = "刷新",
+                                    text = if (refreshing) "刷新中…" else "刷新",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Medium,
-                                    color = skin.accent,
+                                    color = if (refreshing) skin.textMuted else skin.accent,
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
-                                        .clickable { scope.launch { rescan() } }
+                                        .clickable(enabled = !refreshing) {
+                                            scope.launch { rescan() }
+                                        }
                                         .padding(horizontal = 10.dp, vertical = 4.dp)
                                 )
                             }

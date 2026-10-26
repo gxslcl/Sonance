@@ -430,6 +430,18 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_SCROLL_HAPTIC, true)
         set(v) = sp.edit().putBoolean(KEY_SCROLL_HAPTIC, v).apply()
 
+    // ===== B 站缓存 =====
+
+    /**
+     * B 站缓存视频的播放模式。默认**列表循环**（复试 1：与音乐播放器一致的初始选择）。
+     *
+     * 存的是 ordinal，取的时候夹一层范围检查 —— 哪天枚举顺序变了、或者
+     * 读到越界值，直接退回默认而不是崩。
+     */
+    var biliPlayMode: Int
+        get() = sp.getInt(KEY_BILI_PLAY_MODE, 1)
+        set(v) = sp.edit().putInt(KEY_BILI_PLAY_MODE, v).apply()
+
     // ===== 在线封面（默认关闭，与在线歌词同一原则）=====
 
     var onlineCoverEnabled: Boolean
@@ -958,6 +970,9 @@ class Prefs(context: Context) {
         private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
         private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"
         private const val KEY_SCROLL_HAPTIC = "scroll_haptic_enabled"
+
+        /** B 站缓存视频的播放模式，存 [com.sonance.player.playback.PlayMode.ordinal] */
+        private const val KEY_BILI_PLAY_MODE = "bili_play_mode"
         private const val KEY_COVER_ENABLED = "online_cover_enabled"
         private const val KEY_COVER_PIN = "cover_pin_"
         private const val KEY_EQ_ENABLED = "eq_enabled"
