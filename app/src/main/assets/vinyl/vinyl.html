@@ -1,0 +1,3527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AURELIA · 沉浸式黑胶播放模式 (Pro Physical Edition)</title>
+  <script src="./three.min.js"></script>
+  <style>
+    /* ==================== 默认：日间高透暖调模式 (Daylight High-Clarity Espresso) ====================
+       需求不是「白底亮色」，而是白天强光下看得清：背景提到烘焙暖咖、琥珀全面提亮、
+       文字纯白高对比、底轨高可见度——两套主题都是暗调，只切可读性档位 */
+    :root {
+      --outer-bg: #191411;
+      /* 挖孔（前置摄像头）自适应变量，由原生桥 setCutout 注入精确几何：
+         cx=胶囊中心X（居中机型 50%） y=胶囊顶部 h=挖孔高度；无桥/无挖孔回落常规样式 */
+      --cutout-cx: 50%;
+      --cutout-y: 0px;
+      --cutout-h: 0px;
+      /* 背景不再死黑：烘焙暖咖 + 琥珀聚光底色，白天防屏幕镜面反光且光影浓郁 */
+      --bg-spot: #573d29;
+      --bg-mid: #2f231b;
+      --bg-edge: #1b1511;
+
+      --amber-bright: #ffbe55;
+      --amber-main: #e09224;
+      --amber-deep: #9e5f0d;
+
+      --text-primary: #FFFDF9;
+      --text-secondary: #E2D8C7;
+      --text-muted: rgba(235, 224, 206, 0.75);
+      --title-weight: 650;
+      --artist-weight: 500;
+      --title-shadow: 0 2px 12px rgba(0, 0, 0, 0.85);
+      --sub-shadow: 0 1px 8px rgba(0, 0, 0, 0.85);
+
+      --pill-bg: rgba(48, 36, 28, 0.72);
+      --pill-border: rgba(255, 228, 185, 0.24);
+      --surface-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+      --icon-btn-bg: rgba(52, 39, 30, 0.68);
+      --icon-color: #FFFDF8;
+      --icon-drop-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+      --icon-press-bg: rgba(255, 255, 255, 0.12);
+      --icon-dim: rgba(255, 253, 248, 0.42);
+
+      --badge-bg: rgba(224, 146, 36, 0.24);
+      --badge-border: rgba(255, 190, 85, 0.58);
+      --badge-text: #ffe0a3;
+
+      --track-bg: rgba(255, 245, 230, 0.26);
+      --track-drag-bg: rgba(255, 245, 230, 0.38);
+      --fill-glow: 0 0 12px rgba(255, 182, 72, 0.55);
+      --thumb-bg: #FFFDF9;
+      --thumb-shadow: 0 0 0 3px rgba(255, 190, 85, 0.38), 0 2px 6px rgba(0, 0, 0, 0.65);
+      --thumb-drag-shadow: 0 0 0 5px rgba(255, 190, 85, 0.48), 0 2px 8px rgba(0, 0, 0, 0.75);
+
+      --play-btn-bg: linear-gradient(145deg, #f0a334 0%, #9c5b0c 100%);
+      --play-btn-border: rgba(255, 226, 175, 0.68);
+      --play-btn-shadow: 0 8px 26px rgba(224, 146, 36, 0.45), inset 0 1.5px 0 rgba(255, 255, 255, 0.42), inset 0 -2px 6px rgba(0, 0, 0, 0.32);
+      --play-btn-active-shadow: 0 4px 12px rgba(224, 146, 36, 0.3);
+      --play-btn-drop-bg: linear-gradient(145deg, #ffb84d 0%, #b86b11 100%);
+      --play-btn-drop-shadow: 0 0 28px rgba(255, 190, 85, 0.55), inset 0 1.5px 0 rgba(255, 255, 255, 0.45);
+
+      --pulse-border: #ffbe55;
+      --pulse-bg: rgba(255, 190, 85, 0.24);
+      --outer-bg: #14100d;
+
+      /* 组件级补充令牌（Toast/菜单/开关/氛围层/歌词） */
+      --toast-bg: rgba(32, 24, 18, 0.88);
+      --menu-bg: rgba(40, 30, 22, 0.92);
+      --inset-highlight: rgba(255, 235, 205, 0.08);
+      --toggle-border: rgba(255, 228, 185, 0.28);
+      --toggle-bg: rgba(255, 255, 255, 0.08);
+      --toggle-dot: #FFFDF8;
+      --toggle-on-border: rgba(255, 190, 85, 0.6);
+      --toggle-on-bg: rgba(224, 146, 36, 0.28);
+      --main-lyric-glow: 0 0 16px rgba(255, 182, 72, 0.3);
+      --sub-lyric-color: rgba(255, 190, 85, 0.78);
+      --ambient-glow:
+        radial-gradient(circle at 50% 21%, rgba(255, 185, 80, 0.18) 0%, transparent 38%),
+        radial-gradient(circle at 50% 47%, rgba(235, 155, 45, 0.2) 0%, transparent 58%);
+      --vignette-bg:
+        radial-gradient(ellipse at 50% 44%, transparent 48%, rgba(12, 9, 7, 0.38) 100%),
+        linear-gradient(180deg, rgba(18, 14, 11, 0.26) 0%, transparent 110px),
+        linear-gradient(0deg, rgba(18, 14, 11, 0.78) 0%, rgba(22, 17, 13, 0.56) 195px, rgba(22, 17, 13, 0.16) 285px, transparent 340px);
+      --vignette-bg-deck:
+        radial-gradient(ellipse at 50% 48%, transparent 50%, rgba(12, 9, 7, 0.35) 100%),
+        linear-gradient(180deg, rgba(18, 14, 11, 0.2) 0%, transparent 110px),
+        linear-gradient(0deg, rgba(18, 14, 11, 0.72) 0%, rgba(22, 17, 13, 0.52) 195px, rgba(22, 17, 13, 0.13) 285px, transparent 340px);
+      --grain-opacity: 0.028;
+    }
+
+    /* ==================== 夜间微醺模式 (Midnight Velvet - 暗光环境护眼) ==================== */
+    [data-mode="night"] {
+      --outer-bg: #090807;
+      --bg-spot: #38291e;
+      --bg-mid: #1f1915;
+      --bg-edge: #120f0d;
+
+      /* 夜间保持原暗角浓度（日间提亮只改 :root，不漏进夜间） */
+      --ambient-glow:
+        radial-gradient(circle at 50% 21%, rgba(255, 185, 80, 0.14) 0%, transparent 38%),
+        radial-gradient(circle at 50% 47%, rgba(235, 155, 45, 0.16) 0%, transparent 58%);
+      --vignette-bg:
+        radial-gradient(ellipse at 50% 44%, transparent 48%, rgba(12, 9, 7, 0.45) 100%),
+        linear-gradient(180deg, rgba(18, 14, 11, 0.38) 0%, transparent 110px),
+        linear-gradient(0deg, rgba(18, 14, 11, 0.92) 0%, rgba(22, 17, 13, 0.72) 195px, rgba(22, 17, 13, 0.2) 285px, transparent 340px);
+      --vignette-bg-deck:
+        radial-gradient(ellipse at 50% 48%, transparent 50%, rgba(12, 9, 7, 0.42) 100%),
+        linear-gradient(180deg, rgba(18, 14, 11, 0.3) 0%, transparent 110px),
+        linear-gradient(0deg, rgba(18, 14, 11, 0.85) 0%, rgba(22, 17, 13, 0.68) 195px, rgba(22, 17, 13, 0.16) 285px, transparent 340px);
+
+      --amber-bright: #eba844;
+      --amber-main: #c47b19;
+      --amber-deep: #804d0a;
+
+      --text-primary: #F5F2EB;
+      --text-secondary: #BFB8AA;
+      --text-muted: rgba(191, 184, 170, 0.58);
+      --title-weight: 600;
+      --artist-weight: 400;
+
+      --pill-bg: rgba(26, 22, 19, 0.65);
+      --pill-border: rgba(255, 255, 255, 0.12);
+      --surface-shadow: 0 10px 30px rgba(0, 0, 0, 0.48);
+      --icon-btn-bg: rgba(26, 22, 19, 0.58);
+      --icon-color: rgba(245, 242, 235, 0.9);
+      --icon-dim: rgba(245, 242, 235, 0.4);
+
+      --badge-bg: rgba(196, 123, 25, 0.16);
+      --badge-border: rgba(235, 168, 68, 0.42);
+      --badge-text: #f0ca86;
+
+      --track-bg: rgba(255, 255, 255, 0.16);
+      --track-drag-bg: rgba(255, 255, 255, 0.26);
+      --fill-glow: 0 0 10px rgba(196, 123, 25, 0.4);
+      --thumb-bg: #F6F4EE;
+      --thumb-shadow: 0 0 0 3px rgba(196, 123, 25, 0.4), 0 2px 6px rgba(0, 0, 0, 0.6);
+      --thumb-drag-shadow: 0 0 0 5px rgba(235, 168, 68, 0.45), 0 2px 8px rgba(0, 0, 0, 0.7);
+
+      --play-btn-bg: linear-gradient(145deg, #cf831f 0%, #784709 100%);
+      --play-btn-border: rgba(240, 190, 110, 0.48);
+      --play-btn-shadow: 0 8px 24px rgba(186, 117, 23, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+      --play-btn-active-shadow: 0 4px 12px rgba(186, 117, 23, 0.22);
+      --play-btn-drop-bg: linear-gradient(145deg, #d8912a 0%, #8f5610 100%);
+      --play-btn-drop-shadow: 0 0 26px rgba(229, 169, 76, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+
+      --pulse-border: #eba844;
+      --pulse-bg: rgba(235, 168, 68, 0.2);
+      --outer-bg: #090807;
+
+      /* 组件级补充令牌 */
+      --toast-bg: rgba(26, 20, 15, 0.9);
+      --menu-bg: rgba(28, 23, 19, 0.92);
+      --inset-highlight: rgba(255, 255, 255, 0.06);
+      --toggle-border: rgba(255, 255, 255, 0.14);
+      --toggle-bg: rgba(255, 255, 255, 0.06);
+      --toggle-dot: rgba(245, 242, 235, 0.55);
+      --toggle-on-border: rgba(235, 168, 68, 0.5);
+      --toggle-on-bg: rgba(196, 123, 25, 0.2);
+      --main-lyric-glow: 0 0 14px rgba(229, 169, 76, 0.22);
+      --sub-lyric-color: rgba(233, 196, 134, 0.6);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--outer-bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #app-viewport {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      /* 双重径向暖光舞台背景：上方烘托黑胶队列轮廓，中部烘托胡桃木唱机 */
+      background:
+        radial-gradient(circle at 50% 22%, var(--bg-spot) 0%, transparent 46%),
+        radial-gradient(circle at 50% 48%, var(--bg-spot) 0%, var(--bg-mid) 48%, var(--bg-edge) 88%);
+      overflow: hidden;
+      transition: background 0.45s ease;
+    }
+
+    /* 嵌入 WebView：铺满全屏，隐藏桌面预览用的调试抽屉 */
+    #btn-inspector, #inspector-drawer {
+      display: none !important;
+    }
+
+    /* 致命错误可视化：黑屏时直接把原因画在页面上，便于截图定位 */
+    #fatal-error {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      background: #0b0a09;
+      color: #f1efe8;
+      font: 14px/1.7 monospace;
+      padding: 36px 24px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-y: auto;
+    }
+
+    /* 第一层：背景氛围光、暗角与细腻噪点 */
+    .ambient-glow {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: var(--ambient-glow);
+      z-index: 1;
+      transition: opacity 0.45s ease;
+    }
+
+    /* 夜间模式氛围光晕整体收敛 */
+    [data-mode="night"] .ambient-glow {
+      opacity: 0.55;
+    }
+
+    .vignette-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: var(--vignette-bg);
+      z-index: 3;
+      transition: opacity 0.5s ease;
+    }
+
+    #app-viewport.deck-collapsed .vignette-overlay {
+      background: var(--vignette-bg-deck);
+    }
+
+    .grain-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: var(--grain-opacity);
+      z-index: 4;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    }
+
+    /* 第二层：Three.js 3D 场景画布 */
+    #webgl-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 2;
+      touch-action: none;
+    }
+
+    /* 触感视觉脉冲环 */
+    .pulse-ring {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid var(--pulse-border);
+      background: var(--pulse-bg);
+      transform: translate(-50%, -50%) scale(1);
+      pointer-events: none;
+      z-index: 20;
+      animation: pulseExpand 0.62s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    @keyframes pulseExpand {
+      0% { width: 8px; height: 8px; opacity: 0.95; }
+      100% { width: 78px; height: 78px; opacity: 0; }
+    }
+
+    /* 顶部导航栏 */
+    .top-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 68px;
+      padding: 18px 20px 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      z-index: 12;
+      pointer-events: none;
+    }
+
+    .top-right-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      pointer-events: auto;
+      margin-left: auto;
+    }
+
+    .icon-btn {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      border: 1px solid var(--pill-border);
+      background: var(--icon-btn-bg);
+      color: var(--icon-color);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      pointer-events: auto;
+      transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    }
+
+    .icon-btn:active {
+      transform: scale(0.9);
+    }
+
+    /* 拉远激活态：强调色高亮 */
+    .icon-btn.active {
+      border-color: var(--amber-main);
+      color: var(--amber-bright);
+      background: var(--toggle-on-bg);
+    }
+
+    /* 拉远按钮：金色填充放大镜（图标随视角切换 +/−），纯裸图标无底无边框，
+       图标常态 50% 半透明，空闲渐隐幽灵态仍可点击 */
+    #btn-zoom {
+      border-color: transparent;
+      background: transparent;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      color: var(--amber-bright);
+      transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, opacity 0.7s ease;
+    }
+
+    #btn-zoom:active {
+      background: transparent;
+    }
+
+    #btn-zoom svg {
+      width: 14px;
+      height: 14px;
+      opacity: 0.5;
+      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.45));
+    }
+
+    /* 无操作 3s 后的幽灵态：视觉隐去，触摸区域保留（pointer-events 不关） */
+    #btn-zoom.dimmed {
+      opacity: 0.07;
+    }
+
+    /* 返回由系统侧边手势承担，顶栏不放返回键；中央胶囊绝对居中 */
+    #btn-view-toggle {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    /* 悬浮调试日志面板已按需求移除 */
+
+    .icon-btn svg {
+      width: 18px;
+      height: 18px;
+      stroke-width: 2;
+      filter: var(--icon-drop-shadow);
+    }
+
+    /* 顶部胶囊：自动对准前置摄像头（原生桥推 DisplayCutout 精确矩形）——
+       中心 X = 挖孔中心（居中机型仍用 50%），垂直居中于挖孔，
+       高度 = 挖孔高 + 10px 呼吸（下限 36px），只比摄像头大一圈不臃肿；
+       无挖孔设备：y=0、h=0 → 回落 36px 常规高度居中样式 */
+    .top-center-pill {
+      pointer-events: auto;
+      cursor: pointer;
+      position: absolute;
+      left: var(--cutout-cx, 50%);
+      top: var(--cutout-y, 0px);
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      height: max(calc(var(--cutout-h, 0px) + 10px), 36px);
+      padding: 0 22px;
+      border-radius: 999px;
+      background: #08080a;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: var(--text-primary);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      transition: all 0.25s ease;
+    }
+
+    .top-center-pill:hover {
+      border-color: var(--amber-bright);
+      color: var(--text-primary);
+    }
+
+    .pill-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--amber-main);
+      box-shadow: 0 0 8px var(--amber-main);
+      animation: dotBreath 2.6s ease-in-out infinite;
+    }
+
+    @keyframes dotBreath {
+      0%, 100% { opacity: 0.45; transform: scale(0.88); }
+      50% { opacity: 1; transform: scale(1.14); }
+    }
+
+    /* 第三层：歌曲排版信息层（随底部控制面板收起/展开平滑升降） */
+    .info-section {
+      position: absolute;
+      bottom: 204px;
+      left: 24px;
+      right: 24px;
+      z-index: 9;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      transition: bottom 0.46s cubic-bezier(0.22, 1, 0.36, 1), transform 0.46s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    #app-viewport.deck-collapsed .info-section {
+      bottom: 58px;
+      transform: scale(0.96);
+    }
+
+    /* 展开操作栏时信息层抬到手柄之上：手柄(~39px)+控制舱(~118px，音量行已移除)
+       顶到 ~157px，抬到 175 留出呼吸缝 */
+    #app-viewport:not(.deck-collapsed) .info-section {
+      bottom: 175px;
+    }
+
+    .song-title {
+      font-size: 20.5px;
+      font-weight: var(--title-weight);
+      color: var(--text-primary);
+      letter-spacing: 0.01em;
+      line-height: 1.3;
+      max-width: 90%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: var(--title-shadow);
+      margin-bottom: 3px;
+    }
+
+    .song-artist {
+      font-size: 13px;
+      font-weight: var(--artist-weight);
+      color: var(--text-secondary);
+      letter-spacing: 0.02em;
+      max-width: 85%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: var(--sub-shadow);
+    }
+
+    /* 第四层：可整体收起/展开的底部现代控制舱（含进度条、主副按钮、音量模块） */
+    .bottom-deck-wrapper {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 11;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    /* 控制舱收起/展开：手柄已移除，改为底部垂直手势——上滑展开、下滑收起
+       （监听挂在 document，见 setDeckCollapsed 一节） */
+
+    /* 控制舱主体面板 */
+    .controls-drawer {
+      pointer-events: auto;
+      width: 100%;
+      padding: 6px 26px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 210px;
+      opacity: 1;
+      transform: translateY(0);
+      transition:
+        max-height 0.46s cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 0.32s ease,
+        transform 0.46s cubic-bezier(0.22, 1, 0.36, 1),
+        padding 0.46s cubic-bezier(0.22, 1, 0.36, 1);
+      overflow: hidden;
+    }
+
+    #app-viewport.deck-collapsed .controls-drawer {
+      max-height: 0;
+      opacity: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+      transform: translateY(28px);
+      pointer-events: none;
+    }
+
+    /* 平板/宽屏适配：控制舱与歌曲信息限宽居中，避免控件铺满整屏显得松散 */
+    @media (min-width: 760px) {
+      .controls-drawer {
+        width: min(680px, 94vw);
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+
+      .info-section {
+        left: 50%;
+        right: auto;
+        width: min(680px, 94vw);
+        transform: translateX(-50%);
+      }
+
+      #app-viewport.deck-collapsed .info-section {
+        transform: translateX(-50%) scale(0.96);
+      }
+    }
+
+    /* 黑胶页歌词：独立悬浮层，默认视口 77.5% 高度处居中——正对唱机下方留白带
+       （信息层 bottom 锚定，歌词条挂里面会贴死标题，进不了留白带中央）。
+       translate 属性与 transform 各管一摊：transform 负责居中，translate 负责入场动效。
+       与操作栏不再互斥隐藏：min() 上限兜底——视口太矮时自动上移，
+       保证底缘始终与信息层/控制舱顶部留出呼吸缝，两态各自留距 */
+    .vinyl-lyrics {
+      position: absolute;
+      left: 50%;
+      top: min(77.5%, calc(100% - 300px));
+      transform: translate(-50%, -50%);
+      width: min(94vw, 720px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      opacity: 0;
+      translate: 0 10px;
+      transition: opacity 0.4s ease, translate 0.4s cubic-bezier(0.22, 1, 0.36, 1), top 0.46s cubic-bezier(0.22, 1, 0.36, 1);
+      pointer-events: none;
+      z-index: 9;
+    }
+
+    .vinyl-lyrics.visible {
+      opacity: 1;
+      translate: 0 0;
+    }
+
+    /* 放大模式（控制舱收起）唱机更大更靠下，77.5% 的歌词块会压到底座金圈；
+       下移对准唱机与底部歌名之间的留白带中央（信息层贴底，让位距离相应减小） */
+    #app-viewport.deck-collapsed .vinyl-lyrics {
+      top: min(81.5%, calc(100% - 180px));
+    }
+
+    .lyric-line {
+      max-width: 100%;
+      text-align: center;
+      overflow: hidden;
+      display: none;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 1;
+      transition: opacity 0.35s ease;
+    }
+
+    .lyric-line.side {
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--text-muted);
+      text-shadow: var(--sub-shadow);
+    }
+
+    .lyric-line.main {
+      font-size: 18px;
+      font-weight: 500;
+      line-height: 1.5;
+      color: var(--text-primary);
+      text-shadow: var(--main-lyric-glow), var(--title-shadow);
+    }
+
+    .lyric-line.sub {
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--sub-lyric-color);
+      text-shadow: var(--sub-shadow);
+    }
+
+    /* 右下角二级菜单：三点按钮弹出（队列 + 歌词/亮色开关） */
+    .more-menu {
+      position: absolute;
+      right: 18px;
+      bottom: 106px; /* 紧贴三点按钮上方（按钮底距 ≈94px），弹在其头顶而不是屏幕中部 */
+      min-width: 196px;
+      padding: 8px;
+      border-radius: 18px;
+      background: var(--menu-bg);
+      border: 1px solid var(--pill-border);
+      box-shadow: var(--surface-shadow), inset 0 1px 0 var(--inset-highlight);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      z-index: 15;
+      opacity: 0;
+      translate: 0 12px;
+      scale: 0.94;
+      pointer-events: none;
+      transform-origin: 78% 100%;
+      transition: opacity 0.24s ease, translate 0.24s cubic-bezier(0.22, 1, 0.36, 1), scale 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .more-menu.open {
+      opacity: 1;
+      translate: 0 0;
+      scale: 1;
+      pointer-events: auto;
+    }
+
+    .more-item {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 11px 12px;
+      border: none;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--icon-color);
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.18s ease;
+    }
+
+    .more-item:active {
+      background: var(--icon-press-bg);
+    }
+
+    .more-item svg {
+      width: 17px;
+      height: 17px;
+      flex-shrink: 0;
+      opacity: 0.72;
+    }
+
+    .more-item-label {
+      flex: 1;
+    }
+
+    .more-sep {
+      height: 1px;
+      margin: 4px 10px;
+      background: var(--pill-border);
+    }
+
+    /* 菜单行内的迷你滑块开关（沿用歌词开关样式，宽度略窄） */
+    .more-item .lyric-toggle-btn {
+      flex-shrink: 0;
+    }
+
+    .lyric-toggle-btn {
+      width: 34px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid var(--toggle-border);
+      background: var(--toggle-bg);
+      cursor: pointer;
+      position: relative;
+      padding: 0;
+      transition: all 0.25s ease;
+    }
+
+    .lyric-toggle-dot {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--toggle-dot);
+      transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .lyric-toggle-btn.on {
+      border-color: var(--toggle-on-border);
+      background: var(--toggle-on-bg);
+    }
+
+    .lyric-toggle-btn.on .lyric-toggle-dot {
+      left: 18px;
+      background: var(--amber-bright);
+    }
+
+    /* 进度条模块 */
+    .progress-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .time-label {
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      font-variant-numeric: tabular-nums;
+      min-width: 35px;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+    }
+
+    .time-label.right {
+      text-align: right;
+    }
+
+    .slider-hit-area {
+      position: relative;
+      flex: 1;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      touch-action: none;
+    }
+
+    /* 进度条与滑块（加粗至 3.5px + 高对比暖白底轨，白天一清二楚） */
+    .slider-track {
+      position: relative;
+      width: 100%;
+      height: 3.5px;
+      border-radius: 999px;
+      background: var(--track-bg);
+      transition: height 0.15s ease, background 0.15s ease;
+    }
+
+    .slider-hit-area.dragging .slider-track {
+      height: 5px;
+      background: var(--track-drag-bg);
+    }
+
+    .slider-fill {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--amber-main), var(--amber-bright));
+      box-shadow: var(--fill-glow);
+    }
+
+    .slider-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--thumb-bg);
+      box-shadow: var(--thumb-shadow);
+      transform: translate(-50%, -50%);
+      transition: width 0.15s ease, height 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .slider-hit-area.dragging .slider-thumb {
+      width: 13px;
+      height: 13px;
+      box-shadow: var(--thumb-drag-shadow);
+    }
+
+    /* 播放主副控制按钮行 */
+    .transport-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 4px;
+    }
+
+    .sec-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--icon-color);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
+    }
+
+    .sec-btn:active {
+      background: var(--icon-press-bg);
+      transform: scale(0.9);
+    }
+
+    .sec-btn.active-toggle {
+      color: var(--amber-bright);
+    }
+
+    .sec-btn svg {
+      width: 22px;
+      height: 22px;
+      filter: var(--icon-drop-shadow);
+    }
+
+    .primary-play-btn {
+      position: relative;
+      width: 58px;
+      height: 58px;
+      border-radius: 50%;
+      border: 1px solid var(--play-btn-border);
+      background: var(--play-btn-bg);
+      box-shadow: var(--play-btn-shadow);
+      color: #FFFDF9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s ease;
+    }
+
+    .primary-play-btn:active {
+      transform: scale(0.92);
+      box-shadow: var(--play-btn-active-shadow);
+    }
+
+    .primary-play-btn.drop-mode {
+      background: var(--play-btn-drop-bg);
+      box-shadow: var(--play-btn-drop-shadow);
+    }
+
+    .primary-play-btn svg {
+      width: 25px;
+      height: 25px;
+      filter: var(--icon-drop-shadow);
+    }
+
+    /* 音量调节模块已按需求移除（媒体音量交给系统侧键/通知栏） */
+
+    /* 玻璃拟态 Toast */
+    .glass-toast {
+      position: absolute;
+      top: 80px;
+      left: 50%;
+      transform: translate(-50%, -10px);
+      padding: 9px 16px;
+      border-radius: 14px;
+      background: var(--toast-bg);
+      border: 1px solid var(--pill-border);
+      box-shadow: var(--surface-shadow);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 25;
+      transition: opacity 0.26s ease, transform 0.26s ease;
+    }
+
+    .glass-toast.show {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    .toast-main {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+    }
+
+    .toast-sub {
+      font-size: 10.5px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    /* 开发者状态与交互验收面板 */
+    .inspector-drawer {
+      position: absolute;
+      top: 66px;
+      right: 16px;
+      width: 222px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(18, 17, 16, 0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65);
+      font-size: 11px;
+      color: var(--text-secondary);
+      z-index: 22;
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .inspector-drawer.open {
+      display: flex;
+    }
+
+    .insp-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .insp-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--amber-bright);
+      font-size: 10.5px;
+    }
+
+    .insp-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      flex-wrap: wrap;
+    }
+
+    .chip-btn {
+      flex: 1;
+      padding: 5px 6px;
+      border-radius: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-primary);
+      font-size: 10.5px;
+      cursor: pointer;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .chip-btn:hover {
+      border-color: var(--amber-main);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="fatal-error"></div>
+
+  <div id="app-viewport" class="deck-collapsed">
+    <!-- 第一层：背景氛围光、暗角与噪点 -->
+    <div class="ambient-glow"></div>
+    <canvas id="webgl-canvas"></canvas>
+    <div class="vignette-overlay"></div>
+    <div class="grain-overlay"></div>
+
+    <!-- 顶部栏 -->
+    <div class="top-bar">
+      <div class="top-center-pill" id="btn-view-toggle" title="点击切换 选歌态 / 播放态">
+        <span class="pill-dot"></span>
+        <span id="view-mode-label">沉浸黑胶 · 播放态</span>
+      </div>
+
+      <div class="top-right-group">
+        <!-- 近/远视角切换：金色填充放大镜（远视角时显示=点它放大回来）/ 缩小镜（近视角时显示）。
+             空闲 3s 渐隐至幽灵态（仍可点击），任何触摸渐显——平时不抢视觉，界面保持干净 -->
+        <button class="icon-btn" id="btn-zoom" title="切换 近视角 / 远视角">
+          <svg id="zoom-out-icon" viewBox="0 0 24 24" fill="none" style="display: none;">
+            <circle cx="11" cy="11" r="6.5" fill="currentColor"></circle>
+            <line x1="16.6" y1="16.6" x2="21" y2="21" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"></line>
+            <line x1="8.2" y1="11" x2="13.8" y2="11" stroke="#2a1f14" stroke-width="2.2" stroke-linecap="round"></line>
+          </svg>
+          <svg id="zoom-in-icon" viewBox="0 0 24 24" fill="none">
+            <circle cx="11" cy="11" r="6.5" fill="currentColor"></circle>
+            <line x1="16.6" y1="16.6" x2="21" y2="21" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"></line>
+            <line x1="8.2" y1="11" x2="13.8" y2="11" stroke="#2a1f14" stroke-width="2.2" stroke-linecap="round"></line>
+            <line x1="11" y1="8.2" x2="11" y2="13.8" stroke="#2a1f14" stroke-width="2.2" stroke-linecap="round"></line>
+          </svg>
+        </button>
+      </div>
+
+      <button class="icon-btn" id="btn-inspector" title="打开验收参数与状态面板">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="1.5"></circle>
+          <circle cx="19" cy="12" r="1.5"></circle>
+          <circle cx="5" cy="12" r="1.5"></circle>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 玻璃 Toast -->
+    <div class="glass-toast" id="glass-toast">
+      <div class="toast-main" id="toast-main">已复位唱机视角</div>
+      <div class="toast-sub" id="toast-sub">机身播放按钮正对用户 · 最佳观赏角度</div>
+    </div>
+
+    <!-- 右上角实时状态与验收抽屉 -->
+    <div class="inspector-drawer" id="inspector-drawer">
+      <div class="insp-row"><span>观看状态 (View):</span><span class="insp-val" id="dbg-view">PlayingView</span></div>
+      <div class="insp-row"><span>音频状态 (Audio):</span><span class="insp-val" id="dbg-audio">Paused</span></div>
+      <div class="insp-row"><span>唱机水平角 (Yaw):</span><span class="insp-val" id="dbg-yaw">0.0°</span></div>
+      <div class="insp-row"><span>3D 实体操控:</span><span class="insp-val">按钮 + 唱臂已激活</span></div>
+      <div class="insp-row"><span>选中 / 播放项:</span><span class="insp-val" id="dbg-ids">#0 / #0</span></div>
+      <div class="insp-actions">
+        <button class="chip-btn" id="btn-sim-buffer">模拟缓冲态</button>
+        <button class="chip-btn" id="btn-reset-yaw">双击复位</button>
+      </div>
+    </div>
+
+    <!-- 第三层：歌词悬浮层（独立于信息层，居中于唱机与歌曲信息之间的留白带） -->
+    <div class="vinyl-lyrics" id="vinyl-lyrics">
+      <div class="lyric-line side" id="lyric-prev"></div>
+      <div class="lyric-line main" id="lyric-cur"></div>
+      <div class="lyric-line sub" id="lyric-cur-tr"></div>
+      <div class="lyric-line side" id="lyric-next"></div>
+    </div>
+
+    <!-- 第三层：纯净排版信息层 -->
+    <div class="info-section">
+      <div class="song-title" id="song-title">Midnight Velvet Groove</div>
+      <div class="song-artist" id="song-artist">Julian Vance Trio · Blue Note Session</div>
+    </div>
+
+    <!-- 第四层：可整体收起的现代播放控制与音量模块 -->
+    <div class="bottom-deck-wrapper">
+      <div class="controls-drawer" id="controls-drawer">
+        <!-- 进度条 -->
+        <div class="progress-wrapper">
+          <span class="time-label" id="time-current">00:38</span>
+          <div class="slider-hit-area" id="progress-hit-area">
+            <div class="slider-track">
+              <div class="slider-fill" id="progress-fill"></div>
+              <div class="slider-thumb" id="progress-thumb"></div>
+            </div>
+          </div>
+          <span class="time-label right" id="time-total">03:42</span>
+        </div>
+
+        <!-- 播放控制主按钮组 -->
+        <div class="transport-row">
+          <button class="sec-btn" id="btn-mode" title="播放模式">
+            <svg id="mode-icon-shuffle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+              <path d="M16 3h5v5"></path>
+              <path d="M4 20 21 3"></path>
+              <path d="M21 16v5h-5"></path>
+              <path d="m15 15 6 6"></path>
+              <path d="M4 4l5 5"></path>
+            </svg>
+            <svg id="mode-icon-repeat-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m17 2 4 4-4 4"></path>
+              <path d="M3 11v-1a4 4 0 0 1 4-4h14"></path>
+              <path d="m7 22-4-4 4-4"></path>
+              <path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
+            </svg>
+            <svg id="mode-icon-repeat-one" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+              <path d="m17 2 4 4-4 4"></path>
+              <path d="M3 11v-1a4 4 0 0 1 4-4h14"></path>
+              <path d="m7 22-4-4 4-4"></path>
+              <path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
+              <text x="12" y="13.5" text-anchor="middle" font-size="9" font-weight="700" fill="currentColor" stroke="none">1</text>
+            </svg>
+          </button>
+
+          <button class="sec-btn" id="btn-prev" title="上一张唱片">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"></path>
+            </svg>
+          </button>
+
+          <button class="primary-play-btn" id="btn-play" title="播放 / 暂停 / 落片">
+            <svg id="icon-play-svg" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"></path>
+            </svg>
+          </button>
+
+          <button class="sec-btn" id="btn-next" title="下一张唱片">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"></path>
+            </svg>
+          </button>
+
+          <button class="sec-btn" id="btn-more" title="更多">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="1.9"></circle>
+              <circle cx="12" cy="12" r="1.9"></circle>
+              <circle cx="12" cy="19" r="1.9"></circle>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右下角二级菜单：三点按钮弹出（队列入口 + 歌词/日间/视角开关收纳于此） -->
+    <div class="more-menu" id="more-menu">
+      <button class="more-item" id="menu-queue" title="切换 选歌队列 / 播放态">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="4" rx="1"></rect>
+          <rect x="5" y="11" width="14" height="4" rx="1"></rect>
+          <rect x="7" y="18" width="10" height="3" rx="1"></rect>
+        </svg>
+        <span class="more-item-label">选歌队列</span>
+      </button>
+      <div class="more-sep"></div>
+      <button class="more-item" id="menu-lyrics" title="显示 / 隐藏歌词">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="4" y1="6" x2="20" y2="6"></line>
+          <line x1="4" y1="12" x2="16" y2="12"></line>
+          <line x1="4" y1="18" x2="11" y2="18"></line>
+        </svg>
+        <span class="more-item-label">歌词</span>
+        <span class="lyric-toggle-btn more-toggle" id="toggle-lyrics"><span class="lyric-toggle-dot"></span></span>
+      </button>
+      <button class="more-item" id="menu-zoom" title="切换 近视角 / 远视角">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3h6v6"></path>
+          <path d="M9 21H3v-6"></path>
+          <path d="M21 3l-7 7"></path>
+          <path d="M3 21l7-7"></path>
+        </svg>
+        <span class="more-item-label">远视角</span>
+        <span class="lyric-toggle-btn more-toggle" id="toggle-zoom"><span class="lyric-toggle-dot"></span></span>
+      </button>
+      <button class="more-item" id="menu-theme" title="切换 日间高透 / 夜间微醺">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2"></path>
+          <path d="M12 20v2"></path>
+          <path d="m4.9 4.9 1.4 1.4"></path>
+          <path d="m17.7 17.7 1.4 1.4"></path>
+          <path d="M2 12h2"></path>
+          <path d="M20 12h2"></path>
+          <path d="m4.9 19.1 1.4-1.4"></path>
+          <path d="m17.7 6.3 1.4-1.4"></path>
+        </svg>
+        <span class="more-item-label">主题</span>
+        <span class="lyric-toggle-btn more-toggle" id="toggle-theme"><span class="lyric-toggle-dot"></span></span>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    // 致命错误可视化：任何脚本错误/未处理的 Promise 拒绝直接画到页面上
+    // 悬浮调试日志已移除；保留空函数，几十个埋点调用点无需改动
+    let downGuardSeq = 0, lastStallWarnAt = 0, ceremonyStartAt = 0;
+    // 调试日志：console 之外同步上抛 VinylBridge.onDebug（Kotlin Log.d "VinylDebug"），
+    // release WebView 的 console 不进 logcat，桥通道是可靠的取证出口
+    function debugLog() {
+      const msg = "[vinyl] " + Array.prototype.join.call(arguments, " ");
+      try { console.log(msg); } catch (e) {}
+      try { window.VinylBridge && VinylBridge.onDebug(msg); } catch (e) {}
+    }
+
+    function showFatal(msg) {
+      const el = document.getElementById("fatal-error");
+      if (!el) return;
+      el.style.display = "block";
+      el.textContent += msg + "\n";
+    }
+    window.addEventListener("error", function (e) {
+      showFatal("JS错误: " + (e.message || e.type) + " @" + (e.filename || "?").split("/").pop() + ":" + e.lineno + ":" + e.colno);
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      const r = e.reason;
+      showFatal("Promise拒绝: " + ((r && (r.stack || r.message)) || String(r)));
+    });
+
+    /********************************************************************
+     * 1. 曲目数据：由原生 Android 通过 JS Bridge 注入（嵌入 WebView 模式）
+     *    原型的假数据与和弦模拟发声已割除，播放/进度/封面全部由原生驱动。
+     ********************************************************************/
+    let SONGS = [];
+    const LABEL_PALETTE = [
+      ["#b85d28", "#f4d092"], ["#2d6a64", "#bfe3de"], ["#8c2d2d", "#f2c6b6"],
+      ["#3a4f7a", "#c9d7f2"], ["#6e4975", "#e6cef0"], ["#9c6d1e", "#f7e3b5"]
+    ];
+
+    // 落片期间收到外部切歌对位请求先挂起，640ms 编排完成后再应用
+    let pendingSyncIdx = -1;
+
+    // 跨卡触觉反馈：最小间隔 60ms，避免惯性滚动时震动连成一片
+    let lastHapticAt = 0;
+    function hapticTick() {
+      const now = performance.now();
+      if (now - lastHapticAt < 60) return;
+      lastHapticAt = now;
+      if (window.VinylBridge) { try { window.VinylBridge.onHaptic(12); } catch (e) {} }
+    }
+
+    // 原生强制视口：WebView 加载早于自身布局完成时 innerHeight 可能被冻结为 0
+    //（100vh=0 → 整页高度 0 → 黑屏但宽度正常，且后续布局完成也不触发 resize）。
+    // 由原生把真实尺寸按 CSS px 推过来，硬设各层高度后重跑 onResize
+    window.__forceViewport = function (w, h) {
+      if (!(w > 0) || !(h > 0)) return;
+      const px = (v) => Math.round(v) + "px";
+      document.documentElement.style.height = px(h);
+      document.body.style.height = px(h);
+      viewportEl.style.width = px(w);
+      viewportEl.style.height = px(h);
+      if (typeof onResize === "function") onResize();
+    };
+
+    // 封面应用（重建纹理 + 热替换正在显示的材质）。落片编排期间由
+    // pendingCoverApplies 队列延迟调用（见 flushPendingCovers）
+    function applyCover(idx, dataUrl) {
+      const img = new Image();
+      img.onload = () => {
+        // 先落纹理缓存再谈应用：重进页面时桥可能比 setQueue 先就绪
+        //（封面走内存缓存推得快），此时 SONGS 还没建——只缓存，
+        // setQueue 重建时 textureFor→createVinylDiscTexture 会从这里取到封面
+        coverImages.set(idx, img);
+        songTextures.delete(idx);
+        if (!SONGS[idx]) return;
+        if (state.playingSongId === idx && activeVinylMat) {
+          activeVinylMat.map = textureFor(idx);
+          activeVinylMat.needsUpdate = true;
+        }
+        if (state.droppingSongId === idx && transitionMat) {
+          transitionMat.map = textureFor(idx);
+          transitionMat.needsUpdate = true;
+        }
+        const item = queueItems[idx];
+        // 无条件热替换槽位材质：旧实现只在 group.visible 时更新——
+        // 封面推送时落在可见窗口外/正在落片的碟片被跳过，材质永久停留
+        // 在占位标签上（切到选歌队列时就是「没有封面」的那批）
+        if (item) {
+          item.mat.map = textureFor(idx);
+          item.mat.needsUpdate = true;
+        }
+      };
+      img.src = dataUrl;
+    }
+
+    // 落片编排期间暂存的封面推送（setCover 入口检查 ceremonyActive 入队）
+    let pendingCoverApplies = [];
+
+    // 仪式收尾后错峰应用暂存封面：逐张 60ms 间隔，避免纹理上传挤在同一帧
+    function flushPendingCovers() {
+      if (!pendingCoverApplies.length) return;
+      const batch = pendingCoverApplies;
+      pendingCoverApplies = [];
+      batch.forEach(([idx, url], k) => {
+        setTimeout(() => applyCover(idx, url), k * 60);
+      });
+    }
+
+    window.__vinyl = {
+      // 原生推挖孔（前置摄像头）精确矩形 {l,r,t,b,sw}（dp，含偏左/偏右机型）：
+      // 胶囊自动对准摄像头实际位置——中心 X 对挖孔中心、垂直居中于挖孔、
+      // 高度只比挖孔大一圈；null=无挖孔设备，回落常规样式
+      setCutout(info) {
+        const root = document.documentElement.style;
+        let cx, holeH, y;
+        if (!info || !(info.b - info.t > 0)) {
+          cx = null; holeH = 0; y = 0;
+        } else {
+          const holeW = info.r - info.l;
+          holeH = info.b - info.t;
+          // 胶囊尺寸：高 = 挖孔高 + 上下各 5px 呼吸，下限 36px；中心 = 挖孔中心
+          const pillH = Math.max(holeH + 10, 36);
+          const cxPx = info.l + holeW / 2;
+          // 挖孔水平位置贴近屏幕中线（±14px 内）时直接用 50%，
+          // 消除 dp 取整造成的细微偏移；偏侧机型按实际中心对位
+          cx = Math.abs(cxPx - info.sw / 2) <= 14 ? null : cxPx;
+          y = Math.max(2, info.t + holeH / 2 - pillH / 2);
+        }
+        root.setProperty("--cutout-h", holeH + "px");
+        root.setProperty("--cutout-y", y + "px");
+        root.setProperty("--cutout-cx", cx === null ? "50%" : cx + "px");
+      },
+
+      // 原生推歌单：[{title, artist, duration(秒)}]，idx=当前播放序号，isPlaying=是否在播
+      setQueue(list, idx, isPlaying, vol, muted) {
+        if (!list || !list.length) {
+          showFatal("歌单为空：请先播放歌曲后再进入黑胶模式");
+          return;
+        }
+        SONGS = list.map((s, i) => {
+          const pal = LABEL_PALETTE[i % LABEL_PALETTE.length];
+          return {
+            id: i, title: s.title, artist: s.artist,
+            duration: Math.max(1, s.duration || 0),
+            labelColor: pal[0], accentColor: pal[1], catalog: "SLN-" + String(100 + i)
+          };
+        });
+        const cur = Math.max(0, Math.min(SONGS.length - 1, idx || 0));
+        state.playingSongId = cur;
+        state.selectedSongId = cur;
+        state.scrollPosition = cur;
+        state.scrollTarget = cur;
+        state.scrollVelocity = 0;
+        state.audioState = isPlaying ? "Playing" : "Paused";
+        state.ceremonyActive = false;
+        state.droppingSongId = -1;
+        if (typeof vol === "number" && vol > 0) state.volume = vol;
+        state.isMuted = !!muted;
+        rebuildQueueWindow(cur);
+        activeVinylMat.map = textureFor(cur);
+        activeVinylMat.color.set(0xffffff);
+        activeVinylMat.needsUpdate = true;
+        updateUI();
+        updateProgressDOM();
+      },
+
+      // 原生推真实播放状态（500ms 校准 + 状态突变即时推）
+      // mode：播放模式 'shuffle' | 'repeat_all' | 'repeat_one'（旧调用不传则保留现值）
+      syncPlayback(idx, isPlaying, buffering, posSec, durSec, mode) {
+        if (!SONGS.length) return;
+        const i = Math.max(0, Math.min(SONGS.length - 1, idx));
+        if (typeof mode === "string" && mode !== state.playMode) {
+          state.playMode = mode;
+          updateModeBtn();
+        }
+        // 落片编排期间：音频态由编排时间线驱动（Paused→640ms 后 Playing），只消化进度。
+        // 原生对位只记录与仪式目标一致者——用户点击后原生切歌需要时间（淡出+prepare），
+        // 期间 500ms 校准会推送切歌前的旧索引，记下它会让 640ms 收尾把仪式重定向到
+        // 旧碟（用户实测：点 472 却先落 459 再回 472，碟片连落两次）
+        if (state.ceremonyActive) {
+          if (SONGS[i]) state.currentTime = posSec;
+          if (i === state.droppingSongId || state.droppingSongId < 0) {
+            pendingSyncIdx = i;
+          } else {
+            debugLog("ignore stale sync " + i + " dropping=" + state.droppingSongId);
+          }
+          // 记录最新对位，640ms 收尾统一应用——原实现漏写赋值，
+          // ceremony 期间的原生切歌（快速上一曲/下一曲）全部丢失
+          updateProgressDOM();
+          return;
+        }
+        if (SONGS[i]) {
+          if (durSec > 0) SONGS[i].duration = Math.max(1, Math.round(durSec));
+          state.currentTime = posSec;
+        }
+        if (i !== state.playingSongId) {
+          debugLog("sync switch->" + i + " play=" + isPlaying);
+          // 外部切歌（自动下一首/耳机/通知栏）：本地发起落片动画对位（fromSync 不再回抛）
+          triggerPlayCeremony(i, null, null, true);
+        } else {
+          state.audioState = buffering ? "Buffering" : (isPlaying ? "Playing" : "Paused");
+        }
+        updateUI();
+        updateProgressDOM();
+      },
+
+      // 批量推封面：{ "idx": "dataURL", ... } —— 大曲库逐张推太慢（滑列表追不上），
+      // 合并成批；逐个转调 setCover，复用纹理缓存与材质热替换逻辑
+      setCovers(map) {
+        Object.keys(map || {}).forEach((k) => this.setCover(Number(k), map[k]));
+      },
+
+      // 机械音效开关 / 音量（进入时从 Prefs 同步；设置页改动后下次进入生效）。
+      // 音量走 masterGain（0~1）
+      setSfx(enabled, volume) {
+        // 纯状态更新（无画面变化），不唤醒零渲染档
+        state.sfxEnabled = !!enabled;
+        if (typeof volume === "number") {
+          state.sfxVolume = Math.max(0, Math.min(1, volume));
+        }
+        audioEngine.updateVolume();
+      },
+
+      // 原生推封面（base64 dataURL）：重建该碟纹理并热替换正在显示的材质
+      setCover(idx, dataUrl) {
+        // 落片编排期间延迟应用：每张封面 onload 的纹理重建 + GPU 上传是同步提交，
+        // 大曲库封面推送循环常与落片重叠，一批 5 张挤进动画窗口就是 20-30ms 冻结帧。
+        // 仪式收尾后逐张 60ms 错峰应用
+        if (state.ceremonyActive) {
+          pendingCoverApplies.push([idx, dataUrl]);
+          return;
+        }
+        applyCover(idx, dataUrl);
+      },
+
+      // 原生推歌词：[{t:毫秒, text, tr}]，t=-1 无时间轴；空数组=无歌词
+      setLyrics(payload) {
+        try {
+          lyricState.synced = !!(payload && payload.synced);
+          lyricState.lines = (payload && Array.isArray(payload.lines)) ? payload.lines : [];
+        } catch (e) {
+          lyricState.lines = [];
+        }
+        lyricState.index = -2;
+        renderLyrics(true);
+      },
+
+      // 原生推播放器音量（音量 UI 已移除，仅更新音效轨增益状态；无画面变化不唤醒）
+      setVolume(vol, muted) {
+        state.volume = vol;
+        state.isMuted = muted;
+      }
+    };
+
+    /********************************************************************
+     * 2. 核心状态管理（增加 3D 按钮按压行程、落片空间起止坐标、控制栏收起状态）
+     ********************************************************************/
+    const state = {
+      viewState: "PlayingView", // 'Browse' | 'PlayingView' | 'Transitioning'
+      audioState: "Paused",     // 'Playing' | 'Paused' | 'Buffering'
+      deckCollapsed: true,      // 底部现代控制栏默认收起（纯净观赏，手柄可展开）
+      playMode: "repeat_all",   // 播放模式：'shuffle' | 'repeat_all' | 'repeat_one'（原生经 syncPlayback 推送）
+
+      selectedSongId: 0,
+      playingSongId: 0,
+      scrollPosition: 0,
+      scrollVelocity: 0,
+      scrollTarget: 0,
+
+      turntableYaw: 0,
+      yawVelocity: 0,
+      isResettingYaw: false,
+      cameraZoom: 1.0, // 视角倍率：1.0 标准 / 1.5 拉远（顶栏按钮切换，相机距离 = 基础距离 × 倍率）
+      defaultPitch: 0.31, // 约 17.8° 黄金俯视角
+
+      currentTime: 0,
+      volume: 0.78,
+      isMuted: false,
+
+      platterSpeed: 0,
+      tonearmAngle: 0,
+      tonearmLift: 0.085,
+
+      // 3D 实体圆形按钮机械按压状态
+      physicalBtnOffset: 0,
+      physicalBtnVelocity: 0,
+
+      // 抛物线自然落片状态
+      transitionToken: 0,
+      ceremonyActive: false,
+      ceremonyProgress: 0,
+       droppingSongId: -1,
+
+      sfxEnabled: false,        // 默认关：机械音效与歌曲声音相冲突，触感反馈保留（设置页可开）
+      sfxVolume: 0.9            // 机械音效轨音量（0~1），与媒体音量互相独立
+    };
+
+    /********************************************************************
+     * 3. Web Audio 机械音效与黑胶合成器（含实时主音量控制与实体按键开关声）
+     ********************************************************************/
+    class VinylAudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.masterGain = null;
+        this.musicGain = null;
+        this.oscillators = [];
+        this.isMusicRunning = false;
+      }
+
+      init() {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          this.ctx = new AudioCtx();
+          this.masterGain = this.ctx.createGain();
+          this.masterGain.gain.value = state.sfxVolume; // 机械音效轨音量；媒体音量由原生播放器控制
+          this.masterGain.connect(this.ctx.destination);
+        }
+        if (this.ctx.state === "suspended") {
+          this.ctx.resume();
+        }
+      }
+
+      updateVolume() {
+        if (!this.ctx || !this.masterGain) return;
+        // 音效轨增益可调（设置页/桥同步）；真实媒体音量走原生 PlayerController
+        this.masterGain.gain.setTargetAtTime(state.sfxVolume, this.ctx.currentTime, 0.03);
+      }
+
+      // 1. 跨歌刻度声
+      playTick() {
+        if (!state.sfxEnabled) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(1400, now);
+        osc.frequency.exponentialRampToValueAtTime(680, now + 0.055);
+        gain.gain.setValueAtTime(0.03, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+        osc.connect(gain).connect(this.masterGain);
+        osc.start(now);
+        osc.stop(now + 0.065);
+      }
+
+      // 2. 3D 实体机械按钮清脆微动开关声（双阶 Click-Clack）
+      playMechanicalSwitch(isDown = true) {
+        if (!state.sfxEnabled) return;
+        this.init();
+        const now = this.ctx.currentTime;
+
+        // 第一声金属弹片清脆触发
+        const osc1 = this.ctx.createOscillator();
+        const gain1 = this.ctx.createGain();
+        osc1.type = "square";
+        osc1.frequency.setValueAtTime(isDown ? 1850 : 1420, now);
+        osc1.frequency.exponentialRampToValueAtTime(320, now + 0.032);
+        gain1.gain.setValueAtTime(0.055, now);
+        gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
+        osc1.connect(gain1).connect(this.masterGain);
+        osc1.start(now);
+        osc1.stop(now + 0.038);
+
+        // 第二声底座机械触底回响
+        const osc2 = this.ctx.createOscillator();
+        const gain2 = this.ctx.createGain();
+        osc2.type = "sine";
+        osc2.frequency.setValueAtTime(240, now + 0.022);
+        osc2.frequency.exponentialRampToValueAtTime(75, now + 0.075);
+        gain2.gain.setValueAtTime(0.08, now + 0.022);
+        gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+        osc2.connect(gain2).connect(this.masterGain);
+        osc2.start(now + 0.022);
+        osc2.stop(now + 0.085);
+      }
+
+      // 3. 落片低频气垫闷响 (160 -> 38Hz, 240ms)
+      playPlatterThud() {
+        if (!state.sfxEnabled) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.exponentialRampToValueAtTime(38, now + 0.24);
+        gain.gain.setValueAtTime(0.16, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+        osc.connect(gain).connect(this.masterGain);
+        osc.start(now);
+        osc.stop(now + 0.26);
+      }
+
+      // 4. 唱针接触轻响 + 1.5秒渐隐黑胶炒豆音
+      playStylusDropAndBriefCrackle() {
+        if (!state.sfxEnabled) return;
+        this.init();
+        const now = this.ctx.currentTime;
+
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(2200, now);
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.048);
+        gain.gain.setValueAtTime(0.04, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.052);
+        osc.connect(gain).connect(this.masterGain);
+        osc.start(now);
+        osc.stop(now + 0.055);
+
+        const bufferSize = this.ctx.sampleRate * 1.6;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+          data[i] = Math.random() > 0.985 ? (Math.random() * 2 - 1) * 0.45 : (Math.random() * 2 - 1) * 0.02;
+        }
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buffer;
+
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = "bandpass";
+        filter.frequency.value = 1900;
+        filter.Q.value = 1.4;
+
+        const nGain = this.ctx.createGain();
+        nGain.gain.setValueAtTime(0.001, now);
+        nGain.gain.linearRampToValueAtTime(0.05, now + 0.12);
+        nGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.55);
+
+        noise.connect(filter).connect(nGain).connect(this.masterGain);
+        noise.start(now);
+      }
+
+      // 5. 唱臂抬起轻柔机械阻尼声
+      playTonearmLiftSound() {
+        if (!state.sfxEnabled) return;
+        this.init();
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(520, now);
+        osc.frequency.exponentialRampToValueAtTime(980, now + 0.07);
+        gain.gain.setValueAtTime(0.03, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+        osc.connect(gain).connect(this.masterGain);
+        osc.start(now);
+        osc.stop(now + 0.08);
+      }
+    }
+
+    const audioEngine = new VinylAudioEngine();
+
+    function triggerFeedbackPulse(clientX, clientY, vibrateMs = 12) {
+      // 触感走原生 Vibrator（WebView 的 navigator.vibrate 依赖系统设置且不可控）
+      if (window.VinylBridge) {
+        try { window.VinylBridge.onHaptic(vibrateMs); } catch (e) {}
+      } else if (navigator.vibrate && document.visibilityState === "visible") {
+        try { navigator.vibrate(vibrateMs); } catch (e) {}
+      }
+      const viewport = document.getElementById("app-viewport");
+      const rect = viewport.getBoundingClientRect();
+      const x = clientX ? clientX - rect.left : rect.width / 2;
+      const y = clientY ? clientY - rect.top : rect.height * 0.54;
+
+      const ring = document.createElement("div");
+      ring.className = "pulse-ring";
+      ring.style.left = `${x}px`;
+      ring.style.top = `${y}px`;
+      viewport.appendChild(ring);
+      setTimeout(() => ring.remove(), 650);
+    }
+
+    let toastTimer = null;
+    function showToast(mainText, subText = "") {
+      const toast = document.getElementById("glass-toast");
+      document.getElementById("toast-main").textContent = mainText;
+      document.getElementById("toast-sub").textContent = subText;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 1900);
+    }
+
+    /********************************************************************
+     * 4. Three.js 场景与高精度材质
+     ********************************************************************/
+    const canvas = document.getElementById("webgl-canvas");
+    const viewportEl = document.getElementById("app-viewport");
+
+    // WebGL 预检：创建 renderer 前先确认上下文可用，给出可读的中文提示
+    (function checkWebGL() {
+      const probe = document.createElement("canvas");
+      if (!probe.getContext("webgl") && !probe.getContext("experimental-webgl")) {
+        showFatal("WebGL 不可用：此设备 WebView 未启用硬件加速渲染，黑胶画面无法显示");
+      }
+    })();
+
+    // alpha:false：Android WebView 上 alpha:true 的 WebGL 缓冲在硬件合成时
+    // 可能被整帧丢弃（画面全黑但事件正常——canvas 透出 CSS 近黑底），不透明缓冲最稳
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      // MSAA 保留：1.0x 逻辑分辨率下无 AA 的边缘锯齿明显；像素量已是原来的
+      // 1/4，加回 MSAA 的总成本仍远低于原 1.5x+AA 配置（FPS 探针验证不掉帧）
+      antialias: true,
+      alpha: false,
+      powerPreference: "high-performance"
+    });
+    // 像素比 1.5：手机端用户反馈 1.25 下毛边/锯齿明显，适当回调分辨率提升
+    // 边缘细腻度（Lambert 化/阴影 512/几何减面的 GPU 减负仍在，1.5x 是画质优先
+    // 权衡值）；FPS 探针验证——若掉帧明显再回落 1.25
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // 阴影按需重绘（见 animate 内 shadowDirty 检测）：匀速旋转的转盘/碟片圆对称，
+    // 影子形状不变，仅唱臂动作/落片飞行/按钮按压/队列升降时才重绘 shadow map。
+    // shadow map 512：PCFSoft 下与 1024 的柔和度差异在暗色地面上不可辨
+    renderer.shadowMap.autoUpdate = false;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+
+    // canvas 改不透明后原型 CSS 径向渐变氛围底被盖住，复刻一份进 WebGL 背景。
+    // 日/夜两档：日间高透整体提亮一档（用户反馈日间仍偏暗），夜间维持原暖咖；
+    // 纹理各 512×512 只建一次，toggleDayNight 时零成本切换
+    const AMBIENT_THEMES = {
+      day: {
+        stops: ["#6d4f35", "#3b2d22", "#241c16", "#1c1714"],
+        spot: "rgba(109, 79, 53, 0.9)",
+        fog: 0x211f1c,
+        ambient: 1.14
+      },
+      night: {
+        stops: ["#573d29", "#2f231b", "#1b1511", "#161210"],
+        spot: "rgba(87, 61, 41, 0.9)",
+        fog: 0x191817,
+        ambient: 1.02
+      }
+    };
+    function createAmbientBackdropTexture(t) {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 512;
+      const ctx = c.getContext("2d");
+      // 复刻原型 #app-viewport 双重径向舞台底（canvas 不透明盖住 CSS，故画进 WebGL）
+      const g = ctx.createRadialGradient(256, 246, 0, 256, 256, 400);
+      g.addColorStop(0, t.stops[0]);
+      g.addColorStop(0.48, t.stops[1]);
+      g.addColorStop(0.88, t.stops[2]);
+      g.addColorStop(1, t.stops[3]);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 512, 512);
+      // 上方 22% 处的第二重聚光：烘托黑胶队列轮廓
+      const g2 = ctx.createRadialGradient(256, 113, 0, 256, 113, 235);
+      g2.addColorStop(0, t.spot);
+      g2.addColorStop(1, "rgba(0, 0, 0, 0)");
+      ctx.fillStyle = g2;
+      ctx.fillRect(0, 0, 512, 512);
+      return new THREE.CanvasTexture(c);
+    }
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x191817, 0.042);
+
+    const backdropTexDay = createAmbientBackdropTexture(AMBIENT_THEMES.day);
+    const backdropTexNight = createAmbientBackdropTexture(AMBIENT_THEMES.night);
+    let sceneThemeLight = true;
+    try { sceneThemeLight = localStorage.getItem("vinyl_theme_light") !== "0"; } catch (e) {}
+    scene.background = sceneThemeLight ? backdropTexDay : backdropTexNight;
+    scene.fog.color.setHex(sceneThemeLight ? AMBIENT_THEMES.day.fog : AMBIENT_THEMES.night.fog);
+
+    function applyBackdropMode(light) {
+      scene.background = light ? backdropTexDay : backdropTexNight;
+      scene.fog.color.setHex(light ? AMBIENT_THEMES.day.fog : AMBIENT_THEMES.night.fog);
+      ambientLight.intensity = light ? AMBIENT_THEMES.day.ambient : AMBIENT_THEMES.night.ambient;
+    }
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50);
+    camera.position.set(0, 0.55, 8.2);
+    camera.lookAt(0, 0.1, 0);
+
+    const ambientLight = new THREE.AmbientLight(0x3a2e24, sceneThemeLight ? AMBIENT_THEMES.day.ambient : AMBIENT_THEMES.night.ambient);
+    scene.add(ambientLight);
+
+    const mainLight = new THREE.DirectionalLight(0xffe2b8, 1.62);
+    mainLight.position.set(3.5, 7, 5);
+    mainLight.castShadow = true;
+    mainLight.shadow.mapSize.width = 512;
+    mainLight.shadow.mapSize.height = 512;
+    mainLight.shadow.bias = -0.0008;
+    mainLight.shadow.radius = 3;
+    scene.add(mainLight);
+
+    const fillLight = new THREE.DirectionalLight(0x6688aa, 0.5);
+    fillLight.position.set(-5, 3, 2);
+    scene.add(fillLight);
+
+    const rimLight = new THREE.DirectionalLight(0xBA7517, 0.55);
+    rimLight.position.set(-1, 2.5, -6);
+    scene.add(rimLight);
+
+    function createWalnutWoodTexture() {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 512;
+      const ctx = c.getContext("2d");
+
+      const grad = ctx.createLinearGradient(0, 0, 512, 512);
+      grad.addColorStop(0, "#2b201a");
+      grad.addColorStop(0.5, "#382921");
+      grad.addColorStop(1, "#261c17");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 512, 512);
+
+      for (let i = 0; i < 160; i++) {
+        const y = Math.random() * 512;
+        ctx.strokeStyle = i % 2 === 0 ? "rgba(18, 12, 9, 0.28)" : "rgba(78, 56, 42, 0.16)";
+        ctx.lineWidth = 1 + Math.random() * 2.5;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        for (let x = 0; x <= 512; x += 32) {
+          ctx.lineTo(x, y + Math.sin(x * 0.02 + i) * 6);
+        }
+        ctx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      return tex;
+    }
+
+    // 共享黑胶底图：黑底、沟槽（~33 圈 arc）、中孔对所有碟片完全相同，预渲染一次。
+    // 旧实现每张碟面纹理都重画一遍沟槽——而 textureFor 会在封面推送后被删缓存重建，
+    // 点击落片瞬间同步执行，录屏实测造成 60-80ms 画面冻结
+    let vinylBaseCanvas = null;
+    function getVinylBaseCanvas() {
+      if (vinylBaseCanvas) return vinylBaseCanvas;
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 512;
+      const ctx = c.getContext("2d");
+      const cx = 256, cy = 256;
+      // 封面/标签区半径 166：外圈黑边（沟槽）宽约 78 ≈ 半径 1/3（封面占碟面约 2/3）
+      const LABEL_R = 166;
+
+      ctx.fillStyle = "#111111";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 250, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (let r = LABEL_R + 4; r < 244; r += 2.2) {
+        const alpha = (r % 18 < 2) ? 0.08 : 0.22 + (Math.sin(r * 0.3) * 0.06);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.22})`;
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#181716";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.fill();
+
+      vinylBaseCanvas = c;
+      return c;
+    }
+
+    function createVinylDiscTexture(song) {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 512;
+      const ctx = c.getContext("2d");
+      const cx = 256, cy = 256;
+      const LABEL_R = 166;
+
+      // 沟槽底图整张复用，仅标签区（封面/占位标签）按歌重绘
+      ctx.drawImage(getVinylBaseCanvas(), 0, 0);
+
+      const cover = coverImages.get(song && song.id);
+      if (cover) {
+        // 有封面：cover-fit 裁剪进圆形标签区，外缘一圈金色细环分界
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, LABEL_R, 0, Math.PI * 2);
+        ctx.clip();
+        const ratio = Math.max((LABEL_R * 2) / cover.width, (LABEL_R * 2) / cover.height);
+        const w = cover.width * ratio, h = cover.height * ratio;
+        ctx.drawImage(cover, cx - w / 2, cy - h / 2, w, h);
+        ctx.restore();
+        ctx.strokeStyle = "rgba(229, 169, 76, 0.5)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, LABEL_R + 1.5, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        // 无封面：原版标签设计（等比放大到 LABEL_R/84 倍）
+        const k = LABEL_R / 84;
+        ctx.fillStyle = song.labelColor;
+        ctx.beginPath();
+        ctx.arc(cx, cy, LABEL_R, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = song.accentColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 74 * k, -0.4, Math.PI * 1.35);
+        ctx.stroke();
+
+        ctx.fillStyle = song.accentColor;
+        ctx.fillRect(cx - 58 * k, cy - 10 * k, 28 * k, 20 * k);
+
+        ctx.fillStyle = "#F5F2EB";
+        ctx.font = `bold ${Math.round(13 * k)}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.fillText("AURELIA HI-FI", cx, cy - 42 * k);
+
+        ctx.font = `bold ${Math.round(11 * k)}px monospace`;
+        ctx.fillStyle = song.accentColor;
+        ctx.fillText("33 1/3 RPM", cx + 22 * k, cy + 4 * k);
+        ctx.fillText(song.catalog, cx, cy + 52 * k);
+
+        const sliceTitle = song.title.length > 16 ? song.title.slice(0, 16) + "…" : song.title;
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = `600 ${Math.round(11 * k)}px sans-serif`;
+        ctx.fillText(sliceTitle, cx, cy + 32 * k);
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      // 关 mipmap：碟面近处占比大、远处本就在旋转（moiré 不敏感），
+      // 省 mipmap 链生成与多级上传——纹理首次渲染上传是落片动画冻结来源之一
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.anisotropy = 4;
+      return tex;
+    }
+
+    function createAnisotropicSheenTexture() {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 512;
+      const ctx = c.getContext("2d");
+      const cx = 256, cy = 256;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      for (let k = 0; k < 2; k++) {
+        ctx.rotate(k * Math.PI);
+        const grad = ctx.createLinearGradient(-180, -180, 180, 180);
+        grad.addColorStop(0.36, "rgba(255, 245, 228, 0)");
+        grad.addColorStop(0.47, "rgba(255, 245, 228, 0.08)");
+        grad.addColorStop(0.5, "rgba(255, 248, 235, 0.22)");
+        grad.addColorStop(0.53, "rgba(255, 245, 228, 0.08)");
+        grad.addColorStop(0.64, "rgba(255, 245, 228, 0)");
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 246, -0.35, 0.35);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 86, 0, Math.PI * 2);
+      ctx.fill();
+
+      return new THREE.CanvasTexture(c);
+    }
+
+    const walnutTex = createWalnutWoodTexture();
+    const sheenTex = createAnisotropicSheenTexture();
+    // 惰性纹理缓存：索引 -> CanvasTexture（歌单注入后按需创建，配合队列 20+5 增补）
+    const songTextures = new Map();
+    const coverImages = new Map(); // 索引 -> HTMLImageElement（原生推 base64 封面）
+    function textureFor(i) {
+      if (!songTextures.has(i)) {
+        // 索引越界时走兜底碟面，避免 createVinylDiscTexture(undefined) 抛错中断初始化
+        const song = SONGS[i] || {
+          title: "未知曲目", artist: "",
+          labelColor: "#3a4f7a", accentColor: "#c9d7f2", catalog: "SLN-???"
+        };
+        songTextures.set(i, createVinylDiscTexture(song));
+      }
+      return songTextures.get(i);
+    }
+
+    /********************************************************************
+     * 5. 构建唱机 3D 模型（含可点击按压的实体圆形按钮 + 可点击起落的 3D 唱臂）
+     ********************************************************************/
+    const turntablePitchGroup = new THREE.Group();
+    turntablePitchGroup.rotation.x = state.defaultPitch;
+    scene.add(turntablePitchGroup);
+
+    const turntableYawGroup = new THREE.Group();
+    turntablePitchGroup.add(turntableYawGroup);
+
+    // 底部减震底座
+    const basePadMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.15, 2.25, 0.14, 64),
+      new THREE.MeshStandardMaterial({ color: 0x191817, roughness: 0.5, metalness: 0.6 })
+    );
+    basePadMesh.position.y = -0.32;
+    basePadMesh.receiveShadow = true;
+    turntableYawGroup.add(basePadMesh);
+
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: 0xd49434,
+      roughness: 0.26,
+      metalness: 0.92
+    });
+    const darkMetalMat = new THREE.MeshStandardMaterial({
+      color: 0x4a4845,
+      roughness: 0.3,
+      metalness: 0.9
+    });
+    const chromeMat = new THREE.MeshStandardMaterial({
+      color: 0xd8d6ce,
+      roughness: 0.2,
+      metalness: 0.95
+    });
+
+    const baseRing = new THREE.Mesh(new THREE.TorusGeometry(2.18, 0.015, 16, 80), goldMat);
+    baseRing.rotation.x = Math.PI / 2;
+    baseRing.position.y = -0.26;
+    turntableYawGroup.add(baseRing);
+
+    // 北美黑胡桃木机身
+    const plinthMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(3.55, 0.42, 2.95),
+      new THREE.MeshStandardMaterial({ map: walnutTex, roughness: 0.52, metalness: 0.08 })
+    );
+    plinthMesh.position.y = -0.04;
+    plinthMesh.castShadow = true;
+    plinthMesh.receiveShadow = true;
+    turntableYawGroup.add(plinthMesh);
+
+    // 四个金属脚垫
+    const footGeo = new THREE.CylinderGeometry(0.18, 0.15, 0.12, 24);
+    [[-1.45, -1.15], [1.45, -1.15], [-1.45, 1.15], [1.45, 1.15]].forEach(([fx, fz]) => {
+      const foot = new THREE.Mesh(footGeo, darkMetalMat);
+      foot.position.set(fx, -0.26, fz);
+      turntableYawGroup.add(foot);
+    });
+
+    // 正面黄铜铭牌与背面 RCA 接口
+    const frontPlate = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.11, 0.03), goldMat);
+    frontPlate.position.set(0, -0.04, 1.48);
+    turntableYawGroup.add(frontPlate);
+
+    const backPanel = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.22, 0.03), darkMetalMat);
+    backPanel.position.set(0, -0.04, -1.48);
+    turntableYawGroup.add(backPanel);
+
+    [-0.35, -0.12, 0.18].forEach((rx, idx) => {
+      const jack = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.045, 0.045, 0.09, 16),
+        idx === 2 ? darkMetalMat : goldMat
+      );
+      jack.rotation.x = Math.PI / 2;
+      jack.position.set(rx, -0.04, -1.52);
+      turntableYawGroup.add(jack);
+    });
+
+    // 铝合金转盘与橡胶垫
+    const platterX = -0.34;
+    const platterZ = 0.04;
+    const platterMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.26, 1.29, 0.13, 64),
+      new THREE.MeshStandardMaterial({ color: 0xc9c7bf, roughness: 0.24, metalness: 0.93 })
+    );
+    platterMesh.position.set(platterX, 0.22, platterZ);
+    platterMesh.receiveShadow = true;
+    turntableYawGroup.add(platterMesh);
+
+    const matMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.21, 1.21, 0.02, 64),
+      new THREE.MeshStandardMaterial({ color: 0x1a1918, roughness: 0.85 })
+    );
+    matMesh.position.set(platterX, 0.29, platterZ);
+    turntableYawGroup.add(matMesh);
+
+    // 旋转唱盘组
+    const platterSpinGroup = new THREE.Group();
+    platterSpinGroup.position.set(platterX, 0.31, platterZ);
+    turntableYawGroup.add(platterSpinGroup);
+
+    // 初始无贴图（近黑底色），歌单注入后再赋真实纹理。
+    // 转盘大碟与队列碟片统一 Lambert：PBR 的 roughness/metalness 采样在 20+ 碟片
+    // 上是每像素成本大户，黑胶哑光材质下视觉差异不可辨
+    const activeVinylMat = new THREE.MeshLambertMaterial({
+      color: 0x141312
+    });
+    const activeVinylMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.19, 1.19, 0.024, 64),
+      activeVinylMat
+    );
+    activeVinylMesh.castShadow = true;
+    activeVinylMesh.receiveShadow = true;
+    platterSpinGroup.add(activeVinylMesh);
+
+    // 独立静止高光层
+    const sheenMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.38, 2.38),
+      new THREE.MeshBasicMaterial({
+        map: sheenTex,
+        transparent: true,
+        opacity: 0.88,
+        depthWrite: false
+      })
+    );
+    sheenMesh.rotation.x = -Math.PI / 2;
+    sheenMesh.position.set(platterX, 0.326, platterZ);
+    turntableYawGroup.add(sheenMesh);
+
+    // 中心金属主轴 Spindle
+    const spindleMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.032, 0.032, 0.21, 20),
+      chromeMat
+    );
+    spindleMesh.position.set(platterX, 0.36, platterZ);
+    turntableYawGroup.add(spindleMesh);
+
+    /********************************************************************
+     * 【升级点 1】可点击按压的 3D 实体圆形 Start/Stop 按钮（含琥珀光圈与大触控热区）
+     ********************************************************************/
+    const btnPosX = -1.36;
+    const btnPosZ = 1.06;
+
+    // 按钮外圈拉丝底座环
+    const btnBezelMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.21, 0.24, 0.04, 32),
+      darkMetalMat
+    );
+    btnBezelMesh.position.set(btnPosX, 0.18, btnPosZ);
+    turntableYawGroup.add(btnBezelMesh);
+
+    // 按钮周围琥珀 LED 状态呼吸光环
+    const btnLedMat = new THREE.MeshBasicMaterial({
+      color: 0xe5a94c,
+      transparent: true,
+      opacity: 0.75,
+      side: THREE.DoubleSide
+    });
+    const btnLedRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.165, 0.20, 32),
+      btnLedMat
+    );
+    btnLedRing.rotation.x = -Math.PI / 2;
+    btnLedRing.position.set(btnPosX, 0.202, btnPosZ);
+    turntableYawGroup.add(btnLedRing);
+
+    // 可垂直按压的黄铜实体圆形按钮帽
+    const physicalBtnCapMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.155, 0.16, 0.09, 32),
+      goldMat
+    );
+    physicalBtnCapMesh.position.set(btnPosX, 0.225, btnPosZ);
+    physicalBtnCapMesh.castShadow = true;
+    turntableYawGroup.add(physicalBtnCapMesh);
+
+    // 按钮顶面微凹同心环装饰
+    const btnTopDetail = new THREE.Mesh(
+      new THREE.RingGeometry(0.05, 0.11, 24),
+      new THREE.MeshBasicMaterial({ color: 0xfff0d4, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
+    );
+    btnTopDetail.rotation.x = -Math.PI / 2;
+    btnTopDetail.position.y = 0.046;
+    physicalBtnCapMesh.add(btnTopDetail);
+
+    // 3D 按钮透明扩大触控热区（方便手指与鼠标精准点击）
+    const physicalButtonHitMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.38, 0.38, 0.32, 16),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    physicalButtonHitMesh.position.set(btnPosX, 0.24, btnPosZ);
+    physicalButtonHitMesh.userData.interactiveType = "turntableButton";
+    turntableYawGroup.add(physicalButtonHitMesh);
+
+    /********************************************************************
+     * 【升级点 2】可点击放下/抬起的 3D 精密金属唱臂（含唱头指托与 Raycaster 热区）
+     ********************************************************************/
+    const armBaseX = 1.24;
+    const armBaseZ = -0.68;
+
+    const armBaseMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.28, 0.32, 0.16, 32),
+      darkMetalMat
+    );
+    armBaseMesh.position.set(armBaseX, 0.24, armBaseZ);
+    turntableYawGroup.add(armBaseMesh);
+
+    const armRestMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.035, 0.035, 0.22, 12),
+      darkMetalMat
+    );
+    armRestMesh.position.set(armBaseX - 0.04, 0.28, armBaseZ + 0.72);
+    turntableYawGroup.add(armRestMesh);
+
+    const tonearmYawPivot = new THREE.Group();
+    tonearmYawPivot.position.set(armBaseX, 0.38, armBaseZ);
+    turntableYawGroup.add(tonearmYawPivot);
+
+    const tonearmLiftPivot = new THREE.Group();
+    tonearmYawPivot.add(tonearmLiftPivot);
+
+    const counterweight = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.14, 0.14, 0.22, 28),
+      darkMetalMat
+    );
+    counterweight.rotation.x = Math.PI / 2;
+    counterweight.position.set(0, 0, -0.32);
+    tonearmLiftPivot.add(counterweight);
+
+    const armTube = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.028, 0.028, 1.72, 16),
+      chromeMat
+    );
+    armTube.rotation.x = Math.PI / 2;
+    armTube.position.set(0, 0.02, 0.54);
+    armTube.castShadow = true;
+    tonearmLiftPivot.add(armTube);
+
+    const headshell = new THREE.Mesh(
+      new THREE.BoxGeometry(0.15, 0.048, 0.29),
+      goldMat
+    );
+    headshell.position.set(-0.05, 0.015, 1.44);
+    headshell.rotation.y = 0.24;
+    tonearmLiftPivot.add(headshell);
+
+    // 唱头壳右侧金属指托 (Finger Lift)，暗示可拨动抬放
+    const fingerLift = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.012, 0.012, 0.16, 12),
+      chromeMat
+    );
+    fingerLift.rotation.z = Math.PI / 2.4;
+    fingerLift.position.set(0.11, 0.03, 1.42);
+    tonearmLiftPivot.add(fingerLift);
+
+    const stylusCone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.022, 0.075, 12),
+      chromeMat
+    );
+    stylusCone.rotation.x = Math.PI;
+    stylusCone.position.set(-0.07, -0.03, 1.52);
+    tonearmLiftPivot.add(stylusCone);
+
+    // 3D 唱臂透明扩大触控热区（包裹整根唱臂与唱头，点击任意位置均可抬起/放下）
+    const tonearmHitMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.46, 0.32, 2.05),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    tonearmHitMesh.position.set(-0.02, 0.02, 0.65);
+    tonearmHitMesh.userData.interactiveType = "tonearm";
+    tonearmLiftPivot.add(tonearmHitMesh);
+
+    const interactive3DObjects = [physicalButtonHitMesh, tonearmHitMesh];
+    const raycaster = new THREE.Raycaster();
+    const pointerNDC = new THREE.Vector2();
+
+    /********************************************************************
+     * 6. 唱片选歌队列 & 【升级点 3】三段式抛物线 + 四元数对齐过渡黑胶
+     ********************************************************************/
+    const queueGroup = new THREE.Group();
+    scene.add(queueGroup);
+
+    // 队列碟片：20+5 动态增补 —— 首次渲染 20 片，滑到距已渲染边沿不足 5 片时再补 5 片（双向一致）
+    let queueItems = [];
+    let renderedMin = 0, renderedMax = -1;
+
+    // 碟片几何全队列共享：所有碟片的圆柱/圆环几何完全相同，module 级建一份复用——
+    // 旧实现滚动增补时每张 new CylinderGeometry(56 段)+RingGeometry(64 段)，
+    // 5 张挤一帧就是几十 ms 的落片冻结
+    const sharedDiscGeometry = new THREE.CylinderGeometry(1.12, 1.12, 0.026, 40);
+    const sharedHaloGeometry = new THREE.RingGeometry(1.13, 1.175, 48);
+
+    function buildQueueItem(idx) {
+      const group = new THREE.Group();
+      const mat = new THREE.MeshLambertMaterial({
+        map: textureFor(idx),
+        transparent: true,
+        opacity: 1
+      });
+      const disc = new THREE.Mesh(sharedDiscGeometry, mat);
+      disc.rotation.x = Math.PI / 2;
+      group.add(disc);
+
+      const haloMat = new THREE.MeshBasicMaterial({
+        color: 0xe5a94c,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide
+      });
+      const halo = new THREE.Mesh(sharedHaloGeometry, haloMat);
+      halo.position.z = -0.015;
+      group.add(halo);
+
+      queueGroup.add(group);
+      return { group, disc, mat, haloMat, pressOffset: 0 };
+    }
+
+    // 全量重建渲染窗口（歌单注入/重推时）
+    function rebuildQueueWindow(centerIdx) {
+      queueItems.forEach(it => { if (it) queueGroup.remove(it.group); });
+      queueItems = [];
+      pendingBuilds = [];
+      renderedMin = 0; renderedMax = -1;
+      const N = SONGS.length;
+      if (N === 0) return;
+      const start = Math.max(0, Math.min(centerIdx - 2, N - 20));
+      renderedMin = start;
+      renderedMax = Math.min(N - 1, start + 19);
+      for (let i = renderedMin; i <= renderedMax; i++) queueItems[i] = buildQueueItem(i);
+    }
+
+    // 待增补槽位：滚动中一次建 5 张碟会把几何/纹理重活挤进同一帧（录屏实测
+    // 造成落片动画 ~100ms 冻结），改为登记槽位、animate 每帧最多建 2 张分摊。
+    // 遍历处对稀疏槽位已有判空，点击未建槽位时 triggerPlayCeremony 也有全量兜底
+    let pendingBuilds = [];
+
+    // 滚动过程中按需登记增补：距边沿剩 5 片 → 两侧各登记 5 片（数值窗口先扩，
+    // 实体由 flushPendingBuilds 分帧补齐）
+    function ensureQueueWindow(centerPos) {
+      const N = SONGS.length;
+      if (N === 0 || renderedMax < renderedMin) return;
+      if (centerPos > renderedMax - 5 && renderedMax < N - 1) {
+        const newMax = Math.min(N - 1, renderedMax + 5);
+        for (let i = renderedMax + 1; i <= newMax; i++) {
+          if (!queueItems[i]) pendingBuilds.push(i);
+        }
+        renderedMax = newMax;
+      }
+      if (centerPos < renderedMin + 5 && renderedMin > 0) {
+        const newMin = Math.max(0, renderedMin - 5);
+        for (let i = newMin; i < renderedMin; i++) {
+          if (!queueItems[i]) pendingBuilds.unshift(i);
+        }
+        renderedMin = newMin;
+      }
+    }
+
+    // animate 每帧开头调用：消费待建槽位（≤2 张/帧，几何与纹理均已共享/复用，单张 <2ms）
+    // 落片编排期间暂停补建：远跳吸附后 target 附近的空槽会集中在此补建，每张纹理的
+    // GPU 上传都是同步提交，直接撕裂落片动画的帧预算（实测比优化前更卡）。空槽有
+    // 判空不渲染、落片注意力在唱机上，仪式结束后（640ms）再分帧补齐即可
+    function flushPendingBuilds() {
+      if (state.ceremonyActive) return;
+      let built = 0;
+      while (pendingBuilds.length && built < 2) {
+        const i = pendingBuilds.shift();
+        if (!queueItems[i] && SONGS[i]) {
+          queueItems[i] = buildQueueItem(i);
+          built++;
+        }
+      }
+    }
+
+    // 独立过渡黑胶唱片（与转盘上的黑胶尺寸一致 1.19）；初始无贴图，落片时赋目标纹理
+    const transitionMat = new THREE.MeshLambertMaterial({
+      color: 0x141312
+    });
+    const transitionRecord = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.19, 1.19, 0.024, 64),
+      transitionMat
+    );
+    transitionRecord.visible = false;
+    transitionRecord.castShadow = true;
+    scene.add(transitionRecord);
+
+    // 落片起点空间状态缓存（世界坐标 + 世界四元数 + 起始缩放）
+    const dropStartPos = new THREE.Vector3();
+    const dropStartQuat = new THREE.Quaternion();
+    let dropStartScale = 1.0;
+    const tempTargetPos = new THREE.Vector3();
+    const tempTargetQuat = new THREE.Quaternion();
+    const tempUpVec = new THREE.Vector3();
+
+    /********************************************************************
+     * 7. 自然流畅的落片仪式时间线与 3D 实体按钮/唱臂交互控制
+     ********************************************************************/
+    function triggerPlayCeremony(targetSongId, clientX, clientY, fromSync = false) {
+      // 仪式进行中重复点击同一张碟（用户见落针延迟时连点数下的常见习惯）：
+      // 队列还在滑行，每次重启仪式的起飞碟位置都不同，视觉上变成「连续落下
+      // 多张不同的碟」——同目标直接忽略，编排继续
+      if (state.ceremonyActive && targetSongId === state.droppingSongId) {
+        debugLog("ceremony duplicate tap ignored->" + targetSongId);
+        return;
+      }
+
+      state.transitionToken += 1;
+      const currentToken = state.transitionToken;
+      debugLog("ceremony->" + targetSongId + (fromSync ? " sync" : " user") + " prev=" + state.playingSongId);
+      ceremonyStartAt = performance.now();
+
+      // 音频先动：立即通知原生切歌（原生 playAt；外部对位 fromSync 时不再回抛，避免循环）
+      if (!fromSync && window.VinylBridge) {
+        try { window.VinylBridge.onSelectSong(targetSongId); } catch (e) {}
+      }
+
+      // 远跳吸附：快速滑动后远距离选歌（实测 |d| 可达 45 张），目标碟摆在队列窗口
+      // 极边缘（x=±40+），直接落片会从屏幕外横穿整个正在反向滚动的队列飞到唱机——
+      // 多张碟片掠过视野，看起来像「连续落下多张错误的碟，最后一张才正确」。
+      // 先把滚动位置吸附到目标碟居中（队列瞬跳一次，被随后的镜头过渡掩盖），
+      // 落片永远从邻近位置飞来
+      // 远跳吸附：点击时队列因惯性滑行尚未到位（|d| 常见 2-5 张）或快速滑动后
+      // 远距离选歌（实测可达 45 张），目标碟偏离队列中心——落片会从侧边/屏幕外
+      // 横穿整个滑行中的队列飞到唱机。先把滚动位置吸附到目标碟居中（队列瞬跳
+      // 一次，被随后的镜头过渡掩盖），落片永远从正前方位置飞来
+      const jumpDist = Math.abs(targetSongId - state.scrollPosition);
+      if (jumpDist > 1.2) {
+        state.scrollPosition = targetSongId;
+        state.scrollVelocity = 0;
+        state.scrollTarget = targetSongId;
+        // 丢弃滑动路径上残留的远处待建槽位（吸附后已无意义；窗口滑回时
+        // ensureQueueWindow 会对空槽重新登记）
+        pendingBuilds = pendingBuilds.filter(i => Math.abs(i - targetSongId) <= 12);
+        ensureQueueWindow(targetSongId);
+        // 目标碟若在分帧队列里还没建出，立即单建并摆到中心
+        if (!queueItems[targetSongId] && SONGS[targetSongId]) {
+          const it0 = buildQueueItem(targetSongId);
+          queueItems[targetSongId] = it0;
+          it0.group.position.set(0, 0, 0);
+          it0.group.rotation.y = 0;
+          it0.group.scale.setScalar(1);
+          it0.group.updateMatrixWorld();
+        }
+        debugLog("far-jump snap idx=" + targetSongId + " dist=" + jumpDist.toFixed(0));
+      }
+
+      // 记录被选中队列唱片当前的精确世界坐标与姿态四元数，确保无缝衔接
+      let sourceItem = queueItems[targetSongId];
+      if (!sourceItem) {
+        debugLog("fallback sourceItem idx=" + targetSongId +
+          " window=[" + renderedMin + "," + renderedMax + "]" +
+          " scrollPos=" + state.scrollPosition.toFixed(2) +
+          " pendingBuilds=" + pendingBuilds.length);
+        // 槽位在数值窗口内但分帧补建还没轮到：立即单建这一张（不全量重建——
+        // 20 张同步重建会把落片第一帧卡死）
+        if (targetSongId >= renderedMin && targetSongId <= renderedMax && SONGS[targetSongId]) {
+          sourceItem = buildQueueItem(targetSongId);
+          queueItems[targetSongId] = sourceItem;
+        } else {
+          // 目标碟片真在已渲染窗口外（通知栏远跳等）：全量重建窗口后重取
+          rebuildQueueWindow(targetSongId);
+          sourceItem = queueItems[targetSongId];
+        }
+        if (!sourceItem) {
+          // 仍失败（空列表等异常）：直接对位，不做飞行
+          state.selectedSongId = targetSongId;
+          state.playingSongId = targetSongId;
+          state.scrollTarget = targetSongId;
+          state.scrollPosition = targetSongId;
+          updateUI();
+          return;
+        }
+        // 新建组尚未被 animate 摆位：手动放到近似队列位置，避免飞行起点错乱
+        const d0 = targetSongId - state.scrollPosition;
+        sourceItem.group.position.set(d0 * 0.92, -Math.abs(d0) * 0.1, -Math.abs(d0) * 0.44);
+        sourceItem.group.rotation.y = -Math.max(-0.35, Math.min(0.35, d0 * 0.18));
+        sourceItem.group.updateMatrixWorld();
+      }
+      sourceItem.disc.getWorldPosition(dropStartPos);
+      sourceItem.disc.getWorldQuaternion(dropStartQuat);
+      dropStartScale = queueGroup.scale.x * sourceItem.group.scale.x * (1.12 / 1.19);
+
+      state.selectedSongId = targetSongId;
+      state.scrollTarget = targetSongId;
+      state.droppingSongId = targetSongId;
+      state.currentTime = 0;
+
+      // 唱臂先平滑抬起回到安全预备位，等待新唱片落盘（真实音频由原生控制）
+      state.audioState = "Paused";
+
+      state.viewState = "Transitioning";
+      state.ceremonyActive = true;
+      state.ceremonyProgress = 0;
+
+      // 立即按压反馈与音效
+      triggerFeedbackPulse(clientX, clientY, 12);
+      audioEngine.playTick();
+
+      // 引用判等后再赋值：needsUpdate 触发纹理重新提交（texImage2D 阻塞渲染线程），
+      // 同一张纹理重复绑定是无谓的落片冻结来源
+      const t = textureFor(targetSongId);
+      if (transitionMat.map !== t) {
+        transitionMat.map = t;
+        transitionMat.color.set(0xffffff);
+        transitionMat.needsUpdate = true;
+      }
+      transitionRecord.visible = true;
+
+      // 520ms：唱片沿主轴气垫缓冲触盘，发出低频闷响，无缝切换转盘贴图
+      setTimeout(() => {
+        if (state.transitionToken !== currentToken) {
+          debugLog("WARN: 520ms 收尾被新 ceremony 取代", true);
+          return;
+        }
+        audioEngine.playPlatterThud();
+        state.playingSongId = targetSongId;
+        // 同一张纹理（transitionMat 已传过 GPU），引用相同就跳过重提交
+        const t = textureFor(targetSongId);
+        if (activeVinylMat.map !== t) {
+          activeVinylMat.map = t;
+          activeVinylMat.needsUpdate = true;
+        }
+      }, 520);
+
+      // 640ms：过渡唱片完成使命隐藏，唱针落下；真实音频由原生播放（已在切歌时启动）
+      setTimeout(() => {
+        if (state.transitionToken !== currentToken) {
+          debugLog("WARN: 640ms 收尾被新 ceremony 取代", true);
+          return;
+        }
+        transitionRecord.visible = false;
+        state.ceremonyActive = false;
+        state.droppingSongId = -1;
+        state.viewState = "PlayingView";
+        // 仪式结束：补建恢复、暂存封面错峰应用（都由后续帧/定时器分摊）
+        flushPendingCovers();
+        // 落片期间原生若推了新对位，此处应用
+        if (pendingSyncIdx >= 0 && pendingSyncIdx !== state.playingSongId) {
+          const target = pendingSyncIdx;
+          pendingSyncIdx = -1;
+          debugLog("apply pendingSync->" + target);
+          triggerPlayCeremony(target, null, null, true);
+          return;
+        }
+        pendingSyncIdx = -1;
+        state.audioState = "Playing";
+
+        audioEngine.playStylusDropAndBriefCrackle();
+        triggerFeedbackPulse(null, null, 8);
+        updateUI();
+      }, 640);
+
+      updateUI();
+    }
+
+    // 统一播放/暂停切换逻辑（供 3D 实体圆形按钮、3D 唱臂、底部现代按钮共同调用）
+    function togglePlayPause(sourceType, clientX, clientY) {
+      // 如果当前正在预览另一张尚未落片的唱片，触发落片播放
+      if (state.selectedSongId !== state.playingSongId) {
+        if (sourceType === "physicalButton") {
+          state.physicalBtnVelocity = -0.95; // 按钮下压物理冲量
+          audioEngine.playMechanicalSwitch(true);
+        }
+        triggerPlayCeremony(state.selectedSongId, clientX, clientY);
+        return;
+      }
+
+      triggerFeedbackPulse(clientX, clientY, 14);
+
+      if (sourceType === "physicalButton") {
+        // 触发 3D 实体圆形按钮下压与回弹物理动画
+        state.physicalBtnVelocity = -0.95;
+        audioEngine.playMechanicalSwitch(state.audioState !== "Playing");
+      }
+
+      if (state.audioState === "Playing" || state.audioState === "Buffering") {
+        state.audioState = "Paused";
+        // 真实音频暂停走原生（原型和弦模拟已割除）
+        if (window.VinylBridge) { try { window.VinylBridge.onTogglePlay(); } catch (e) {} }
+        if (sourceType === "tonearm") {
+          audioEngine.playTonearmLiftSound();
+          showToast("已抬起唱臂 · 暂停播放", "轻触 3D 唱臂或机身按钮可恢复播放");
+        } else if (sourceType === "physicalButton") {
+          showToast("机身按键 · 已暂停", "转盘平滑减速，唱臂自动抬起");
+        }
+      } else {
+        if (state.viewState === "Browse") {
+          state.viewState = "PlayingView";
+        }
+        state.audioState = "Playing";
+        audioEngine.playStylusDropAndBriefCrackle();
+        if (window.VinylBridge) { try { window.VinylBridge.onTogglePlay(); } catch (e) {} }
+        if (sourceType === "tonearm") {
+          showToast("已放下唱臂 · 开始循迹", "33⅓ RPM 恒速旋转中");
+        } else if (sourceType === "physicalButton") {
+          showToast("机身按键 · 开始播放", "33⅓ RPM 唱针落下循迹");
+        }
+      }
+      updateUI();
+    }
+
+    function setViewMode(targetMode) {
+      if (state.ceremonyActive) {
+        debugLog("WARN: setViewMode SKIP (ceremony 悬挂)", true);
+        return;
+      }
+      state.viewState = targetMode;
+      if (targetMode === "PlayingView") {
+        state.selectedSongId = state.playingSongId;
+        state.scrollTarget = state.playingSongId;
+      }
+      audioEngine.playTick();
+      updateUI();
+    }
+
+    function normalizeAngle(angle) {
+      return Math.atan2(Math.sin(angle), Math.cos(angle));
+    }
+
+    // 双击复位的 home 朝向：机身播放按钮局部坐标 (x=-1.36, z=1.06)，方位角
+    // atan2(x,z)≈-52°；rotation.y 每加 α，点方位角同步 +α，故 home yaw 取
+    // -atan2(x,z)≈+52°——按钮正好转到 +z 正前方正对用户，即「正面与侧面
+    // 之间约 45°」的最佳观赏角
+    const TURNTABLE_HOME_YAW = -Math.atan2(-1.36, 1.06); // ≈ +0.909 rad ≈ 52°
+    // 进页面直接落在 home 朝向：与双击复位的最佳观赏角一致，不做入场甩头
+    state.turntableYaw = TURNTABLE_HOME_YAW;
+
+    function triggerTurntableReset(clientX, clientY) {
+      state.yawVelocity = 0;
+      state.isResettingYaw = true;
+      audioEngine.playTick();
+      triggerFeedbackPulse(clientX, clientY, 10);
+      showToast("唱机视角已复位", "机身播放按钮正对用户 · 最佳观赏角度");
+    }
+
+    /********************************************************************
+     * 8. UI 层更新与底部控制舱收起/展开逻辑
+     ********************************************************************/
+    function formatTime(sec) {
+      const s = Math.max(0, Math.floor(sec));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+    }
+
+    function updateUI() {
+      if (!SONGS.length) return;
+      const isPreviewDifferent = state.selectedSongId !== state.playingSongId;
+      const displayedSong = SONGS[state.selectedSongId];
+      const playingSong = SONGS[state.playingSongId];
+
+      document.getElementById("song-title").textContent = displayedSong.title;
+      document.getElementById("song-artist").textContent = displayedSong.artist;
+
+      const playBtn = document.getElementById("btn-play");
+      const playSvg = document.getElementById("icon-play-svg");
+
+      playBtn.classList.remove("drop-mode");
+
+      document.getElementById("view-mode-label").textContent =
+        state.viewState === "Browse" ? "选歌队列 · 点击收起" : "沉浸黑胶 · 播放态";
+
+      if (isPreviewDifferent) {
+        playBtn.classList.add("drop-mode");
+        playSvg.innerHTML = `<path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/>`;
+      } else if (state.audioState !== "Paused") {
+        // Playing / Buffering 都按暂停键图标（状态徽标已按需求移除）
+        playSvg.innerHTML = `<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>`;
+      } else {
+        playSvg.innerHTML = `<path d="M8 5v14l11-7z"/>`;
+      }
+
+      document.getElementById("time-total").textContent = formatTime(playingSong.duration);
+      updateProgressDOM();
+
+      document.getElementById("dbg-view").textContent = state.viewState;
+      document.getElementById("dbg-audio").textContent = state.audioState;
+      document.getElementById("dbg-ids").textContent = `#${state.selectedSongId} / #${state.playingSongId}`;
+    }
+
+    // ===== 黑胶页歌词（原生推内嵌/缓存歌词，随播放进度高亮） =====
+    const lyricState = { synced: false, lines: [], index: -2, on: false };
+    try { lyricState.on = localStorage.getItem("vinyl_lyrics_on") === "1"; } catch (e) {}
+
+    function setLyricLine(el, text) {
+      const t = text || "";
+      if (el.textContent !== t) el.textContent = t;
+      el.style.display = t ? "-webkit-box" : "none";
+    }
+
+    // 线性推进找当前行：从上次位置向两侧收敛，seek 大跳也能快速定位
+    function lyricIndexFor(ms) {
+      const lines = lyricState.lines;
+      if (!lines.length) return -1;
+      let i = lyricState.index >= 0 && lyricState.index < lines.length ? lyricState.index : 0;
+      while (i > 0 && lines[i].t > ms) i--;
+      while (i < lines.length - 1 && lines[i + 1].t <= ms) i++;
+      return lines[0].t > ms ? -1 : i;
+    }
+
+    function renderLyrics(force) {
+      const panel = document.getElementById("vinyl-lyrics");
+      if (!panel) return;
+      const active = lyricState.on && lyricState.lines.length > 0;
+      if (panel.classList.contains("visible") !== active) panel.classList.toggle("visible", active);
+      if (!active) return;
+      const prevEl = document.getElementById("lyric-prev");
+      const curEl = document.getElementById("lyric-cur");
+      const trEl = document.getElementById("lyric-cur-tr");
+      const nextEl = document.getElementById("lyric-next");
+      if (!lyricState.synced) {
+        // 纯文本歌词：无时间轴，静态展示头两行
+        setLyricLine(prevEl, "");
+        setLyricLine(curEl, lyricState.lines[0] ? lyricState.lines[0].text : "");
+        setLyricLine(trEl, "");
+        setLyricLine(nextEl, lyricState.lines[1] ? lyricState.lines[1].text : "");
+        return;
+      }
+      const ms = state.currentTime * 1000;
+      const idx = lyricIndexFor(ms);
+      if (!force && idx === lyricState.index) return;
+      lyricState.index = idx;
+      const line = idx >= 0 ? lyricState.lines[idx] : null;
+      setLyricLine(prevEl, idx > 0 ? lyricState.lines[idx - 1].text : "");
+      setLyricLine(curEl, line ? line.text : "· · ·");
+      setLyricLine(trEl, line && line.tr ? line.tr : "");
+      setLyricLine(nextEl, line && lyricState.lines[idx + 1] ? lyricState.lines[idx + 1].text : "");
+    }
+
+    // 进度条 DOM 更新：元素引用缓存（避免每帧 getElementById），每帧刷新保证
+    // 进度与歌词推进的流畅度
+    let progressDomEls = null;
+    function updateProgressDOM() {
+      // 落片编排期间跳过 DOM 写：进度由编排时间线驱动、收尾时统一刷新，
+      // 每帧 textContent/样式写会在编排关键帧上叠加主线程成本
+      if (state.ceremonyActive) return;
+      const playingSong = SONGS[state.playingSongId];
+      if (!playingSong) return;
+      const ratio = Math.min(1, Math.max(0, state.currentTime / playingSong.duration));
+      if (!progressDomEls) {
+        progressDomEls = {
+          time: document.getElementById("time-current"),
+          fill: document.getElementById("progress-fill"),
+          thumb: document.getElementById("progress-thumb")
+        };
+      }
+      progressDomEls.time.textContent = formatTime(state.currentTime);
+      progressDomEls.fill.style.width = `${ratio * 100}%`;
+      progressDomEls.thumb.style.left = `${ratio * 100}%`;
+      renderLyrics(false);
+    }
+
+    // 音量 UI 已移除（媒体音量交给系统侧键/通知栏）；state.volume/isMuted 仍保留，
+    // 供原生推送与音效轨增益（audioEngine.updateVolume）使用
+
+    // 底部控制栏整体收起/展开：手柄已移除，改为垂直手势
+    function setDeckCollapsed(collapsed) {
+      if (state.deckCollapsed === collapsed) return;
+      state.deckCollapsed = collapsed;
+      viewportEl.classList.toggle("deck-collapsed", collapsed);
+      audioEngine.playTick();
+      if (collapsed) {
+        showToast("已进入全屏纯净黑胶模式", "上滑可重新展开控制舱");
+      }
+    }
+
+    // 全屏垂直手势：上滑展开控制舱、下滑收起。识别区域不限底部（扩大到全屏），
+    // 仅排除真实交互元素（按钮/滑块/菜单/顶部栏）避免抢占点击；
+    // 3D 横滑选歌（dx 主导）与该手势（dy 主导）天然互斥不冲突
+    (function () {
+      let startY = 0, startX = 0, fired = false, tracking = false;
+      const THRESH = 34;
+      document.addEventListener("pointerdown", (e) => {
+        if (e.target.closest("button, input, .slider-hit-area, .progress-wrapper, .more-menu, .chip-btn, .top-bar, .top-center-pill")) {
+          tracking = false;
+          return;
+        }
+        startY = e.clientY; startX = e.clientX;
+        fired = false; tracking = true;
+      }, { passive: true });
+      document.addEventListener("pointermove", (e) => {
+        if (!tracking || fired) return;
+        const dy = e.clientY - startY;
+        const dx = e.clientX - startX;
+        if (Math.abs(dy) > THRESH && Math.abs(dy) > Math.abs(dx) * 1.3) {
+          fired = true;
+          setDeckCollapsed(dy > 0); // 上滑 dy<0 → 展开；下滑 dy>0 → 收起
+        }
+      }, { passive: true });
+      document.addEventListener("pointerup", () => { tracking = false; }, { passive: true });
+      document.addEventListener("pointercancel", () => { tracking = false; }, { passive: true });
+    })();
+
+    /********************************************************************
+     * 9. 3D 射线检测 (Raycaster) 与手势分区交互
+     ********************************************************************/
+    function getHit3DInteractiveObject(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      pointerNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNDC, camera);
+      const hits = raycaster.intersectObjects(interactive3DObjects, false);
+      return hits.length > 0 ? hits[0].object.userData.interactiveType : null;
+    }
+
+    let pointerZone = null;
+    let isPointerDown = false;
+    let startX = 0, startY = 0;
+    let lastX = 0, lastMoveTime = 0;
+    let yawStart = 0, scrollStart = 0;
+    let isDraggingHorizontal = false;
+    let isInvalidVerticalGesture = false;
+    let lastTapUpTime = 0, lastTapX = 0, lastTapY = 0;
+    let lastTickIndex = 0;
+    // 多指/鬼点防护：只跟踪一个活动指针。触屏快速滑动时数字触控板可能把
+    // 一根手指拆成 2~3 个触点（鬼点），鬼点会覆盖 startX/startY 导致碟片
+    // 跳位，其 pointercancel 还会连带杀掉真手势——这是「转着转着卡死」的主因
+    let activePointerId = null;
+
+    canvas.addEventListener("pointerdown", (e) => {
+      // 已有活动指针时忽略新触点：鬼点/第二根手指不得污染进行中的手势
+      if (isPointerDown && activePointerId !== null && e.pointerId !== activePointerId) {
+        debugLog("down ignore id=" + e.pointerId + " (活动 id=" + activePointerId + ")");
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const relY = (e.clientY - rect.top) / rect.height;
+
+      const queueSplitRatio = state.viewState === "Browse" ? 0.65 : 0.42;
+      const bottomLimit = state.deckCollapsed ? 0.92 : 0.74;
+      if (relY > bottomLimit) return;
+      // 播放态把选歌触发区收窄到碟片列表条带（碟片实际占 ~0.27-0.37）：
+      // 顶部留白带误拖/误点就会整片切进选歌模式，反馈很突兀。
+      // 顶部状态胶囊是独立 HTML 按钮（有自己的点击处理），不依赖此区域
+      const queueTopMin = state.viewState === "Browse" ? 0.0 : 0.16;
+      if (relY < queueTopMin) return;
+
+      pointerZone = relY <= queueSplitRatio ? "queue" : "turntable";
+      isPointerDown = true;
+      activePointerId = e.pointerId;
+      startX = lastX = e.clientX;
+      startY = e.clientY;
+      lastMoveTime = performance.now();
+      isDraggingHorizontal = false;
+      isInvalidVerticalGesture = false;
+
+      if (pointerZone === "turntable") {
+        yawStart = state.turntableYaw;
+        state.yawVelocity = 0;
+        state.isResettingYaw = false;
+      } else {
+        scrollStart = state.scrollPosition;
+        state.scrollVelocity = 0;
+        lastTickIndex = Math.round(state.scrollPosition);
+      }
+      debugLog("down id=" + e.pointerId + " x=" + ((e.clientX - rect.left) / rect.width).toFixed(2) +
+        " y=" + relY.toFixed(2) + " zone=" + pointerZone + " " + state.viewState);
+      // 卡死检测：down 悬挂 8s 未收到 up/cancel（状态泄漏）
+      const guardStamp = ++downGuardSeq;
+      setTimeout(() => {
+        if (isPointerDown && guardStamp === downGuardSeq) {
+          debugLog("WARN: down 悬挂>8s 未释放", true);
+        }
+      }, 8000);
+      canvas.setPointerCapture(e.pointerId);
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      // 桌面端鼠标悬停在 3D 按钮或唱臂上时显示手型指针
+      if (!isPointerDown) {
+        const hoverType = getHit3DInteractiveObject(e.clientX, e.clientY);
+        canvas.style.cursor = hoverType ? "pointer" : "grab";
+        return;
+      }
+
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const now = performance.now();
+      const dt = Math.max(8, now - lastMoveTime) / 1000;
+      const stepDx = e.clientX - lastX;
+      lastX = e.clientX;
+      lastMoveTime = now;
+
+      if (!isDraggingHorizontal && !isInvalidVerticalGesture) {
+        // 横向按主导轴归属（斜向拖动不再因竖直分量被卡住）；
+        // 只有明显的竖直意图才作废手势——原判定（|dy|>14 即作废）会把
+        // 先竖后横的轨迹整段杀掉，表现就是「拖不动、松手重拖才恢复」
+        if (Math.abs(dx) > 8 && Math.abs(dx) >= Math.abs(dy)) {
+          isDraggingHorizontal = true;
+          canvas.style.cursor = "grabbing";
+          debugLog("drag-lock " + pointerZone + " dx=" + Math.round(dx) + " dy=" + Math.round(dy));
+        } else if (Math.abs(dy) > 24 && Math.abs(dy) >= Math.abs(dx) * 1.8) {
+          isInvalidVerticalGesture = true;
+          debugLog("WARN: invalid-vertical zone=" + pointerZone + " dx=" + Math.round(dx) + " dy=" + Math.round(dy), true);
+          if (pointerZone === "queue" && dy > 26 && state.viewState === "PlayingView") {
+            setViewMode("Browse");
+          } else if (dy < -28 && state.viewState === "Browse") {
+            setViewMode("PlayingView");
+          }
+          return;
+        } else {
+          return;
+        }
+      }
+
+      if (isInvalidVerticalGesture) return;
+
+      if (pointerZone === "turntable") {
+        const sensitivity = 0.0082;
+        state.turntableYaw = yawStart + dx * sensitivity;
+        state.yawVelocity = (stepDx * sensitivity) / dt;
+      } else if (pointerZone === "queue") {
+        if (state.viewState === "PlayingView") {
+          state.viewState = "Browse";
+          updateUI();
+        }
+        const queueSensitivity = 0.0068;
+        const rawPos = scrollStart - dx * queueSensitivity;
+        const minBound = -0.35, maxBound = SONGS.length - 1 + 0.35;
+        state.scrollPosition = Math.max(minBound, Math.min(maxBound, rawPos));
+        state.scrollVelocity = (-stepDx * queueSensitivity) / dt;
+        ensureQueueWindow(state.scrollPosition);
+
+        const currentRound = Math.max(0, Math.min(SONGS.length - 1, Math.round(state.scrollPosition)));
+        if (currentRound !== lastTickIndex) {
+          lastTickIndex = currentRound;
+          state.selectedSongId = currentRound;
+          audioEngine.playTick();
+          triggerFeedbackPulse(e.clientX, e.clientY, 8);
+          hapticTick();
+          debugLog("tick->" + currentRound);
+          updateUI();
+        }
+      }
+    });
+
+    canvas.addEventListener("pointerup", (e) => {
+      // 非活动指针的抬起（鬼点/第二根手指）不结算手势
+      if (!isPointerDown || (activePointerId !== null && e.pointerId !== activePointerId)) {
+        debugLog("up id=" + e.pointerId + " noop");
+        return;
+      }
+      activePointerId = null;
+      isPointerDown = false;
+      canvas.style.cursor = "grab";
+      const now = performance.now();
+      const totalMove = Math.hypot(e.clientX - startX, e.clientY - startY);
+
+      if (pointerZone === "turntable") {
+        if (!isDraggingHorizontal && !isInvalidVerticalGesture && totalMove < 12) {
+          // 优先检测是否点击了 3D 唱机上的实体圆形按钮或 3D 唱臂
+          const hit3D = getHit3DInteractiveObject(e.clientX, e.clientY);
+          if (hit3D === "turntableButton") {
+            togglePlayPause("physicalButton", e.clientX, e.clientY);
+            lastTapUpTime = 0;
+            pointerZone = null;
+            return;
+          } else if (hit3D === "tonearm") {
+            togglePlayPause("tonearm", e.clientX, e.clientY);
+            lastTapUpTime = 0;
+            pointerZone = null;
+            return;
+          }
+
+          // 若点击的是唱机木质机身空白处
+          if (state.viewState === "Browse") {
+            setViewMode("PlayingView");
+            lastTapUpTime = 0;
+          } else {
+            const tapInterval = now - lastTapUpTime;
+            const tapDist = Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY);
+            if (tapInterval < 320 && tapDist < 30) {
+              triggerTurntableReset(e.clientX, e.clientY);
+              lastTapUpTime = 0;
+            } else {
+              lastTapUpTime = now;
+              lastTapX = e.clientX;
+              lastTapY = e.clientY;
+            }
+          }
+        }
+      } else if (pointerZone === "queue") {
+        if (isDraggingHorizontal) {
+          // 连贯惯性：放宽速度上限、加大预测滑行距离，松手后滑行再缓停吸附
+          const clampedVel = Math.max(-18, Math.min(18, state.scrollVelocity));
+          const predicted = state.scrollPosition + clampedVel * 0.28;
+          const targetIdx = Math.max(0, Math.min(SONGS.length - 1, Math.round(predicted)));
+          state.scrollTarget = targetIdx;
+          state.selectedSongId = targetIdx;
+          debugLog("up zone=" + pointerZone + " v=" + Math.round(state.scrollVelocity) + " tgt=" + targetIdx);
+          updateUI();
+        } else if (!isInvalidVerticalGesture && totalMove < 12) {
+          if (state.viewState === "PlayingView") {
+            setViewMode("Browse");
+          } else {
+            const rect = canvas.getBoundingClientRect();
+            const relX = (e.clientX - rect.left) / rect.width - 0.5;
+            if (Math.abs(relX) < 0.22) {
+              triggerPlayCeremony(state.selectedSongId, e.clientX, e.clientY);
+            } else if (relX < -0.22 && state.selectedSongId > 0) {
+              state.selectedSongId -= 1;
+              state.scrollTarget = state.selectedSongId;
+              audioEngine.playTick();
+              updateUI();
+            } else if (relX > 0.22 && state.selectedSongId < SONGS.length - 1) {
+              state.selectedSongId += 1;
+              state.scrollTarget = state.selectedSongId;
+              audioEngine.playTick();
+              updateUI();
+            }
+          }
+        }
+      }
+      pointerZone = null;
+    });
+
+    // 系统中断（手掌误判/边缘手势/多指冲突）会以 pointercancel 收场而不是
+    // pointerup：不清理的话「拖拽中」状态永久泄漏；直接停摆的话队列/转盘
+    // 会停在半路——用户的「卡死」体感。这里按松手处理，让惯性滑行与吸附继续
+    canvas.addEventListener("pointercancel", (e) => {
+      const hadDrag = isPointerDown;
+      const zone = pointerZone;
+      const wasHorizontal = isDraggingHorizontal;
+      // 鬼点自己的 cancel 不结算真手势
+      if (hadDrag && activePointerId !== null && e.pointerId !== activePointerId) {
+        debugLog("cancel id=" + e.pointerId + " 其他指针忽略");
+        return;
+      }
+      if (hadDrag && zone === "queue" && wasHorizontal) {
+        const clampedVel = Math.max(-18, Math.min(18, state.scrollVelocity));
+        const predicted = state.scrollPosition + clampedVel * 0.28;
+        const targetIdx = Math.max(0, Math.min(SONGS.length - 1, Math.round(predicted)));
+        state.scrollTarget = targetIdx;
+        state.selectedSongId = targetIdx;
+        debugLog("WARN: pointercancel id=" + e.pointerId + " -> 惯性接续 tgt=" + targetIdx, true);
+        updateUI();
+      } else if (hadDrag) {
+        // 转盘分支：yawVelocity 保留，animate 循环自会衰减滑行
+        debugLog("WARN: pointercancel id=" + e.pointerId + " zone=" + zone, true);
+      }
+      activePointerId = null;
+      isPointerDown = false;
+      isDraggingHorizontal = false;
+      isInvalidVerticalGesture = false;
+      pointerZone = null;
+      canvas.style.cursor = "grab";
+    });
+    // document 级探针：捕获落在 canvas 之外的系统中断（滑杆/按钮上的 cancel），
+    // 用于判断中断源是逐指针还是整条流被系统收走
+    document.addEventListener("pointercancel", (e) => {
+      if (e.target === canvas) return;
+      debugLog("doc-cancel id=" + e.pointerId + " t=" + e.pointerType, true);
+    }, true);
+
+    /********************************************************************
+     * 10. 底部控制面板事件（播放、上下曲、进度拖拽、音量拖拽）
+     ********************************************************************/
+    document.getElementById("btn-play").addEventListener("click", (e) => {
+      togglePlayPause("uiButton", e.clientX, e.clientY);
+    });
+
+    document.getElementById("btn-prev").addEventListener("click", (e) => {
+      const nextId = (state.selectedSongId - 1 + SONGS.length) % SONGS.length;
+      triggerPlayCeremony(nextId, e.clientX, e.clientY);
+    });
+
+    document.getElementById("btn-next").addEventListener("click", (e) => {
+      const nextId = (state.selectedSongId + 1) % SONGS.length;
+      triggerPlayCeremony(nextId, e.clientX, e.clientY);
+    });
+
+    // ===== 播放模式按钮：随机 → 列表循环 → 单曲循环 三态循环 =====
+    // 图标由原生 syncPlayback 推送驱动（500ms 校准自愈）；点击只上抛请求，
+    // 由原生 VM 与主界面同一套三态逻辑切换（洗牌袋/队列重排保持一致）
+    const MODE_LABELS = { shuffle: "随机播放", repeat_all: "列表循环", repeat_one: "单曲循环" };
+    const MODE_NEXT = { shuffle: "repeat_all", repeat_all: "repeat_one", repeat_one: "shuffle" };
+
+    function updateModeBtn() {
+      const icons = { shuffle: "mode-icon-shuffle", repeat_all: "mode-icon-repeat-all", repeat_one: "mode-icon-repeat-one" };
+      Object.keys(icons).forEach((m) => {
+        const el = document.getElementById(icons[m]);
+        if (el) el.style.display = m === state.playMode ? "" : "none";
+      });
+      const btn = document.getElementById("btn-mode");
+      if (btn) btn.title = "播放模式：" + (MODE_LABELS[state.playMode] || "");
+    }
+
+    document.getElementById("btn-mode").addEventListener("click", () => {
+      const next = MODE_NEXT[state.playMode] || "repeat_all";
+      state.playMode = next;
+      updateModeBtn();
+      showToast(MODE_LABELS[next], "与主界面播放模式同步");
+      hapticTick();
+      try { window.VinylBridge && VinylBridge.onPlayModeRequested(next); } catch (e) {}
+    });
+
+    // ===== 右下角三点菜单：队列入口 + 歌词/亮色开关收纳 =====
+    const moreMenu = document.getElementById("more-menu");
+    function toggleMoreMenu(force) {
+      const open = typeof force === "boolean" ? force : !moreMenu.classList.contains("open");
+      moreMenu.classList.toggle("open", open);
+      if (open) hapticTick();
+    }
+    document.getElementById("btn-more").addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMoreMenu();
+    });
+    // 点外部/滚页面关闭
+    document.addEventListener("pointerdown", (e) => {
+      if (!moreMenu.classList.contains("open")) return;
+      if (moreMenu.contains(e.target) || e.target.closest("#btn-more")) return;
+      toggleMoreMenu(false);
+    }, true);
+
+    document.getElementById("menu-queue").addEventListener("click", () => {
+      toggleMoreMenu(false);
+      setViewMode(state.viewState === "Browse" ? "PlayingView" : "Browse");
+    });
+
+    // 歌词开关：与视角记忆同一套 localStorage 模式（开关本体收进菜单）
+    const lyricToggle = document.getElementById("toggle-lyrics");
+    lyricToggle.classList.toggle("on", lyricState.on);
+    document.getElementById("menu-lyrics").addEventListener("click", () => {
+      lyricState.on = !lyricState.on;
+      lyricToggle.classList.toggle("on", lyricState.on);
+      try { localStorage.setItem("vinyl_lyrics_on", lyricState.on ? "1" : "0"); } catch (e) {}
+      lyricState.index = -2;
+      renderLyrics(true);
+      hapticTick();
+    });
+
+    // 近/远视角切换：右上角金色放大镜（远视角显示「+」点它放大回来 / 近视角显示「−」点它拉远）
+    // 与三点菜单「远视角」开关双入口，状态双向同步；选择随 WebView 持久化
+    function updateZoomUI() {
+      const zoomedOut = state.cameraZoom > 1.2;
+      document.getElementById("zoom-in-icon").style.display = zoomedOut ? "" : "none";
+      document.getElementById("zoom-out-icon").style.display = zoomedOut ? "none" : "";
+      document.getElementById("toggle-zoom").classList.toggle("on", zoomedOut);
+      document.getElementById("btn-zoom").title = zoomedOut ? "回到近视角" : "拉远视角";
+    }
+
+    function setCameraZoom(z) {
+      state.cameraZoom = z;
+      // 记住近/远视角，下次进页恢复（domStorage 已开启，随 WebView 持久化）
+      try { localStorage.setItem("vinyl_camera_zoom", String(z)); } catch (e) {}
+      updateZoomUI();
+    }
+
+    try {
+      const savedZoom = parseFloat(localStorage.getItem("vinyl_camera_zoom"));
+      if (savedZoom === 1.5 || savedZoom === 1.0) state.cameraZoom = savedZoom;
+    } catch (e) {}
+    updateZoomUI();
+
+    document.getElementById("btn-zoom").addEventListener("click", () => {
+      setCameraZoom(state.cameraZoom > 1.2 ? 1.0 : 1.5);
+      hapticTick();
+    });
+    document.getElementById("menu-zoom").addEventListener("click", () => {
+      setCameraZoom(state.cameraZoom > 1.2 ? 1.0 : 1.5);
+      hapticTick();
+    });
+
+    // 右上角按钮空闲渐隐：任何触摸（切歌/拖动/点按）立即渐显，无操作 3s 渐隐到
+    // 幽灵态（opacity 0.07，触摸区域保留仍可点）——平时不抢视觉，界面保持干净
+    const zoomBtnEl = document.getElementById("btn-zoom");
+    let zoomIdleTimer = null;
+    function wakeZoomBtn() {
+      zoomBtnEl.classList.remove("dimmed");
+      if (zoomIdleTimer) clearTimeout(zoomIdleTimer);
+      zoomIdleTimer = setTimeout(() => zoomBtnEl.classList.add("dimmed"), 3000);
+    }
+    document.addEventListener("pointerdown", wakeZoomBtn, { capture: true, passive: true });
+    document.addEventListener("pointermove", wakeZoomBtn, { capture: true, passive: true });
+    wakeZoomBtn(); // 进页先显示，3 秒后无操作自动渐隐
+
+    document.getElementById("btn-view-toggle").addEventListener("click", () => {
+      setViewMode(state.viewState === "Browse" ? "PlayingView" : "Browse");
+    });
+
+    // 日间高透 / 夜间微醺：localStorage vinyl_theme_light "1"=日间(默认) "0"=夜间，
+    // 入口：三点菜单「主题」行，点击切换 CSS 令牌（:root=日间 / [data-mode="night"]=夜间）
+    let themeLight = true;
+    try { themeLight = localStorage.getItem("vinyl_theme_light") !== "0"; } catch (e) {}
+    function applyThemeMode() {
+      if (themeLight) {
+        document.documentElement.removeAttribute("data-mode");
+      } else {
+        document.documentElement.setAttribute("data-mode", "night");
+      }
+      const tgl = document.getElementById("toggle-theme");
+      if (tgl) tgl.classList.toggle("on", themeLight);
+    }
+    function toggleDayNight() {
+      themeLight = !themeLight;
+      try { localStorage.setItem("vinyl_theme_light", themeLight ? "1" : "0"); } catch (e) {}
+      applyThemeMode();
+      applyBackdropMode(themeLight);
+      showToast(themeLight ? "日间高透" : "夜间微醺",
+                themeLight ? "暖咖提亮 · 白天看得清" : "暗光护眼氛围");
+    }
+    applyThemeMode();
+    document.getElementById("menu-theme").addEventListener("click", toggleDayNight);
+
+    document.getElementById("btn-inspector").addEventListener("click", () => {
+      document.getElementById("inspector-drawer").classList.toggle("open");
+    });
+
+    document.getElementById("btn-sim-buffer").addEventListener("click", () => {
+      if (state.audioState === "Buffering") {
+        state.audioState = "Playing";
+        showToast("缓冲完成 · 唱针落下", "恢复真实音频稳定播放");
+      } else {
+        state.audioState = "Buffering";
+        showToast("模拟网络缓冲态", "唱针悬停等待，不伪装播放");
+      }
+      updateUI();
+    });
+
+    document.getElementById("btn-reset-yaw").addEventListener("click", (e) => {
+      triggerTurntableReset(e.clientX, e.clientY);
+    });
+
+    // 进度条拖拽
+    const progressHitArea = document.getElementById("progress-hit-area");
+    let isScrubbingProgress = false;
+
+    function seekByClientX(clientX) {
+      const rect = progressHitArea.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      state.currentTime = ratio * SONGS[state.playingSongId].duration;
+      updateProgressDOM();
+    }
+
+    progressHitArea.addEventListener("pointerdown", (e) => {
+      isScrubbingProgress = true;
+      progressHitArea.classList.add("dragging");
+      seekByClientX(e.clientX);
+      progressHitArea.setPointerCapture(e.pointerId);
+    });
+    progressHitArea.addEventListener("pointermove", (e) => {
+      if (isScrubbingProgress) seekByClientX(e.clientX);
+    });
+    progressHitArea.addEventListener("pointerup", () => {
+      if (!isScrubbingProgress) return;
+      isScrubbingProgress = false;
+      progressHitArea.classList.remove("dragging");
+      audioEngine.playTick();
+      // 拖动结束才把最终落点交给原生 seek（拖动中由本地预览）
+      if (window.VinylBridge) {
+        try { window.VinylBridge.onSeek(state.currentTime); } catch (e) {}
+      }
+    });
+
+    // 音量滑块与静音按钮已按需求移除，无对应交互逻辑
+
+    /********************************************************************
+     * 11. 主渲染循环（物理弹簧按键、三段式自然抛物线落片、唱臂起落、呼吸感）
+     ********************************************************************/
+    let lastViewportW = -1, lastViewportH = -1;
+    let cameraBaseZ = 8.2; // 拉远倍率的基础距离（由视口宽高比决定），实际 z = 基础 × cameraZoom
+    function onResize() {
+      const w = viewportEl.clientWidth;
+      const h = viewportEl.clientHeight;
+      // 布局未就绪（AndroidView 组合早于 WebView 布局）：跳过，等帧检查再试，
+      // 避免把 canvas 内联尺寸设成 0 导致渲染面积丢失
+      if (w <= 0 || h <= 0) return;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      cameraBaseZ = (w / h < 0.5) ? 8.6 : 8.2;
+      camera.updateProjectionMatrix();
+      lastViewportW = w;
+      lastViewportH = h;
+    }
+    window.addEventListener("resize", onResize);
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(onResize).observe(viewportEl);
+    onResize();
+
+    // 五次平滑缓动函数 (Quintic Smootherstep)
+    function smootherstep(t) {
+      const x = Math.max(0, Math.min(1, t));
+      return x * x * x * (x * (x * 6 - 15) + 10);
+    }
+
+    let lastFrameTime = performance.now();
+
+    // 首帧上报：原生遮罩等这一刻才淡出（3D 引擎初始化的半秒纯黑被盖住）
+    let firstFrameSent = false;
+    function reportFirstFrame() {
+      if (firstFrameSent) return;
+      firstFrameSent = true;
+      try { window.VinylBridge && VinylBridge.onFirstFrame(); } catch (e) {}
+    }
+
+    // ===== 主渲染循环 =====
+    // 帧节奏钳制 ~60fps：120Hz 屏上 rAF 全速跑而渲染预算不足时帧时间抖动
+    // （45-120fps 来回跳）反而显卡顿，稳定 60fps 节奏观感更顺；输入响应由
+    // pointer 事件驱动（≤16ms 内必有画面反馈），跟手性不受影响
+    let lastRenderAt = 0;
+    // 阴影按需重绘的状态镜像（上一帧值）
+    let lastShadowTonearmAngle = 0, lastShadowTonearmLift = 0.085, lastShadowBtnOffset = 0, lastShadowQueueY = -999;
+    // FPS 探针计数
+    let fpsFrameCount = 0, fpsWindowStart = performance.now();
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+
+      if (now - lastRenderAt < 14) return;
+      lastRenderAt = now;
+
+      // FPS 探针：rAF 实际执行频率 ≈ 显示帧率（GPU 跑不满时被 vsync 节流），
+      // 每秒上抛一次供 logcat 取证（VinylDebug tag）
+      fpsFrameCount++;
+      if (now - fpsWindowStart >= 1000) {
+        debugLog("fps=" + fpsFrameCount);
+        fpsFrameCount = 0;
+        fpsWindowStart = now;
+      }
+
+      // 分帧补齐滚动增补的碟片槽位（每帧 ≤2 张），紧跟视口校准之后、
+      // 同帧内 flush 的碟片会被下方摆位循环直接 placement，不露空槽
+      flushPendingBuilds();
+
+      // WebView 布局可能晚于脚本执行且 window resize 不再触发：每帧兜底校准
+      // 视口（尺寸没变时开销≈两次属性读取+比较）
+      if (viewportEl.clientWidth !== lastViewportW || viewportEl.clientHeight !== lastViewportH) {
+        onResize();
+      }
+
+      // 歌单未注入前只渲染空场景（原生 onPageFinished 后立刻推数据）
+      if (!SONGS.length) {
+        renderer.render(scene, camera);
+        reportFirstFrame();
+        return;
+      }
+
+      const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+      lastFrameTime = now;
+      const elapsedSec = now * 0.001;
+
+      // 1. 唱机水平 360° 旋转更新
+      if (!isPointerDown || pointerZone !== "turntable") {
+        if (state.isResettingYaw) {
+          const delta = normalizeAngle(TURNTABLE_HOME_YAW - state.turntableYaw);
+          state.turntableYaw += delta * Math.min(1, dt * 11);
+          if (Math.abs(delta) < 0.003) {
+            state.turntableYaw = TURNTABLE_HOME_YAW;
+            state.isResettingYaw = false;
+          }
+        } else if (Math.abs(state.yawVelocity) > 0.001) {
+          state.turntableYaw += state.yawVelocity * dt;
+          state.yawVelocity *= Math.pow(0.015, dt);
+        }
+      }
+      turntableYawGroup.rotation.y = state.turntableYaw;
+      sheenMesh.rotation.z = -state.turntableYaw * 0.65;
+
+      const normDeg = ((normalizeAngle(state.turntableYaw) * 180) / Math.PI).toFixed(1);
+      document.getElementById("dbg-yaw").textContent = `${normDeg}°`;
+
+      // 2. 3D 实体圆形按钮物理弹簧按压与 LED 状态灯环更新
+      const springStiffness = 180;
+      const springDamping = 16;
+      const springForce = -springStiffness * state.physicalBtnOffset - springDamping * state.physicalBtnVelocity;
+      state.physicalBtnVelocity += springForce * dt;
+      state.physicalBtnOffset += state.physicalBtnVelocity * dt;
+      // 限制最大下压深度 -0.046
+      const clampedPress = Math.max(-0.048, Math.min(0.01, state.physicalBtnOffset));
+      physicalBtnCapMesh.position.y = 0.225 + clampedPress;
+
+      // 实体按钮周围的琥珀光圈：播放态常亮温润，暂停态缓慢呼吸提示可点击
+      if (state.audioState === "Playing") {
+        btnLedMat.opacity = 0.92;
+      } else {
+        btnLedMat.opacity = 0.32 + (Math.sin(elapsedSec * 3.2) * 0.5 + 0.5) * 0.48;
+      }
+
+      // 3. 唱片队列更新（稀疏数组：仅已创建的 20+5 窗口内碟片参与计算）
+      if (!isPointerDown || pointerZone !== "queue") {
+        const prevRound = Math.round(state.scrollPosition);
+        const diff = state.scrollTarget - state.scrollPosition;
+        // 追赶放缓（dt*11 → dt*7.5）：吸附段保留滑行余韵，跨卡震动只在滚动进行中触发
+        state.scrollPosition += diff * Math.min(1, dt * 7.5);
+        state.scrollVelocity *= Math.pow(0.01, dt);
+        ensureQueueWindow(state.scrollPosition);
+        if (Math.round(state.scrollPosition) !== prevRound && Math.abs(diff) > 0.05) {
+          hapticTick();
+          debugLog("inertia->" + Math.round(state.scrollPosition));
+        }
+      }
+
+      const isBrowse = state.viewState === "Browse";
+      const targetQueueY = isBrowse ? 0.68 : 2.02;
+      const targetQueueZ = isBrowse ? 1.55 : -0.18;
+      const targetQueueScale = isBrowse ? 1.0 : 0.55;
+
+      queueGroup.position.y += (targetQueueY - queueGroup.position.y) * Math.min(1, dt * 7.5);
+      queueGroup.position.z += (targetQueueZ - queueGroup.position.z) * Math.min(1, dt * 7.5);
+      const nextQScale = queueGroup.scale.x + (targetQueueScale - queueGroup.scale.x) * Math.min(1, dt * 7.5);
+      queueGroup.scale.setScalar(nextQScale);
+
+      queueItems.forEach((item, i) => {
+        if (!item) return; // 窗口外尚未创建的槽位
+        const d = i - state.scrollPosition;
+        const absD = Math.abs(d);
+        // 正在执行落片飞行的原槽位黑胶暂时淡出，避免视觉双影
+        const isCurrentlyDropping = state.ceremonyActive && i === state.droppingSongId;
+        // 可见窗口随视角倍率扩大：拉远 1.5 倍时两侧多露出约一半的碟片
+        item.group.visible = absD <= 3.3 * state.cameraZoom && !isCurrentlyDropping;
+        if (!item.group.visible) return;
+
+        const x = d * 0.92;
+        const z = -absD * 0.44;
+        const floatY = Math.sin(elapsedSec * 0.9 + i) * 0.012;
+        const y = -absD * 0.1 + floatY;
+
+        const scale = Math.max(0.58, 1 - absD * 0.15);
+        const opacity = Math.max(0.18, 1 - absD * 0.24);
+        const tilt = Math.max(-0.35, Math.min(0.35, d * 0.18)) + Math.max(-0.15, Math.min(0.15, state.scrollVelocity * 0.02));
+
+        item.group.position.set(x, y, z);
+        item.group.scale.setScalar(scale);
+        item.group.rotation.y = -tilt;
+        item.mat.opacity = opacity;
+
+        const targetHalo = absD < 0.25 && isBrowse ? 0.68 : 0;
+        item.haloMat.opacity += (targetHalo - item.haloMat.opacity) * Math.min(1, dt * 10);
+      });
+
+      // 4. 唱机纵向焦点位置（当底部控制栏收起时，唱机自动向屏幕黄金中心微移，增强整体性）
+      let targetTurntableY = -0.24;
+      if (isBrowse) {
+        targetTurntableY = -0.92;
+      } else if (state.deckCollapsed) {
+        targetTurntableY = -0.04; // 全屏纯净态居中舒展
+      }
+      const targetTurntableZ = isBrowse ? -0.45 : 0.45;
+      turntablePitchGroup.position.y += (targetTurntableY - turntablePitchGroup.position.y) * Math.min(1, dt * 6.5);
+      turntablePitchGroup.position.z += (targetTurntableZ - turntablePitchGroup.position.z) * Math.min(1, dt * 6.5);
+      turntablePitchGroup.updateMatrixWorld();
+
+      // 5. 【升级点 3】三段式抛物线 + 四元数姿态对齐的自然落片动画
+      if (state.ceremonyActive) {
+        state.ceremonyProgress += dt / 0.64; // 640ms 完整丝滑落盘
+        const p = Math.min(1, state.ceremonyProgress);
+
+        // 实时获取转盘上目标唱片的真实世界坐标与世界四元数（无论唱机正在怎样移动或旋转都能精准追踪）
+        activeVinylMesh.getWorldPosition(tempTargetPos);
+        activeVinylMesh.getWorldQuaternion(tempTargetQuat);
+
+        // 计算唱机转盘法线方向（用于沿中心主轴垂直气垫下降）
+        tempUpVec.set(0, 1, 0).applyQuaternion(tempTargetQuat).normalize();
+
+        // 水平与平面滑翔进度 (0 ~ 0.78 完成水平对准主轴)
+        const glideT = smootherstep(p / 0.78);
+
+        // 基础插值位置
+        transitionRecord.position.lerpVectors(dropStartPos, tempTargetPos, glideT);
+
+        // 叠加抛物线弧高 + 主轴气垫下落高度
+        let liftHeight = 0;
+        if (p < 0.78) {
+          // 抛物线优雅弧线抽出并悬停在主轴正上方 0.24 单位处
+          const arcPhase = p / 0.78;
+          liftHeight = Math.sin(arcPhase * Math.PI) * 0.42 + smootherstep(arcPhase) * 0.24;
+        } else {
+          // 0.78 ~ 1.0：套入中心主轴后，带气垫阻尼平滑垂直落向橡胶垫 (0.24 -> 0)
+          const dropPhase = (p - 0.78) / 0.22;
+          const easeDrop = 1 - Math.pow(1 - dropPhase, 2.6);
+          liftHeight = 0.24 * (1 - easeDrop);
+        }
+        transitionRecord.position.addScaledVector(tempUpVec, liftHeight);
+
+        // 姿态四元数 Slerp：从队列竖直倾角丝滑翻转为转盘倾斜平面
+        const rotT = smootherstep(p / 0.74);
+        THREE.Quaternion.slerp(dropStartQuat, tempTargetQuat, transitionRecord.quaternion, rotT);
+
+        // 尺寸平滑匹配至 1.0
+        const currentScale = THREE.MathUtils.lerp(dropStartScale, 1.0, glideT);
+        transitionRecord.scale.setScalar(currentScale);
+      }
+
+      // 6. 真实播放状态驱动转盘转速、唱臂循迹与唱针起落
+      const isActuallyPlaying = state.audioState === "Playing";
+      const isBuffering = state.audioState === "Buffering";
+
+      // 用户要求放慢：2.45 rad/s ≈ 23 RPM（黑胶标称 33⅓ 的七成），观感更从容
+      const targetPlatterSpeed = isActuallyPlaying ? 2.45 : 0;
+      state.platterSpeed += (targetPlatterSpeed - state.platterSpeed) * Math.min(1, dt * 6.5);
+      platterSpinGroup.rotation.y -= state.platterSpeed * dt;
+
+      const playingSong = SONGS[state.playingSongId];
+      if (isActuallyPlaying && !isScrubbingProgress) {
+        // 本地插值平滑推进；真实进度由原生 500ms 校准（播完自动下一首也由原生驱动）
+        state.currentTime = Math.min(state.currentTime + dt, playingSong.duration);
+        updateProgressDOM();
+      }
+
+      const progressRatio = state.currentTime / playingSong.duration;
+      const grooveMicroTrack = isActuallyPlaying ? Math.sin(elapsedSec * 3.8) * 0.0018 : 0;
+      const targetArmAngle = (isActuallyPlaying || isBuffering)
+        ? 0.37 + progressRatio * 0.14 + grooveMicroTrack
+        : 0;
+      state.tonearmAngle += (targetArmAngle - state.tonearmAngle) * Math.min(1, dt * 6.5);
+      tonearmYawPivot.rotation.y = -state.tonearmAngle;
+
+      // 唱针抬放：Playing 落下 (0)，Buffering 或 Paused 抬起 (0.095 rad)
+      const targetLift = isActuallyPlaying ? 0 : 0.095;
+      state.tonearmLift += (targetLift - state.tonearmLift) * Math.min(1, dt * 9);
+      tonearmLiftPivot.rotation.x = -state.tonearmLift;
+
+      // 视角拉远：z 平滑过渡到 基础距离 × 倍率（呼吸感只动 y，两者不冲突）
+      const targetCamZ = cameraBaseZ * state.cameraZoom;
+      if (Math.abs(camera.position.z - targetCamZ) > 0.001) {
+        camera.position.z += (targetCamZ - camera.position.z) * Math.min(1, dt * 6);
+      }
+
+      // 悬浮日志卡死检测：吸附不收敛 / ceremony 悬挂（2s 节流，避免刷屏）
+      if (!isPointerDown && SONGS.length &&
+          Math.abs(state.scrollTarget - state.scrollPosition) > 0.25) {
+        if (now - lastStallWarnAt > 2000) {
+          lastStallWarnAt = now;
+          debugLog("WARN: 吸附不收敛 tgt=" + state.scrollTarget.toFixed(2) +
+            " pos=" + state.scrollPosition.toFixed(2), true);
+        }
+      } else if (!isPointerDown) {
+        lastStallWarnAt = 0;
+      }
+      if (state.ceremonyActive && now - ceremonyStartAt > 3000 && now - lastStallWarnAt > 2000) {
+        lastStallWarnAt = now;
+        debugLog("WARN: ceremony 悬挂>3s", true);
+      }
+
+      // 7. 播放态克制呼吸感
+      if (isActuallyPlaying && state.viewState === "PlayingView") {
+        const breath = Math.sin(elapsedSec * (Math.PI * 2 / 9.5));
+        camera.position.y = 0.55 + breath * 0.012;
+        mainLight.intensity = 1.52 + breath * 0.06;
+        rimLight.intensity = 0.55 + breath * 0.08;
+      } else {
+        camera.position.y += (0.55 - camera.position.y) * Math.min(1, dt * 3);
+      }
+
+      // 阴影按需重绘：shadow pass 每帧全场景重绘是常驻大成本，而匀速旋转的
+      // 转盘/碟片是圆对称的（影子形状不变），仅唱臂动作、落片飞行、按钮按压、
+      // 队列升降会真正改变影子——变化帧才置 needsUpdate
+      const shadowDirty =
+        state.ceremonyActive ||
+        Math.abs(state.tonearmAngle - lastShadowTonearmAngle) > 0.0005 ||
+        Math.abs(state.tonearmLift - lastShadowTonearmLift) > 0.0005 ||
+        Math.abs(state.physicalBtnOffset - lastShadowBtnOffset) > 0.0005 ||
+        Math.abs(queueGroup.position.y - lastShadowQueueY) > 0.001;
+      if (shadowDirty) {
+        lastShadowTonearmAngle = state.tonearmAngle;
+        lastShadowTonearmLift = state.tonearmLift;
+        lastShadowBtnOffset = state.physicalBtnOffset;
+        lastShadowQueueY = queueGroup.position.y;
+        renderer.shadowMap.needsUpdate = true;
+      }
+
+      renderer.render(scene, camera);
+      reportFirstFrame();
+    }
+
+    // WebGL 上下文丢失（GPU 重置/驱动回收）：直接可视化提示，避免无声黑屏
+    canvas.addEventListener("webglcontextlost", function (e) {
+      e.preventDefault();
+      showFatal("WebGL 上下文被系统回收，请退出黑胶模式后重进");
+    }, false);
+
+    // 诊断：歌单已注入 3 秒后仍视口异常 / 渲染输出为空，把关键数据画出来定位
+    setTimeout(function () {
+      if (!SONGS.length) return;
+      const vw = viewportEl.clientWidth, vh = viewportEl.clientHeight;
+      const rect = canvas.getBoundingClientRect();
+      if (vw <= 0 || vh <= 0) {
+        showFatal("视口尺寸异常: " + vw + "x" + vh +
+          " innerH=" + window.innerHeight +
+          " docH=" + document.documentElement.clientHeight +
+          " canvas=" + Math.round(rect.width) + "x" + Math.round(rect.height) +
+          " dpr=" + window.devicePixelRatio);
+      } else {
+        const info = renderer.info.render;
+        if (info.triangles === 0) {
+          showFatal("渲染输出为空: triangles=0 calls=" + info.calls +
+            " 视口=" + vw + "x" + vh);
+        }
+      }
+    }, 3000);
+
+    updateUI();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

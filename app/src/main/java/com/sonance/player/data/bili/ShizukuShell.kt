@@ -196,6 +196,28 @@ object ShizukuShell {
         }.getOrDefault(false)
     }
 
+    /**
+     * 以 shell 身份删除若干个路径（`rm -rf`，文件或目录都行）。
+     *
+     * 删完会再 stat 一遍确认路径真的不存在：Shizuku 失联、B 站正在写这个目录、
+     * SELinux 拒绝都会让 `rm` 静默失败，只看退出码不够。
+     *
+     * 返回 true 表示这些路径现在都不存在了 —— **原本就不存在也算成功**，
+     * 这样用户重试或目录被 B 站自己清掉时不会误报失败。
+     */
+    fun deleteTree(paths: List<String>): Boolean {
+        if (!hasPermission()) return false
+        val valid = paths.filter { it.isNotBlank() }
+        if (valid.isEmpty()) return true
+        val remove = valid.joinToString("\n") { p -> "rm -rf ${quote(p)} 2>/dev/null" }
+        val remaining = valid.joinToString(" || ") { p -> "[ -e ${quote(p)} ]" }
+        val out = exec(
+            "$remove\nif $remaining; then echo DELETE_FAIL; else echo DELETE_OK; fi",
+            limitBytes = 64
+        )
+        return out?.trim()?.endsWith("DELETE_OK") == true
+    }
+
     /** 单引号包裹路径，内部单引号按 POSIX 规则转义 */
     private fun quote(path: String): String = "'" + path.replace("'", "'\\''") + "'"
 }

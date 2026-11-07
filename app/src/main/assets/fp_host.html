@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<script>
+// 页内未捕获异常先落到桥上，带 文件:行:列 —— 真机排查不再靠猜
+window.onerror = function (msg, src, line, col) {
+    try { AndroidBridge.onLog('pageerror: ' + msg + ' @ ' + (src || '?') + ':' + line + ':' + col); } catch (e) {}
+    return false;
+};
+// 胶水包按 Node/webpack 打包，浏览器里补齐缺失的全局：
+// - module：包尾 module.exports = {...} 的无害接收者
+// - require('fs')：仅 Node 路径使用，浏览器不会走到，返回空对象即可
+// - require('path')：join(__dirname, "afp.wasm") 决定 wasm 拉取路径，
+//   固定返回根路径，由 Kotlin 侧 shouldInterceptRequest 提供文件
+// - require('crypto')：uuid 生成 sessionId 用 getRandomValues，
+//   必须委托给全局 WebCrypto（const crypto 会遮蔽全局，垫片不能是空对象）
+var module = { exports: {} };
+// Node 环境全局：浏览器里不存在，但 glue 的 wasm 路径计算会引用，先垫上防 ReferenceError
+var __dirname = '/';
+var __filename = '/afp_bundle.js';
+// 此 WebView 的页面里没有全局 crypto（WebCrypto 只在安全上下文暴露，
+// 被拦截的虚拟域未必算）。uuid 生成 sessionId 只是个会话标识，
+// Math.random 级别的随机完全够用。
+// 用 defineProperty 而非直接赋值：个别内核把 crypto 设成只读属性，
+// 普通赋值会静默失败，bundle 里的 bare 引用照样抛 ReferenceError。
+(function () {
+    var shim = {
+        getRandomValues: function (arr) {
+            for (var i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256) & 0xFF;
+            return arr;
+        }
+    };
+    var existing = window.crypto;
+    try {
+        if (!existing || !existing.getRandomValues) {
+            Object.defineProperty(window, 'crypto', { value: shim, writable: true, configurable: true });
+        }
+    } catch (e) { /* 真 crypto 已存在且不可重定义：直接用即可 */ }
+    try {
+        AndroidBridge.onLog('crypto shim 后: typeof window.crypto=' + (typeof window.crypto) +
+            ' hasGRV=' + !!(window.crypto && window.crypto.getRandomValues));
+    } catch (e) {}
+})();
+window.require = function (name) {
+    if (name === 'path') return { join: function () { return '/afp.wasm'; } };
+    if (name === 'crypto') {
+        // 禁写裸 `crypto`：bundle 顶层的 const crypto 在其脚本质检期（TDZ）
+        // 会让本函数里的裸引用直接抛 ReferenceError（typeof 也躲不开），
+        // bundle 第 3 行 require('crypto') 就炸，wasm 永远加载不了。
+        // 显式走 window.crypto 属性访问，绕开全局词法绑定。
+        var c = window.crypto;
+        return (c && c.getRandomValues) ? c : {};
+    }
+    if (name === 'fs') return {
+        // 关键垫片：glue 在「fetch 可用」的环境里走 fs.readFile(Q, cb) 读 wasm
+        // （这包是按 Electron 形态打的）。用页面内 fetch 拉被拦截的 /afp.wasm，
+        // 以 Node 回调风格交还字节，工厂即可正常完成实例化。
+        readFile: function (path, cb) {
+            fetch(path)
+                .then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.arrayBuffer();
+                })
+                .then(function (buf) { cb(null, new Uint8Array(buf)); })
+                .catch(function (e) { cb(e); });
+        }
+    };
+    return {};
+};
+</script>
+<script src="/afp_bundle.js"></script>
+<script>
+// 标准字母表 Base64（含 padding），与参考实现 NeteaseRecordArrayToBase64 一致
+function fpB64Encode(u8) {
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var out = '';
+    for (var i = 0; i < u8.length; i += 3) {
+        var b0 = u8[i];
+        var b1 = i + 1 < u8.length ? u8[i + 1] : undefined;
+        var b2 = i + 2 < u8.length ? u8[i + 2] : undefined;
+        out += chars[b0 >> 2];
+        out += chars[((b0 & 3) << 4) | (b1 === undefined ? 0 : b1 >> 4)];
+        out += b1 === undefined ? '=' : chars[((b1 & 15) << 2) | (b2 === undefined ? 0 : b2 >> 6)];
+        out += b2 === undefined ? '=' : chars[b2 & 63];
+    }
+    return out;
+}
+
+// 一次识别：从桥拉 PCM → ExtractQueryFP → Base64 回传。
+// ExtractQueryFP 在 wasm 初始化完成（embind 注册）后才出现，沿用参考实现的轮询。
+window.__fpRun = function () {
+    // 诊断优先：包体没执行完 / processor 不可达时，把具体原因报回 Kotlin
+    var proc = null;
+    try {
+        proc = window.__afpProcessor ||
+            (typeof processor !== 'undefined' ? processor : null);
+    } catch (e) {
+        proc = null;
+    }
+    if (proc == null) {
+        var bundleErr = window.__afpBundleError || 'undefined';
+        AndroidBridge.onResult('', '指纹引擎不可达（bundleError=' + bundleErr + '）');
+        return;
+    }
+    AndroidBridge.onLog('__fpRun: proc ok, start=' + typeof proc.start);
+    try {
+        var fn = proc.start();
+        var poll = setInterval(function () {
+            if (fn && typeof fn.ExtractQueryFP === 'function') {
+                clearInterval(poll);
+                try {
+                    var b64pcm = AndroidBridge.getPcm();
+                    var raw = atob(b64pcm);
+                    var u8 = new Uint8Array(raw.length);
+                    for (var i = 0; i < raw.length; i++) u8[i] = raw.charCodeAt(i);
+                    var f32 = new Float32Array(u8.buffer);   // 小端 Float32，Kotlin 侧同序
+                    var fp = fn.ExtractQueryFP(f32.buffer);
+                    var n = fp.size();
+                    var i8 = new Int8Array(n);
+                    for (var j = 0; j < n; j++) i8[j] = fp.get(j);
+                    if (n <= 64) {
+                        AndroidBridge.onResult('', '指纹过短（' + n + ' 字节）');
+                        return;
+                    }
+                    // 编码必须走无符号视图：Int8Array 的负值做下标会取到
+                    // undefined，字面量 "undefined" 拼进 Base64，指纹成垃圾。
+                    // （参考实现 Ke(result_buf.buffer) 内部就是 new Uint8Array 视图）
+                    AndroidBridge.onResult(fpB64Encode(new Uint8Array(i8.buffer)), '');
+                } catch (e) {
+                    AndroidBridge.onResult('', '指纹计算失败: ' + e);
+                }
+            }
+        }, 25);
+    } catch (e) {
+        AndroidBridge.onResult('', '指纹引擎启动失败: ' + e);
+    }
+};
+
+AndroidBridge.onReady();
+</script>
+</body>
+</html>

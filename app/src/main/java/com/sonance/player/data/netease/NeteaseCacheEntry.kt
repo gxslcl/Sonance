@@ -17,8 +17,82 @@ enum class NcKind {
     /** 明文音频，直接复制到输出文件夹即可 */
     PLAIN,
 
+    /** 酷狗 KGM 家族（kgm/kgma/kgg/vpr），KGM/KGMA/VPR 走解密管线，KGG 新版不支持 */
+    KGM,
+
+    /** QQ 音乐 QMC 家族（qmc0/qmc3/mflac/mgg 等），无魔数、密钥在文件尾，走解密管线 */
+    QMC,
+
+    /** 汽水音乐 MDL：字节自研加密，无公开解密方案，仅识别列出 */
+    MDL,
+
+    /**
+     * QQ 音乐在线播放分块缓存（cache/files 目录下的 .bin，魔数 01 01 02 02）：
+     * 私有分块仓库，音频分片密钥由服务端下发、文件内无任何密钥结构，
+     * 全生态无公开解密方案，仅识别列出。
+     */
+    QQCACHE,
+
     /** 认不出来的魔数（json、图片、数据库、残片…），扫描结果里直接丢弃 */
     UNKNOWN
+}
+
+/**
+ * 嗅探目标 App。roots 是各 App 缓存 / 下载的候选根目录（存在才扫）：
+ * Android/data 下的 cache 与 files 覆盖流媒体缓存，
+ * 公共下载目录（kgmusic / qqmusic）覆盖用户手动下载的加密文件。
+ */
+enum class SniffApp(val pkg: String, val label: String, val roots: List<String>) {
+    NETEASE(
+        "com.netease.cloudmusic", "网易云",
+        listOf(
+            "/sdcard/Android/data/com.netease.cloudmusic/cache",
+            "/sdcard/Android/data/com.netease.cloudmusic/files",
+            "/sdcard/Android/data/com.netease.cloudmusic.lite/cache",
+            "/sdcard/Android/data/com.netease.cloudmusic.lite/files"
+        )
+    ),
+    KUGOU(
+        "com.kugou.android", "酷狗",
+        listOf(
+            "/sdcard/Android/data/com.kugou.android/cache",
+            "/sdcard/Android/data/com.kugou.android/files",
+            // 概念版是独立包名；其流媒体缓存多在应用内部存储（无 root 读不到），
+            // 公共目录有缓存时（如手动下载）这里能接住
+            "/sdcard/Android/data/com.kugou.android.lite/cache",
+            "/sdcard/Android/data/com.kugou.android.lite/files",
+            "/sdcard/kgmusic"
+        )
+    ),
+    TENCENT(
+        "com.tencent.qqmusic", "QQ 音乐",
+        listOf(
+            "/sdcard/Android/data/com.tencent.qqmusic/cache",
+            "/sdcard/Android/data/com.tencent.qqmusic/files",
+            // 下载的歌（带 QTag 密钥，可转换）默认落在这里；在线播放缓存无密钥，转不了
+            "/sdcard/qqmusic"
+        )
+    ),
+    LUNA(
+        "com.luna.music", "汽水",
+        listOf(
+            "/sdcard/Android/data/com.luna.music/cache",
+            "/sdcard/Android/data/com.luna.music/files",
+            "/sdcard/Android/data/com.ss.android.music/cache",
+            "/sdcard/Android/data/com.ss.android.music/files"
+        )
+    ),
+    BODIAN(
+        "cn.wenyu.bodian", "波点",
+        listOf(
+            "/sdcard/Android/data/cn.wenyu.bodian/files/playCache",
+            "/sdcard/Android/data/cn.wenyu.bodian/cache"
+        )
+    );
+
+    companion object {
+        fun safeOf(name: String): SniffApp? = runCatching { valueOf(name) }.getOrNull()
+    }
 }
 
 /** 扫描到的单个缓存文件。分片场景下它只是组员，还不是可转换的条目 */
@@ -70,6 +144,10 @@ data class NeteaseCacheEntry(
             when (kind) {
                 NcKind.NCM -> append("NCM 加密")
                 NcKind.NMS -> append("NMSF 加密")
+                NcKind.KGM -> append("KGM 加密")
+                NcKind.QMC -> append("QMC 加密")
+                NcKind.MDL -> append("MDL 加密 · 暂不支持解密")
+                NcKind.QQCACHE -> append("QQ 分块缓存 · 暂不支持解密")
                 NcKind.PLAIN -> append(plainExt.removePrefix(".").uppercase() + " 明文")
                 NcKind.UNKNOWN -> append("无法识别")
             }
@@ -96,13 +174,14 @@ object NeteaseCacheParser {
     private val FRAGMENT_SUFFIX = Regex("""^(.*)-([0-9]{1,5})$""")
 
     /**
-     * 按头部字节判类别。
+     * 按头部字节 + 文件名判类别。
      *
-     * 只认可靠的容器签名（与 [com.sonance.player.data.AudioDecoder.sniffExtension]
-     * 同一套判断标准，但作用在**加密前的明文头**上），认不出就返回 UNKNOWN，
-     * 宁可漏掉也不把 json / 图片当成音频塞给用户。
+     * 魔数优先（NCM / NMSF / KGM 家族），其次明文音频签名；
+     * 都不中再按扩展名兜底 —— QMC 家族**没有任何魔数**（密钥藏在文件尾），
+     * 只能靠文件名认；KGG 新版加密的魔数不在支持列表里，也靠扩展名识别。
+     * 全部落空返回 UNKNOWN，宁可漏掉也不把 json / 图片当成音频塞给用户。
      */
-    fun classify(header: ByteArray): Pair<NcKind, String> {
+    fun classify(header: ByteArray, fileName: String = ""): Pair<NcKind, String> {
         if (header.size >= 8 && header.copyOfRange(0, 8).contentEquals(NCM_MAGIC)) {
             return NcKind.NCM to ""
         }
@@ -110,8 +189,19 @@ object NeteaseCacheParser {
         if (com.sonance.player.data.NmsDecoder.looksLike(header)) {
             return NcKind.NMS to ""
         }
-        val b0 = header.getOrNull(0)?.toInt()?.and(0xFF) ?: return NcKind.UNKNOWN to ""
-        val b1 = header.getOrNull(1)?.toInt()?.and(0xFF) ?: return NcKind.UNKNOWN to ""
+        // 酷狗 KGM / KGMA / VPR 的魔数（KGG 新版不在其中，靠扩展名兜底）
+        if (com.sonance.player.data.KgmDecoder.looksLike(header)) {
+            return NcKind.KGM to ""
+        }
+        // QQ 音乐在线播放分块仓库（cache/files 目录下的 .bin，真机实测魔数 01 01 02 02）
+        if (header.size >= 4 &&
+            header[0] == 0x01.toByte() && header[1] == 0x01.toByte() &&
+            header[2] == 0x02.toByte() && header[3] == 0x02.toByte()
+        ) {
+            return NcKind.QQCACHE to ""
+        }
+        val b0 = header.getOrNull(0)?.toInt()?.and(0xFF) ?: return byExtension(fileName)
+        val b1 = header.getOrNull(1)?.toInt()?.and(0xFF) ?: return byExtension(fileName)
         val b2 = header.getOrNull(2)?.toInt()?.and(0xFF)
         val b3 = header.getOrNull(3)?.toInt()?.and(0xFF)
 
@@ -123,8 +213,23 @@ object NeteaseCacheParser {
         if (b0 == 0x66 && b1 == 0x4C && b2 == 0x61 && b3 == 0x43) return NcKind.PLAIN to ".flac"
         // OggS
         if (b0 == 0x4F && b1 == 0x67 && b2 == 0x67 && b3 == 0x53) return NcKind.PLAIN to ".ogg"
-        // RIFF (wav)
-        if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46) return NcKind.PLAIN to ".wav"
+        // RIFF —— 12 字节起先排除 WEBP 封面（RIFF....WEBP，QQ音乐 download_cache
+        // 的封面图就是它，只看头 8 字节会和 wav 混淆）；不足 12 字节维持旧判定
+        if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46) {
+            if (header.size >= 12) {
+                val b8 = header[8].toInt().and(0xFF)
+                val b9 = header[9].toInt().and(0xFF)
+                val b10 = header[10].toInt().and(0xFF)
+                val b11 = header[11].toInt().and(0xFF)
+                if (b8 == 0x57 && b9 == 0x45 && b10 == 0x42 && b11 == 0x50) {
+                    return NcKind.UNKNOWN to "" // WEBP 图片
+                }
+                if (!(b8 == 0x57 && b9 == 0x41 && b10 == 0x56 && b11 == 0x45)) {
+                    return NcKind.UNKNOWN to "" // RIFF 变体但不是 WAVE
+                }
+            }
+            return NcKind.PLAIN to ".wav"
+        }
         // ftyp（第 4~7 字节）—— m4a
         val b4 = header.getOrNull(4)?.toInt()?.and(0xFF)
         val b5 = header.getOrNull(5)?.toInt()?.and(0xFF)
@@ -132,6 +237,16 @@ object NeteaseCacheParser {
         val b7 = header.getOrNull(7)?.toInt()?.and(0xFF)
         if (b4 == 0x66 && b5 == 0x74 && b6 == 0x79 && b7 == 0x70) return NcKind.PLAIN to ".m4a"
 
+        return byExtension(fileName)
+    }
+
+    /** 魔数落空后的扩展名兜底（QMC / KGG 新版 / MDL 都没有可靠魔数） */
+    private fun byExtension(fileName: String): Pair<NcKind, String> {
+        if (fileName.isBlank()) return NcKind.UNKNOWN to ""
+        val ext = com.sonance.player.data.LockedFormat.extensionOf(fileName)
+        if (ext in com.sonance.player.data.KgmDecoder.extensions) return NcKind.KGM to ""
+        if (com.sonance.player.data.QmcDecoder.looksLikeName(fileName)) return NcKind.QMC to ""
+        if (ext == "mdl") return NcKind.MDL to ""
         return NcKind.UNKNOWN to ""
     }
 
@@ -164,7 +279,7 @@ object NeteaseCacheParser {
             val path = parts[1]
             if (path.isBlank() || size <= 0) return@forEach
             if (out.containsKey(path)) return@forEach
-            val (kind, ext) = classify(hexToBytes(parts[2]))
+            val (kind, ext) = classify(hexToBytes(parts[2]), parts[1].substringAfterLast('/'))
             out[path] = NcFile(path, size, kind, ext)
         }
         return out.values.toList()
@@ -176,8 +291,14 @@ object NeteaseCacheParser {
      * 阈值 = 150 秒 × 128kbps ÷ 8 ≈ 2.4MB（128kbps 是网易云缓存的最低常见码率）：
      * 真机实测残曲（≤1.28MB）全覆盖，完整歌（≥2.5MB）不误标。
      * 最终裁决在转换时按时长做（150 秒），这里只影响展示。
+     *
+     * [plainExt] 豁免：ogg/opus 这类低码率明文容器（波点缓存主力，48~96kbps），
+     * 2.4MB 以内也可能是完整短歌，不做大小预判（转换时长裁决仍在）。
      */
-    fun isSuspectTrial(sizeBytes: Long): Boolean = sizeBytes < 2_400_000
+    fun isSuspectTrial(sizeBytes: Long, plainExt: String = ""): Boolean {
+        if (sizeBytes >= 2_400_000) return false
+        return plainExt != ".ogg" && plainExt != ".flac"
+    }
 
     /**
      * 把散文件归并成可转换的条目。
@@ -225,13 +346,15 @@ object NeteaseCacheParser {
                 val size = ordered.sumOf { it.file.size }
                 result += NeteaseCacheEntry(
                     key = first.file.path,
-                    displayName = first.prefix.ifBlank { "未命名缓存" },
+                    displayName = displayNameOf(first.prefix.ifBlank { "未命名缓存" }),
                     sizeBytes = size,
                     kind = first.file.kind,
                     plainExt = first.file.plainExt,
                     fragments = ordered.map { it.file.path },
                     fragmentCount = ordered.size,
-                    suspectTrial = isSuspectTrial(size)
+                    // 分块仓库不是单曲，大小预判无意义，直接豁免
+                    suspectTrial = first.file.kind != NcKind.QQCACHE &&
+                        isSuspectTrial(size, first.file.plainExt)
                 )
             } else {
                 result += singleEntry(frags.first().file)
@@ -267,14 +390,25 @@ object NeteaseCacheParser {
         val stem = if (dot > 0) name.substring(0, dot) else name
         return NeteaseCacheEntry(
             key = f.path,
-            displayName = stem.ifBlank { "未命名缓存" },
+            displayName = displayNameOf(stem),
             sizeBytes = f.size,
             kind = f.kind,
             plainExt = f.plainExt,
             fragments = listOf(f.path),
             fragmentCount = 1,
-            suspectTrial = isSuspectTrial(f.size)
+            // 分块仓库不是单曲，大小预判无意义，直接豁免
+            suspectTrial = f.kind != NcKind.QQCACHE && isSuspectTrial(f.size, f.plainExt)
         )
+    }
+
+    /**
+     * 展示名清洗：波点缓存假扩展名链是 `<id>.<码率>.vcc.song`，去扩展名后的
+     * stem 还挂着 `.vcc` 中缀（如 `551684.128.vcc`），把它剥掉；
+     * 其余文件名原样返回。
+     */
+    private fun displayNameOf(stem: String): String {
+        val s = stem.removeSuffix(".vcc")
+        return s.ifBlank { "未命名缓存" }
     }
 }
 

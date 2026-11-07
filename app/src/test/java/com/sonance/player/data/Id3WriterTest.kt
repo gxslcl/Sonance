@@ -313,6 +313,70 @@ class Id3WriterTest {
         }
     }
 
+    // ===== 编辑信息：替换标题/歌手/专辑并保留其余帧 =====
+
+    /**
+     * 手动编辑歌名歌手时，**除了标题/歌手/专辑之外的帧一个都不能少** ——
+     * 尤其是封面：改个名字不该把 APIC 弄丢。
+     */
+    @Test
+    fun `编辑信息替换标题歌手专辑并保留封面和次要帧`() {
+        val original = tagOf(
+            3,
+            frameV(3, "TIT2", utf16("旧标题")),
+            frameV(3, "TPE1", utf16("旧歌手")),
+            frameV(3, "TALB", utf16("旧专辑")),
+            frameV(3, "TRCK", utf16("3/12")),
+            frameV(3, "APIC", apicPayload(cover))
+        )
+
+        val rebuilt = Id3Writer.withMetaPreserving(original, "晴天", "周杰伦", "叶惠美")
+        assertNotNull(rebuilt)
+
+        val texts = readTextFrames(rebuilt!!)
+        assertEquals("晴天", texts["TIT2"])
+        assertEquals("周杰伦", texts["TPE1"])
+        assertEquals("叶惠美", texts["TALB"])
+        assertEquals("3/12", texts["TRCK"])
+        assertEquals(3, rebuilt[3].toInt())          // 版本跟随原标签
+        // 封面帧还在且能被项目解析器读出来
+        assertEquals(1, countFrames(rebuilt, "APIC"))
+        assertArrayEquals(cover, AudioTags.coverArtFrom(ByteArrayInputStream(rebuilt)))
+    }
+
+    /** 空串不写帧：只改歌手时不应多出一个空标题帧 */
+    @Test
+    fun `编辑信息时空字段不写帧`() {
+        val original = tagOf(3, frameV(3, "TIT2", utf16("旧标题")))
+
+        val rebuilt = Id3Writer.withMetaPreserving(original, "", "新歌手", "")!!
+        val texts = readTextFrames(rebuilt)
+        assertFalse("空标题不该写 TIT2", texts.containsKey("TIT2"))
+        assertEquals("新歌手", texts["TPE1"])
+        assertFalse(texts.containsKey("TALB"))
+    }
+
+    /** 原标签是 v2.4 时，新写的文本帧长度也必须是 syncsafe */
+    @Test
+    fun `编辑信息在 v2_4 上产出 v2_4`() {
+        val original = tagOf(4, frameV(4, "TRCK", utf16("1/1")))
+
+        val rebuilt = Id3Writer.withMetaPreserving(original, "晴", "周", "叶")!!
+        assertEquals(4, rebuilt[3].toInt())
+        val texts = readTextFrames(rebuilt)
+        assertEquals("晴", texts["TIT2"])
+        assertEquals("周", texts["TPE1"])
+        assertEquals("叶", texts["TALB"])
+        assertEquals("1/1", texts["TRCK"])
+    }
+
+    /** 没有原标签 → 返回 null，由调用方退回 buildTag 从零建 */
+    @Test
+    fun `编辑信息没有原标签时返回 null`() {
+        assertNull(Id3Writer.withMetaPreserving(null, "a", "b", "c"))
+        assertNull(Id3Writer.withMetaPreserving(audio, "a", "b", "c"))
+    }
+
     // ===== 测试用的迷你解析器 =====
 
     /**

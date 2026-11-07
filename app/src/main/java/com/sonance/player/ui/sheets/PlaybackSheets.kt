@@ -40,6 +40,7 @@ import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /* ============================================================
  * 均衡器面板
@@ -64,7 +65,7 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = skin.surface,
+        containerColor = skin.surface.solidSurface(),
         dragHandle = { SheetHandle() }
     ) {
         Column(
@@ -225,7 +226,7 @@ fun SleepTimerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = skin.surface,
+        containerColor = skin.surface.solidSurface(),
         dragHandle = { SheetHandle() }
     ) {
         Column(

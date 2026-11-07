@@ -32,6 +32,20 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putBoolean(KEY_VINYL_MODE, v).apply()
 
     /**
+     * 沉浸黑胶页（全屏 WebView 唱机）的机械音效开关与音量。
+     * 默认关闭（音效与歌曲声音相冲突，触感反馈保留），设置页可开；
+     * 进入黑胶页时经 setSfx 推给页面。
+     */
+    var vinylSfxEnabled: Boolean
+        get() = sp.getBoolean(KEY_VINYL_SFX_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_VINYL_SFX_ENABLED, v).apply()
+
+    /** 机械音效轨音量 0~1（页面内 masterGain），与媒体音量互相独立 */
+    var vinylSfxVolume: Float
+        get() = sp.getFloat(KEY_VINYL_SFX_VOLUME, 0.9f)
+        set(v) = sp.edit().putFloat(KEY_VINYL_SFX_VOLUME, v.coerceIn(0f, 1f)).apply()
+
+    /**
      * 晕染浓度。
      *
      * 默认 0.60 是「能一眼看出来、但不抢封面」的档位 ——
@@ -127,6 +141,16 @@ class Prefs(context: Context) {
         get() = sp.getLong(KEY_PLAY_POS, 0L)
         set(v) = sp.edit().putLong(KEY_PLAY_POS, v).apply()
 
+    /**
+     * 播放模式（[PlayMode] 的 name：SHUFFLE / REPEAT_ALL / REPEAT_ONE）。
+     *
+     * 用字符串而不是 ordinal：以后模式顺序变了，旧值也不会错位成另一种模式。
+     * 默认「列表循环」—— 与 UI 的首个图标一致。
+     */
+    var playMode: String
+        get() = sp.getString(KEY_PLAY_MODE, "REPEAT_ALL") ?: "REPEAT_ALL"
+        set(v) = sp.edit().putString(KEY_PLAY_MODE, v).apply()
+
     var scanFilterShortAudio: Boolean
         get() = sp.getBoolean(KEY_FILTER_SHORT, true)
         set(v) = sp.edit().putBoolean(KEY_FILTER_SHORT, v).apply()
@@ -145,6 +169,16 @@ class Prefs(context: Context) {
     var scanExcludeNonSongFolders: Boolean
         get() = sp.getBoolean(KEY_EXCLUDE_NON_SONG, true)
         set(v) = sp.edit().putBoolean(KEY_EXCLUDE_NON_SONG, v).apply()
+
+    /**
+     * 上次「扫描」面板里勾选的目录（换行分隔）。
+     *
+     * 空 = 还没选过，下次打开面板不预选任何目录；老用户没有这个键时读到的也是空，
+     * 不会因为升级而误扫某些目录。
+     */
+    var scanScopePaths: String
+        get() = sp.getString(KEY_SCAN_SCOPE, "") ?: ""
+        set(v) = sp.edit().putString(KEY_SCAN_SCOPE, v).apply()
 
     /** 当前选中的应用图标（对应 manifest 里的 activity-alias 后缀）；没选过时用全局默认（s2_4） */
     var appIconId: String
@@ -557,6 +591,69 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_BILI_PLAY_MODE, 1)
         set(v) = sp.edit().putInt(KEY_BILI_PLAY_MODE, v).apply()
 
+    /**
+     * 画面提亮档位：0=关 1=弱 2=中 3=强（对应 gain 1.0/1.15/1.30/1.45）。
+     *
+     * 和播放模式一样存 ordinal 并夹范围：跨视频、跨会话沿用，
+     * 用户调一次就该一直是那个档，切视频不重置。
+     */
+    var biliBrightnessGain: Int
+        get() = sp.getInt(KEY_BILI_BRIGHTNESS_GAIN, 0).coerceIn(0, 3)
+        set(v) = sp.edit().putInt(KEY_BILI_BRIGHTNESS_GAIN, v.coerceIn(0, 3)).apply()
+
+    /**
+     * B 站播放页操作菜单**被用户拖动后的位置**，存的是菜单中心点的屏幕比例（0~1）。
+     *
+     * -1 = 还没拖过。按比例存是为了横竖屏、不同分辨率下位置不跑偏；
+     * 跨视频、跨会话都沿用，切换视频或重进页面不会把它重置回屏幕正中。
+     */
+    var biliMenuX: Float
+        get() = sp.getFloat(KEY_BILI_MENU_X, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_MENU_X, v.coerceIn(0f, 1f)).apply()
+
+    var biliMenuY: Float
+        get() = sp.getFloat(KEY_BILI_MENU_Y, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_MENU_Y, v.coerceIn(0f, 1f)).apply()
+
+    /** 用户是否手动拖过菜单。没拖过时按「上次点击锚点」定位，拖动后固定用拖动位置 */
+    var biliMenuDragged: Boolean
+        get() = sp.getBoolean(KEY_BILI_MENU_DRAGGED, false)
+        set(v) = sp.edit().putBoolean(KEY_BILI_MENU_DRAGGED, v).apply()
+
+    /**
+     * 菜单**上次出现时的点击锚点**（屏幕比例）。用户没拖过菜单时，下次显示就落在
+     * 这个锚点上 —— 这样"上次点哪儿、菜单就在哪儿"，而不是每次回到屏幕中央。
+     */
+    var biliMenuAnchorX: Float
+        get() = sp.getFloat(KEY_BILI_MENU_ANCHOR_X, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_MENU_ANCHOR_X, v.coerceIn(0f, 1f)).apply()
+
+    var biliMenuAnchorY: Float
+        get() = sp.getFloat(KEY_BILI_MENU_ANCHOR_Y, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_MENU_ANCHOR_Y, v.coerceIn(0f, 1f)).apply()
+
+    /**
+     * 视频浮窗中心点的屏幕比例（0~1），-1 = 还没拖过。
+     *
+     * 和 [biliMenuX] 一样按比例存：换分辨率、横竖屏后位置不会跑到屏幕外。
+     */
+    var biliFloatX: Float
+        get() = sp.getFloat(KEY_BILI_FLOAT_X, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_FLOAT_X, v.coerceIn(0f, 1f)).apply()
+
+    var biliFloatY: Float
+        get() = sp.getFloat(KEY_BILI_FLOAT_Y, -1f)
+        set(v) = sp.edit().putFloat(KEY_BILI_FLOAT_Y, v.coerceIn(0f, 1f)).apply()
+
+    /**
+     * 锁屏 / 切后台时是否继续播放视频音频。默认关闭（与音乐不同，视频默认不该在后台偷偷出声）。
+     *
+     * 状态持久化：用户改一次，下次冷启动保持上次选择。
+     */
+    var biliBackgroundPlay: Boolean
+        get() = sp.getBoolean(KEY_BILI_BACKGROUND_PLAY, false)
+        set(v) = sp.edit().putBoolean(KEY_BILI_BACKGROUND_PLAY, v).apply()
+
     // ===== 在线封面（默认打开，与在线歌词同一步调）=====
 
     var onlineCoverEnabled: Boolean
@@ -690,6 +787,17 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_NETEASE_FILL, false)
         set(v) = sp.edit().putBoolean(KEY_NETEASE_FILL, v).apply()
 
+    // ===== 嗅探目标 =====
+
+    /**
+     * 嗅探音乐缓存的目标 App（[com.sonance.player.data.netease.SniffApp.name] 集合）。
+     * 默认网易云 + 酷狗 + QQ 音乐；汽水不进默认（其 MDL 加密无公开解密方案）。
+     */
+    var sniffTargets: Set<String>
+        get() = (sp.getStringSet(KEY_SNIFF_TARGETS, DEFAULT_SNIFF_TARGETS) ?: DEFAULT_SNIFF_TARGETS)
+            .filter { it in VALID_SNIFF_TARGETS }.toSet()
+        set(v) = sp.edit().putStringSet(KEY_SNIFF_TARGETS, v).apply()
+
     // ===== 播放并下载 =====
 
     /**
@@ -776,6 +884,16 @@ class Prefs(context: Context) {
     var lastScanAt: Long
         get() = sp.getLong(KEY_SCAN_AT, 0L)
         set(v) = sp.edit().putLong(KEY_SCAN_AT, v).apply()
+
+    /**
+     * 列表长按提示是否已经看过。
+     *
+     * 行尾去掉 ⋮ 之后长按是唯一入口，这条灰字只提示一次；用户第一次长按后写 true，
+     * 之后不再打扰。
+     */
+    var longPressHintShown: Boolean
+        get() = sp.getBoolean(KEY_LONG_PRESS_HINT, false)
+        set(v) = sp.edit().putBoolean(KEY_LONG_PRESS_HINT, v).apply()
 
     /** 用户授权用于检查不可播放文件的目录（SAF tree uri） */
     var compatTreeUri: String?
@@ -989,6 +1107,31 @@ class Prefs(context: Context) {
         }
     }
 
+    /**
+     * 多设备同步：本机在组里显示的名字（默认取机型，可被用户改）。
+     * 只做本地展示，不参与配对鉴权。
+     */
+    var groupDeviceName: String
+        get() = sp.getString(KEY_GROUP_NAME, null)?.takeIf { it.isNotBlank() }
+            ?: android.os.Build.MODEL.orEmpty().ifBlank { "Android" }
+        set(v) = sp.edit().putString(KEY_GROUP_NAME, v.trim().take(24)).apply()
+
+    /** 最近一次手动连接的主机地址（调试入口用，正式流程靠 NSD） */
+    var groupLastHost: String?
+        get() = sp.getString(KEY_GROUP_LAST_HOST, null)
+        set(v) = sp.edit().putString(KEY_GROUP_LAST_HOST, v).apply()
+
+    /**
+     * 输出延迟校准结果，按「机型 + 输出路由」分开存。
+     * 同一台手机插拔耳机/连蓝牙都要用不同的值，混用会把同步搞坏。
+     */
+    fun groupOutputLatency(model: String, route: String): Long =
+        sp.getInt(KEY_GROUP_LATENCY + model + "_" + route, -1).toLong()
+
+    fun setGroupOutputLatency(model: String, route: String, ms: Long) {
+        sp.edit().putInt(KEY_GROUP_LATENCY + model + "_" + route, ms.toInt()).apply()
+    }
+
     companion object {
         /** 晕染浓度的可调范围（界面上的滑块直接用这两个值） */
         const val MIN_GLOW_STRENGTH = 0.02f
@@ -1005,11 +1148,16 @@ class Prefs(context: Context) {
 
         private const val KEY_GLOW_MODE = "glow_mode"
         private const val KEY_GLOW_STRENGTH = "glow_strength"
+        private const val KEY_GROUP_NAME = "group_device_name"
+        private const val KEY_GROUP_LAST_HOST = "group_last_host"
+        private const val KEY_GROUP_LATENCY = "group_latency_"
         private const val KEY_GLOW_TRANSITION = "glow_transition"
         private const val KEY_GLOW_FADE_MS = "glow_fade_ms"
         private const val KEY_ART_TRANSITION = "art_transition_mode"
         private const val KEY_ART_FADE_MS = "art_fade_ms"
         private const val KEY_VINYL_MODE = "player_vinyl_mode"
+        private const val KEY_VINYL_SFX_ENABLED = "player_vinyl_sfx_enabled"
+        private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
         private const val KEY_SKIN = "skin_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"
@@ -1028,11 +1176,14 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_QUEUE = "play_queue_ids"
         private const val KEY_PLAY_INDEX = "play_queue_index"
         private const val KEY_PLAY_POS = "play_position_ms"
+        private const val KEY_PLAY_MODE = "play_mode"
         private const val KEY_COUNT = "play_count_"
         private const val KEY_FILTER_SHORT = "filter_short"
         private const val KEY_EXCLUDE_LOCKED = "scan_exclude_locked"
         private const val KEY_EXCLUDE_UNSUPPORTED = "scan_exclude_unsupported"
         private const val KEY_EXCLUDE_NON_SONG = "scan_exclude_nonsong"
+        private const val KEY_SCAN_SCOPE = "scan_scope_paths"
+        private const val KEY_LONG_PRESS_HINT = "long_press_hint_shown"
         private const val KEY_APP_ICON = "app_icon_id"
         private const val KEY_VIZ_STYLE = "viz_style"
         private const val KEY_VIZ_BARS = "viz_bars"
@@ -1061,6 +1212,10 @@ class Prefs(context: Context) {
         /** 搜索历史最多存几条。再多这一行胶囊就翻不动了，而且没人会翻回去用 */
         const val MAX_ONLINE_HISTORY = 12
         private const val KEY_NETEASE_FILL = "netease_fill_enabled"
+        private const val KEY_SNIFF_TARGETS = "sniff_targets"
+        private val DEFAULT_SNIFF_TARGETS = setOf("NETEASE", "KUGOU", "TENCENT")
+        private val VALID_SNIFF_TARGETS =
+            com.sonance.player.data.netease.SniffApp.entries.map { it.name }.toSet()
         private const val KEY_DL_ENABLED = "online_download_enabled"
         private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
         private const val KEY_DL_KEYS = "online_download_keys"
@@ -1110,6 +1265,19 @@ class Prefs(context: Context) {
 
         /** B 站缓存视频的播放模式，存 [com.sonance.player.playback.PlayMode.ordinal] */
         private const val KEY_BILI_PLAY_MODE = "bili_play_mode"
+
+        /** 播放页画面提亮档位（0=关 1=弱 2=中 3=强） */
+        private const val KEY_BILI_BRIGHTNESS_GAIN = "bili_brightness_gain"
+
+        /** B 站播放页操作菜单的位置（屏幕比例，-1 = 未设置）与拖动标记 */
+        private const val KEY_BILI_MENU_X = "bili_menu_x"
+        private const val KEY_BILI_MENU_Y = "bili_menu_y"
+        private const val KEY_BILI_MENU_DRAGGED = "bili_menu_dragged"
+        private const val KEY_BILI_MENU_ANCHOR_X = "bili_menu_anchor_x"
+        private const val KEY_BILI_MENU_ANCHOR_Y = "bili_menu_anchor_y"
+        private const val KEY_BILI_FLOAT_X = "bili_float_x"
+        private const val KEY_BILI_FLOAT_Y = "bili_float_y"
+        private const val KEY_BILI_BACKGROUND_PLAY = "bili_background_play"
         private const val KEY_COVER_ENABLED = "online_cover_enabled"
         private const val KEY_COVER_PIN = "cover_pin_"
         private const val KEY_EQ_ENABLED = "eq_enabled"

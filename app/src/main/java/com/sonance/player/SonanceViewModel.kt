@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.util.Log
 import com.sonance.player.data.Album
 import com.sonance.player.data.AppIconSwitcher
 import com.sonance.player.data.Artist
@@ -34,6 +35,10 @@ import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.ShuffleOrder
+import com.sonance.player.data.SongMetaEditor
+import com.sonance.player.data.recognition.AudioFingerprinter
+import com.sonance.player.data.recognition.NeteaseRecognizer
+import com.sonance.player.data.recognition.PcmExtractor
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.hasCjkText
 import com.sonance.player.data.isRemoteSongId
@@ -60,11 +65,16 @@ import com.sonance.player.data.decodeSongsFromJson
 import com.sonance.player.data.findDuplicates
 import com.sonance.player.data.encodeSongsToJson
 import com.sonance.player.data.ScanOutcome
+import com.sonance.player.data.ScanFolderInfo
+import com.sonance.player.data.canonicalArtist
+import com.sonance.player.data.canonicalTitle
+import com.sonance.player.data.DUPLICATE_DURATION_TOLERANCE_MS
 import com.sonance.player.data.RestoreEngine
 import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.netease.NcConvertSummary
 import com.sonance.player.data.netease.NeteaseCacheRepository
 import com.sonance.player.data.netease.NeteaseScanResult
+import com.sonance.player.data.netease.SniffApp
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongStats
 import com.sonance.player.data.SortField
@@ -89,6 +99,7 @@ import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
@@ -171,6 +182,228 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 最近一次扫描的排除明细，供「曲库清理」区块展示 */
     var lastScanOutcome by mutableStateOf<ScanOutcome?>(null)
         private set
+
+    // ===== 长按提示（一次性）=====
+
+    /**
+     * 行尾去掉 ⋮ 之后，长按是低频操作的唯一入口。
+     * 列表顶部那条灰字只出现到用户第一次长按为止，之后不再出现，也不弹 toast。
+     */
+    var longPressHintShown by mutableStateOf(prefs.longPressHintShown)
+        private set
+
+    fun noteLongPressUsed() {
+        if (longPressHintShown) return
+        longPressHintShown = true
+        prefs.longPressHintShown = true
+    }
+
+    // ===== 列表多选删除 =====
+
+    /** 是否处于多选态。放 ViewModel 里，保证多个复用 SongList 的页面/页签共享同一份状态 */
+    var selectionMode by mutableStateOf(false)
+        private set
+
+    /** 多选态下勾选的歌曲 id */
+    var selectedSongIds by mutableStateOf<Set<Long>>(emptySet())
+        private set
+
+    fun enterSelection(initialId: Long? = null) {
+        selectionMode = true
+        selectedSongIds = if (initialId == null) emptySet() else setOf(initialId)
+    }
+
+    fun toggleSelection(id: Long) {
+        selectedSongIds = if (id in selectedSongIds) selectedSongIds - id else selectedSongIds + id
+    }
+
+    fun selectAllSongIds(ids: Collection<Long>) {
+        selectedSongIds = ids.toSet()
+    }
+
+    fun deselectAllSongIds() {
+        selectedSongIds = emptySet()
+    }
+
+    fun clearSelection() {
+        selectionMode = false
+        selectedSongIds = emptySet()
+    }
+
+    /** 多选删除：走和单曲「删除文件」同一套删除/授权链路 */
+    fun deleteSelectedSongs(allSongs: List<Song>) {
+        val targets = allSongs.filter { it.id in selectedSongIds && it.isLocal }
+        if (targets.isEmpty()) {
+            showToast("没有可删除的本地文件")
+            return
+        }
+        // 先退出多选，结果由删除链路异步提示
+        clearSelection()
+        deleteSongFiles(targets, detailed = true)
+    }
+
+    // ===== 扫描范围（MediaStore 已索引目录多选）=====
+
+    /** 面板里的可选目录（MediaStore 聚合结果 + 已记忆但暂时查不到的目录） */
+    var scanFolders by mutableStateOf<List<ScanFolderInfo>>(emptyList())
+        private set
+    var scanFoldersLoading by mutableStateOf(false)
+        private set
+
+    /** 上次勾选的目录；从 Prefs 读，默认空集合 */
+    var scanScopeSelection by mutableStateOf(
+        prefs.scanScopePaths.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    )
+        private set
+
+    var scopedScanRunning by mutableStateOf(false)
+        private set
+    var scopedScanScanned by mutableIntStateOf(0)
+        private set
+    var scopedScanResult by mutableStateOf<ScopedScanResult?>(null)
+        private set
+
+    private var scopedScanJob: Job? = null
+
+    /** 扫描结果短暂占用顶栏副标题位，几秒后自动退回常规副标题（不新增控件、不弹 toast） */
+    var scanHint by mutableStateOf<String?>(null)
+        private set
+    private var scanHintJob: Job? = null
+
+    private fun flashScanHint(text: String) {
+        scanHint = text
+        scanHintJob?.cancel()
+        scanHintJob = viewModelScope.launch {
+            delay(6_000L)
+            scanHint = null
+        }
+    }
+
+    data class ScopedScanResult(val scanned: Int, val added: Int, val removed: Int)
+
+    /** 打开面板时拉取目录列表；已记忆但 MediaStore 暂时查不到的目录保留为 0 首条目 */
+    fun loadScanFolders() {
+        if (scanFoldersLoading) return
+        scanFoldersLoading = true
+        viewModelScope.launch {
+            val listed = withContext(Dispatchers.IO) { repo.listFolders() }
+            val known = listed.mapTo(HashSet()) { it.path }
+            val missing = scanScopeSelection.filter { it !in known }.map {
+                ScanFolderInfo(
+                    path = it,
+                    name = it.substringAfterLast('/').ifBlank { "根目录" },
+                    songCount = 0
+                )
+            }
+            scanFolders = listed + missing
+            scanFoldersLoading = false
+        }
+    }
+
+    fun toggleScanScope(path: String) {
+        val next = if (path in scanScopeSelection) scanScopeSelection - path else scanScopeSelection + path
+        updateScanScopeSelection(next)
+    }
+
+    fun updateScanScopeSelection(paths: Set<String>) {
+        scanScopeSelection = paths
+        prefs.scanScopePaths = paths.joinToString("\n")
+    }
+
+    fun clearScopedScanResult() {
+        scopedScanResult = null
+    }
+
+    fun cancelScopedScan() {
+        scopedScanJob?.cancel()
+        scopedScanJob = null
+        scopedScanRunning = false
+        showToast("已取消扫描")
+    }
+
+    /** 只重扫所选目录，并与现有曲库合并（其他目录保持不动） */
+    fun startScopedScan(paths: Set<String>) {
+        if (paths.isEmpty()) {
+            showToast("请先选择要扫描的文件夹")
+            return
+        }
+        if (!hasAudioPermission()) {
+            showToast("没有读取音乐文件的权限，无法扫描")
+            return
+        }
+        scopedScanJob?.cancel()
+        updateScanScopeSelection(paths)
+        scopedScanScanned = 0
+        scopedScanResult = null
+        scopedScanRunning = true
+        scopedScanJob = viewModelScope.launch {
+            try {
+                val outcome = repo.scan(
+                    filterShortAudio = filterShortAudio,
+                    filters = currentScanFilters(),
+                    folderPaths = paths,
+                    onProgress = { n -> scopedScanScanned = n }
+                )
+                mergeScopedScan(outcome, paths)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                showToast("扫描失败：${t.message ?: "目录不可读"}")
+            } finally {
+                scopedScanRunning = false
+            }
+        }
+    }
+
+    private suspend fun mergeScopedScan(outcome: ScanOutcome, paths: Set<String>) {
+        val existing = songs
+        val existingIds = existing.mapTo(HashSet()) { it.id }
+        val kept = existing.filter { it.folderPath !in paths }
+        // 原来就在库里的歌（同一 MediaStore id）直接保留，避免重扫把老条目当成"新增"
+        val reappearing = outcome.songs.filter { it.id in existingIds }
+        val fresh = outcome.songs.filter { it.id !in existingIds }
+
+        val (merged, added) = withContext(Dispatchers.Default) {
+            val keys = HashSet<String>()
+            (kept + reappearing).forEach { keys += songDedupeKey(it) }
+            val unique = ArrayList<Song>(fresh.size)
+            for (song in fresh) {
+                if (keys.add(songDedupeKey(song))) unique += song
+            }
+            val all = (kept + reappearing + unique)
+                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+            all to unique.size
+        }
+
+        val removed = (existing.size - kept.size - reappearing.size).coerceAtLeast(0)
+        songs = filterHidden(merged)
+        warmUpCovers()
+        albums = MediaRepository.groupAlbums(songs)
+        artists = MediaRepository.groupArtists(songs)
+        folders = MediaRepository.groupFolders(songs)
+        prefs.songsCacheJson = encodeSongsToJson(merged)
+        prefs.lastScanAt = System.currentTimeMillis()
+        lastScanOutcome = outcome.copy(songs = merged)
+        duplicateReport = null
+        scopedScanResult = ScopedScanResult(scanned = scopedScanScanned, added = added, removed = removed)
+        flashScanHint(
+            if (removed > 0) "已扫描 · 新增 $added 首 · 移除 $removed 首"
+            else "已扫描 · 新增 $added 首"
+        )
+        showToast(
+            if (removed > 0) {
+                "扫描完成：新增 $added 首，移除 $removed 首"
+            } else {
+                "扫描完成：新增 $added 首"
+            }
+        )
+    }
+
+    /** 与现有去重规则一致的 key：归一化标题 + 归一化歌手 + 时长桶 */
+    private fun songDedupeKey(song: Song): String {
+        val bucket = song.durationMs / DUPLICATE_DURATION_TOLERANCE_MS
+        return canonicalTitle(song.title) + "\u0000" + canonicalArtist(song.artist) + "\u0000" + bucket
+    }
 
     fun changeScanExcludeLocked(value: Boolean) {
         scanExcludeLocked = value
@@ -311,6 +544,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         pushSkinToWidget()
+        // 播放模式（随机 / 列表循环 / 单曲循环）持久化恢复。
+        // 必须在恢复播放现场之前设好：队列是按上次的模式排的（随机时就是洗牌序），
+        // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
+        applyPersistedPlayMode()
         player.onSongStarted = { id ->
             // 在线歌不进本地记账。
             //
@@ -778,6 +1015,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var neteaseConvertedKeys by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** 嗅探目标 App（网易云 / 酷狗 / QQ 音乐 / 汽水），持久化在 Prefs 里 */
+    var sniffTargets by mutableStateOf(prefs.sniffTargets)
+        private set
+
+    fun toggleSniffTarget(name: String) {
+        val next = if (name in sniffTargets) sniffTargets - name else sniffTargets + name
+        sniffTargets = next
+        prefs.sniffTargets = next
+    }
+
     private var neteaseJob: Job? = null
 
     /** 首次进区块时用上次扫描结果铺列表（可能为 null，表示还没扫过） */
@@ -789,10 +1036,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun neteaseScan() {
+        val apps = sniffTargets.mapNotNull { SniffApp.safeOf(it) }.toSet()
+        if (apps.isEmpty()) {
+            showToast("请先勾选至少一个嗅探目标")
+            return
+        }
         neteaseJob?.cancel()
         neteaseJob = viewModelScope.launch {
             neteaseScanning = true
-            val result = neteaseRepo.scan()
+            val result = neteaseRepo.scan(apps)
             neteaseScanState = result
             neteaseScanning = false
             when (result) {
@@ -860,6 +1112,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearNeteaseResult() {
         neteaseResult = null
+    }
+
+    /** 清掉嗅探列表：扫描结果与本地缓存副本一并丢弃（不动已转换记录与输出成品） */
+    fun neteaseClearList() {
+        neteaseJob?.cancel()
+        neteaseScanState = null
+        neteaseResult = null
+        neteaseRepo.clearCached()
     }
 
     // ===== 行为 =====
@@ -996,7 +1256,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 非空 → API 29+ 的系统确认框；**用户同意后文件已被系统删掉**，直接落地即可。
          * 为空 → API 28 及以下，先授予 `WRITE_EXTERNAL_STORAGE`，同意后要**重新执行删除**。
          */
-        val intentSender: IntentSender?
+        val intentSender: IntentSender?,
+        /** 多选删除：结果提示用「成功 N 首 / 失败 M 首」 */
+        val detailed: Boolean = false
     ) {
         val songIds: Set<Long> = songs.mapTo(HashSet()) { it.id }
     }
@@ -1012,7 +1274,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 以及系统（MediaStore）自己的那一次确认：被拦下时把请求挂进
      * [pendingSongDelete]，由界面拉起系统弹窗，结果回到 [onSongDeletePermissionResult]。
      */
-    fun deleteSongFiles(songsToDelete: List<Song>) {
+    fun deleteSongFiles(songsToDelete: List<Song>, detailed: Boolean = false) {
         val targets = songsToDelete.filter { it.isLocal }
         if (targets.isEmpty()) {
             showToast("没有可删除的本地文件")
@@ -1021,12 +1283,21 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val app = getApplication<Application>()
             when (val r = withContext(Dispatchers.IO) { MediaFileDeleter.request(app, targets) }) {
-                is MediaFileDeleter.Result.Deleted ->
-                    finalizeSongFileDeletion(targets.mapTo(HashSet()) { it.id }, targets.size)
+                is MediaFileDeleter.Result.Deleted -> {
+                    val deleted = targets.filter { it.uri in r.deletedUris }
+                    finalizeSongFileDeletion(
+                        deleted.mapTo(HashSet()) { it.id },
+                        deleted.size,
+                        r.failed,
+                        detailed
+                    )
+                }
                 is MediaFileDeleter.Result.NeedsPermission ->
-                    pendingSongDelete = PendingSongDelete(targets, r.intentSender)
-                MediaFileDeleter.Result.Failed ->
+                    pendingSongDelete = PendingSongDelete(targets, r.intentSender, detailed)
+                MediaFileDeleter.Result.Failed -> {
+                    clearSelection()
                     showToast("删除失败：文件可能正被其它应用占用")
+                }
             }
         }
     }
@@ -1041,25 +1312,48 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (pending.intentSender == null) {
             // 老权限模型：刚拿到 WRITE 权限，现在才真正执行删除
-            deleteSongFiles(pending.songs)
+            deleteSongFiles(pending.songs, pending.detailed)
             return
         }
-        // createDeleteRequest 路径：用户同意时系统已经把文件删掉了
-        finalizeSongFileDeletion(pending.songIds, pending.songs.size)
+        // createDeleteRequest 路径：用户同意时系统已经把文件删掉了。
+        // 系统只回「同意/取消」，没有逐个结果，所以再查一遍哪些还在，给用户准确的成败数。
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val remaining = withContext(Dispatchers.IO) { MediaFileDeleter.remaining(app, pending.songs) }
+            val deleted = pending.songs.filterNot { it in remaining }
+            finalizeSongFileDeletion(
+                deleted.mapTo(HashSet()) { it.id },
+                deleted.size,
+                remaining.size,
+                pending.detailed
+            )
+        }
     }
 
     /**
      * 文件删掉之后把曲库收干净。**不走 hiddenSongIds** —— 文件已经不存在，
      * 把 id 塞进隐藏表只会让「恢复隐藏曲目」的计数说谎。
      */
-    private fun finalizeSongFileDeletion(ids: Set<Long>, count: Int) {
+    private fun finalizeSongFileDeletion(
+        ids: Set<Long>,
+        success: Int,
+        failed: Int = 0,
+        detailed: Boolean = false
+    ) {
         songs = songs.filter { it.id !in ids }
         albums = MediaRepository.groupAlbums(songs)
         artists = MediaRepository.groupArtists(songs)
         folders = MediaRepository.groupFolders(songs)
         prefs.songsCacheJson = encodeSongsToJson(songs)
         duplicateReport = null
-        showToast("已删除 $count 个文件")
+        clearSelection()
+        showToast(
+            when {
+                detailed -> "成功 $success 首 / 失败 $failed 首"
+                failed > 0 -> "删除完成：成功 $success 个 / 失败 $failed 个"
+                else -> "已删除 $success 个文件"
+            }
+        )
     }
 
     /** 恢复所有被隐藏的曲目 */
@@ -1077,11 +1371,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun scan() {
         viewModelScope.launch {
+            val beforeIds = songs.mapTo(HashSet()) { it.id }
             scanState = ScanState.SCANNING
             runScan()
             scanState = ScanState.READY
             // 没有歌曲缓存时（首次启动）init 里那次恢复会跳过，扫完再试一次
             restorePlaybackState()
+            val added = songs.count { it.id !in beforeIds }
+            flashScanHint(if (added > 0) "已扫描 · 新增 $added 首" else "已扫描 · 暂无新增")
         }
     }
 
@@ -1537,6 +1834,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 本次会话已尝试补过的 songId，避免反复请求 */
     private val coverTried = HashSet<Long>()
 
+    /** 本次会话已尝试「把下载到的封面写进文件」的 songId，避免反复改文件 */
+    private val coverEmbedTried = HashSet<Long>()
+
     var coverSearching by mutableStateOf(false)
         private set
     var coverResults by mutableStateOf<List<CoverCandidate>>(emptyList())
@@ -1642,6 +1942,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeVinylMode(enabled: Boolean) {
         vinylMode = enabled
         prefs.vinylMode = enabled
+    }
+
+    /** 黑胶页机械音效开关（页面内小喇叭按钮与设置页读写同一份 Prefs） */
+    var vinylSfxEnabled by mutableStateOf(prefs.vinylSfxEnabled)
+        private set
+
+    /** 黑胶页机械音效音量 0~1 */
+    var vinylSfxVolume by mutableStateOf(prefs.vinylSfxVolume)
+        private set
+
+    fun changeVinylSfxEnabled(enabled: Boolean) {
+        vinylSfxEnabled = enabled
+        prefs.vinylSfxEnabled = enabled
+    }
+
+    fun changeVinylSfxVolume(v: Float) {
+        vinylSfxVolume = v
+        prefs.vinylSfxVolume = v
     }
 
     fun changeOnlineCover(enabled: Boolean) {
@@ -1754,6 +2072,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         val raw = OnlineCover.downloadBytes(url) ?: return false
         CoverCache.store(app, key, raw)
+        embedCoverToFile(app, song, raw)
         // 让「磁盘里也没有封面」那条短路失效：列表 200px 和播放页 900px 是两个缓存键，
         // 不失效的话另一个档位会一直以为没封面。
         //
@@ -1761,6 +2080,28 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 几百首就是几百张位图。写盘已经足够 —— 列表下次组合（滚动 / 重进）就会读到。
         ArtworkLoader.forgetCoverMiss(key)
         return true
+    }
+
+    /**
+     * 下载到的封面顺手写进歌曲文件本身；失败就只留在应用私有目录，**不弹窗**。
+     *
+     * - 只做 MP3 / FLAC。M4A、WAV、OGG 等在 [CoverTagWriter] 里直接返回
+     *   UnsupportedFormat —— 那些容器的覆盖写风险不值得在后台自动做。
+     * - 分区存储下没有写权限时返回 NeedsPermission，这里刻意**不**拉起系统确认框：
+     *   自动补封面动辄几十上百首，每首弹一次是骚扰；用户手动「选封面」那条路仍会弹。
+     * - 每首每个会话只尝试一次，避免反复改文件（改动会改 mtime）。
+     */
+    private suspend fun embedCoverToFile(app: Application, song: Song, raw: ByteArray) {
+        if (!coverEmbedTried.add(song.id)) return
+        when (CoverTagWriter.write(app, song, raw, skipIfPresent = true)) {
+            CoverTagWriter.Result.Written ->
+                Log.i("SonanceCover", "封面已写入文件：${song.displayName}")
+            is CoverTagWriter.Result.NeedsPermission ->
+                Log.i("SonanceCover", "无写文件权限，封面仅存应用私有目录：${song.displayName}")
+            CoverTagWriter.Result.Failed ->
+                Log.w("SonanceCover", "写封面到文件失败：${song.displayName}")
+            else -> Unit
+        }
     }
 
     fun ensureCover(song: Song) {
@@ -1805,7 +2146,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     return@withContext null
                 }
                 val raw = OnlineCover.downloadBytes(url)
-                if (raw != null) CoverCache.store(app, key, raw)
+                if (raw != null) {
+                    CoverCache.store(app, key, raw)
+                    embedCoverToFile(app, song, raw)
+                }
                 raw
             }
 
@@ -2000,6 +2344,147 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 }
             )
         }
+    }
+
+    // ===== 歌曲信息编辑 / 听歌识曲 =====
+
+    /**
+     * 一次「等用户点头」的歌曲信息写盘（结构照 [PendingCoverWrite] 来：
+     * 系统授权框弹出来时编辑对话框可能已经关了，字段必须存在 pending 里）。
+     */
+    class PendingMetaEdit(
+        val songId: Long,
+        val title: String,
+        val artist: String,
+        val album: String,
+        /**
+         * 非空 → API 29+ 的「允许修改此文件？」；为空 → API 28 及以下先要
+         * `WRITE_EXTERNAL_STORAGE`
+         */
+        val intentSender: IntentSender?
+    )
+
+    /** 待用户授权的信息写回；null 表示没有。界面据此拉起系统弹窗 */
+    var pendingMetaEdit by mutableStateOf<PendingMetaEdit?>(null)
+        private set
+
+    /** 识别状态机：空闲 → 运行（带阶段文案）→ 出结果等确认 / 失败回空闲 */
+    sealed interface RecognizeState {
+        data object Idle : RecognizeState
+        data class Running(val songId: Long, val phase: String) : RecognizeState
+        data class Done(val songId: Long, val result: NeteaseRecognizer.Recognized) : RecognizeState
+    }
+
+    var recognizeState by mutableStateOf<RecognizeState>(RecognizeState.Idle)
+        private set
+
+    /** 手动编辑歌曲信息：写进文件真实标签 + 文件改名「歌名 - 歌手」 */
+    fun editSongInfo(songId: Long, title: String, artist: String, album: String) {
+        viewModelScope.launch { writeSongMeta(songId, title, artist, album) }
+    }
+
+    private suspend fun writeSongMeta(songId: Long, title: String, artist: String, album: String) {
+        val app = getApplication<Application>()
+        val song = songById(songId) ?: return
+        val result = SongMetaEditor.edit(app, song, title, artist, album)
+        when (result) {
+            is SongMetaEditor.Result.Written -> {
+                applySongMetaInMemory(song, title, artist, album)
+                showToast(if (result.renamed) "已写入文件，文件已改名" else "已写入文件")
+            }
+            is SongMetaEditor.Result.NeedsPermission ->
+                pendingMetaEdit = PendingMetaEdit(songId, title, artist, album, result.intentSender)
+            SongMetaEditor.Result.NotLocal -> showToast("在线歌曲没有本地文件可写")
+            SongMetaEditor.Result.UnsupportedFormat -> showToast("该格式暂不支持写入（仅 mp3 / m4a）")
+            SongMetaEditor.Result.Failed -> showToast("写入文件失败")
+        }
+    }
+
+    /** 系统写文件确认框的结果（见 [pendingMetaEdit]） */
+    fun onMetaEditPermissionResult(granted: Boolean) {
+        val pending = pendingMetaEdit ?: return
+        pendingMetaEdit = null
+        if (!granted) {
+            showToast("未授权改写文件，信息未保存")
+            return
+        }
+        viewModelScope.launch {
+            writeSongMeta(pending.songId, pending.title, pending.artist, pending.album)
+        }
+    }
+
+    /**
+     * 标签写盘成功后把内存列表同步改掉：MediaStore 的回读是异步的（rescan
+     * 不保证立即可见），等下次扫描再刷新会让用户以为没改成功。
+     */
+    private fun applySongMetaInMemory(song: Song, title: String, artist: String, album: String) {
+        val patched = song.copy(title = title, artist = artist, album = album)
+        songs = songs.map { if (it.id == song.id) patched else it }
+        albums = MediaRepository.groupAlbums(songs)
+        artists = MediaRepository.groupArtists(songs)
+        folders = MediaRepository.groupFolders(songs)
+        prefs.songsCacheJson = encodeSongsToJson(songs)
+        // 封面缓存按「标题+歌手」做 key，改名后按新信息重新补（pinCoverUrl 按
+        // songId 记，不受改名影响）；正在播的话通知栏/锁屏跟着换
+        player.refreshCurrentArtwork(patched)
+    }
+
+    /**
+     * 听歌识曲：解码开头几秒 → 算指纹 → 网易云匹配。
+     * 出结果不停在 Done 状态等确认卡片，用户点「应用」才写盘。
+     */
+    fun startRecognize(songId: Long) {
+        if (recognizeState is RecognizeState.Running) {
+            showToast("已有识别任务进行中")
+            return
+        }
+        val song = songById(songId) ?: return
+        if (!song.isLocal) {
+            showToast("仅支持识别本地文件")
+            return
+        }
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            recognizeState = RecognizeState.Running(songId, "正在解码音频")
+            val decoded = withContext(Dispatchers.IO) {
+                PcmExtractor.decodePrefix(app, song.uri, song.durationMs)
+            }
+            if (decoded == null) {
+                recognizeState = RecognizeState.Idle
+                showToast("音频解码失败，无法识别")
+                return@launch
+            }
+            recognizeState = RecognizeState.Running(songId, "正在计算指纹")
+            val fp = AudioFingerprinter.fingerprint(app, PcmExtractor.toFingerprintSamples(decoded))
+            if (fp.fp == null) {
+                recognizeState = RecognizeState.Idle
+                showToast(fp.error ?: "指纹计算失败")
+                return@launch
+            }
+            recognizeState = RecognizeState.Running(songId, "正在识别歌曲")
+            val match = NeteaseRecognizer.match(fp.fp, song.durationMs)
+            if (match.recognized == null) {
+                recognizeState = RecognizeState.Idle
+                showToast(match.error ?: "未识别出歌曲")
+                return@launch
+            }
+            recognizeState = RecognizeState.Done(songId, match.recognized)
+        }
+    }
+
+    /** 用户在识别确认卡片上点了「应用」：按识别结果写盘 */
+    fun applyRecognition() {
+        val state = recognizeState
+        if (state !is RecognizeState.Done) return
+        recognizeState = RecognizeState.Idle
+        viewModelScope.launch {
+            writeSongMeta(state.songId, state.result.title, state.result.artist, state.result.album)
+        }
+    }
+
+    /** 用户放弃了识别结果 */
+    fun dismissRecognition() {
+        if (recognizeState is RecognizeState.Done) recognizeState = RecognizeState.Idle
     }
 
     /** 删掉这首歌的封面（回到占位图；联网状态下下次播放会重新找） */
@@ -3528,6 +4013,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 val idx = st.queueIndex.coerceIn(0, q.lastIndex)
                 val shuffled = ShuffleOrder.build(q, idx, recentWindowFor(q.size))
                 player.setShuffle(true)
+                // 随机必须能无限往下切：repeat 设成 ALL，避免从「单曲循环」切过来时
+                // 随机开着却一直重复当前首。
+                player.setRepeat(RepeatMode.ALL)
+                persistPlayMode(PlayMode.SHUFFLE)
                 // 保住进度：重排队列不等于重头播。
                 // notifyStart = false —— 还是同一首歌，不该再记一次「播放次数」。
                 player.play(
@@ -3544,6 +4033,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             if (orig != null) {
                 val idx = orig.indexOfFirst { it.id == st.mediaId }.coerceAtLeast(0)
                 player.setShuffle(false)
+                persistPlayMode(PlayMode.of(shuffle = false, repeat = st.repeat))
                 player.play(
                     orig, idx,
                     autoplay = st.isPlaying,
@@ -3556,7 +4046,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         // 队列只有一首 / 没有记录过原顺序：只切标志
-        player.setShuffle(!st.shuffle)
+        val on = !st.shuffle
+        player.setShuffle(on)
+        if (on) player.setRepeat(RepeatMode.ALL)
+        persistPlayMode(PlayMode.of(on, if (on) RepeatMode.ALL else st.repeat))
+    }
+
+    /** 读取上次保存的播放模式；值损坏时退回列表循环（也是 UI 的首个图标） */
+    private fun persistedPlayMode(): PlayMode =
+        PlayMode.entries.firstOrNull { it.name == prefs.playMode } ?: PlayMode.REPEAT_ALL
+
+    private fun persistPlayMode(mode: PlayMode) {
+        prefs.playMode = mode.name
+    }
+
+    /**
+     * 把持久化的播放模式应用到播放器。
+     *
+     * 随机模式的队列已经是上次保存的洗牌序（`playQueueIds` 存的就是队列本身），
+     * 所以这里只需要打开 App 侧的随机开关；播放器的 `shuffleModeEnabled` 始终关闭
+     * （理由见 [PlayerController.setShuffle]）。
+     */
+    private fun applyPersistedPlayMode() {
+        when (persistedPlayMode()) {
+            PlayMode.SHUFFLE -> {
+                player.setShuffle(true)
+                player.setRepeat(RepeatMode.ALL)
+            }
+            PlayMode.REPEAT_ALL -> {
+                player.setShuffle(false)
+                player.setRepeat(RepeatMode.ALL)
+            }
+            PlayMode.REPEAT_ONE -> {
+                player.setShuffle(false)
+                player.setRepeat(RepeatMode.ONE)
+            }
+        }
     }
 
     /**
@@ -3576,12 +4101,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      *
      * 播放页那个按钮点一下就调它。
      *
+     * @param quiet 不弹提示。沉浸黑胶页的模式按钮也走这里（onPlayModeRequested 桥），
+     *   页面自己有风格化 toast，Android 原生 toast 再弹一条就重复了，传 true 抑制。
+     * @param list 还没在播时用这一页的歌定模式开播（黑胶页只切模式不传）。
+     *
      * 底层要同时动两个标志（`shuffleModeEnabled` + `repeatMode`），
      * 这里按目标状态一次性设好，而不是"先关一个再开另一个" ——
      * 中间态会短暂出现"随机 + 单曲循环"这种矛盾组合，播放器可能刚好在那一瞬
      * 决定下一首放什么。
      */
-    fun cyclePlayMode(list: List<Song> = emptyList()) {
+    fun cyclePlayMode(list: List<Song> = emptyList(), quiet: Boolean = false) {
         val st = player.state.value
 
         // 还没在播 → 先定模式，再用这一页的歌开播。
@@ -3603,7 +4132,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             player.play(ordered, 0)
             player.setShuffle(shuffled)
             player.setRepeat(if (next == PlayMode.REPEAT_ONE) RepeatMode.ONE else RepeatMode.ALL)
-            showToast(next.label)
+            persistPlayMode(next)
+            if (!quiet) showToast(next.label)
             return
         }
 
@@ -3625,7 +4155,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 player.setRepeat(RepeatMode.ONE)
             }
         }
-        showToast(next.label)
+        persistPlayMode(next)
+        if (!quiet) showToast(next.label)
     }
 
     // ===== 播放入口 =====

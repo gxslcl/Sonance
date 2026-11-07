@@ -36,8 +36,15 @@ object ArtworkThumbCache {
     /** 大图档落盘时的边长上限 */
     private const val MAX_STORE_PX = 768
 
-    private const val MAX_BYTES = 64L * 1024 * 1024
-    private const val MAX_FILES = 3000
+    /**
+     * 条数与体积上限。
+     *
+     * 之前是 3000 条 / 64MB —— 大曲库（几千首 × 两个尺寸档）会不停触发淘汰，
+     * 冷启动时列表要反复回源（本地文件 / MediaStore）。这里和 [CoverCache] 一起
+     * 抬到明显高于常见曲库规模，淘汰只在真正超限时才发生。
+     */
+    private const val MAX_BYTES = 256L * 1024 * 1024
+    private const val MAX_FILES = 20_000
 
     /**
      * 攒够多少张才做一次全目录清理。

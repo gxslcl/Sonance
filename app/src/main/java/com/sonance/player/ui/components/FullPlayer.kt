@@ -11,10 +11,13 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -36,6 +40,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -43,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,12 +75,17 @@ import android.graphics.Bitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -92,17 +105,88 @@ import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
+import com.sonance.player.playback.PcmBus
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.playback.PlayMode
+import com.sonance.player.sync.GroupPhase
+import com.sonance.player.sync.GroupRole
+import com.sonance.player.sync.GroupUiState
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import com.sonance.player.ui.theme.solidSurface
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.log10
 import kotlin.math.roundToInt
+
+/* ============================================================
+ * 播放页「呼吸感」
+ * ============================================================ */
+
+/**
+ * 封面缩放的幅度（相对 1.000）。1.5% 是「看得出来在动、但不觉得画面在喘」的量级：
+ * 再大（≥2%）照片的构图会开始发抖，再小（≤1%）静止截图对比才看得出。
+ */
+private const val BREATH_COVER_SCALE = 0.015f
+
+/** 极矮窗口（横屏手机）的封面缩放上限：压到 1.2%，否则上下边缘离按钮太近、显得挤 */
+private const val BREATH_COVER_SCALE_SHORT = 0.012f
+
+/** 晕染强度的呼吸上限：现有浓度的 1.10 倍。只动绘制 alpha，不重烘位图 */
+private const val BREATH_GLOW_MAX = 1.10f
+
+/** 音频能量叠加的峰值：封面 +0.4%、晕染 +4%（在呼吸项之上再加） */
+private const val BREATH_AUDIO_COVER = 0.004f
+private const val BREATH_AUDIO_GLOW = 0.04f
+
+/** 两个周期：封面 4.6s、晕染 5.2s；晕染比封面滞后 0.6s，避免两者同时到顶 */
+private const val BREATH_COVER_PERIOD_MS = 4600f
+private const val BREATH_GLOW_PERIOD_MS = 5200f
+private const val BREATH_GLOW_OFFSET_MS = 600f
+
+/** 统一包络：起播 450ms 渐入、暂停 600ms 归零 */
+private const val BREATH_IN_MS = 450f
+private const val BREATH_OUT_MS = 600f
+
+/** 音频能量平滑：起音 60ms、释放 350ms（暂停后比包络先落，600ms 内一定收干净） */
+private const val BREATH_AUDIO_ATTACK_MS = 60f
+private const val BREATH_AUDIO_RELEASE_MS = 350f
+
+/**
+ * RMS → 0..1 的分贝映射区间。
+ * 音乐正常播放的 RMS 大约在 -30 ~ -12dB，映射后落在 0.5~0.95；
+ * 静音/间歇段低于 -50dB 直接归零，免得把底噪放大成「一直在喘」。
+ */
+private const val BREATH_ENERGY_FLOOR_DB = -50f
+private const val BREATH_ENERGY_CEIL_DB = -10f
+
+/**
+ * 呼吸引擎的内部状态。
+ *
+ * 刻意**不用** snapshot state：包络 / 相位 / 能量只在帧循环里读写，
+ * 每帧变化的是 [FullPlayer] 里那两个最终输出值。这样它们不会被组合期读取，
+ * 也就不会逐帧触发重组。
+ */
+private class BreathEngine {
+    var envelope = 0f
+    var energy = 0f
+    var phaseMs = 0f
+}
+
+/** 原始 RMS → 0..1 能量（分贝映射，接近人耳对响度的感受） */
+private fun rmsToEnergy(rms: Float): Float {
+    if (rms <= 0f) return 0f
+    val db = 20f * log10(rms)
+    return ((db - BREATH_ENERGY_FLOOR_DB) /
+        (BREATH_ENERGY_CEIL_DB - BREATH_ENERGY_FLOOR_DB)).coerceIn(0f, 1f)
+}
 
 /**
  * 全屏播放页。竖向翻页（TikTok / 汽水音乐式）：整页上下滑动切歌，
@@ -133,6 +217,8 @@ fun FullPlayer(
     onOpenEqualizer: () -> Unit = {},
     /** 打开睡眠定时器面板 */
     onOpenSleepTimer: () -> Unit = {},
+    /** 打开沉浸式黑胶播放模式 */
+    onOpenVinyl: () -> Unit = {},
     /** 睡眠定时器是否在计时中（顶栏图标高亮用） */
     sleepTimerActive: Boolean = false,
     /** 均衡器是否开着（图标高亮用） */
@@ -157,6 +243,10 @@ fun FullPlayer(
     vinylMode: Boolean = false,
     /** 双击封面那个面板切黑碟模式 */
     onVinylModeChange: (Boolean) -> Unit = {},
+    /** 多设备同步的实时状态（入口图标高亮与顶部状态条用它） */
+    groupState: GroupUiState = GroupUiState(),
+    /** 打开多设备面板 */
+    onOpenGroup: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -201,6 +291,23 @@ fun FullPlayer(
     val isSwipeGlow = glowTransition == GlowTransition.SWIPE
 
     /**
+     * 位图烘焙用的「带余量」浓度。
+     *
+     * 呼吸要往上加 10%，但位图的浓度已经烘进像素里，每帧重烘是绝对不允许的。
+     * 做法是把峰值先烘进去、平时用 draw alpha 压低：
+     * `bake = strength × 1.10`，绘制时 `alpha = strength × breath / bake`（≤1）。
+     * 这样 1.00 倍时视觉上正好是原浓度，1.10 倍时刚好用满位图的余量。
+     * AROUND 走径向 Brush、不烘位图，直接按强度乘即可，所以保持原值。
+     */
+    val glowBakeStrength = remember(glowStrength, glowMode) {
+        if (glowMode == GlowMode.AROUND) {
+            glowStrength
+        } else {
+            (glowStrength * BREATH_GLOW_MAX).coerceIn(0f, 1f)
+        }
+    }
+
+    /**
      * 这一帧要画的一到两层素材。
      *
      * SWIPE 下是 `[上一页, 当前页, 下一页]` 三份（按滚动位置取其中相邻的两份混合）；
@@ -209,16 +316,16 @@ fun FullPlayer(
     val glowFrames: List<GlowFrame> = if (isSwipeGlow) {
         // currentPage 只在翻页那一刻变（一次滑动最多变一次），不会每帧重组
         val page = pagerState.currentPage
-        val prev = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page - 1), skin), glowMode, glowStrength)
-        val cur = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page), skin), glowMode, glowStrength)
-        val next = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page + 1), skin), glowMode, glowStrength)
+        val prev = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page - 1), skin), glowMode, glowBakeStrength)
+        val cur = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page), skin), glowMode, glowBakeStrength)
+        val next = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page + 1), skin), glowMode, glowBakeStrength)
         remember(prev, cur, next) { listOf(prev, cur, next) }
     } else {
         listOf(
             rememberGlowFrame(
                 colors = rememberFadeGlowColors(queue, state.queueIndex, skin, glowFadeMs),
                 mode = glowMode,
-                strength = glowStrength
+                strength = glowBakeStrength
             )
         )
     }
@@ -295,6 +402,77 @@ fun FullPlayer(
         }
     }
 
+    // ===== 呼吸动效：引擎 + 帧循环 =====
+    //
+    // 两个输出值只在这里被**写入**，读取全部发生在 drawBehind / graphicsLayer 里，
+    // 所以每帧只是让绘制层失效，不会触发任何重组。
+    // 包络 / 相位 / 能量放在普通对象里（不参与快照），暂停时从当前值继续收敛，不会跳。
+    val breathEngine = remember { BreathEngine() }
+    val coverBreath = remember { mutableFloatStateOf(0f) }
+    val glowBreath = remember { mutableFloatStateOf(1f) }
+
+    // 「页面可见」= 停在封面层。切到歌词 / 律动柱层后不再推进；
+    // 暂停后仍然继续跑 600ms 把包络收回去，收干净立即 break，不留空转。
+    val breathActive = state.isPlaying && layer == PlayerLayer.COVER
+
+    LaunchedEffect(breathActive) {
+        var last = withFrameNanos { it }
+        // 绘制发布节流：高刷屏（120Hz）下每两帧发布一次，稳定在 ~60Hz，
+        // 呼吸是秒级的慢动作，没必要追 120Hz 的功耗
+        var sincePublish = 0f
+        while (true) {
+            val now = withFrameNanos { it }
+            val dt = ((now - last) / 1_000_000f).coerceIn(0f, 50f)
+            last = now
+            val e = breathEngine
+
+            // 统一包络：450ms 渐入 / 600ms 归零（线性，乘以周期项后已经足够柔和）
+            if (breathActive) {
+                e.envelope = (e.envelope + dt / BREATH_IN_MS).coerceAtMost(1f)
+                e.phaseMs += dt
+            } else {
+                e.envelope = (e.envelope - dt / BREATH_OUT_MS).coerceAtLeast(0f)
+                if (e.envelope > 0f) e.phaseMs += dt
+            }
+
+            // 音频能量：复用 PcmTap 在同一轮采样里算出的 RMS（无 FFT、无二次遍历）
+            val target = if (breathActive && PcmBus.ready) rmsToEnergy(PcmBus.rms) else 0f
+            val k = (if (target > e.energy) {
+                dt / BREATH_AUDIO_ATTACK_MS
+            } else {
+                dt / BREATH_AUDIO_RELEASE_MS
+            }).coerceIn(0f, 1f)
+            e.energy += (target - e.energy) * k
+
+            if (e.envelope <= 0f) {
+                // 归零：缩放精确 1.000、晕染精确 1.00，不留任何残余
+                e.envelope = 0f
+                e.energy = 0f
+                coverBreath.floatValue = 0f
+                glowBreath.floatValue = 1f
+                if (!breathActive) break   // 暂停后收干净就停帧
+            } else {
+                val env = e.envelope
+                sincePublish += dt
+                if (sincePublish < 15f) continue
+                sincePublish = 0f
+                // 0 → 1 → 0 的余弦呼吸：起点就在基线，不会有「先弹一下再开始」的观感
+                val coverPeriodic = 0.5f - 0.5f * cos(
+                    2f * PI.toFloat() * e.phaseMs / BREATH_COVER_PERIOD_MS
+                )
+                val glowPeriodic = 0.5f - 0.5f * cos(
+                    2f * PI.toFloat() * (e.phaseMs - BREATH_GLOW_OFFSET_MS) / BREATH_GLOW_PERIOD_MS
+                )
+                coverBreath.floatValue =
+                    BREATH_COVER_SCALE * env * coverPeriodic +
+                        BREATH_AUDIO_COVER * env * e.energy
+                glowBreath.floatValue =
+                    1f + (BREATH_GLOW_MAX - 1f) * env * glowPeriodic +
+                        BREATH_AUDIO_GLOW * env * e.energy
+            }
+        }
+    }
+
     Box(
         modifier
             .fillMaxSize()
@@ -321,9 +499,24 @@ fun FullPlayer(
                 // 裁在 AnimatedVisibility 的 modifier 上会因为顺序问题裁在变换之外，
                 // 滑出时照样能看见。
                 clipRect {
+                    // 呼吸只在这里读一次：位图已按「峰值浓度」烘好，
+                    // 绘制阶段只按 alpha 缩放，绝不重烘（见 glowBakeStrength 的说明）。
+                    val breath = glowBreath.floatValue
+                    val effective = (glowStrength * breath).coerceIn(0f, 1f)
+                    // AROUND 走径向 Brush，可以直接把强度乘进去；
+                    // 其它模式靠 draw alpha 从「带余量」的烘焙浓度里往回收。
+                    val strengthArg = if (glowMode == GlowMode.AROUND) effective else glowStrength
+                    val alphaScale = if (glowMode == GlowMode.AROUND) {
+                        1f
+                    } else if (glowBakeStrength > 0f) {
+                        (effective / glowBakeStrength).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+
                     if (!isSwipeGlow) {
                         // 渐变模式：只有一层，颜色已经在组合期补间过了
-                        drawGlow(glowFrames[0], cover, glowMode, glowStrength)
+                        drawGlow(glowFrames[0], cover, glowMode, strengthArg, alpha = alphaScale)
                     } else {
                         // 跟手模式：按分页器的滚动位置在相邻两页之间混合。
                         //
@@ -336,12 +529,18 @@ fun FullPlayer(
                         val t = (pos - base).coerceIn(0f, 1f)
                         // glowFrames = [currentPage-1, currentPage, currentPage+1]
                         val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
-                        drawGlow(glowFrames[i], cover, glowMode, glowStrength, alpha = 1f - t)
+                        drawGlow(
+                            glowFrames[i], cover, glowMode, strengthArg,
+                            alpha = (1f - t) * alphaScale
+                        )
                         if (t > 0f) {
                             // 相邻页色卡还没算出来时 drawGlow 会直接返回，
                             // 于是画面变成「一层淡到 (1-t)」—— 平滑地淡下去，
                             // 比"先按住不动、等色卡到了再跳一下"好。预取会把这个窗口压到很小。
-                            drawGlow(glowFrames[i + 1], cover, glowMode, glowStrength, alpha = t)
+                            drawGlow(
+                                glowFrames[i + 1], cover, glowMode, strengthArg,
+                                alpha = t * alphaScale
+                            )
                         }
                     }
                 }
@@ -408,60 +607,127 @@ fun FullPlayer(
                         },
                         iconSize = 22.dp
                     )
-                    // 睡眠定时器：放在左侧第二格。
-                    // 不放右边 —— 右侧已经有歌词/律动柱/队列三个图标，再挤一个会把
-                    // 居中的「正在播放」顶到，左侧只有"收起"一个，还有富余。
-                    IconAction(
-                        icon = SonanceIcons.Timer,
-                        contentDescription = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
-                        onClick = onOpenSleepTimer,
-                        iconSize = 20.dp,
-                        tint = if (sleepTimerActive) skin.accent else skin.textMuted
-                    )
                     Spacer(Modifier.weight(1f))
-                    // 歌词 / 律动柱开关：当前就在那一层时再点一次，回到封面层
+                    // 多设备入口：未连接时压暗，入组后点亮。
                     IconAction(
-                        icon = SonanceIcons.Lyrics,
-                        contentDescription = if (layer == PlayerLayer.LYRICS) "关闭歌词" else "显示歌词",
-                        onClick = {
-                            goToLayer(
-                                if (layer == PlayerLayer.LYRICS) PlayerLayer.COVER else PlayerLayer.LYRICS
-                            )
-                        },
+                        icon = SonanceIcons.Users,
+                        contentDescription = "多设备",
+                        onClick = onOpenGroup,
                         iconSize = 20.dp,
-                        tint = if (layer == PlayerLayer.LYRICS) skin.accent else skin.textMuted
+                        tint = if (groupState.active) skin.accent else skin.textMuted.copy(alpha = 0.65f)
                     )
+                    // 沉浸式黑胶模式入口：压暗半透明，不与标题/内容抢焦点（用户要求）
                     IconAction(
-                        icon = SonanceIcons.Equalizer,
-                        contentDescription = if (layer == PlayerLayer.VISUALIZER) {
-                            "关闭律动柱"
-                        } else {
-                            "显示律动柱"
-                        },
-                        onClick = {
-                            goToLayer(
-                                if (layer == PlayerLayer.VISUALIZER) {
-                                    PlayerLayer.COVER
-                                } else {
-                                    PlayerLayer.VISUALIZER
+                        icon = SonanceIcons.Maximize,
+                        contentDescription = "黑胶模式",
+                        onClick = onOpenVinyl,
+                        iconSize = 20.dp,
+                        tint = skin.textMuted.copy(alpha = 0.65f)
+                    )
+                    // 睡眠定时器 / 歌词 / 律动柱收进溢出菜单（用户要求精简顶栏）。
+                    // 与 DotsMenuButton 同款视觉，但点击菜单项后自动收起
+                    var moreOpen by remember { mutableStateOf(false) }
+                    Box {
+                        // 无边框无背景的裸图标（用户要求），仅保留开启态的琥珀字色反馈
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable { moreOpen = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = SonanceIcons.MoreVertical,
+                                contentDescription = "更多",
+                                tint = if (moreOpen) skin.accent else skin.textDim,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
+                                        color = if (sleepTimerActive) skin.accent else skin.text
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = SonanceIcons.Timer,
+                                        contentDescription = null,
+                                        tint = if (sleepTimerActive) skin.accent else skin.textDim,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    moreOpen = false
+                                    onOpenSleepTimer()
                                 }
                             )
-                        },
-                        iconSize = 20.dp,
-                        tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textMuted
-                    )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (layer == PlayerLayer.LYRICS) "关闭歌词" else "显示歌词",
+                                        color = if (layer == PlayerLayer.LYRICS) skin.accent else skin.text
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = SonanceIcons.Lyrics,
+                                        contentDescription = null,
+                                        tint = if (layer == PlayerLayer.LYRICS) skin.accent else skin.textDim,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    moreOpen = false
+                                    goToLayer(
+                                        if (layer == PlayerLayer.LYRICS) PlayerLayer.COVER else PlayerLayer.LYRICS
+                                    )
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (layer == PlayerLayer.VISUALIZER) "关闭律动柱" else "显示律动柱",
+                                        color = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.text
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = SonanceIcons.Equalizer,
+                                        contentDescription = null,
+                                        tint = if (layer == PlayerLayer.VISUALIZER) skin.accent else skin.textDim,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                },
+                                onClick = {
+                                    moreOpen = false
+                                    goToLayer(
+                                        if (layer == PlayerLayer.VISUALIZER) PlayerLayer.COVER else PlayerLayer.VISUALIZER
+                                    )
+                                }
+                            )
+                        }
+                    }
                     // 顶栏这里原来还有一个「播放队列」图标，已去掉（用户要求）——
                     // 队列入口在下面的控制行上（原来"循环模式"按钮那个位置），
                     // 同一屏出现两个一模一样的按钮没有意义。
                 }
 
                 // 标题独立居中于整条栏，不受左右图标数量影响
+                // 播放 / 暂停两态：和宽屏的 NowPlayingPanel 保持同一套文案
                 Text(
-                    text = "正在播放",
+                    text = if (state.isPlaying) "正在播放" else "已暂停",
                     style = MaterialTheme.typography.labelMedium,
                     color = skin.textMuted,
                     modifier = Modifier.align(Alignment.Center)
                 )
+            }
+
+            // 已入组时顶部常驻一条连接状态：点进去就是多设备面板
+            if (groupState.active) {
+                GroupStatusStrip(state = groupState, onClick = onOpenGroup)
             }
 
             if (queue.isEmpty()) {
@@ -486,7 +752,14 @@ fun FullPlayer(
                 // 实测现象：往回滑（看上一曲）时，上一页停在视口上方的那一截
                 // —— 控制按钮、音量条 —— 会画在顶栏和状态栏那一条上。
                 // 裁在这一层就绕不过去了。
-                Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                // 底部安全区 = 分页器高度的 10% 与系统导航栏高度取较大值。
+                // 只手挡「上下滑切歌」，点击 / 横向拖动（音量条）不受影响；
+                // 布局完全不动，只改触控命中范围。
+                val density = LocalDensity.current
+                val heightPx = with(density) { maxHeight.toPx() }
+                val navPx = WindowInsets.navigationBars.getBottom(density)
+                val bottomSafePx = maxOf(heightPx * 0.1f, navPx.toFloat())
                 VerticalPager(
                     state = pagerState,
                     beyondViewportPageCount = 1,
@@ -494,7 +767,9 @@ fun FullPlayer(
                     // （用户对已在队列里的歌点"下一首播放"就会），只拿 song.id 当 key
                     // 会撞成重复 key，分页器直接抛 "Key ... was already used"。
                     key = { page -> "$page-${queue.getOrNull(page)?.id ?: -1L}" },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blockSongSwipeInBottomBand(bottomSafePx)
                 ) { page ->
                     val song = queue.getOrNull(page) ?: return@VerticalPager
                     val isCurrent = page == state.queueIndex
@@ -567,7 +842,9 @@ fun FullPlayer(
                             if (isCurrent && !pagerState.isScrollInProgress) {
                                 coverBounds = rect.translate(-rootTopLeft.x, -rootTopLeft.y)
                             }
-                        }
+                        },
+                        // 只有当前页读呼吸量：相邻页读了会跟着每帧失效重绘
+                        coverPulse = if (isCurrent) coverBreath else null
                     )
                     }
                 }
@@ -1175,7 +1452,7 @@ private fun GlowSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = skin.surface
+        containerColor = skin.surface.solidSurface()
     ) {
         Column(
             Modifier
@@ -1353,7 +1630,15 @@ private fun PlayerPage(
     /** 双击封面 → 打开晕染设置面板 */
     onOpenGlow: () -> Unit,
     /** 把封面的位置量出来上报 —— 晕染画在整页背景层，需要知道封面画在哪 */
-    onCoverBounds: (Rect) -> Unit
+    onCoverBounds: (Rect) -> Unit,
+    /**
+     * 当前页封面的呼吸缩放量（相对 1.000 的增量）。
+     *
+     * 只在**当前页**传非 null：相邻页也参与组合（beyondViewportPageCount = 1），
+     * 如果它们也读这个状态，会跟着每帧失效、白白重绘。
+     * 读取发生在 graphicsLayer 里，不触发重组。
+     */
+    coverPulse: State<Float>? = null
 ) {
     val seed = song.title + song.artist
     val frac = if (durationMs > 0) {
@@ -1379,6 +1664,9 @@ private fun PlayerPage(
         val landscapeSide = if (isWide) landscapeCoverSize(boxW, boxH) else 0.dp
         // onGloballyPositioned 报的是像素，横屏推封面矩形时要用来算边长
         val landscapeSidePx = with(LocalDensity.current) { landscapeSide.toPx() }
+
+        // 极端矮窗口（横屏手机）把缩放上限压到 1.2%，免得封面上下边挤到控制区
+        val breathCap = if (boxH < 480.dp) BREATH_COVER_SCALE_SHORT else BREATH_COVER_SCALE
 
         // 这里原来有一层页面背景渐变。**删掉了**：它是不透明的，会把画在上一层
         // （[FullPlayer] 最外那个 Box）的封面晕染整个盖住 —— 这是「顶栏一直没有颜色」
@@ -1432,6 +1720,7 @@ private fun PlayerPage(
                                 positionMs = positionMs,
                                 prefs = prefs,
                                 onSeek = onSeek,
+                                isPlaying = isPlaying,
                                 glowImage = glowImage,
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -1449,6 +1738,15 @@ private fun PlayerPage(
                                 seed = seed,
                                 modifier = Modifier
                                     .size(landscapeSide)
+                                    // 呼吸缩放挂在 clip 之前：圆角、阴影一起缩放，
+                                    // 形状始终是那块圆角正方形，不会被裁掉一角。
+                                    // 数值只在 graphicsLayer 里读，不触发重组。
+                                    .graphicsLayer {
+                                        val s = 1f + (coverPulse?.value ?: 0f).coerceAtMost(breathCap)
+                                        scaleX = s
+                                        scaleY = s
+                                        transformOrigin = TransformOrigin.Center
+                                    }
                                     .clip(RoundedCornerShape(16.dp))
                                     // 位置由左栏那一层上报（见上面的注释）
                                     .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow),
@@ -1531,6 +1829,7 @@ private fun PlayerPage(
                                 positionMs = positionMs,
                                 prefs = prefs,
                                 onSeek = onSeek,
+                                isPlaying = isPlaying,
                                 glowImage = glowImage,
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -1548,6 +1847,13 @@ private fun PlayerPage(
                                 seed = seed,
                                 modifier = Modifier
                                     .size(portraitSide)
+                                    // 见横屏那处说明：缩放包在 clip 外层，圆角一起放大
+                                    .graphicsLayer {
+                                        val s = 1f + (coverPulse?.value ?: 0f).coerceAtMost(breathCap)
+                                        scaleX = s
+                                        scaleY = s
+                                        transformOrigin = TransformOrigin.Center
+                                    }
                                     .clip(RoundedCornerShape(16.dp))
                                     // 位置由主区域那一层上报（见上面的注释）——
                                     // 挂在这里的话歌词态就断了
@@ -1743,6 +2049,64 @@ private fun LyricsEntryButton(expanded: Boolean, onClick: () -> Unit) {
     }
 }
 
+/**
+ * 已连接多设备时播放页顶部的常驻状态条。
+ *
+ * 只放三件事：连接台数、同步偏差、健康色点；点开才进入完整面板。
+ */
+@Composable
+private fun GroupStatusStrip(state: GroupUiState, onClick: () -> Unit) {
+    val skin = LocalSkin.current
+    val deviation = if (state.role == GroupRole.GUEST) {
+        state.syncErrorMs?.let { kotlin.math.abs(it) }
+    } else {
+        state.peers.mapNotNull { it.syncErrorMs }.maxOfOrNull { kotlin.math.abs(it) }
+    }
+    val healthy = state.phase == GroupPhase.SYNCING && deviation != null && deviation < 30L
+    val progress = state.transferProgress
+    val dot = when {
+        progress != null -> skin.accent
+        state.phase == GroupPhase.DEGRADED -> Color(0xFFFFB300)
+        deviation == null -> skin.textMuted
+        healthy -> Color(0xFF4CAF50)
+        else -> Color(0xFFFFB300)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(skin.surface2.copy(alpha = 0.65f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(dot)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (progress != null) {
+                // 用户手动切到还没传完的歌时，这里就是可见的进度反馈，而不是空等
+                val percent = (progress.coerceIn(0f, 1f) * 100).roundToInt()
+                "传输中 $percent% · ${state.transferTitle.orEmpty()}"
+            } else buildString {
+                append("已连接 ${state.connectedCount.coerceAtLeast(1)} 台")
+                if (deviation != null) append(" · 同步偏差 $deviation ms")
+                else append(" · 正在同步")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
 private fun landscapeCoverSize(width: Dp, height: Dp): Dp {
     val byHeight = height - 28.dp
     val byWidth = width * 0.44f
@@ -1751,3 +2115,41 @@ private fun landscapeCoverSize(width: Dp, height: Dp): Dp {
 
 /** 播放页内容距底部的留白 */
 private val BottomGap = 20.dp
+
+/**
+ * 底部安全区内不响应「上下滑切歌」。
+ *
+ * 只挡竖向拖拽，不动布局、不挡别的交互：
+ * - 起点不在安全区 → 一个事件都不消费，分页器照常翻页；
+ * - 起点在安全区 → 等竖向位移超过 touch slop 再 consume，
+ *   分页器的 scrollable 发现事件已被消费就放弃这次拖拽（不会切歌）；
+ * - 没超过 slop 就抬手 = 点击，不消费 → 暂停/播放、收藏、队列等按钮正常；
+ * - 横向位移大于竖向时不消费 → 音量条拖动正常；
+ * - 系统「底部上滑回桌面」是系统级手势，App 侧的 consume 拦不住它，
+ *   所以留白区上滑依然能正常返回桌面。
+ */
+private fun Modifier.blockSongSwipeInBottomBand(bandPx: Float): Modifier =
+    this.pointerInput(bandPx) {
+        if (bandPx <= 0f) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            // 起点在安全区之上：完全放行，不参与这次手势
+            if (down.position.y < size.height - bandPx) return@awaitEachGesture
+            var totalDy = 0f
+            var totalDx = 0f
+            var blocked = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) break
+                totalDy += change.positionChange().y
+                totalDx += change.positionChange().x
+                if (!blocked && abs(totalDy) > viewConfiguration.touchSlop &&
+                    abs(totalDy) > abs(totalDx)
+                ) {
+                    blocked = true
+                }
+                if (blocked) change.consume()
+            }
+        }
+    }

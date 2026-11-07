@@ -34,6 +34,15 @@ class MainActivity : ComponentActivity() {
         vm.persistPlayback()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // 返回栈清空（用户真正退出应用）：浮窗 / 视频播放不能留孤儿实例出声。
+        // 旋转等非 finishing 的重建不能走这里，否则会把正在播的视频掐掉
+        if (isFinishing) {
+            com.sonance.player.playback.BiliVideoSession.of(this).onAppExit()
+        }
+    }
+
     /**
      * 请求高刷新率。
      *

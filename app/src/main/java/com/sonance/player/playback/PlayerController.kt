@@ -15,6 +15,7 @@ import com.sonance.player.data.CoverCache
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.Song
+import com.sonance.player.sync.GroupManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -120,6 +121,15 @@ class PlayerController(private val context: Context) {
      */
     private var shuffleState: Boolean = false
 
+    /**
+     * 最近一次设定的循环模式。
+     *
+     * 连接 MediaController 是异步的（[connect]），冷启动恢复播放现场时
+     * [setRepeat] **可能还没连上**。只写 `controller.repeatMode` 的话这次设定会丢，
+     * 恢复出来的歌就退回播放器默认的 OFF。这里先记住，连上后补一次。
+     */
+    private var repeatState: RepeatMode = RepeatMode.OFF
+
     private var pendingRequest: PlayRequest? = null
     private var controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
 
@@ -153,13 +163,30 @@ class PlayerController(private val context: Context) {
         future.addListener({
             val c = runCatching { future.get() }.getOrNull() ?: return@addListener
             controller = c
+            // 冷启动恢复时 [setRepeat] 可能早于连接完成：这里补上记住的模式
+            c.repeatMode = repeatState.toPlayerRepeat()
+            // 随机始终由 App 自己的队列实现，播放器标志固定关掉
+            if (c.shuffleModeEnabled) c.shuffleModeEnabled = false
             c.addListener(object : Player.Listener {
                 override fun onEvents(player: Player, events: Player.Events) {
                     sync(player, events)
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
-                    _state.update { it.copy(errorMessage = describeError(error)) }
+                    // 报错时 `_state.value.title` 可能还停在上一条（元数据是异步回调的），
+                    // 直接读播放器当前的媒体项才不会把「鸟之诗」报成上一首。
+                    val failedTitle = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
+                        ?.takeIf { it.isNotBlank() } ?: _state.value.title
+                    val failedUri = controller?.currentMediaItem?.localConfiguration?.uri?.toString()
+                        ?: _state.value.sourceUri
+                    val message = describeError(error, failedTitle)
+                    android.util.Log.e(
+                        "Sonance",
+                        "播放失败 code=${error.errorCode} name=${error.errorCodeName} " +
+                            "item=$failedTitle uri=$failedUri msg=$message",
+                        error
+                    )
+                    _state.update { it.copy(errorMessage = message) }
                 }
             })
             _state.update { it.copy(connected = true) }
@@ -334,8 +361,7 @@ class PlayerController(private val context: Context) {
     }
 
     /** 把 ExoPlayer 的错误码翻译成用户能看懂的一句话 */
-    private fun describeError(error: PlaybackException): String {
-        val title = _state.value.title
+    private fun describeError(error: PlaybackException, title: String): String {
         val prefix = if (title.isNotBlank()) "「$title」" else "这首歌"
 
         // 在线流要单独解释。
@@ -368,16 +394,61 @@ class PlayerController(private val context: Context) {
             PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ->
                 "设备的解码器不支持这种音频编码"
 
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
+                "音频参数超出设备解码能力"
+
+            // 24bit / 192kHz 这类高采样率 PCM 最常踩的就是这里：文件能解析、
+            // 时长也读得出来，但 AudioTrack 建不起来。必须给出明确原因，
+            // 不能让用户以为"进度条都有了，是不是卡了"。
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED ->
+                "设备的音频输出不支持这个音频参数（如 192kHz / 24bit PCM）"
+
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED ->
+                "音频输出中断，可能是设备音频服务异常"
+
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODING_FAILED -> "解码失败"
+
+            // 1004：底层运行时检查失败。实测 384kHz 的 WAV 会在这里报
+            // `getMinBufferSize(): 384000 Hz is not a supported sample rate`。
+            // 192kHz 的 PCM 在部分设备上同样会走到这条路径 —— 文件能解析、
+            // 时长也读得出来，只是 AudioTrack 建不起来。必须说清是采样率，
+            // 否则用户只看到「无法播放（错误码 1004）」。
+            PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK -> {
+                // 这条路径抛的是「没有 message 的 IllegalStateException」，
+                // 只能靠栈里是不是 DefaultAudioSink 来判断是不是音频参数问题。
+                // 实测 384kHz：Assertions.checkState 在 getAudioTrackMinBufferSize 里失败。
+                val fromAudioSink = generateSequence(error as Throwable?) { it.cause }
+                    .flatMap { t -> t.stackTrace.asSequence() }
+                    .any {
+                        it.className.contains("DefaultAudioSink") ||
+                            it.className.contains("AudioTrack")
+                    }
+                if (fromAudioSink) {
+                    "设备的音频输出不支持这种音频参数（高采样率 PCM 常见）"
+                } else {
+                    "播放器运行时检查失败"
+                }
+            }
+
+            PlaybackException.ERROR_CODE_NOT_SUPPORTED,
+            PlaybackException.ERROR_CODE_BAD_VALUE -> "设备不支持这种音频参数"
 
             else -> "无法播放（错误码 ${error.errorCode}）"
         }
 
         val hint = if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
-            error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+            error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
+            error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES
         ) {
             "。可以在「皮肤与设置 → 格式与兼容性」里查看本机支持的格式"
+        } else if (error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED ||
+            error.errorCode == PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK
+        ) {
+            "。可以试试转换成 48kHz / 16bit 的版本再播放"
         } else {
             ""
         }
@@ -418,6 +489,8 @@ class PlayerController(private val context: Context) {
     }
 
     fun togglePlay() {
+        // 组内从机的播放/暂停交给主机决定：本地只发命令，由主机锚点驱动所有设备
+        if (GroupManager.interceptGuestCommand("toggle")) return
         val c = controller ?: return
         if (c.mediaItemCount == 0) return
         if (c.isPlaying) c.pause() else {
@@ -426,11 +499,43 @@ class PlayerController(private val context: Context) {
         }
     }
 
-    fun playAt(index: Int) {
+    /** 切歌音量淡出协程：新调用先取消旧的，避免被打断的旧协程停在半途音量上 */
+    private var fadeJob: Job? = null
+
+    /**
+     * 播放指定曲目。
+     *
+     * [fadeMs] > 0 且正在播放时，先把当前曲目音量在 fadeMs 内渐降到 0 再切换
+     * （黑胶页唱臂抬起时传 150ms 极短淡出，消除音频硬截断叠上机械音效的突兀感），
+     * 完成后恢复用户音量并起播新曲。恢复值取 [_state.value.volume]——它是
+     * [setVolume] 即时写入的用户设定，不受淡出操作污染。
+     */
+    fun playAt(index: Int, fadeMs: Long = 0L) {
         val c = controller ?: return
         if (index !in 0 until c.mediaItemCount) return
+        fadeJob?.cancel()
+        // 上一个淡出协程若被打断会停在半途音量上，先复原
+        c.volume = _state.value.volume
         if (index == c.currentMediaItemIndex) {
             togglePlay()
+        } else if (fadeMs > 0L && c.isPlaying) {
+            lastNotifiedId = -1L
+            fadeJob = scope.launch {
+                val target = _state.value.volume
+                val steps = 5
+                repeat(steps) { step ->
+                    if (!c.isPlaying) {
+                        c.volume = target // 淡出中被打断（暂停/退出）：复原后放弃切歌
+                        return@launch
+                    }
+                    c.volume = target * (steps - step - 1f) / steps
+                    delay(fadeMs / steps)
+                }
+                c.volume = target
+                c.seekToDefaultPosition(index)
+                if (c.playbackState == Player.STATE_IDLE) c.prepare()
+                c.play()
+            }
         } else {
             lastNotifiedId = -1L
             c.seekToDefaultPosition(index)
@@ -442,38 +547,64 @@ class PlayerController(private val context: Context) {
     /**
      * 下一首。
      *
-     * 必须用 [Player.seekToNext] 而不是 [Player.seekToNextMediaItem]：
-     * 前者按**当前 repeat + shuffle 模式**挑下一首，后者是死板的"时间轴上下一项"。
-     * 之前用错了，所以开了随机播放按下一首还是原顺序 —— 这就是"随机不生效"的原因。
+     * **手动切歌按队列下标走，到末首绕回第一首**，不交给 `seekToNext()` 判断。
+     *
+     * 之前用 `hasNextMediaItem()` 兜底，有两个坑：
+     * - 单曲循环（REPEAT_MODE_ONE）下它返回 false（"下一项"就是当前项），
+     *   于是手动点下一首被兜底成"跳回第 0 首"；
+     * - 随机是 App 自己重排队列实现的（播放器 `shuffleModeEnabled` 始终关着），
+     *   `seekToNext()` 只看时间轴，本来也不会乱序。
+     *
+     * 自己算下标之后，顺序 / 列表循环 / 单曲循环 / 随机四种模式下手动切歌
+     * 行为一致：永远往后走一首，最后一首回到第一首，不存在"切不动"的尽头。
      */
     fun next() {
+        if (GroupManager.interceptGuestCommand("next")) return
         val c = controller ?: return
         lastNotifiedId = -1L
-        // hasNextMediaItem() 与已废弃的 hasNext() 语义相同：只看时间轴有没有下一项，
-        // **不考虑** repeat/shuffle。这里只是判"能不能往后跳"，所以用它没问题；
-        // 真正决定跳去哪首的仍然是 seekToNext()（它才读 repeat + shuffle）。
-        if (c.hasNextMediaItem()) c.seekToNext() else c.seekToDefaultPosition(0)
+        val count = c.mediaItemCount
+        if (count <= 0) return
+        val nextIndex = if (c.currentMediaItemIndex >= count - 1) 0 else c.currentMediaItemIndex + 1
+        c.seekToDefaultPosition(nextIndex)
         if (!c.isPlaying) c.play()
     }
 
     fun previous() {
+        if (GroupManager.interceptGuestCommand("prev")) return
         val c = controller ?: return
+        val count = c.mediaItemCount
+        if (count <= 0) return
+        // 队首再往前 → 绕到队尾。这一条优先于"回到本首开头"，
+        // 否则第一首放过 4 秒之后，用户按上一首永远到不了最后一首。
+        if (c.currentMediaItemIndex <= 0) {
+            lastNotifiedId = -1L
+            c.seekToDefaultPosition(count - 1)
+            if (!c.isPlaying) c.play()
+            return
+        }
         if (c.currentPosition > 4000L) {
+            // 唱了几秒再按上一首：按主流播放器的惯例先回到本首开头
             c.seekTo(0)
             return
         }
         lastNotifiedId = -1L
-        // 同样用 seekToPrevious（尊重 shuffle）。media3 1.5 的 Player 接口没有
-        // hasPrevious()，而 hasPreviousMediaItem() 是时间轴语义、判断不了 shuffle 序，
-        // 所以这里直接调用 —— 在队首时它是 no-op，正是想要的行为。
-        c.seekToPrevious()
+        // 其余位置：往上一首走
+        val prevIndex = c.currentMediaItemIndex - 1
+        c.seekToDefaultPosition(prevIndex)
         if (!c.isPlaying) c.play()
     }
 
     fun seekTo(ms: Long) {
+        if (GroupManager.interceptGuestCommand("seek", ms)) return
         val c = controller ?: return
         c.seekTo(ms.coerceAtLeast(0L))
         _state.update { it.copy(positionMs = ms.coerceAtLeast(0L)) }
+    }
+
+    /** 多设备同步的从机纠偏会走这里（主机锚点下发的速率微调） */
+    fun setSpeed(speed: Float) {
+        val c = controller ?: return
+        c.setPlaybackSpeed(speed.coerceIn(0.5f, 2f))
     }
 
     fun setVolume(value: Float) {
@@ -514,13 +645,20 @@ class PlayerController(private val context: Context) {
      * 它那种"转一圈"的语义和 [PlayMode] 的三态不是一回事，留着只会让人误用。
      */
     fun setRepeat(mode: RepeatMode) {
-        val c = controller ?: return
-        c.repeatMode = when (mode) {
-            RepeatMode.OFF -> Player.REPEAT_MODE_OFF
-            RepeatMode.ALL -> Player.REPEAT_MODE_ALL
-            RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+        repeatState = mode
+        val c = controller
+        if (c == null) {
+            _state.update { it.copy(repeat = mode) }
+            return
         }
+        c.repeatMode = mode.toPlayerRepeat()
         sync(c, null)
+    }
+
+    private fun RepeatMode.toPlayerRepeat(): Int = when (this) {
+        RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+        RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+        RepeatMode.ONE -> Player.REPEAT_MODE_ONE
     }
 
     /** 下一首播放 */

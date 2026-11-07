@@ -38,6 +38,7 @@ import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.QueueSongRow
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,7 +57,7 @@ fun QueueSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = skin.surface,
+        containerColor = skin.surface.solidSurface(),
         dragHandle = {
             Box(
                 Modifier

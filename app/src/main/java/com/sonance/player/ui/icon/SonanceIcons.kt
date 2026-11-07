@@ -89,6 +89,27 @@ object SonanceIcons {
     val Palette by o("Palette", "M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z")
     val Info by o("Info", circle(12.0, 12.0, 10.0), "M12 16v-4", "M12 8h.01")
 
+    /** 画面提亮开关 */
+    val Sun by o(
+        "Sun",
+        circle(12.0, 12.0, 4.0),
+        "M12 2v2", "M12 20v2", "M2 12h2", "M20 12h2",
+        "M4.93 4.93l1.41 1.41", "M17.66 17.66l1.41 1.41",
+        "M4.93 19.07l1.41-1.41", "M17.66 6.34l1.41-1.41"
+    )
+
+    /**
+     * 锁屏 / 后台继续播放开关。
+     *
+     * 用月牙而不是一个「设置齿轮」：它表达的是「熄屏后还在响」，
+     * 和左边 [Sun]（画面提亮）在底栏里成对出现，开启/关闭只靠亮度区分，
+     * 不占常驻大按钮的位置。
+     */
+    val Moon by o(
+        "Moon",
+        "M20.6 13.1A8.6 8.6 0 0 1 10.9 3.4 9 9 0 1 0 20.6 13.1z"
+    )
+
     // ===== 操作 =====
     val Search by o("Search", circle(11.0, 11.0, 8.0), "M21 21l-4.35-4.35")
     val ListView by o("ListView", "M8 6h13", "M8 12h13", "M8 18h13", dot(3.0, 6.0), dot(3.0, 12.0), dot(3.0, 18.0))
@@ -99,6 +120,23 @@ object SonanceIcons {
     val Sort by o("Sort", "M3 6h11", "M3 12h8", "M3 18h5", "M17 8v11", "M14 16l3 3 3-3")
     val Close by o("Close", "M18 6L6 18", "M6 6l12 12")
     val ChevronDown by o("ChevronDown", "M6 9l6 6 6-6")
+
+    /** 全屏（进入沉浸式黑胶播放页的入口图标，feather maximize） */
+    val Maximize by o(
+        "Maximize",
+        "M8 3H5a2 2 0 0 0-2 2v3",
+        "M16 3h3a2 2 0 0 1 2 2v3",
+        "M8 21H5a2 2 0 0 1-2-2v-3",
+        "M16 21h3a2 2 0 0 0 2-2v-3"
+    )
+    /** 全屏页的「缩到浮窗」按钮：四角向内收，和 [Maximize] 是同一套线宽/圆角 */
+    val Minimize by o(
+        "Minimize",
+        "M9 3v5a1 1 0 0 1-1 1H3",
+        "M15 3v5a1 1 0 0 0 1 1h5",
+        "M9 21v-5a1 1 0 0 0-1-1H3",
+        "M15 21v-5a1 1 0 0 1 1-1h5"
+    )
     val ArrowLeft by o("ArrowLeft", "M19 12H5", "M12 19l-7-7 7-7")
     /** 「回到顶部」按钮的箭头。实心向上，比 chevron 在小尺寸下更好认 */
     val ArrowUp by o("ArrowUp", "M12 20V6", "M6 12l6-6 6 6")

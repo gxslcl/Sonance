@@ -28,12 +28,26 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 多设备同步：MulticastLock（mDNS 发现）与 WifiLock（锁屏后保持对时精度） -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- NSD（mDNS）发现权限：Android 12 及以下要定位，13 起要 NEARBY_WIFI_DEVICES -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="33" />
 
     <!-- 后台播放与通知 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 黑胶模式的触感反馈（install-time 普通权限） -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!--
       Shizuku：以 shell 身份读 B 站缓存目录（Android/data/tv.danmaku.bilibilihd）。
@@ -84,6 +98,17 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!--
+          视频「锁屏 / 后台继续播放」的前台服务。
+          只负责把进程钉住 + 提供媒体通知（播放/暂停、上一首/下一首、进度），
+          播放器仍然只有 BiliVideoSession 里的那一个实例。
+        -->
+        <service
+            android:name=".playback.BiliVideoService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
 
         <!--
           B 站缓存的全屏播放页。

@@ -204,6 +204,12 @@ fun GlassBackdrop(
                             translationX = if (sliding) -slideFrom * 0.04f * boxW * p else 0f
                         }
                 ) {
+                    // 组内底色：封面带不透明度（可见度 <100 时 <1），若直接在透明
+                    // 缓冲上合成，组的像素 alpha <1 —— 两层叠加时中段多混进一截
+                    // 旧组、动画结束移除旧组的瞬间又少一截（≈2.5 个灰度级，
+                    // 真机录屏实锤「过渡快结束时跳一下」）。垫上遮罩同色实底后
+                    // 组先合成到完全不透明，p·L + (1-p)·L = L 才严格成立。
+                    Box(Modifier.matchParentSize().background(scrimColor))
                     Image(
                         bitmap = bmp,
                         contentDescription = null,
@@ -236,6 +242,8 @@ fun GlassBackdrop(
                             alpha = p
                         }
                 ) {
+                    // 同上：组内垫遮罩同色实底，组合成到不透明再参与整层混合
+                    Box(Modifier.matchParentSize().background(scrimColor))
                     Image(
                         bitmap = bmp,
                         contentDescription = null,

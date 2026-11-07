@@ -100,6 +100,35 @@ internal object Id3Writer {
     }
 
     /**
+     * 在**保留原有帧**的前提下替换标题 / 歌手 / 专辑（手动编辑歌曲信息用）。
+     *
+     * 规则与 [withCoverPreserving] 同源，只是换掉的帧不同：
+     * - 旧标签里的 `TIT2` / `TPE1` / `TALB` 丢掉，换成新值（空串就不写该帧）
+     * - 其余帧**逐字节原样保留** —— 封面（APIC）、音轨号、流派、年份全都不动
+     * - 版本跟随原标签
+     *
+     * @param existing 原文件开头的完整 ID3v2 标签（含 10 字节头）
+     * @return 新的完整标签；[existing] 缺失或结构太特殊时返回 null，
+     *         由调用方退回 [buildTag]（从零建标签，牺牲音轨号等次要帧）
+     */
+    internal fun withMetaPreserving(
+        existing: ByteArray?,
+        title: String,
+        artist: String,
+        album: String
+    ): ByteArray? {
+        val parsed = parseFrames(existing) ?: return null
+        val frames = parsed.frames
+            .filterNot { it.id == "TIT2" || it.id == "TPE1" || it.id == "TALB" }
+            .map { it.bytes }
+            .toMutableList()
+        if (title.isNotBlank()) frames += textFrame("TIT2", title, parsed.version)
+        if (artist.isNotBlank()) frames += textFrame("TPE1", artist, parsed.version)
+        if (album.isNotBlank()) frames += textFrame("TALB", album, parsed.version)
+        return assemble(parsed.version, frames)
+    }
+
+    /**
      * 文件开头那个 ID3v2 标签**一共占多少字节**（含 10 字节头）。
      *
      * 没有标签、或数据不够判断时返回 0。
@@ -223,7 +252,8 @@ internal object Id3Writer {
     }
 
     /** 文本帧：编码字节 + BOM + UTF-16LE */
-    private fun textFrame(id: String, text: String): ByteArray = frame(id, utf16(text))
+    private fun textFrame(id: String, text: String, version: Int = VERSION_MAJOR): ByteArray =
+        frame(id, utf16(text), version)
 
     /**
      * APIC 帧：

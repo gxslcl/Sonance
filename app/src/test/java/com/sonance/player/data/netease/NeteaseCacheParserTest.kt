@@ -1,7 +1,9 @@
 package com.sonance.player.data.netease
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -354,6 +356,18 @@ class NeteaseCacheParserTest {
     }
 
     @Test
+    fun `低码率明文容器豁免大小预判_波点 ogg 短歌不误标`() {
+        // ogg/opus 48~96kbps：2.4MB 以内也可能是完整歌，不做大小预判
+        for (s in longArrayOf(900_000, 1_600_000, 2_300_000)) {
+            assertEquals(false, NeteaseCacheParser.isSuspectTrial(s, ".ogg"))
+            assertEquals(false, NeteaseCacheParser.isSuspectTrial(s, ".flac"))
+        }
+        // mp3 等其余明文照旧
+        assertEquals(true, NeteaseCacheParser.isSuspectTrial(1_600_000, ".mp3"))
+        assertEquals(true, NeteaseCacheParser.isSuspectTrial(1_600_000, ""))
+    }
+
+    @Test
     fun `扫描归并时按大小打残曲标记`() {
         val raw = buildString {
             // 真机形态：nmsf 缓存文件
@@ -372,5 +386,223 @@ class NeteaseCacheParserTest {
         assertEquals(false, full.suspectTrial)
         assertEquals(true, trial.typeLabel.contains("疑似残曲"))
         assertEquals(false, full.typeLabel.contains("疑似残曲"))
+    }
+
+    // ===== 多 App 缓存分类（酷狗 KGM / QQ 音乐 QMC / 汽水 MDL） =====
+
+    /** 酷狗 KGM 容器的 16 字节魔数（见 PrivateAudioRestorer.KGM_MAGIC_HEX） */
+    private val KGM_MAGIC_HEX = "7cd532eb86027f4ba8afa68e0fff9914"
+
+    @Test
+    fun `酷狗 KGM 魔数被认出来`() {
+        val (kind, ext) = NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(KGM_MAGIC_HEX))
+        assertEquals(NcKind.KGM, kind)
+        assertEquals("", ext)
+    }
+
+    @Test
+    fun `KGG 新版加密魔数不在支持列表_靠扩展名兜底成 KGM`() {
+        val (kind, _) = NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(JSON), "晴天.kgg")
+        assertEquals(NcKind.KGM, kind)
+        val (kind2, _) = NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(JSON), "晴天.kgma")
+        assertEquals(NcKind.KGM, kind2)
+    }
+
+    @Test
+    fun `QMC 家族没有魔数_按文件名扩展名识别`() {
+        fun kindOf(name: String) =
+            NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(JSON), name).first
+        assertEquals(NcKind.QMC, kindOf("晴天.mflac"))
+        assertEquals(NcKind.QMC, kindOf("晴天.mflac0"))
+        assertEquals(NcKind.QMC, kindOf("晴天.mgg1"))
+        assertEquals(NcKind.QMC, kindOf("晴天.qmcflac"))
+        assertEquals(NcKind.QMC, kindOf("晴天.qmc0"))
+        assertEquals(NcKind.QMC, kindOf("晴天.tkm"))
+    }
+
+    @Test
+    fun `汽水 MDL 按扩展名识别为暂不支持类别`() {
+        val (kind, ext) = NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(JSON), "a1b2c3.mdl")
+        assertEquals(NcKind.MDL, kind)
+        assertEquals("", ext)
+    }
+
+    @Test
+    fun `明文魔数优先于扩展名_标准音频不会被误判成加密`() {
+        // 名字带 .mflac 但内容是 ID3 mp3：按魔数走明文
+        assertEquals(
+            NcKind.PLAIN to ".mp3",
+            NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes("49443303"), "x.mflac")
+        )
+    }
+
+    @Test
+    fun `杂文件即使带陌生扩展名也不会被当成加密容器`() {
+        fun kindOf(name: String) =
+            NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes(JSON), name).first
+        assertEquals(NcKind.UNKNOWN, kindOf("cover.json"))
+        assertEquals(NcKind.UNKNOWN, kindOf("db.sqlite"))
+        assertEquals(NcKind.UNKNOWN, kindOf("video.mp4"))
+    }
+
+    @Test
+    fun `parseScan 把文件名传给分类器_mflac 条目带 QMC 类别`() {
+        val files = NeteaseCacheParser.parseScan(
+            line(5_242_880, "/sdcard/qqmusic/song/晴天 - 周杰伦.mflac", JSON)
+        )
+        assertEquals(1, files.size)
+        assertEquals(NcKind.QMC, files.single().kind)
+    }
+
+    @Test
+    fun `QMC 条目归并后保留类别与真实文件名`() {
+        val entries = NeteaseCacheParser.buildEntries(
+            listOf(
+                NcFile("/sdcard/qqmusic/song/晴天 - 周杰伦.mflac", 5_242_880L, NcKind.QMC, ""),
+                NcFile("/sdcard/kgmusic/download/告白气球 - 周杰伦.kgm", 6_291_456L, NcKind.KGM, "")
+            )
+        )
+        assertEquals(2, entries.size)
+        val qmc = entries.first { it.kind == NcKind.QMC }
+        assertEquals("晴天 - 周杰伦", qmc.displayName)
+        assertEquals(false, qmc.suspectTrial)
+        assertEquals("QMC 加密", qmc.typeLabel)
+        val kgm = entries.first { it.kind == NcKind.KGM }
+        assertEquals("KGM 加密", kgm.typeLabel)
+    }
+
+    @Test
+    fun `MDL 条目的类型标签如实标注暂不支持`() {
+        val entries = NeteaseCacheParser.buildEntries(
+            listOf(NcFile("/sdcard/Android/data/com.luna.music/cache/music/x.mdl", 3_000_000L, NcKind.MDL, ""))
+        )
+        assertEquals(1, entries.size)
+        assertEquals("MDL 加密 · 暂不支持解密", entries.single().typeLabel)
+    }
+
+    @Test
+    fun `codec 往返兼容新增的三种类别`() {
+        for (kind in listOf(NcKind.KGM, NcKind.QMC, NcKind.MDL)) {
+            val e = NeteaseCacheEntry(
+                key = "/cache/a.bin", displayName = "a", sizeBytes = 100L,
+                kind = kind, plainExt = "", fragments = listOf("/cache/a.bin"), fragmentCount = 1
+            )
+            assertEquals(e, NeteaseCacheCodec.fromLine(NeteaseCacheCodec.toLine(e)))
+        }
+    }
+
+    @Test
+    fun `扫描脚本包含所选目标的根目录且不含未选目标`() {
+        val script = NeteaseCacheRepository.buildScanScript(setOf(SniffApp.KUGOU, SniffApp.LUNA))
+        assertTrue(script.contains("/sdcard/kgmusic"))
+        assertTrue(script.contains("com.kugou.android/cache"))
+        assertTrue(script.contains("com.luna.music/cache"))
+        assertTrue(script.contains("com.ss.android.music/cache"))
+        assertFalse(script.contains("com.netease.cloudmusic"))
+        assertFalse(script.contains("com.tencent.qqmusic"))
+        // shell 变量必须原样输出（由 shell 端展开），不能被 Kotlin 字符串模板吃掉
+        assertTrue(script.contains("\$root"))
+        assertTrue(script.contains("\"\$f\""))
+        // 汇合点：while read 逐文件报大小与魔数
+        assertTrue(script.contains("od -An -tx1 -N12"))
+    }
+
+    @Test
+    fun `扫描脚本根目录列表全选时去重且逐行换行`() {
+        val script = NeteaseCacheRepository.buildScanScript(SniffApp.entries.toSet())
+        // 每个根目录一行带续行反斜杠（最后一行跟 ; do）
+        assertTrue(script.contains("\"/sdcard/Android/data/com.netease.cloudmusic/cache\" \\"))
+        assertTrue(script.contains("; do"))
+    }
+
+    // ===== 真机实测形态回归（QQ 封面图误判 / 波点明文缓存 / 概念版根目录） =====
+
+    @Test
+    fun `WEBP 封面图不会被误判成 wav`() {
+        // RIFF....WEBP：QQ音乐 download_cache 的封面图（真机实测头 12 字节）
+        val webp = NeteaseCacheParser.hexToBytes("52494646" + "d6a10900" + "57454250")
+        assertEquals(NcKind.UNKNOWN, NeteaseCacheParser.classify(webp).first)
+        assertEquals(
+            NcKind.UNKNOWN,
+            NeteaseCacheParser.classify(webp, "1794693713029").first
+        )
+    }
+
+    @Test
+    fun `RIFF 容器 12 字节起校验 WAVE 标记`() {
+        val wave = NeteaseCacheParser.hexToBytes("52494646" + "fc7d1a00" + "57415645")
+        assertEquals(NcKind.PLAIN to ".wav", NeteaseCacheParser.classify(wave))
+        // 不足 12 字节区分不了（旧版扫描只报 8 字节），维持旧行为按 wav 放行
+        assertEquals(
+            NcKind.PLAIN to ".wav",
+            NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes("524946460000"))
+        )
+    }
+
+    @Test
+    fun `扫描脚本读 12 字节头部`() {
+        val script = NeteaseCacheRepository.buildScanScript(setOf(SniffApp.TENCENT))
+        assertTrue(script.contains("od -An -tx1 -N12"))
+        assertFalse(script.contains("-N8 "))
+    }
+
+    @Test
+    fun `波点 vcc 缓存按明文魔数识别且展示名剥掉 vcc 中缀`() {
+        // 真机实测：<歌曲id>.<码率>.vcc.song 头部是明文 ID3 mp3，.vcc.dat 是 OggS
+        val head = NeteaseCacheParser.hexToBytes("49443303")
+        assertEquals(NcKind.PLAIN to ".mp3", NeteaseCacheParser.classify(head, "551684.128.vcc.song"))
+        assertEquals(
+            NcKind.PLAIN to ".ogg",
+            NeteaseCacheParser.classify(NeteaseCacheParser.hexToBytes("4f6767530002"), "1131986.100.vcc.dat")
+        )
+        val entries = NeteaseCacheParser.buildEntries(
+            listOf(NcFile("/sdcard/Android/data/cn.wenyu.bodian/files/playCache/551684.128.vcc.song", 3_971_266L, NcKind.PLAIN, ".mp3"))
+        )
+        assertEquals(1, entries.size)
+        assertEquals("551684.128", entries.single().displayName)
+        assertEquals(NcKind.PLAIN, entries.single().kind)
+    }
+
+    @Test
+    fun `非波点的 vcc 结尾不受清洗影响`() {
+        // 只有完整的「.vcc 中缀」才剥；普通名字原样保留
+        val entries = NeteaseCacheParser.buildEntries(
+            listOf(NcFile("/cache/abc.vcc", 4_000_000L, NcKind.UNKNOWN, ""))
+        )
+        // UNKNOWN 不会成条目；用明文验证清洗只发生在波点形态上
+        val plain = NeteaseCacheParser.buildEntries(
+            listOf(NcFile("/cache/moon.mp3", 4_000_000L, NcKind.PLAIN, ".mp3"))
+        )
+        assertEquals("moon", plain.single().displayName)
+    }
+
+    @Test
+    fun `酷狗概念版与波点的根目录进扫描脚本`() {
+        val script = NeteaseCacheRepository.buildScanScript(setOf(SniffApp.KUGOU, SniffApp.BODIAN))
+        assertTrue(script.contains("com.kugou.android.lite/cache"))
+        assertTrue(script.contains("com.kugou.android.lite/files"))
+        assertTrue(script.contains("cn.wenyu.bodian/files/playCache"))
+        assertTrue(script.contains("/sdcard/kgmusic"))
+        assertFalse(script.contains("com.netease.cloudmusic"))
+    }
+
+    @Test
+    fun `QQ 分块仓库 bin 按魔数识别且豁免残曲预判`() {
+        // 真机实测：cache/files/*.bin 头 4 字节 01 01 02 02
+        val head = NeteaseCacheParser.hexToBytes("0101020241000000410000000401")
+        assertEquals(NcKind.QQCACHE, NeteaseCacheParser.classify(head, "5.bin").first)
+        val entries = NeteaseCacheParser.buildEntries(
+            listOf(
+                // 600KB（低于 2.4MB 残曲线）也必须成条目：分块仓库不是单曲
+                NcFile("/sdcard/Android/data/com.tencent.qqmusic/cache/files/1.bin", 600_731L, NcKind.QQCACHE, ""),
+                NcFile("/sdcard/Android/data/com.tencent.qqmusic/cache/files/5.bin", 19_973_750L, NcKind.QQCACHE, "")
+            )
+        )
+        assertEquals(2, entries.size)
+        entries.forEach {
+            assertEquals(false, it.suspectTrial)
+            assertEquals("QQ 分块缓存 · 暂不支持解密", it.typeLabel)
+        }
+        assertEquals("1", entries.first { it.sizeBytes == 600_731L }.displayName)
     }
 }

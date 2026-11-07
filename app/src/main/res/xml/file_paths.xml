@@ -3,10 +3,20 @@
   给 FileProvider 用的路径表。
 
   cover_cache 是 CoverCache 落盘下载封面的目录（filesDir/cover_cache）。
-  只暴露这一个子目录 —— 不要写 files-path path="."，那等于把应用私有目录整个敞开。
+  只暴露这两个子目录 —— 不要写 files-path path="."，那等于把应用私有目录整个敞开。
+
+  group_audio 是多设备同步时从主机接收的曲目缓存（cacheDir/group_audio），
+  转成 content:// 后交给 ExoPlayer 播放。
 -->
 <paths>
     <files-path
         name="covers"
         path="cover_cache/" />
+    <cache-path
+        name="group"
+        path="group_audio/" />
+    <!-- 多设备诊断日志（cacheDir/group_logs），导出后经 FileProvider 分享 -->
+    <cache-path
+        name="group_log"
+        path="group_logs/" />
 </paths>

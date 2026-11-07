@@ -83,6 +83,7 @@ import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import com.sonance.player.ui.components.GlassControls
 import com.sonance.player.ui.components.SliderLine
+import com.sonance.player.ui.sheets.ScanScopeSheet
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
@@ -98,6 +99,9 @@ fun SettingsScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val skin = LocalSkin.current
+    // 「扫描」不再占列表的 ⁝ 菜单：它是设置类操作，入口收进媒体库分组。
+    // 这里点开的是同一个 ScanScopeSheet（沿用 Prefs 里记住的目录勾选）
+    var showScanScope by remember { mutableStateOf(false) }
 
     // 解锁窗口到点自动收起。放一个 5 秒的轻量轮询，而不是在 ViewModel 里挂常驻定时器 ——
     // 这个区块只在设置页可见时才有意义，离开设置页就该停下
@@ -179,8 +183,12 @@ fun SettingsScreen(
             )
             SettingsActionRow(
                 title = "重新扫描本地音乐",
-                subtitle = buildLastScanSubtitle(context, vm.songs.size),
-                onClick = { vm.scan() },
+                subtitle = buildLastScanSubtitle(
+                    context = context,
+                    songCount = vm.songs.size,
+                    scopeCount = vm.scanScopeSelection.size
+                ),
+                onClick = { showScanScope = true },
                 actionLabel = if (vm.scanState == com.sonance.player.ScanState.SCANNING) "扫描中…" else "扫描"
             )
         }
@@ -202,6 +210,11 @@ fun SettingsScreen(
         // ===== 网易云缓存嗅探并转换 =====
         // 与「私有格式还原」共用同一个彩蛋开关
         if (vm.conversionUnlocked) NeteaseCacheSection(vm = vm)
+
+        // ===== 多设备调试 =====
+        // 正式界面不出现 IP / 端口输入框；这里只是真机联调时绕过 mDNS 的兜底入口，
+        // 与上面两个内部工具共用同一个彩蛋开关。
+        if (vm.conversionUnlocked) GroupDebugSection()
 
         // ===== 统计 =====
         SettingsSection(title = "曲库概览") {
@@ -367,6 +380,11 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(24.dp))
+    }
+
+    // 面板与列表页原本用的是同一个 ScanScopeSheet，这里只是把入口换到了设置里
+    if (showScanScope) {
+        ScanScopeSheet(vm = vm, onDismiss = { showScanScope = false })
     }
 }
 
@@ -1186,6 +1204,37 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
             onCheckedChange = { vm.changeVinylMode(it) }
         )
 
+        // ===== 沉浸黑胶页机械音效 =====
+        // 与黑胶页控制舱里的小喇叭按钮读写同一份配置
+        SettingsSwitchRow(
+            title = "黑胶机械音效",
+            subtitle = "沉浸黑胶页里的按键「啪嗒」声、唱针落片与炒豆底噪。" +
+                "切歌抬臂时音乐会做 150ms 短淡出，与音效衔接更温润。",
+            checked = vm.vinylSfxEnabled,
+            onCheckedChange = { vm.changeVinylSfxEnabled(it) }
+        )
+        if (vm.vinylSfxEnabled) {
+            Spacer(Modifier.height(4.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("音效音量", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text(
+                    text = "${(vm.vinylSfxVolume * 100).roundToInt()}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.accent
+                )
+            }
+            Slider(
+                value = vm.vinylSfxVolume,
+                onValueChange = { vm.changeVinylSfxVolume(it) },
+                valueRange = 0f..1f,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
         SettingsSwitchRow(
             title = "在线补全封面（iTunes Search API）",
             subtitle = "本地没有内嵌封面时，联网按「歌名 + 歌手」搜一张。默认关闭 —— " +
@@ -1820,6 +1869,81 @@ private fun CollapsibleSection(
 }
 
 @Composable
+private fun GroupDebugSection() {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val prefs = remember { Prefs(context) }
+    var open by remember { mutableStateOf(false) }
+    var ip by remember { mutableStateOf("") }
+
+    SettingsSection(title = "多设备调试") {
+        SettingsActionRow(
+            title = "手动连接主机",
+            subtitle = "mDNS 发现失败时，用同一 Wi-Fi 下主机的 IP 直连。仅用于真机联调。",
+            actionLabel = "连接",
+            onClick = {
+                ip = prefs.groupLastHost?.substringBefore(':').orEmpty()
+                open = true
+            }
+        )
+        if (prefs.groupLastHost != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "上次连接：${prefs.groupLastHost}",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+        }
+    }
+
+    if (open) {
+        AlertDialog(
+            onDismissRequest = { open = false },
+            containerColor = skin.surface,
+            title = { Text("手动连接主机", color = skin.text) },
+            text = {
+                Column {
+                    Text(
+                        "输入主机在局域网里的 IP（端口默认 47801）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.textMuted
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = ip,
+                        onValueChange = { ip = it },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = skin.accent,
+                            unfocusedBorderColor = skin.border2,
+                            focusedTextColor = skin.text,
+                            unfocusedTextColor = skin.text,
+                            cursorColor = skin.accent
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val host = ip.trim().substringBefore(':')
+                    val port = ip.trim().substringAfter(':', "").takeIf { it.isNotBlank() }
+                        ?.toIntOrNull() ?: com.sonance.player.sync.GroupProtocol.TCP_PORT
+                    if (host.isNotBlank()) {
+                        com.sonance.player.sync.GroupManager.connectManual(host, port)
+                    }
+                    open = false
+                }) { Text("连接", color = skin.accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { open = false }) { Text("取消", color = skin.textMuted) }
+            }
+        )
+    }
+}
+
+@Composable
 private fun SettingsSection(
     title: String,
     content: @Composable () -> Unit
@@ -1948,13 +2072,22 @@ private fun StatBox(label: String, value: String, modifier: Modifier = Modifier)
 }
 
 /**
- * 在「重新扫描」按钮下面显示缓存新鲜度：有缓存就告诉用户多久前扫的、没有就提示「首次启动会扫」。
+ * 在「重新扫描」这一行下面显示缓存新鲜度与扫描范围：有缓存就告诉用户多久前扫的、
+ * 这次会扫哪些目录；没有就提示「首次启动会扫」。
+ *
+ * 范围是**配置**（选哪些文件夹），扫描是**动作** —— 两者放在同一行里，
+ * 用户点开就是同一个范围面板，不再出现「这里直扫、那里选范围」的两套行为。
  */
-internal fun buildLastScanSubtitle(context: android.content.Context, songCount: Int): String {
+internal fun buildLastScanSubtitle(
+    context: android.content.Context,
+    songCount: Int,
+    scopeCount: Int = 0
+): String {
     val lastAt = com.sonance.player.data.Prefs(context).lastScanAt
+    val scopeText = if (scopeCount > 0) "范围 $scopeCount 个文件夹" else "范围：全部文件夹"
     if (lastAt <= 0L) {
-        return if (songCount == 0) "首次启动会扫描一次，之后秒开"
-        else "未记录扫描时间"
+        return if (songCount == 0) "首次启动会扫描一次，之后秒开 · $scopeText"
+        else "未记录扫描时间 · $scopeText"
     }
     val mins = ((System.currentTimeMillis() - lastAt) / 60000L).coerceAtLeast(0)
     val rel = when {
@@ -1963,5 +2096,5 @@ internal fun buildLastScanSubtitle(context: android.content.Context, songCount: 
         mins < 24 * 60 -> "${mins / 60} 小时前"
         else -> "${mins / (24 * 60)} 天前"
     }
-    return "上次扫描：$rel · $songCount 首"
+    return "上次扫描：$rel · $songCount 首 · $scopeText"
 }

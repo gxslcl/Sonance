@@ -2,6 +2,7 @@ package com.sonance.player.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,11 +23,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -73,6 +77,12 @@ fun SideNavigation(
     storageFraction: Float,
     modifier: Modifier = Modifier,
     /**
+     * 沉浸皮肤下侧栏也半透明，让整页封面玻璃透上来 —— 与右侧播放面板同一口径
+     * （`skin.surface.copy(alpha = 0.46f)`），三栏连成一片。
+     * 手机紧凑布局没有侧栏，不受这里影响。
+     */
+    translucent: Boolean = false,
+    /**
      * 是否显示「B 站缓存」这一项。
      *
      * 只有平板（EXPANDED）布局才为 true：手机布局没有侧栏，而这个功能依赖
@@ -80,7 +90,18 @@ fun SideNavigation(
      */
     biliVisible: Boolean = false,
     biliSelected: Boolean = false,
-    onOpenBili: () -> Unit = {}
+    onOpenBili: () -> Unit = {},
+    /** 左上角的品牌名（= 应用显示名，可在双击时修改） */
+    appName: String = "Sonance",
+    /** 左上角的品牌图案（AppIcons id，空串 = 内置 Logo） */
+    logoId: String = "",
+    /**
+     * **双击**左上角「图标 + 名称」触发的动作。
+     *
+     * 手机上这个入口在顶栏标题上；平板没有顶栏标题那一行，品牌块就是
+     * 同一个位置 —— 不补这个手势，平板上就没有修改应用名/图标的入口。
+     */
+    onBrandDoubleTap: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -94,16 +115,35 @@ fun SideNavigation(
         modifier = modifier
             .width(width)
             .fillMaxHeight()
-            .background(skin.surface)
+            // 半透明层要先铺满整列（含系统栏那一段高度），再把内容内缩；
+            // 反过来的话侧栏顶部会在状态栏处断出一条实底接缝
+            .background(
+                if (translucent) skin.surface.copy(alpha = 0.46f) else skin.surface
+            )
+            .systemBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(vertical = if (dense) 10.dp else 20.dp)
     ) {
         // 品牌（矮屏窄栏下省略）
         if (expanded || !dense) {
+            // 双击品牌块 = 手机顶栏「双击标题」的等价入口（改应用名 / 换顶栏图标）
+            val brandTap = rememberUpdatedState(onBrandDoubleTap)
+            // logoId 为空时用内置 Logo；为空时底色取默认图标自己的底色，
+            // 这样左上角看起来就是桌面那个图标的缩小版
+            val brandIcon = AppIcons.byId(logoId.ifBlank { AppIcons.DEFAULT_ID })
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = if (expanded) 22.dp else 0.dp),
+                    .padding(horizontal = if (expanded) 22.dp else 0.dp)
+                    .then(
+                        if (onBrandDoubleTap != null) {
+                            Modifier.pointerInput(Unit) {
+                                detectTapGestures(onDoubleTap = { brandTap.value?.invoke() })
+                            }
+                        } else {
+                            Modifier
+                        }
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = if (expanded) Arrangement.Start else Arrangement.Center
             ) {
@@ -111,13 +151,13 @@ fun SideNavigation(
                     Modifier
                         .size(34.dp)
                         .clip(RoundedCornerShape(9.dp))
-                        // 用 AppIcons 的默认图标（和桌面图标同一张图）当品牌标，
-                        // 保证「桌面看到的」与「应用里看到的」是同一个图案
-                        .background(AppIcons.byId(AppIcons.DEFAULT_ID).bgColor),
+                        .background(
+                            if (logoId.isNotBlank()) skin.surface2 else brandIcon.bgColor
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     androidx.compose.foundation.Image(
-                        painter = painterResource(AppIcons.byId(AppIcons.DEFAULT_ID).preview),
+                        painter = painterResource(brandIcon.preview),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -126,10 +166,12 @@ fun SideNavigation(
                     Spacer(Modifier.width(11.dp))
                     Column {
                         Text(
-                            text = "Sonance",
+                            text = appName.ifBlank { "Sonance" },
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
-                            color = skin.text
+                            color = skin.text,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "本地音乐播放器",

@@ -1,7 +1,9 @@
 package com.sonance.player.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,15 +12,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,11 +46,13 @@ import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /* ============================================================
  * 歌曲行
  * ============================================================ */
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SongRow(
     song: Song,
@@ -70,6 +77,25 @@ fun SongRow(
      * 二次确认对话框由调用方负责 —— 这里只负责把"用户想删"这件事报上去。
      */
     onDeleteFile: (() -> Unit)? = null,
+    /**
+     * 进入多选删除。**传 null 就不显示这一项**（只有本地歌曲才传）。
+     */
+    onEnterMultiSelect: (() -> Unit)? = null,
+    /** 当前列表是否处于多选态（多选态下点击整行 = 勾选/取消，不播放） */
+    selectionMode: Boolean = false,
+    /** 这一行是否被勾选 */
+    selected: Boolean = false,
+    /**
+     * 手动编辑歌名 / 歌手 / 专辑（写进文件标签）。**传 null 就不显示这一项**
+     * （在线歌、队列等没有本地文件可写的场景）。
+     */
+    onEditInfo: (() -> Unit)? = null,
+    /**
+     * 听歌识曲（网易云指纹识别，自动补全信息）。**传 null 就不显示这一项**。
+     */
+    onRecognize: (() -> Unit)? = null,
+    /** 第一次长按打开动作面板时回调，用于把「长按可更多操作」提示永久收起 */
+    onLongPressHintUsed: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
     /**
      * 封面放大倍数（设置里的「封面大小」，1 / 1.2 / 1.5 / 2）。
@@ -81,7 +107,14 @@ fun SongRow(
     coverScale: Float = 1f
 ) {
     val skin = LocalSkin.current
-    var menuOpen by remember { mutableStateOf(false) }
+    var actionsOpen by remember { mutableStateOf(false) }
+
+    // 行尾不再放 ⋮：低频操作全部收进长按弹出的动作面板。
+    // 长按只在普通态可用；多选态下长按不做事，避免和勾选逻辑打架。
+    val longPressActions: () -> Unit = {
+        actionsOpen = true
+        onLongPressHintUsed?.invoke()
+    }
 
     val thumb = (if (compact) 38.dp else 44.dp) * coverScale
 
@@ -89,8 +122,17 @@ fun SongRow(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(if (isCurrent) skin.accentGlow else Color.Transparent)
-            .clickable(onClick = onClick)
+            .background(
+                when {
+                    selected -> skin.accent.copy(alpha = 0.14f)
+                    isCurrent -> skin.accentGlow
+                    else -> Color.Transparent
+                }
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = if (!selectionMode) longPressActions else null
+            )
             .padding(horizontal = if (compact) 8.dp else 10.dp, vertical = if (compact) 8.dp else 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -175,52 +217,178 @@ fun SongRow(
             )
         }
 
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.width(8.dp))
 
-        IconAction(
-            icon = if (isFavorite) SonanceIcons.HeartFilled else SonanceIcons.Heart,
-            contentDescription = "收藏",
-            onClick = onToggleFavorite,
-            iconSize = 17.dp,
-            tint = if (isFavorite) skin.accent else skin.textMuted
-        )
-
-        Box {
+        if (selectionMode) {
+            // 多选态：尾部换成选择圈，行高不变；点击整行由上层切换勾选
+            Box(Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+                SelectionCircle(selected = selected)
+            }
+        } else {
+            // 收藏心形常驻：未收藏空心 / 已收藏实心。
+            // 它是对"收藏"这个高频动作的唯一常驻入口，也让行尾保持对称。
             IconAction(
-                icon = SonanceIcons.MoreVertical,
-                contentDescription = "更多",
-                onClick = { menuOpen = true },
+                icon = if (isFavorite) SonanceIcons.HeartFilled else SonanceIcons.Heart,
+                contentDescription = "收藏",
+                onClick = onToggleFavorite,
                 iconSize = 17.dp,
-                tint = skin.textMuted
+                tint = if (isFavorite) skin.accent else skin.textMuted
             )
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("下一首播放", color = skin.text) },
-                    onClick = { menuOpen = false; onPlayNext() }
+        }
+
+        trailing?.invoke()
+    }
+
+    // 长按动作面板：低频/文件类操作都在这里，破坏性项排在最后
+    if (actionsOpen) {
+        RowActionSheet(
+            title = song.title,
+            subtitle = listOf(song.artist, song.album)
+                .filter { it.isNotBlank() }
+                .joinToString(" · ")
+                .ifBlank { null },
+            actions = buildList {
+                add(RowSheetAction("下一首播放") { onPlayNext() })
+                onEditInfo?.let { add(RowSheetAction("编辑信息…", onClick = it)) }
+                onRecognize?.let { add(RowSheetAction("识别歌曲", onClick = it)) }
+                onRemoveFromLibrary?.let {
+                    add(RowSheetAction("从列表移除（不删文件）", onClick = it))
+                }
+                onDeleteFile?.let {
+                    add(RowSheetAction("删除文件…", destructive = true, onClick = it))
+                }
+                onEnterMultiSelect?.let {
+                    add(RowSheetAction("多选删除", destructive = true, onClick = it))
+                }
+            },
+            onDismiss = { actionsOpen = false }
+        )
+    }
+}
+
+/** 长按动作面板的一项。destructive = true 的项会染成警示色并归入最后一组。 */
+data class RowSheetAction(
+    val label: String,
+    val destructive: Boolean = false,
+    val onClick: () -> Unit
+)
+
+/**
+ * 长按行弹出的动作面板（沿用现有的底部 sheet 视觉与 ScanScopeSheet 一致）。
+ *
+ * 行尾不再常驻 ⋮ 之后，这是低频操作的唯一入口；破坏性项排在最后并单独分组。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RowActionSheet(
+    title: String,
+    subtitle: String?,
+    actions: List<RowSheetAction>,
+    onDismiss: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = skin.surface.solidSurface(),
+        dragHandle = {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    Modifier
+                        .width(38.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(skin.textMuted.copy(alpha = 0.45f))
                 )
-                DropdownMenuItem(
-                    text = { Text(if (isFavorite) "取消收藏" else "添加到收藏", color = skin.text) },
-                    onClick = { menuOpen = false; onToggleFavorite() }
+            }
+        }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(bottom = 10.dp)
+        ) {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = skin.text,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
-                if (onRemoveFromLibrary != null) {
-                    DropdownMenuItem(
-                        // 把「不删文件」写进标题里：这是菜单里最容易让人犹豫的一项，
-                        // 不说清楚的话用户根本不敢点。这个版本的 Material3 的
-                        // DropdownMenuItem 没有 supportingText，只能并进一行。
-                        text = { Text("从列表移除（不删文件）", color = skin.text) },
-                        onClick = { menuOpen = false; onRemoveFromLibrary() }
+                if (!subtitle.isNullOrBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (onDeleteFile != null) {
-                    DropdownMenuItem(
-                        text = { Text("删除文件…", color = skin.text) },
-                        onClick = { menuOpen = false; onDeleteFile() }
+            }
+
+            actions.forEachIndexed { index, action ->
+                if (action.destructive && index > 0 && !actions[index - 1].destructive) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                        color = skin.border
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onDismiss()
+                            action.onClick()
+                        }
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = action.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (action.destructive) skin.danger else skin.text
                     )
                 }
             }
         }
+    }
+}
 
-        trailing?.invoke()
+/** 多选态的选择圈（复用现有 Check 图标和 accent 色，不引入新视觉） */
+@Composable
+fun SelectionCircle(selected: Boolean, modifier: Modifier = Modifier) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = modifier
+            .size(20.dp)
+            .clip(CircleShape)
+            .background(if (selected) skin.accent else Color.Transparent)
+            .border(
+                1.dp,
+                if (selected) skin.accent else skin.textMuted.copy(alpha = 0.5f),
+                CircleShape
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (selected) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Check,
+                contentDescription = null,
+                tint = skin.onAccent,
+                modifier = Modifier.size(12.dp)
+            )
+        }
     }
 }
 

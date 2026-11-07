@@ -6,8 +6,27 @@ import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/**
+ * 逐字/逐词片段。
+ *
+ * 来自**增强型 LRC**（一行内多个 `<mm:ss.xxx>` 标签），每个标签后面那段文字
+ * 归它自己的时间。普通 LRC 没有这个结构，[LyricLine.segments] 为 null。
+ */
+data class LyricSegment(val timeMs: Long, val text: String)
+
 /** 一行带时间轴的歌词 */
-data class LyricLine(val timeMs: Long, val text: String, val translation: String? = null)
+data class LyricLine(
+    val timeMs: Long,
+    val text: String,
+    val translation: String? = null,
+    /**
+     * 增强型 LRC 的逐字片段；普通 LRC 为 null。
+     *
+     * 有值时 [text] 是各片段拼起来的完整正文（时间标签已剥掉），渲染层可以按
+     * 片段逐字高亮；没有值时退化为整行高亮。
+     */
+    val segments: List<LyricSegment>? = null
+)
 
 /** 歌词内容：可能是带时间轴的（能跟着播滚动），也可能只有纯文本 */
 sealed interface Lyrics {
@@ -200,14 +219,17 @@ object LyricsRepository {
      * - 忽略 `[ti:]` `[ar:]` `[al:]` `[by:]` 等元信息标签
      */
     fun parse(text: String): Lyrics? {
-        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+        // 有些歌词文件（以及我们自己的缓存）带 UTF-8 BOM；不清掉会让行首 `[..]` 标签
+        // 认不出来，时间戳就漏进正文了。
+        val normalized = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
         val rawLines = normalized.split('\n')
         val out = ArrayList<LyricLine>(rawLines.size)
         var offsetMs = 0L
         var sawTimeTag = false
 
         for (rawLine in rawLines) {
-            val line = rawLine.trim()
+            // `[!text]` 是部分歌词接口给「无时间轴的纯文本」打的标记，不是歌词内容。
+            val line = rawLine.trim().removePrefix("[!text]").trim()
             if (line.isEmpty()) continue
 
             var i = 0
@@ -240,16 +262,35 @@ object LyricsRepository {
 
             val content = line.substring(textStart).trim()
             if (times.isEmpty()) {
-                // 没有时间标签：纯文本行（onlyMeta 的行是元信息，丢掉）
+                // 没有行级时间标签：可能是纯文本行，也可能是只有行内 `<...>` 的增强型 LRC
                 if (!onlyMeta && content.isNotEmpty()) {
                     val (main, tr) = splitTranslation(content)
-                    out.add(LyricLine(-1L, main, tr))
+                    val (clean, segments) = extractSegments(main, offsetMs)
+                    if (segments != null) {
+                        // 整行没有 [..] 但有逐字标签：行级时间取第一个片段
+                        sawTimeTag = true
+                        out.add(LyricLine(segments.first().timeMs, clean, tr, segments))
+                    } else if (clean.isNotEmpty()) {
+                        out.add(LyricLine(-1L, clean, tr))
+                    }
                 }
                 continue
             }
             if (content.isEmpty()) continue
             val (main, tr) = splitTranslation(content)
-            for (t in times) out.add(LyricLine((t + offsetMs).coerceAtLeast(0L), main, tr))
+            val lineTime = (times.first() + offsetMs).coerceAtLeast(0L)
+            val (clean, segments) = extractSegments(main, offsetMs, lineTime)
+            if (clean.isEmpty()) continue
+            for (t in times) {
+                out.add(
+                    LyricLine(
+                        timeMs = (t + offsetMs).coerceAtLeast(0L),
+                        text = clean,
+                        translation = tr,
+                        segments = segments
+                    )
+                )
+            }
         }
 
         if (out.isEmpty()) return null
@@ -277,6 +318,93 @@ object LyricsRepository {
     }
 
     private fun plainLines(lines: List<LyricLine>): List<String> = lines.map { it.text }
+
+    /**
+     * 增强型 LRC 的行内逐字时间标签，如 `<00:27.720>`。
+     * 比行级 `[..]` 更严格：必须有「分:秒」结构，避免把歌词里的普通尖括号当标签。
+     */
+    private val INLINE_TIME_TAG = Regex("<(\\d{1,4}):(\\d{1,2}(?:\\.\\d{1,3})?)>")
+
+    /**
+     * 「时间戳样子」的残留标签。解析失败（比如 `<00:27>` 写坏了、或被别的正则漏掉）
+     * 也一律从正文里剥掉 —— 用户任何情况下都不该看到 `<00:27.720>` 这种字符串。
+     */
+    private val RESIDUAL_TIME_TAG = Regex("<\\d{1,4}:\\d{1,2}(?:\\.\\d{1,3})?>")
+
+    /**
+     * 行级 `[...]` 时间戳残留在正文里的兜底清理。
+     * 正常解析会在行首把 `[mm:ss]` 吃掉；但当文件带 BOM、或标签出现在行中间时，
+     * 它就会漏出来。既然它「长得就是时间戳」，就不该显示给用户。
+     */
+    private val RESIDUAL_BRACKET_TIME = Regex("\\[\\d{1,4}:\\d{1,2}(?::\\d{1,2})?(?:\\.\\d{1,3})?\\]")
+
+    /** 把正文里任何形似时间戳的残留标签（`<..>` / `[..]`）都剥掉 */
+    private fun scrubTags(text: String): String =
+        RESIDUAL_TIME_TAG.replace(RESIDUAL_BRACKET_TIME.replace(text, ""), "")
+
+    /**
+     * 把一行正文切成逐字片段（增强型 LRC）。
+     *
+     * 形态是 `而<00:27.990>人<00:28.330>生...` —— 标签在文字**前面**，
+     * 表示「从这一刻开始唱标签后面的字」。按标签切：每个标签之后、下一个标签之前
+     * 的文字归这个标签的时间；行首标签之前若有文字，并入第一段。
+     *
+     * [offsetMs] 是文件里的 `[offset:]`，和行级时间用同一套偏移。
+     *
+     * @return (剥掉全部时间标签的正文, 片段序列)；没有可解析的行内标签时
+     *         返回 `(剥掉残留标签的正文, null)` —— 普通 LRC 走这一支，行为不变。
+     */
+    private fun extractSegments(
+        text: String,
+        offsetMs: Long,
+        lineTimeMs: Long? = null
+    ): Pair<String, List<LyricSegment>?> {
+        var hasTimedTag = false
+        for (m in INLINE_TIME_TAG.findAll(text)) {
+            if (parseTimeTag(m.groupValues[1] + ":" + m.groupValues[2]) != null) {
+                hasTimedTag = true
+                break
+            }
+        }
+        if (!hasTimedTag) {
+            return scrubTags(text).trim() to null
+        }
+
+        val segments = ArrayList<LyricSegment>()
+        var cursor = 0
+        var pendingTime: Long? = null
+        var prefix = ""
+        for (m in INLINE_TIME_TAG.findAll(text)) {
+            val t = parseTimeTag(m.groupValues[1] + ":" + m.groupValues[2]) ?: continue
+            // 上一个标签到这一个标签之间的文字，归上一个标签的时间
+            val between = scrubTags(text.substring(cursor, m.range.first))
+            if (pendingTime == null) {
+                prefix = between
+                // 行首标签之前还有字（混合写法）：它属于行级时间，单独成段，
+                // 不能并到第一段去 —— 否则这几个字会晚唱。
+                if (prefix.isNotEmpty() && lineTimeMs != null) {
+                    segments.add(LyricSegment(lineTimeMs, prefix))
+                    prefix = ""
+                }
+            } else if (between.isNotEmpty()) {
+                segments.add(
+                    LyricSegment((pendingTime + offsetMs).coerceAtLeast(0L), between)
+                )
+            }
+            pendingTime = t
+            cursor = m.range.last + 1
+        }
+        val lastTime = pendingTime ?: return scrubTags(text).trim() to null
+        val tail = scrubTags(text.substring(cursor))
+        val lastText = prefix + tail
+        if (lastText.isNotEmpty()) {
+            segments.add(LyricSegment((lastTime + offsetMs).coerceAtLeast(0L), lastText))
+        }
+        if (segments.isEmpty()) {
+            return scrubTags(text).trim() to null
+        }
+        return segments.joinToString("") { it.text } to segments
+    }
 
     /** `mm:ss`、`mm:ss.xx`、`mm:ss.xxx`、`hh:mm:ss` 都能吃 */
     private fun parseTimeTag(tag: String): Long? {

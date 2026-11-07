@@ -1,6 +1,7 @@
 package com.sonance.player.data.bili
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -21,6 +22,35 @@ sealed interface BiliScanResult {
 
 /** 已经落到本地、可以直接给播放器用的一个 MP4 */
 data class BiliMedia(val file: File)
+
+/**
+ * 当前正在播放的缓存条目。
+ *
+ * 由播放页在落定页变化时写入、退出播放页时清空（同进程内共享）。
+ * 删除流程据此**拒绝删除正在播放的那一条**：播放器正握着转存出来的
+ * `playable.mp4`，页内还维护着上一首/下一首的播放列表，把底下的源文件抽走
+ * 会让后续 seek、切页直接失败。提示「先退出播放页再删」是代价最小也最安全的做法。
+ */
+object BiliPlaybackState {
+    @Volatile
+    var activeKey: String? = null
+}
+
+/** 单条删除失败的原因，够上层拼出「哪几条、为什么」 */
+data class BiliDeleteFailure(
+    val key: String,
+    val title: String,
+    val reason: String
+)
+
+/** 一批删除的结果：成功的 key 和逐条失败原因，失败不影响其余条目 */
+data class BiliDeleteReport(
+    val deletedKeys: List<String> = emptyList(),
+    val failures: List<BiliDeleteFailure> = emptyList()
+) {
+    val successCount: Int get() = deletedKeys.size
+    val failureCount: Int get() = failures.size
+}
 
 /**
  * B 站离线缓存的读取入口。
@@ -239,6 +269,90 @@ class BiliRepository(context: Context) {
         .filter { it.isFile }
         .sumOf { it.length() }
 
+    /**
+     * 真正删掉若干条缓存（**不是只从列表移除**）。
+     *
+     * 每条按这个顺序处理，任何一条失败都不影响其余：
+     * 1. 先删本应用转存的目录 `externalCacheDir/bili/<key>/` ——
+     *    里面有 `playable.mp4`、完成标记 `.done`，以及上次合成中断留下的
+     *    `video.m4s` / `audio.m4s`。先删它，失败就整体放弃这条（免得源目录删了、
+     *    派生文件变成孤儿还不在列表里）；
+     * 2. 再通过 Shizuku 以 shell 身份 `rm -rf` B 站原缓存目录（见 [deleteRemote]）；
+     * 3. 只有两步都确认删干净了，才把 key 从内存索引和 [metaFile] 里摘掉。
+     *
+     * @param allEntries 当前列表的全部条目，用于判断目录是否被别的条目共享
+     */
+    suspend fun deleteEntries(
+        targets: List<BiliEntry>,
+        allEntries: List<BiliEntry>
+    ): BiliDeleteReport = withContext(Dispatchers.IO) {
+        val deleted = mutableListOf<String>()
+        val failures = mutableListOf<BiliDeleteFailure>()
+
+        targets.distinctBy { it.key }.forEach { entry ->
+            if (BiliPlaybackState.activeKey == entry.key) {
+                failures += BiliDeleteFailure(entry.key, entry.displayTitle, "正在播放，先退出播放页再删除")
+                return@forEach
+            }
+
+            // 1) 派生缓存（我们自己的目录，直接删，不需要 shell）
+            val localDir = File(cacheRoot, entry.key)
+            localDir.deleteRecursively()
+            if (localDir.exists()) {
+                failures += BiliDeleteFailure(
+                    entry.key, entry.displayTitle,
+                    "应用内转存缓存清理失败：${localDir.absolutePath}"
+                )
+                return@forEach
+            }
+
+            // 2) B 站原缓存
+            val remoteOk = runCatching { deleteRemote(entry, allEntries) }.getOrDefault(false)
+            if (!remoteOk) {
+                Log.w(TAG, "删除失败: key=${entry.key} dir=${entry.dir}")
+                failures += BiliDeleteFailure(
+                    entry.key, entry.displayTitle,
+                    "B 站缓存目录未能完全删除（Shizuku 可能已失效，或文件被占用）"
+                )
+                return@forEach
+            }
+
+            Log.i(TAG, "已删除: key=${entry.key} dir=${entry.dir}")
+            deleted += entry.key
+        }
+
+        if (deleted.isNotEmpty()) {
+            lastEntries = lastEntries.filterNot { it.key in deleted }
+            saveCache(lastEntries)
+        }
+        BiliDeleteReport(deleted, failures)
+    }
+
+    /**
+     * 删 B 站原缓存目录。
+     *
+     * 常规情况下 `entry.dir` 就是这一分 P 的独立目录
+     * （`.../download/<avid>/c_<cid>/`），里面是 entry.json、danmaku.xml、
+     * 字幕/封面、`<type_tag>/video.m4s`、`<type_tag>/audio.m4s`、
+     * index.json，以及下载中断留下的临时文件——整目录递归删除，不留孤儿。
+     *
+     * 极端情况：两条扫描结果落在同一个目录（同一份 entry.json 解析出多条），
+     * 这时只能删本条目自己的清晰度子目录，`entry.json` / `danmaku.xml` 等
+     * 共享文件必须留着；若连独立子目录都没有，就放弃并报失败。
+     */
+    private fun deleteRemote(entry: BiliEntry, allEntries: List<BiliEntry>): Boolean {
+        val qualityDir = entry.videoPath.substringBeforeLast('/', "")
+        val sharesDir = allEntries.any { it.key != entry.key && it.dir == entry.dir }
+        if (sharesDir) {
+            if (qualityDir.isBlank() || qualityDir == entry.dir) {
+                Log.w(TAG, "目录被其他条目共享且没有独立清晰度子目录，放弃删除: ${entry.dir}")
+                return false
+            }
+            return ShizukuShell.deleteTree(listOf(qualityDir))
+        }
+        return ShizukuShell.deleteTree(listOf(entry.dir))
+    }
+
     suspend fun clearLocalCache() = withContext(Dispatchers.IO) {
         runCatching { cacheRoot.deleteRecursively() }
     }
@@ -291,6 +405,9 @@ class BiliRepository(context: Context) {
     }
 
     private companion object {
+        /** logcat 过滤用：`adb logcat -s SonanceBili` */
+        const val TAG = "SonanceBili"
+
         /**
          * 容器方案的版本标记。**改动 [BiliMp4Writer] 的写出策略后必须升这个号**，
          * 否则用户已经存在的 `playable.mp4` 会被一直复用，修复永远到不了设备上。

@@ -95,7 +95,7 @@ data class Skin(
 
 private fun c(hex: Long) = Color(hex)
 
-/** 22 套皮肤：11 套深色（含液态玻璃）+ 11 套浅色（含霜华玻璃） */
+/** 28 套皮肤：17 套深色（含液态玻璃）+ 11 套浅色（含霜华玻璃） */
 object Skins {
 
     /** 1 · 午夜琥珀 —— 原型默认 */
@@ -513,10 +513,119 @@ object Skins {
         immersive = true
     )
 
+    /**
+     * 24-28 · 五色沉浸系列 —— 与「沉浸」同一路径的封面玻璃皮肤，但各自带主题色：
+     * - 主界面铺当前播放封面的液态玻璃，scrimColor = bg（主题色深调遮罩），
+     *   整页氛围 = 封面 × 主题色调；字色/图标色为该主题的协调浅色，
+     *   ensureReadable 仅在压不住时兜底提亮
+     * - surface 家族全部半透明：叠在玻璃上是主题色调玻璃卡片
+     * - glass = LIQUID：选中时歌词页 / 律动柱 / 迷你条三处一起切液态玻璃
+     */
+    /** 24 · 提香红 —— 典雅 · 艺术（Titian Red #D34947）*/
+    val TitianRed = Skin(
+        id = "titian_red",
+        name = "提香红",
+        tagline = "封面铺底 · 绯红玻璃",
+        isLight = false,
+        bg = c(0xFF201010), surface = c(0xCC2A1A18), surface2 = c(0xCC33201D), surface3 = c(0xB33D2723),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFF7ECEA), textDim = c(0xFFD9C2BE), textMuted = c(0xFFA68D89),
+        accent = c(0xFFE0615E), accentDim = c(0xFFB23E3B), onAccent = c(0xFFFFF4F2),
+        accentGlow = c(0x2EE0615E), danger = c(0xFFFF7A5A),
+        gradients = listOf(
+            listOf(c(0xFF4A1C1B), c(0xFF150A0A)),
+            listOf(c(0xFF3B1514), c(0xFF110707)),
+            listOf(c(0xFF5A2322), c(0xFF180C0B)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 25 · 莱姆绿 —— 生机 · 自然（Lime Green #6ECC54）*/
+    val LimeGreen = Skin(
+        id = "lime_green",
+        name = "莱姆绿",
+        tagline = "封面铺底 · 青翠玻璃",
+        isLight = false,
+        bg = c(0xFF101A0C), surface = c(0xCC1A2814), surface2 = c(0xCC22331A), surface3 = c(0xB32C4121),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFF1FAEA), textDim = c(0xFFCFE2C4), textMuted = c(0xFF97AC8B),
+        accent = c(0xFF7DD863), accentDim = c(0xFF4FA836), onAccent = c(0xFF08120A),
+        accentGlow = c(0x2E7DD863), danger = c(0xFFE05555),
+        gradients = listOf(
+            listOf(c(0xFF2C4A16), c(0xFF0C1405)),
+            listOf(c(0xFF223A12), c(0xFF090F04)),
+            listOf(c(0xFF3A5C1E), c(0xFF0F1A08)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 26 · 马尔斯绿 —— 奢华 · 神秘（Marrs Green #018B8D）*/
+    val MarrsGreen = Skin(
+        id = "marrs_green",
+        name = "马尔斯绿",
+        tagline = "封面铺底 · 幽青玻璃",
+        isLight = false,
+        bg = c(0xFF0A1A1B), surface = c(0xCC14292B), surface2 = c(0xCC1B3436), surface3 = c(0xB3224244),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFE9F7F6), textDim = c(0xFFC2DEDC), textMuted = c(0xFF86A5A3),
+        accent = c(0xFF22BCB7), accentDim = c(0xFF018B8D), onAccent = c(0xFF041414),
+        accentGlow = c(0x2E22BCB7), danger = c(0xFFFF6B6B),
+        gradients = listOf(
+            listOf(c(0xFF0E3A3B), c(0xFF051313)),
+            listOf(c(0xFF0A2E2F), c(0xFF040F0F)),
+            listOf(c(0xFF124A4A), c(0xFF061818)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 27 · 克莱因蓝 —— 希望 · 自由（Klein Blue #002FA7）*/
+    val KleinBlue = Skin(
+        id = "klein_blue",
+        name = "克莱因蓝",
+        tagline = "封面铺底 · 深蓝玻璃",
+        isLight = false,
+        bg = c(0xFF0A1128), surface = c(0xCC161F45), surface2 = c(0xCC1D2856), surface3 = c(0xB3253370),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFEDF1FF), textDim = c(0xFFC4CDEE), textMuted = c(0xFF8B97C4),
+        accent = c(0xFF4A6EE8), accentDim = c(0xFF002FA7), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x2E4A6EE8), danger = c(0xFFFF5C7A),
+        gradients = listOf(
+            listOf(c(0xFF0E1E5C), c(0xFF050918)),
+            listOf(c(0xFF0A1750), c(0xFF040713)),
+            listOf(c(0xFF12267A), c(0xFF060B1E)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 28 · 中国红 —— 热情 · 福禄（Chinese Red #C8161D）*/
+    val ChineseRed = Skin(
+        id = "chinese_red",
+        name = "中国红",
+        tagline = "封面铺底 · 朱红玻璃",
+        isLight = false,
+        bg = c(0xFF1E0C0D), surface = c(0xCC2C1517), surface2 = c(0xCC371B1E), surface3 = c(0xB3442326),
+        border = c(0x40FFFFFF), border2 = c(0x29FFFFFF),
+        text = c(0xFFF9ECEA), textDim = c(0xFFDFC4C1), textMuted = c(0xFFA98D8A),
+        accent = c(0xFFE0454B), accentDim = c(0xFFC8161D), onAccent = c(0xFFFFF5F3),
+        accentGlow = c(0x2EE0454B), danger = c(0xFFFF7A5A),
+        gradients = listOf(
+            listOf(c(0xFF4A1013), c(0xFF140506)),
+            listOf(c(0xFF3A0C0F), c(0xFF100405)),
+            listOf(c(0xFF5C161A), c(0xFF170607)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
     val all: List<Skin> = listOf(
         // ---- 深色 ----
         MidnightAmber, Graphite, Ocean, NeonViolet, Forest, Crimson,
         NeonLime, CyberMagenta, ElectricCyan, SunsetBlaze, LiquidGlass, Immersive,
+        TitianRed, LimeGreen, MarrsGreen, KleinBlue, ChineseRed,
         // ---- 浅色 ----
         Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay,
         Tropical, SkyLemon, FrostedGlass
@@ -526,3 +635,10 @@ object Skins {
 }
 
 val LocalSkin = staticCompositionLocalOf { Skins.MidnightAmber }
+
+/**
+ * 弹窗/浮层面板背景：沉浸皮肤的 surface 家族带透明度（叠在页面上是玻璃卡片），
+ * 但用作**整块弹窗背景**时会透出后面的页面内容。这里把 alpha 抬到 ≥0.96，
+ * 保留一丝层次观感的同时保证弹窗内容可读。
+ */
+fun Color.solidSurface(): Color = copy(alpha = alpha.coerceAtLeast(0.96f))

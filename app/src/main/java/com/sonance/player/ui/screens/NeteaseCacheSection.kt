@@ -5,8 +5,12 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,13 +19,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -34,9 +42,11 @@ import com.sonance.player.data.formatSize
 import com.sonance.player.data.bili.ShizukuShell
 import com.sonance.player.data.netease.NeteaseCacheEntry
 import com.sonance.player.data.netease.NeteaseScanResult
+import com.sonance.player.data.netease.SniffApp
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /**
  * 「嗅探音乐缓存并转换」设置区块。
@@ -48,6 +58,7 @@ import com.sonance.player.ui.theme.LocalSkin
  * 默认隐藏：与「私有格式还原」共用 conversionUnlocked 彩蛋开关
  * （在「关于」里连点署名 10 次出现，一小时后自动收起）。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun NeteaseCacheSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
@@ -103,17 +114,56 @@ fun NeteaseCacheSection(vm: SonanceViewModel) {
 
         Spacer(Modifier.height(10.dp))
         Text(
-            "读取网易云音乐的本地缓存，认出其中的加密容器与明文音频并转换成标准格式。\n" +
+            "读取网易云 / 酷狗 / QQ 音乐 / 汽水 / 波点的本地缓存，认出其中的加密容器与明文音频并转换成标准格式。\n" +
+                "支持 NCM、NMSF、KGM/KGMA/VPR、QMC（mflac/mgg）等加密容器与明文音频；" +
+                "波点的缓存本身是明文，直接转换；汽水的 MDL 加密暂无公开解密方案，仅识别列出；酷狗 KGG 新版加密暂不支持。\n" +
+                "能力边界：QQ 在线播放缓存不带密钥（只有「下载」的歌可转换）；酷狗概念版的缓存多在应用内部存储，无 root 读不到。\n" +
                 "解密与写入全部在本机完成，不碰账号；NMSF 缓存会按文件名里的歌曲 ID 联网补全歌名 / 歌手 / 专辑 / 封面，查询失败不影响转换。",
             style = MaterialTheme.typography.bodySmall,
             color = skin.textMuted
         )
 
+        // ===== 嗅探目标多选 =====
+        Spacer(Modifier.height(12.dp))
+        Text("嗅探目标（可多选）", style = MaterialTheme.typography.labelMedium, color = skin.textDim)
+        Spacer(Modifier.height(6.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            SniffApp.entries.forEach { app ->
+                val selected = app.name in vm.sniffTargets
+                Text(
+                    text = app.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) skin.accent else skin.textDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (selected) skin.accent.copy(alpha = 0.14f) else skin.surface2)
+                        .border(
+                            1.dp,
+                            if (selected) skin.accent else skin.surface3,
+                            RoundedCornerShape(999.dp)
+                        )
+                        .clickable { vm.toggleSniffTarget(app.name) }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                )
+            }
+        }
+        if ("LUNA" in vm.sniffTargets) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "汽水的 MDL 加密暂无公开解密方案，扫到的条目只能列出、无法转换。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted
+            )
+        }
+
         // ===== Shizuku 状态 =====
         when {
             !shizukuInstalled -> ShizukuStatusCard(
                 title = "还没有安装 Shizuku",
-                subtitle = "网易云的缓存放在 Android/data 里，Android 11 起普通应用读不到。" +
+                subtitle = "音乐 App 的缓存放在 Android/data 里，Android 11 起普通应用读不到。" +
                     "装一个 Shizuku，用无线调试启动服务后就能读；不需要 root。",
                 actionLabel = "打开 Shizuku",
                 onAction = {
@@ -136,7 +186,7 @@ fun NeteaseCacheSection(vm: SonanceViewModel) {
 
             !shizukuGranted -> ShizukuStatusCard(
                 title = "需要授予 Shizuku 权限",
-                subtitle = "Sonance 只读取缓存文件的内容，不会写入、修改或删除网易云的任何数据。",
+                subtitle = "Sonance 只读取缓存文件的内容，不会写入、修改或删除所选音乐 App 的任何数据。",
                 actionLabel = "去授权",
                 onAction = {
                     // 必须由用户点击触发（与 B 站缓存页同一条纪律）
@@ -226,20 +276,74 @@ fun NeteaseCacheSection(vm: SonanceViewModel) {
         // ===== 结果列表 =====
         if (entries.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            Text(
-                "共 ${entries.size} 个 · 总计 ${formatSize(entries.sumOf { it.sizeBytes })}",
-                style = MaterialTheme.typography.labelMedium,
-                color = skin.textMuted
-            )
+            var hideConverted by remember { mutableStateOf(false) }
+            var showClearConfirm by remember { mutableStateOf(false) }
+            val shown = if (hideConverted) {
+                entries.filter { it.key !in vm.neteaseConvertedKeys }
+            } else entries
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (shown.isEmpty()) "已转换的 ${entries.size} 个已隐藏"
+                    else "共 ${shown.size} 个 · 总计 ${formatSize(shown.sumOf { it.sizeBytes })}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.textMuted,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    if (hideConverted) "显示全部" else "隐藏已转换",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.accent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { hideConverted = !hideConverted }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+                Text(
+                    "清除列表",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showClearConfirm = true }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
             Spacer(Modifier.height(4.dp))
-            entries.take(DISPLAY_LIMIT).forEach { entry ->
+            shown.take(DISPLAY_LIMIT).forEach { entry ->
                 EntryRow(entry = entry, vm = vm, canConvertOne = canConvert)
             }
-            if (entries.size > DISPLAY_LIMIT) {
+            if (shown.size > DISPLAY_LIMIT) {
                 Text(
-                    "…其余 ${entries.size - DISPLAY_LIMIT} 个未列出，「全部转换」不受影响",
+                    "…其余 ${shown.size - DISPLAY_LIMIT} 个未列出，「全部转换」不受影响",
                     style = MaterialTheme.typography.labelSmall,
                     color = skin.textMuted
+                )
+            }
+
+            if (showClearConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showClearConfirm = false },
+                    containerColor = skin.surface2.solidSurface(),
+                    titleContentColor = skin.text,
+                    textContentColor = skin.textDim,
+                    title = { Text("清除嗅探列表？") },
+                    text = {
+                        Text(
+                            "只清掉这份扫描列表，不会删除所选音乐 App 的缓存文件、" +
+                                "已转换记录和输出文件夹里的成品。下次点「扫描缓存」会重新扫描。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    },
+                    confirmButton = {
+                        PillButton(label = "清除", onClick = {
+                            showClearConfirm = false
+                            vm.neteaseClearList()
+                        })
+                    },
+                    dismissButton = {
+                        PillButton(label = "保留", onClick = { showClearConfirm = false }, filled = false)
+                    }
                 )
             }
         }

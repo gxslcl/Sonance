@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -31,10 +32,14 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,11 +73,18 @@ import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.RemotePlaylist
+import com.sonance.player.data.Song
+import com.sonance.player.data.SongMetaEditor
 import com.sonance.player.data.formatDuration
+import com.sonance.player.sync.GroupManager
+import com.sonance.player.sync.GroupRole
+import com.sonance.player.ui.group.GroupSheet
 import com.sonance.player.data.formatSize
+import com.sonance.player.playback.BiliVideoSession
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.AppTopBar
 import com.sonance.player.ui.components.ArtTransition
+import com.sonance.player.ui.components.BiliFloatWindow
 import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.FullPlayer
 import com.sonance.player.ui.components.GlassBackdrop
@@ -109,6 +121,7 @@ import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.SonanceTheme
+import com.sonance.player.ui.vinyl.VinylWebScreen
 import com.sonance.player.ui.components.CoverPickerDialog
 
 /* ============================================================
@@ -151,6 +164,23 @@ sealed interface Detail {
 
 @Composable
 fun SonanceRoot(vm: SonanceViewModel) {
+    // 进程级前后台：视频浮动/后台续播行为按「整个应用是否退到后台」判断，
+    // 而不是单看某个 Activity（视频全屏页盖住主界面时应用仍是前台）
+    val appContext = LocalContext.current.applicationContext
+    DisposableEffect(Unit) {
+        val session = BiliVideoSession.of(appContext)
+        val owner = androidx.lifecycle.ProcessLifecycleOwner.get()
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> session.onAppBackground()
+                androidx.lifecycle.Lifecycle.Event.ON_START -> session.onAppForeground()
+                else -> Unit
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+
     SonanceTheme(vm.skin) {
         val playerState by vm.player.state.collectAsStateWithLifecycle()
         PermissionGate(vm) {
@@ -291,10 +321,107 @@ private fun CoverWritePermissionGate(vm: SonanceViewModel) {
     }
 }
 
+/**
+ * 编辑歌曲信息写盘被系统拦下时，把确认框拉起来 —— 结构照着 [CoverWritePermissionGate] 来，
+ * 只是回调换成 [SonanceViewModel.onMetaEditPermissionResult]。
+ */
+@Composable
+private fun MetaEditPermissionGate(vm: SonanceViewModel) {
+    val pending = vm.pendingMetaEdit
+
+    val writeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        vm.onMetaEditPermissionResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    val storageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> vm.onMetaEditPermissionResult(granted) }
+
+    LaunchedEffect(pending) {
+        val request = pending ?: return@LaunchedEffect
+        val sender = request.intentSender
+        if (sender != null) {
+            val launched = runCatching {
+                writeLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }.isSuccess
+            // 拉不起来也要收尾，否则 pendingMetaEdit 会一直挂着
+            if (!launched) vm.onMetaEditPermissionResult(false)
+        } else {
+            storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+}
+
+/* ============================================================
+ * 听歌识曲的进度与结果
+ * ============================================================ */
+
+/**
+ * 识别进行中：阶段文案 + 转圈（整条链路只有几秒，不做取消）。
+ * 出结果：确认卡片，用户点「应用」才写盘 —— 与手动编辑共用同一条
+ * 写盘链路（含系统「允许修改此文件？」授权）。
+ */
+@Composable
+private fun RecognizeSheet(vm: SonanceViewModel) {
+    val state = vm.recognizeState
+    when (state) {
+        is SonanceViewModel.RecognizeState.Running -> {
+            AlertDialog(
+                onDismissRequest = { },
+                title = { Text("听歌识曲") },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.5.dp
+                        )
+                        Text(
+                            state.phase,
+                            modifier = Modifier.padding(start = 14.dp)
+                        )
+                    }
+                },
+                confirmButton = { }
+            )
+        }
+        is SonanceViewModel.RecognizeState.Done -> {
+            val r = state.result
+            AlertDialog(
+                onDismissRequest = { vm.dismissRecognition() },
+                title = { Text("识别到歌曲") },
+                text = {
+                    Column {
+                        Text("「${r.title}」- ${r.artist}")
+                        if (r.album.isNotBlank()) {
+                            Text(
+                                "专辑：${r.album}",
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        Text(
+                            "应用后将写入文件标签，并把文件改名为" +
+                                "「${SongMetaEditor.outputStem(r.title, r.artist)}」。",
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.applyRecognition() }) { Text("应用") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { vm.dismissRecognition() }) { Text("放弃") }
+                }
+            )
+        }
+        else -> Unit
+    }
+}
+
 /* ============================================================
  * 删除音频文件的授权
  * ============================================================ */
-
 /**
  * 删除歌曲文件被系统拦下时，把确认框拉起来。结构照着 [CoverWritePermissionGate] 来：
  * - `intentSender` 非空：`StartIntentSenderForResult` 拉起「允许删除这些文件？」，
@@ -342,7 +469,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     val layout = resolveLayout(configuration.screenWidthDp, configuration.screenHeightDp)
 
     var fullPlayerOpen by rememberSaveable { mutableStateOf(false) }
+    /** 沉浸式黑胶模式（铺在一切之上；关闭后音频不受影响） */
+    var vinylOpen by remember { mutableStateOf(false) }
     var queueOpen by rememberSaveable { mutableStateOf(false) }
+    var groupOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
     var eqOpen by remember { mutableStateOf(false) }
@@ -394,10 +524,42 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // onlineRevision 是必须的 key：在线歌不在 vm.songs 里，搜一次之后
     // 队列页 / 播放页要按 id 反查它们，映射必须重建。
     val songMap = remember(vm.songs, vm.onlineRevision) { vm.songMap() }
-    val queue = remember(playerState.queueIds, songMap) {
-        playerState.queueIds.mapNotNull { songMap[it] }
+
+    // 多设备：从机播放的是主机推过来的远端曲目，mediaId 是负数，不在 songMap 里。
+    // 这里给它合成一个占位 Song，播放页 / 队列页才不会因为「查不到歌」而空白。
+    val groupState by GroupManager.state.collectAsStateWithLifecycle()
+    val remoteSong = remember(
+        playerState.mediaId, groupState.trackTitle, groupState.trackArtist,
+        groupState.trackAlbum, groupState.trackDurationMs
+    ) {
+        val title = groupState.trackTitle
+        if (playerState.mediaId < 0 && title != null && groupState.role == GroupRole.GUEST) {
+            Song(
+                id = playerState.mediaId,
+                title = title,
+                artist = groupState.trackArtist,
+                album = groupState.trackAlbum,
+                albumId = -1L,
+                durationMs = groupState.trackDurationMs,
+                uri = android.net.Uri.EMPTY,
+                folderPath = "",
+                folderName = "",
+                displayName = title,
+                sizeBytes = 0L,
+                dateAddedSec = 0L,
+                track = 0
+            )
+        } else null
     }
-    val currentSong = songMap[playerState.mediaId]
+    val queue = remember(playerState.queueIds, songMap, remoteSong) {
+        playerState.queueIds.mapNotNull { songMap[it] ?: remoteSong?.takeIf { s -> s.id == it } }
+    }
+    val currentSong = songMap[playerState.mediaId] ?: remoteSong?.takeIf { it.id == playerState.mediaId }
+
+    // 主机收到入组请求时，不管当前在哪个页面都把多设备面板拉起来，好让确认框出现
+    LaunchedEffect(groupState.pendingPeerId) {
+        if (groupState.pendingPeerId != null) groupOpen = true
+    }
 
     // ===== 沉浸皮肤：背景 = 当前播放封面的液态玻璃，字色随封面明暗自适应 =====
     val context = LocalContext.current
@@ -628,6 +790,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenCover = { vm.openCoverPicker(playerState.mediaId) },
                 onOpenEqualizer = openEqualizer,
                 onOpenSleepTimer = { sleepOpen = true },
+                onOpenVinyl = { vinylOpen = true },
                 sleepTimerActive = vm.sleepTimerLabel != null,
                 eqEnabled = vm.eqEnabled,
                 glowMode = vm.glowMode,
@@ -639,7 +802,32 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
                 onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
                 vinylMode = vm.vinylMode,
-                onVinylModeChange = { vm.changeVinylMode(it) }
+                onVinylModeChange = { vm.changeVinylMode(it) },
+                groupState = groupState,
+                onOpenGroup = { groupOpen = true }
+            )
+        }
+
+        // ===== 沉浸式黑胶模式 =====
+        AnimatedVisibility(
+            visible = vinylOpen,
+            enter = fadeIn(tween(280)),
+            exit = fadeOut(tween(240)),
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(35f)
+        ) {
+            VinylWebScreen(
+                state = playerState,
+                queue = queue,
+                onClose = { vinylOpen = false },
+                // 唱臂抬起时 150ms 极短淡出，音频渐弱与「啪嗒」机械声衔接更温润
+                onPlayAt = { vm.player.playAt(it, fadeMs = 150) },
+                onTogglePlay = { vm.player.togglePlay() },
+                onSeek = { vm.player.seekTo(it) },
+                onVolume = { vm.player.setVolume(it) },
+                // 黑胶页模式按钮走主界面同一套三态逻辑；页面自己弹风格化 toast，抑制原生 toast
+                onPlayMode = { vm.cyclePlayMode(quiet = true) }
             )
         }
 
@@ -651,6 +839,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 .padding(horizontal = 28.dp)
                 .padding(bottom = if (layout == LayoutMode.EXPANDED) 104.dp else 150.dp)
                 .zIndex(30f)
+        )
+
+        // ===== 应用内视频浮窗 =====
+        // 放在根布局最上层：切到主界面 / 列表 / 设置都还看得见；
+        // 它只是视频会话的宿主视图，播放器本身不随页面销毁
+        BiliFloatWindow(
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(40f)
         )
     }
     }
@@ -664,6 +861,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     // 删除歌曲文件被系统拦下时，拉起「允许删除这些文件？」
     SongDeletePermissionGate(vm)
+
+    // 编辑歌曲信息写盘被系统拦下时，拉起「允许修改此文件？」
+    MetaEditPermissionGate(vm)
+
+    // 听歌识曲的进度框 / 结果确认卡片
+    RecognizeSheet(vm)
 
     if (queueOpen) {
         QueueSheet(
@@ -686,6 +889,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     if (sleepOpen) {
         SleepTimerSheet(vm = vm, onDismiss = { sleepOpen = false })
+    }
+
+    if (groupOpen) {
+        GroupSheet(onDismiss = { groupOpen = false })
     }
 
     // 打开专辑详情时收起全屏播放页
@@ -1026,7 +1233,9 @@ private fun MediumLayout(
             favoriteCount = vm.favorites.size,
             storageText = "",
             storageFraction = 0f,
-            modifier = Modifier.systemBarsPadding()
+            // 沉浸皮肤下侧栏也半透明，与右侧面板同一层背景；系统栏内边距由侧栏内部处理
+            translucent = skin.immersive,
+            modifier = Modifier
         )
         Row(Modifier.width(1.dp).fillMaxHeight().background(skin.border)) {}
 
@@ -1100,6 +1309,16 @@ private fun ExpandedLayout(
     val configuration = LocalConfiguration.current
     val wide = configuration.screenWidthDp >= 1200
 
+    // 双击左上角品牌块 = 手机「双击顶栏标题」的等价入口（改应用名 / 换顶栏图标）
+    var showBrandEditor by remember { mutableStateOf(false) }
+    // 悬浮迷你播放卡：设置里选「悬浮」档时，平板也用它，而不是底部通栏
+    val floating = vm.miniPlayerStyle == MiniPlayerStyle.FLOAT
+    var miniBarHeightPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+    val miniBarHeight = with(density) { miniBarHeightPx.toDp() }
+    // 还没量到高度前先用老值垫着，避免第一帧列表跳动
+    val miniReserve = if (miniBarHeightPx > 0) miniBarHeight + 8.dp else MINI_FLOAT_RESERVE
+
     Row(Modifier.fillMaxSize()) {
         SideNavigation(
             selected = vm.tab,
@@ -1118,7 +1337,12 @@ private fun ExpandedLayout(
             biliVisible = true,
             biliSelected = detail is Detail.BiliCache,
             onOpenBili = { onOpenDetail(Detail.BiliCache) },
-            modifier = Modifier.systemBarsPadding()
+            appName = vm.appDisplayName,
+            logoId = vm.topBarLogoId,
+            onBrandDoubleTap = { showBrandEditor = true },
+            // 沉浸皮肤下侧栏也半透明，与右侧面板同一层背景；系统栏内边距由侧栏内部处理
+            translucent = skin.immersive,
+            modifier = Modifier
         )
         Row(Modifier.width(1.dp).fillMaxHeight().background(skin.border)) {}
 
@@ -1137,18 +1361,82 @@ private fun ExpandedLayout(
                         // 挤一行会把标题截没，所以保持两行
                         subtitleInline = detail == null,
                         onBack = detail?.let { { onCloseDetail() } },
+                        // 和手机同一条规则：双击标题 = 改应用名 / 换顶栏图标
+                        logoId = vm.topBarLogoId,
+                        onTitleDoubleTap = if (detail == null) {
+                            { showBrandEditor = true }
+                        } else null,
                         // 刷新图标去掉了：列表页有下拉刷新，其它页面走「设置 → 重新扫描」。
                         // 顶栏只留真正一步到不了的入口，图标多了反而每个都不像入口。
                         actions = {}
                     )
                     Box(Modifier.weight(1f).fillMaxWidth()) {
-                        ScreenBody(
-                            vm = vm,
-                            playerState = playerState,
-                            detail = detail,
-                            onOpenDetail = onOpenDetail,
-                            onOpenEqualizer = onOpenEqualizer
-                        )
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                // 悬浮卡叠在列表上：内容让出一条底边距，
+                                // 免得最后一行被卡片压住
+                                .padding(
+                                    bottom = if (floating && playerState.hasItem) miniReserve else 0.dp
+                                )
+                        ) {
+                            ScreenBody(
+                                vm = vm,
+                                playerState = playerState,
+                                detail = detail,
+                                onOpenDetail = onOpenDetail,
+                                onOpenEqualizer = onOpenEqualizer
+                            )
+                        }
+
+                        // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
+                        // 平板列表原来没有这个入口，长曲库里找回正在播放的歌只能手滚
+                        if (detail == null && vm.tab.inPager && playerState.hasItem) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(end = 15.dp)
+                                    // 悬浮卡是整宽贴底的，按钮要抬到卡片上方才不被压住
+                                    .padding(bottom = if (floating) miniReserve + 8.dp else 10.dp)
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .clickable { vm.requestScrollToCurrent() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    imageVector = SonanceIcons.Locate,
+                                    contentDescription = "定位到正在播放的歌曲",
+                                    tint = skin.text.copy(alpha = 0.62f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
+                        // 悬浮播放卡：设置里选了「悬浮」才出现（经典档仍是底部通栏）
+                        if (floating && playerState.hasItem) {
+                            MiniPlayer(
+                                state = playerState,
+                                song = null,
+                                onOpen = onOpenFullPlayer,
+                                onPlayPause = { vm.player.togglePlay() },
+                                onNext = { vm.player.next() },
+                                onPrev = { vm.player.previous() },
+                                style = vm.miniPlayerStyle,
+                                glass = vm.miniGlassStyle,
+                                glassBlur = vm.miniGlassBlur,
+                                glassVisibility = vm.miniGlassVisibility,
+                                cardOpacity = vm.miniCardOpacity,
+                                progressStyle = vm.miniProgressStyle,
+                                swipeLeftPct = vm.miniSwipeLeftPct,
+                                swipeRightPct = vm.miniSwipeRightPct,
+                                heightScale = vm.miniHeightScale / 100f,
+                                coverScale = vm.miniCoverScale / 100f,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    // 量出真实高度：内容让位靠它（设置里能把卡片调到 2 倍高）
+                                    .onSizeChanged { miniBarHeightPx = it.height }
+                            )
+                        }
                     }
                 }
 
@@ -1156,7 +1444,9 @@ private fun ExpandedLayout(
 
                 NowPlayingPanel(
                     state = playerState,
-                    song = null,
+                    // 右侧面板的歌词/律动柱层需要完整 Song（uri、album、时长等），
+                    // 原来这里传 null，导致只能展示封面
+                    song = vm.songById(playerState.mediaId),
                     onCyclePlayMode = { vm.cyclePlayMode() },
                     onPrev = { vm.player.previous() },
                     onPlayPause = { vm.player.togglePlay() },
@@ -1168,26 +1458,42 @@ private fun ExpandedLayout(
                         vm.songById(playerState.mediaId)?.let { vm.toggleFavorite(it.id) }
                     },
                     isFavorite = vm.favorites.contains(playerState.mediaId),
+                    // 沉浸皮肤：右侧面板也半透明，让整页封面玻璃透上来，
+                    // 与左侧列表是同一层背景（不再是一块实心色）
+                    translucent = skin.immersive,
+                    // 面板内上下滑切歌，方向和手机播放页一致：上滑下一首、下滑上一首
+                    onSwipeUp = { vm.player.next() },
+                    onSwipeDown = { vm.player.previous() },
                     modifier = Modifier
                         .width(if (wide) 344.dp else 312.dp)
                         .fillMaxHeight()
                 )
             }
 
-            PlayerBar(
-                state = playerState,
-                song = null,
-                onOpen = onOpenFullPlayer,
-                onCyclePlayMode = { vm.cyclePlayMode() },
-                onPrev = { vm.player.previous() },
-                onPlayPause = { vm.player.togglePlay() },
-                onNext = { vm.player.next() },
-                onVolume = { vm.player.setVolume(it) },
-                onSeek = { vm.player.seekTo(it) },
-                onOpenQueue = onOpenQueue,
-                modifier = Modifier.navigationBarsPadding()
-            )
+            // 悬浮档不画底部通栏（卡片会叠在列表上）；经典档保持原样
+            if (playerState.hasItem && !floating) {
+                PlayerBar(
+                    state = playerState,
+                    song = null,
+                    onOpen = onOpenFullPlayer,
+                    onCyclePlayMode = { vm.cyclePlayMode() },
+                    onPrev = { vm.player.previous() },
+                    onPlayPause = { vm.player.togglePlay() },
+                    onNext = { vm.player.next() },
+                    onVolume = { vm.player.setVolume(it) },
+                    onSeek = { vm.player.seekTo(it) },
+                    onOpenQueue = onOpenQueue,
+                    modifier = Modifier.navigationBarsPadding()
+                )
+            } else {
+                // 没有通栏时也要给系统手势条留高度
+                Box(Modifier.navigationBarsPadding())
+            }
         }
+    }
+
+    if (showBrandEditor) {
+        BrandEditorDialog(vm = vm, onDismiss = { showBrandEditor = false })
     }
 }
 
@@ -1314,7 +1620,10 @@ private fun ScreenBody(
  * 文案
  * ============================================================ */
 
-private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
+private fun tabSubtitle(vm: SonanceViewModel): String {
+    // 扫描刚完成：先用副标题位顶几秒结果，再自动退回常规文案
+    vm.scanHint?.let { return it }
+    return when (vm.tab) {
     // 时间汇总去掉了：找歌的人不关心曲库总共多少小时，
     // 而且它跟着扫描结果变，挂在那里只是噪音
     LibraryTab.SONGS -> "共 ${vm.songs.size} 首"
@@ -1328,6 +1637,7 @@ private fun tabSubtitle(vm: SonanceViewModel): String = when (vm.tab) {
     LibraryTab.ONLINE -> if (vm.onlineMusicEnabled) "搜索并播放网络歌曲" else "未开启 · 点击开启"
     LibraryTab.FAVORITES -> "已收藏 ${vm.favorites.size} 首"
     LibraryTab.SETTINGS -> vm.skin.name
+    }
 }
 
 private fun detailTitle(vm: SonanceViewModel, detail: Detail): String = when (detail) {

@@ -68,12 +68,14 @@ data class NcConvertSummary(
  * （见 [NcMetaFetcher]），查询失败自动退回无标签转换。
  *
  * 三步走：
- * ① [scan] —— 一条 shell 把四个候选根目录下的大文件（>256KB）连同**头 8 字节魔数**
- *    一起报回来，Kotlin 侧按魔数分类、按「同目录同前缀-片号」归并分片组；
+ * ① [scan] —— 一条 shell 把所选目标 App（网易云 / 酷狗 / QQ 音乐 / 汽水 / 波点，
+ *    见 [SniffApp]）候选根目录下的大文件（>256KB）连同**头 12 字节魔数**
+ *    一起报回来，Kotlin 侧按魔数 / 扩展名分类、按「同目录同前缀-片号」归并分片组；
  * ② 拉取 —— 优先 shell 内部 `cp`（~250MB/s），不可用退回 stdout 管道；
  *    分片逐片拷回本地再拼成完整文件；
- * ③ [convertAll] —— NCM 走 [RestorePlanner] 解密管线（与「私有格式还原」同一套代码），
- *    明文文件直接流复制，成品统一写进用户选的输出文件夹。
+ * ③ [convertAll] —— 加密容器（NCM/NMSF/KGM/QMC）走 [RestorePlanner] 解密管线
+ *    （与「私有格式还原」同一套代码），明文文件直接流复制，
+ *    成品统一写进用户选的输出文件夹；汽水 MDL 无公开解密方案，只识别不转换。
  */
 class NeteaseCacheRepository(context: Context) {
 
@@ -101,28 +103,38 @@ class NeteaseCacheRepository(context: Context) {
     /** 产物目录是否在外部私有目录 —— 决定 shell `cp` 快路是否可用 */
     private val shellCanWrite = appContext.externalCacheDir != null
 
-    suspend fun scan(): NeteaseScanResult = withContext(Dispatchers.IO) {
+    suspend fun scan(apps: Set<SniffApp>): NeteaseScanResult = withContext(Dispatchers.IO) {
         when {
             !ShizukuShell.isInstalled(appContext) -> NeteaseScanResult.NoShizuku
             !ShizukuShell.isRunning() -> NeteaseScanResult.NotRunning
             !ShizukuShell.hasPermission() -> NeteaseScanResult.NoPermission
+            apps.isEmpty() -> NeteaseScanResult.Failed("请先选择至少一个嗅探目标")
             else -> {
-                val raw = ShizukuShell.exec(SCAN_SCRIPT)
+                val raw = ShizukuShell.exec(buildScanScript(apps))
                     ?: return@withContext NeteaseScanResult.Failed("读取缓存目录失败")
+                // 疑似试听残曲在扫描阶段直接过滤：不进列表、不写缓存副本、不参与转换
+                //（转换时的时长裁决仍保留，兜住大小预判漏掉的漏网之鱼）
                 val entries = NeteaseCacheParser.buildEntriesFromScan(raw)
+                    .filterNot { it.suspectTrial }
                 saveCache(entries)
                 NeteaseScanResult.Ok(entries)
             }
         }
     }
 
-    /** 上次扫描结果，进设置页先显示、不用每次都等几秒的 shell 扫描 */
+    /** 上次扫描结果，进设置页先显示、不用每次都等几秒的 shell 扫描（旧副本里的残曲条目一并滤掉） */
     fun loadCached(): List<NeteaseCacheEntry>? = runCatching {
         if (!metaFile.exists()) return null
         val list = metaFile.readLines().mapNotNull { NeteaseCacheCodec.fromLine(it) }
+            .filterNot { it.suspectTrial }
         if (list.isEmpty()) return null
         list
     }.getOrNull()
+
+    /** 清掉扫描列表：删除本地缓存副本。只影响列表展示，不动已转换记录与输出成品 */
+    fun clearCached() {
+        runCatching { metaFile.delete() }
+    }
 
     private fun saveCache(entries: List<NeteaseCacheEntry>) {
         runCatching {
@@ -237,9 +249,26 @@ class NeteaseCacheRepository(context: Context) {
             workDir.deleteRecursively()
             workDir.mkdirs()
             val src = pullEntry(entry, workDir)
+            // 源文件的真实扩展名：KGM / QMC 的探测与命名都要靠它
+            //（QMC 无魔数，RestorePlanner 靠文件名放行；displayName 只是去后缀的 stem）
+            val srcName = entry.fragments.firstOrNull()?.substringAfterLast('/') ?: ""
+            val srcExt = com.sonance.player.data.LockedFormat.extensionOf(srcName)
             return when (entry.kind) {
                 NcKind.NCM -> convertEncrypted(src, entry, root, existing, doneMap, ".ncm")
                 NcKind.NMS -> convertEncrypted(src, entry, root, existing, doneMap, ".nmsf")
+                NcKind.KGM -> convertEncrypted(
+                    src, entry, root, existing, doneMap,
+                    if (srcExt.isBlank()) ".kgm" else ".$srcExt"
+                )
+                NcKind.QMC -> convertEncrypted(
+                    src, entry, root, existing, doneMap,
+                    if (srcExt.isBlank()) ".mflac" else ".$srcExt",
+                    tail = readTail(src)
+                )
+                NcKind.MDL -> NcConvertOutcome.Skipped("汽水 MDL 加密暂无公开解密方案")
+                NcKind.QQCACHE -> NcConvertOutcome.Skipped(
+                    "QQ 在线播放缓存为分块仓库，音频密钥由服务端下发，无法本地解密（只有「下载」的歌可转换）"
+                )
                 NcKind.PLAIN -> convertPlain(src, entry, root, existing, doneMap)
                 NcKind.UNKNOWN -> NcConvertOutcome.Skipped("无法识别")
             }
@@ -281,19 +310,33 @@ class NeteaseCacheRepository(context: Context) {
         if (!ok) error("复制缓存文件失败：$srcPath")
     }
 
-    /** 加密容器（NCM / NMSF）：走「私有格式还原」的探测 + 解密 + 标签组装管线 */
+    /** 读文件尾部窗口（QMC 的密钥结构在最后 4KB 里），文件过短就全读 */
+    private fun readTail(src: File): ByteArray? = runCatching {
+        java.io.RandomAccessFile(src, "r").use { raf ->
+            val len = raf.length().toInt()
+            if (len <= 0) null
+            else {
+                val window = minOf(len, com.sonance.player.data.QmcDecoder.TAIL_WINDOW)
+                raf.seek((len - window).toLong())
+                ByteArray(window).also { raf.readFully(it) }
+            }
+        }
+    }.getOrNull()
+
+    /** 加密容器（NCM / NMSF / KGM / QMC）：走「私有格式还原」的探测 + 解密 + 标签组装管线 */
     private suspend fun convertEncrypted(
         src: File,
         entry: NeteaseCacheEntry,
         root: DocumentFile,
         existing: MutableMap<String, Pair<Uri, Long>>,
         doneMap: MutableMap<String, String>,
-        containerExt: String
+        containerExt: String,
+        tail: ByteArray? = null
     ): NcConvertOutcome {
         val scopeContext = coroutineContext
         // plan 持有流引用、writeTo 还要继续读，整个「探测→写盘」必须包在同一个 use 里
         src.inputStream().use { stream ->
-            val probe = RestorePlanner.plan(stream, src.length(), "${entry.displayName}$containerExt")
+            val probe = RestorePlanner.plan(stream, src.length(), "${entry.displayName}$containerExt", tail)
             val plan = when (probe) {
                 is RestoreProbe.Ready -> probe.plan
                 is RestoreProbe.Skip -> return NcConvertOutcome.Skipped(probe.reason)
@@ -503,30 +546,33 @@ class NeteaseCacheRepository(context: Context) {
     private fun workKey(key: String): String =
         Integer.toHexString(key.hashCode()) + "-" + key.length
 
-    private companion object {
+    companion object {
         /**
-         * 一次扫完网易云主版本 / Lite 版本的缓存目录。
+         * 按所选目标 App 生成扫描脚本：把每个 App 的候选根目录拼进同一条
+         * `for root in …` 循环（目录不存在会被 `[ -d ]` 跳过）。
          *
-         * 只扫 cache 与 files：网易云的**下载**目录里本来就是标准 mp3/flac，
-         * 媒体库扫描就能收，不需要也不应该混进这里。
+         * 只扫各 App 的 cache / files 与公共下载目录：各 App 的「下载」目录里
+         * 标准音频不需要还原，混进来反而添乱。
          *
-         * 输出约定：每行 `<大小>\t<路径>\t<头8字节hex>`，路径放中间列
+         * 输出约定：每行 `<大小>\t<路径>\t<头12字节hex>`（12 字节是为了区分
+         * RIFF 容器里的 wav 与 WEBP 封面图），路径放中间列
          * 防止带空格 / 引号的文件名错位；`while read` 而不是 `for f in $(find)`
          * 同样是为了空格安全。find + od 逐文件 fork，几百个文件几秒内扫完。
          */
-        val SCAN_SCRIPT = """
-            for root in \
-              "/sdcard/Android/data/com.netease.cloudmusic/cache" \
-              "/sdcard/Android/data/com.netease.cloudmusic/files" \
-              "/sdcard/Android/data/com.netease.cloudmusic.lite/cache" \
-              "/sdcard/Android/data/com.netease.cloudmusic.lite/files"; do
-              [ -d "${'$'}root" ] || continue
-              find "${'$'}root" -type f -size +256k 2>/dev/null
-            done | while IFS= read -r f; do
-              printf '%s\t%s\t' "${'$'}(wc -c < "${'$'}f" 2>/dev/null | tr -d ' \n')" "${'$'}f"
-              od -An -tx1 -N8 "${'$'}f" 2>/dev/null | tr -d ' \n'
-              printf '\n'
-            done
-        """.trimIndent()
+        internal fun buildScanScript(apps: Set<SniffApp>): String {
+            val roots = apps.flatMap { it.roots }.distinct()
+                .joinToString(" \\\n") { "              \"$it\"" }
+            return """
+                for root in \
+            $roots; do
+                  [ -d "${'$'}root" ] || continue
+                  find "${'$'}root" -type f -size +256k 2>/dev/null
+                done | while IFS= read -r f; do
+                  printf '%s\t%s\t' "${'$'}(wc -c < "${'$'}f" 2>/dev/null | tr -d ' \n')" "${'$'}f"
+                  od -An -tx1 -N12 "${'$'}f" 2>/dev/null | tr -d ' \n'
+                  printf '\n'
+                done
+            """.trimIndent()
+        }
     }
 }

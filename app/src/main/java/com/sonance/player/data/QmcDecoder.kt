@@ -118,7 +118,9 @@ object QmcDecoder {
         cipher.decrypt(sniffBuf, sniffBuf.size, 0)
         val sniffed = AudioDecoder.sniffExtension(sniffBuf)
         if (sniffed.isEmpty()) {
-            return Unsupported("解密后无法识别音频格式（密钥不符或非 QMC 文件）")
+            return Unsupported(
+                "无内嵌密钥或密钥不符；QQ 在线播放缓存的密钥由服务端下发，本地无法解密（只有下载的歌带 QTag 密钥）"
+            )
         }
 
         return Decoder(cipher, audioLen, sniffed)

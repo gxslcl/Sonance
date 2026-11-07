@@ -1,5 +1,6 @@
 package com.sonance.player.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -40,6 +41,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -173,6 +176,17 @@ fun SongList(
     // MediaStore 那一关（系统自己的「允许删除？」弹窗）。
     var deleteTarget by remember { mutableStateOf<Song?>(null) }
 
+    // 多选删除的二次确认
+    var confirmMultiDelete by remember { mutableStateOf(false) }
+
+    // 多选态下返回键先退出多选，而不是退出页面。
+    // 这个 BackHandler 注册在列表内容里，晚于根布局的返回处理，因此优先响应。
+    BackHandler(enabled = vm.selectionMode) { vm.clearSelection() }
+
+    // 「编辑信息」对话框的目标歌。状态同样放列表这一层：对话框盖住整个列表，
+    // 确认后把三个字段交给 vm（真正写盘还要过系统的「允许修改此文件？」）。
+    var editTarget by remember { mutableStateOf<Song?>(null) }
+
     // 滚动期间**降低**封面解码并发（不是停掉，见 ArtworkLoader.withDecodeGate）。
     // 这一句同时被下面几个列表复用，所以放在 SongList 里，不散到每个调用点。
     LaunchedEffect(listState) {
@@ -254,46 +268,109 @@ fun SongList(
         else -> 1.dp
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxSize(),
-        contentPadding = padding,
-        verticalArrangement = Arrangement.spacedBy(rowGap)
-    ) {
-        itemsIndexed(items = songs, key = { _, s -> s.id }) { index, song ->
-            Column {
-                SongRow(
-                    song = song,
-                    index = index,
-                    isCurrent = currentId == song.id,
-                    isPlaying = isPlaying,
-                    isFavorite = favorites.contains(song.id),
-                    onClick = { playFromSongs(song) },
-                    onToggleFavorite = { toggleFav(song.id) },
-                    onPlayNext = { playNextSong(song) },
-                    onRemoveFromLibrary = onRemoveFromLibrary?.let { remove ->
-                        { remove(song) }
-                    },
-                    onDeleteFile = if (song.isLocal) {
-                        { deleteTarget = song }
-                    } else null,
-                    compact = compact || dense,
-                    coverScale = coverScale
-                )
-                // 细分隔线：**左右各缩 12dp**，不顶到屏幕边 —— 顶满会变成
-                // "表格线"，把列表切成一条条格子，反而更乱。
-                // 最后一行不画，免得列表底部多一条悬空的线。
-                if (rowStyle == ListRowStyle.DIVIDER && index < songs.lastIndex) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp)
-                            .height(0.6.dp)
-                            .background(skin.border.copy(alpha = if (dense) 0.5f else 0.65f))
+    Column(modifier = modifier.fillMaxSize()) {
+        if (vm.selectionMode) {
+            SelectionToolbar(
+                count = vm.selectedSongIds.size,
+                allSelected = songs.isNotEmpty() && songs.all { it.id in vm.selectedSongIds },
+                onExit = { vm.clearSelection() },
+                onToggleAll = {
+                    if (songs.all { it.id in vm.selectedSongIds }) vm.deselectAllSongIds()
+                    else vm.selectAllSongIds(songs.map { it.id })
+                },
+                onDelete = { confirmMultiDelete = true }
+            )
+        }
+
+        // 行尾去掉 ⋮ 之后长按是唯一入口：列表顶部给一条一次性灰字提示，
+        // 用户第一次长按后永久收起；纯文字，不是可点控件，也不弹 toast。
+        if (!vm.longPressHintShown && !vm.selectionMode) {
+            Text(
+                text = "长按条目可进行更多操作",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted.copy(alpha = 0.65f),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = padding,
+            verticalArrangement = Arrangement.spacedBy(rowGap)
+        ) {
+            itemsIndexed(items = songs, key = { _, s -> s.id }) { index, song ->
+                Column {
+                    SongRow(
+                        song = song,
+                        index = index,
+                        isCurrent = currentId == song.id,
+                        isPlaying = isPlaying,
+                        isFavorite = favorites.contains(song.id),
+                        onClick = if (vm.selectionMode) {
+                            { vm.toggleSelection(song.id) }
+                        } else {
+                            { playFromSongs(song) }
+                        },
+                        onToggleFavorite = { toggleFav(song.id) },
+                        onPlayNext = { playNextSong(song) },
+                        onRemoveFromLibrary = onRemoveFromLibrary?.let { remove ->
+                            { remove(song) }
+                        },
+                        onDeleteFile = if (song.isLocal) {
+                            { deleteTarget = song }
+                        } else null,
+                        onEnterMultiSelect = if (song.isLocal) {
+                            { vm.enterSelection(song.id) }
+                        } else null,
+                        selectionMode = vm.selectionMode,
+                        selected = song.id in vm.selectedSongIds,
+                        onEditInfo = if (song.isLocal) {
+                            { editTarget = song }
+                        } else null,
+                        onRecognize = if (song.isLocal) {
+                            { vm.startRecognize(song.id) }
+                        } else null,
+                        compact = compact || dense,
+                        coverScale = coverScale,
+                        onLongPressHintUsed = { vm.noteLongPressUsed() }
                     )
+                    // 细分隔线：**左右各缩 12dp**，不顶到屏幕边 —— 顶满会变成
+                    // "表格线"，把列表切成一条条格子，反而更乱。
+                    // 最后一行不画，免得列表底部多一条悬空的线。
+                    if (rowStyle == ListRowStyle.DIVIDER && index < songs.lastIndex) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .height(0.6.dp)
+                                .background(skin.border.copy(alpha = if (dense) 0.5f else 0.65f))
+                        )
+                    }
                 }
             }
         }
+    }
+
+    // 多选删除的应用内二次确认
+    if (confirmMultiDelete) {
+        val selectedSongs = songs.filter { it.id in vm.selectedSongIds }
+        AlertDialog(
+            onDismissRequest = { confirmMultiDelete = false },
+            title = { Text("删除歌曲文件") },
+            text = {
+                Text("将删除 ${selectedSongs.size} 首歌曲文件，此操作不可恢复，是否确认？")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmMultiDelete = false
+                    vm.deleteSelectedSongs(songs)
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmMultiDelete = false }) { Text("取消") }
+            }
+        )
     }
 
     // 删除文件的**应用内二次确认**。文案把后果说满 —— 文件级删除没有后悔药，
@@ -317,6 +394,143 @@ fun SongList(
             dismissButton = {
                 TextButton(onClick = { deleteTarget = null }) { Text("取消") }
             }
+        )
+    }
+
+    // 「编辑信息」对话框：三个字段预填当前值，写盘后文件同时改成「歌名 - 歌手」。
+    // 标题是唯一必填 —— 清空标题媒体库会退回显示文件名。
+    editTarget?.let { target ->
+        var editTitle by remember(target.id) { mutableStateOf(target.title) }
+        var editArtist by remember(target.id) { mutableStateOf(target.artist) }
+        var editAlbum by remember(target.id) { mutableStateOf(target.album) }
+        val editSkin = LocalSkin.current
+        AlertDialog(
+            onDismissRequest = { editTarget = null },
+            title = { Text("编辑歌曲信息") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "修改会写入音频文件的标签，并将文件改名为「歌名 - 歌手」。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = editSkin.textMuted
+                    )
+                    OutlinedTextField(
+                        value = editTitle,
+                        onValueChange = { editTitle = it },
+                        label = { Text("歌名") },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = editSkin.accent,
+                            unfocusedBorderColor = editSkin.border2,
+                            focusedTextColor = editSkin.text,
+                            unfocusedTextColor = editSkin.text,
+                            cursorColor = editSkin.accent
+                        )
+                    )
+                    OutlinedTextField(
+                        value = editArtist,
+                        onValueChange = { editArtist = it },
+                        label = { Text("歌手") },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = editSkin.accent,
+                            unfocusedBorderColor = editSkin.border2,
+                            focusedTextColor = editSkin.text,
+                            unfocusedTextColor = editSkin.text,
+                            cursorColor = editSkin.accent
+                        )
+                    )
+                    OutlinedTextField(
+                        value = editAlbum,
+                        onValueChange = { editAlbum = it },
+                        label = { Text("专辑") },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = editSkin.accent,
+                            unfocusedBorderColor = editSkin.border2,
+                            focusedTextColor = editSkin.text,
+                            unfocusedTextColor = editSkin.text,
+                            cursorColor = editSkin.accent
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = editTitle.isNotBlank(),
+                    onClick = {
+                        editTarget = null
+                        vm.editSongInfo(
+                            target.id,
+                            editTitle.trim(),
+                            editArtist.trim(),
+                            editAlbum.trim()
+                        )
+                    }
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editTarget = null }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/**
+ * 多选态顶部的轻量工具条：退出 / 已选数量 / 全选 / 删除。
+ *
+ * 放在列表内容区内部，不改页面顶部栏，也就不会和底部迷你播放条抢位置。
+ */
+@Composable
+private fun SelectionToolbar(
+    count: Int,
+    allSelected: Boolean,
+    onExit: () -> Unit,
+    onToggleAll: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconAction(
+            icon = SonanceIcons.Close,
+            contentDescription = "退出多选",
+            onClick = onExit,
+            iconSize = 18.dp,
+            tint = skin.text
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = "已选 $count 首",
+            style = MaterialTheme.typography.titleSmall,
+            color = skin.text
+        )
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onToggleAll) {
+            Text(
+                text = if (allSelected) "取消全选" else "全选",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.accent
+            )
+        }
+        IconAction(
+            icon = SonanceIcons.Trash,
+            contentDescription = "删除选中歌曲",
+            onClick = onDelete,
+            iconSize = 18.dp,
+            tint = skin.danger,
+            enabled = count > 0
         )
     }
 }
@@ -445,11 +659,10 @@ fun SongsScreen(
                 }
             },
 
-            // ⁝ 菜单：收纳被移出主行的两件事。文件夹模式下视图切换不适用（文件夹恒为网格），
-            // 菜单里就没东西可放了，这时整个按钮一起收起。
-            overflow = if (mode == 2) {
-                null
-            } else {
+            // ⁝ 菜单里只剩被移出主行的视图切换 ——
+            // 「扫描」是低频设置类操作，已归到「设置 → 媒体库」，不跟显示偏好混在一起；
+            // 文件夹模式下视图切换不适用（文件夹恒为网格），此时菜单为空，整个 ⁝ 不再渲染
+            overflow = if (mode != 2) {
                 {
                     MenuRow(
                         icon = SonanceIcons.ListView,
@@ -468,7 +681,7 @@ fun SongsScreen(
                         selected = false
                     ) { mode = 2 }
                 }
-            },
+            } else null,
 
             actions = if (mode != 2 && list.isNotEmpty()) {
                 { m -> QuickActions(songs = list, vm = vm, modifier = m) }
@@ -511,7 +724,8 @@ fun SongsScreen(
             list.isEmpty() -> EmptyState(
                 icon = SonanceIcons.Music,
                 title = if (vm.searchQuery.isNotBlank()) "没有找到匹配的歌曲" else "本地曲库还是空的",
-                subtitle = if (vm.searchQuery.isNotBlank()) "换个关键词试试" else "把音乐文件放进设备后点击重新扫描",
+                subtitle = if (vm.searchQuery.isNotBlank()) "换个关键词试试"
+                    else "把音乐文件放进设备存储，点下面的「重新扫描」即可导入",
                 actionLabel = if (vm.searchQuery.isBlank()) "重新扫描" else null,
                 onAction = if (vm.searchQuery.isBlank()) ({ vm.scan() }) else null
             )
@@ -523,15 +737,34 @@ fun SongsScreen(
                 onOpenAlbum = onOpenAlbum
             )
 
-            else -> SongList(
-                songs = list,
-                vm = vm,
-                playerState = playerState,
-                scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                queueSongs = playQueue,
-                // 「全部歌曲」是曲库本身，"从列表移除"在这一页才说得清
-                onRemoveFromLibrary = removeSong
-            )
+            else -> {
+                // 滚动条要读写同一个列表状态，所以状态在这里提起来传给 SongList；
+                // 平板布局没有 pager，这个位置以前没有任何滚动条，长曲库里只能手滚
+                val listState = rememberLazyListState()
+                val scope = rememberCoroutineScope()
+                Box(Modifier.fillMaxSize()) {
+                    SongList(
+                        songs = list,
+                        vm = vm,
+                        playerState = playerState,
+                        scrollToCurrentSignal = vm.scrollToCurrentSignal,
+                        queueSongs = playQueue,
+                        // 「全部歌曲」是曲库本身，"从列表移除"在这一页才说得清
+                        onRemoveFromLibrary = removeSong,
+                        listState = listState
+                    )
+                    FastScrollBar(
+                        itemCount = { list.size },
+                        visibleCount = { listState.layoutInfo.visibleItemsInfo.size },
+                        firstIndex = { listState.firstVisibleItemIndex },
+                        hapticEnabled = vm.scrollHaptic,
+                        onSeek = { index -> scope.launch { listState.scrollToItem(index) } },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 2.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -915,12 +1148,30 @@ fun SongCollectionScreen(
             )
         }
 
-        SongList(
-            songs = songs,
-            vm = vm,
-            playerState = playerState,
-            modifier = Modifier.weight(1f)
-        )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            // 专辑 / 艺术家 / 收藏 / 最近播放共用的这套列表也要有滚动条 ——
+            // 平板布局没有 pager 那一层，以前这些页一律没有右侧拖动条
+            val listState = rememberLazyListState()
+            val scope = rememberCoroutineScope()
+            SongList(
+                songs = songs,
+                vm = vm,
+                playerState = playerState,
+                scrollToCurrentSignal = vm.scrollToCurrentSignal,
+                modifier = Modifier.fillMaxSize(),
+                listState = listState
+            )
+            FastScrollBar(
+                itemCount = { songs.size },
+                visibleCount = { listState.layoutInfo.visibleItemsInfo.size },
+                firstIndex = { listState.firstVisibleItemIndex },
+                hapticEnabled = vm.scrollHaptic,
+                onSeek = { index -> scope.launch { listState.scrollToItem(index) } },
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 2.dp)
+            )
+        }
         Spacer(Modifier.height(8.dp))
     }
 }
@@ -1192,6 +1443,8 @@ fun LibraryPagerScreen(
                     }
                 }
             },
+            // 这里不再有 ⁝ 菜单：「扫描」属于设置类操作，已归到
+            // 「设置 → 媒体库 → 重新扫描本地音乐」，列表头只留日常动作。
             // 双击指示器右边的空白 → 回到顶部（替代原来那个刷新图标的位置感）
             onDoubleTapToTop = jumpToTop
         )
@@ -1302,6 +1555,8 @@ fun LibraryPagerScreen(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
+                // 多选态下不允许横滑换页：勾选状态是按列表页维护的，换页会让数量和目标对不上
+                userScrollEnabled = !vm.selectionMode,
                 beyondViewportPageCount = 1
             ) { page ->
                 // 本虚拟页用的滚动状态（池化，见 SCROLL_SLOTS 的注释）
@@ -1333,7 +1588,7 @@ fun LibraryPagerScreen(
                                 icon = SonanceIcons.Music,
                                 title = if (vm.searchQuery.isNotBlank()) "没有找到匹配的歌曲" else "本地曲库还是空的",
                                 subtitle = if (vm.searchQuery.isNotBlank()) "换个关键词试试"
-                                else "把音乐文件放进设备后下拉刷新",
+                                    else "把音乐文件放进设备存储，点下面的「重新扫描」即可导入",
                                 actionLabel = if (vm.searchQuery.isBlank()) "重新扫描" else null,
                                 onAction = if (vm.searchQuery.isBlank()) ({ vm.scan() }) else null
                             )
@@ -1445,9 +1700,10 @@ fun LibraryPagerScreen(
                     .align(Alignment.CenterEnd)
                     .padding(end = 2.dp)
             )
+            }
         }
     }
-}
+
 }
 
 /**

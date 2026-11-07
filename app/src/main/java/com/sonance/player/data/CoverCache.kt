@@ -24,7 +24,29 @@ object CoverCache {
     private const val TAG = "SonanceCover"
     private const val DIR = "cover_cache"
     private const val EXT = ".jpg"
-    private const val MAX_FILES = 300
+
+    /**
+     * 条数 / 体积上限。
+     *
+     * 原来是 **300 条**：批量补封面时，第 301 首一落盘就把最早下载的那张删掉，
+     * 于是曲库大于 300 首的用户「每次补完封面、重开 App 就少一部分」——
+     * 少的正是最早下载的那批（[trim] 按 lastModified 删旧）。
+     *
+     * 现在把上限抬到远高于曲库规模，并改成**按访问时间**淘汰：
+     * 读封面时顺手 touch 一下 lastModified，常用的不会因为"下载早"被误杀。
+     */
+    private const val MAX_FILES = 20_000
+
+    /** 512 MB：按每张 100KB 算约 5000 张，足够覆盖大曲库；真有更大需求也是软上限 */
+    private const val MAX_BYTES = 512L * 1024 * 1024
+
+    /** 攒够多少张才扫一次目录（避免每存一张都 listFiles + 全目录 stat） */
+    private const val TRIM_EVERY = 64
+
+    /** 距上次访问不足 1 小时就不重复写时间戳，省掉滚动列表时的元数据写 */
+    private const val TOUCH_INTERVAL_MS = 60L * 60 * 1000
+
+    private var storesSinceTrim = 0
 
     /** 查询结果。和 [LyricsCache.Lookup] 一样是**三态** —— */
     sealed interface Lookup {
@@ -50,10 +72,24 @@ object CoverCache {
             val f = fileOf(context, key)
             if (!f.exists()) return Lookup.Unknown
             val b = f.readBytes()
-            if (b.isEmpty()) Lookup.KnownMiss else Lookup.Hit(b)
+            if (b.isEmpty()) Lookup.KnownMiss else {
+                touch(f)
+                Lookup.Hit(b)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "读封面缓存失败: ${t.message}")
             Lookup.Unknown
+        }
+    }
+
+    /**
+     * 把 lastModified 当成「最后访问时间」用：淘汰按它排序，常用封面就不会
+     * 因为下载得早就被清掉。
+     */
+    private fun touch(f: java.io.File) {
+        val now = System.currentTimeMillis()
+        if (now - f.lastModified() > TOUCH_INTERVAL_MS) {
+            runCatching { f.setLastModified(now) }
         }
     }
 
@@ -63,7 +99,10 @@ object CoverCache {
             val dir = dirOf(context)
             if (!dir.exists() && !dir.mkdirs()) return
             fileOf(context, key).writeBytes(bytes ?: ByteArray(0))
-            trim(dir)
+            if (++storesSinceTrim >= TRIM_EVERY) {
+                storesSinceTrim = 0
+                trim(dir)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "写封面缓存失败: ${t.message}")
         }
@@ -118,11 +157,19 @@ object CoverCache {
     private fun dirOf(context: Context) = java.io.File(context.filesDir, DIR)
     private fun fileOf(context: Context, key: String) = java.io.File(dirOf(context), "$key$EXT")
 
+    /** 先按条数、再按体积收；删除顺序按 lastModified（≈ 最后访问时间）从旧到新 */
     private fun trim(dir: java.io.File) {
         val files = dir.listFiles() ?: return
-        if (files.size <= MAX_FILES) return
-        files.sortedBy { it.lastModified() }
-            .take(files.size - MAX_FILES)
-            .forEach { runCatching { it.delete() } }
+        var overCount = files.size - MAX_FILES
+        var total = files.sumOf { it.length() }
+        if (overCount <= 0 && total <= MAX_BYTES) return
+        for (f in files.sortedBy { it.lastModified() }) {
+            if (overCount <= 0 && total <= MAX_BYTES) break
+            val len = f.length()
+            if (runCatching { f.delete() }.getOrDefault(false)) {
+                total -= len
+                overCount--
+            }
+        }
     }
 }

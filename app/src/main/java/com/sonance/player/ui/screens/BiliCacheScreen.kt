@@ -3,9 +3,11 @@ package com.sonance.player.ui.screens
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,10 +22,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +43,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sonance.player.data.bili.BiliCoverLoader
@@ -47,9 +52,14 @@ import com.sonance.player.data.bili.BiliRepository
 import com.sonance.player.data.bili.BiliScanResult
 import com.sonance.player.data.bili.ShizukuShell
 import com.sonance.player.data.formatSize
+import com.sonance.player.playback.BiliVideoSession
 import com.sonance.player.ui.VideoPlayerActivity
 import com.sonance.player.ui.components.EmptyState
+import com.sonance.player.ui.components.IconAction
 import com.sonance.player.ui.components.LoadingState
+import com.sonance.player.ui.components.RowActionSheet
+import com.sonance.player.ui.components.RowSheetAction
+import com.sonance.player.ui.components.SelectionCircle
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.Dispatchers
@@ -106,12 +116,105 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
         localBytes = withContext(Dispatchers.IO) { repo.cachedBytes() }
     }
 
+    // 删除：待确认的目标、执行中标记、多选态
+    var deleteTargets by remember { mutableStateOf<List<BiliEntry>>(emptyList()) }
+    var deleting by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    /**
+     * 真正删盘：先删我们自己的转存目录，再经 Shizuku 删 B 站原缓存。
+     * 只有确认删干净的条目才从列表移除 —— 失败的留在列表里，连同原因一起提示，
+     * 这样用户可以重试，也不会出现「列表没了但文件还在」。
+     */
+    fun performDelete(targets: List<BiliEntry>) {
+        if (deleting || targets.isEmpty()) return
+        val snapshot = entries
+        deleting = true
+        deleteTargets = emptyList()
+        hint = "正在删除 ${targets.size} 个缓存…"
+        scope.launch {
+            val report = repo.deleteEntries(targets, snapshot)
+            if (report.deletedKeys.isNotEmpty()) {
+                val removed = report.deletedKeys.toSet()
+                result = BiliScanResult.Ok(snapshot.filterNot { it.key in removed })
+                localBytes = withContext(Dispatchers.IO) { repo.cachedBytes() }
+            }
+            deleting = false
+            selectionMode = false
+            selectedKeys = emptySet()
+            hint = buildString {
+                if (report.successCount > 0) append("已删除 ${report.successCount} 个缓存")
+                if (report.failureCount > 0) {
+                    if (report.successCount > 0) append("；")
+                    append("${report.failureCount} 个失败：")
+                    val first = report.failures.first()
+                    append(first.title).append("（").append(first.reason).append("）")
+                    if (report.failureCount > 1) append(" 等")
+                }
+            }
+        }
+    }
+
+    // 多选态下先退多选，再让外层处理返回
+    BackHandler(enabled = selectionMode) {
+        selectionMode = false
+        selectedKeys = emptySet()
+    }
+
+    deleteTargets.takeIf { it.isNotEmpty() }?.let { targets ->
+        AlertDialog(
+            onDismissRequest = { if (!deleting) deleteTargets = emptyList() },
+            title = { Text("删除缓存") },
+            text = {
+                Text(
+                    text = if (targets.size == 1) {
+                        "将从设备上永久删除「${targets.first().displayTitle}」的缓存文件，" +
+                            "包括视频轨、音频轨、弹幕/字幕与元数据，以及本应用转存的合成文件。此操作不可恢复。"
+                    } else {
+                        "将删除 ${targets.size} 个缓存，其视频轨、音频轨、弹幕/字幕、元数据以及" +
+                            "本应用转存的合成文件都会被永久删除。此操作不可恢复，是否确认？"
+                    },
+                    color = skin.text
+                )
+            },
+            confirmButton = {
+                TextButton(enabled = !deleting, onClick = { performDelete(targets) }) {
+                    Text("删除", color = skin.danger)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !deleting, onClick = { deleteTargets = emptyList() }) {
+                    Text("取消", color = skin.textMuted)
+                }
+            }
+        )
+    }
+
     fun play(entry: BiliEntry) {
         if (!entry.playable) {
             hint = "这条缓存没有独立的音视频轨（旧版缓存格式），暂不支持"
             return
         }
         if (preparingKey != null) return
+
+        // 浮窗存在时不进全屏：把浮窗里的内容就地换成刚点的这条。
+        // 列表与索引都从这次点击重新铺给会话，不读任何过期的「当前播放项」。
+        val session = BiliVideoSession.of(context)
+        if (session.floating && session.items.isNotEmpty()) {
+            val playable = entries.filter { it.playable }.map { e ->
+                BiliVideoSession.Item(
+                    key = e.key,
+                    title = e.displayTitle,
+                    owner = e.owner,
+                    entry = e,
+                    fallbackPath = null
+                )
+            }
+            session.playFromList(playable, entry.key)
+            return
+        }
+
         preparingKey = entry.key
         prepareProgress = 0f
         hint = null
@@ -176,7 +279,8 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
             BiliScanResult.NoPermission -> EmptyState(
                 icon = SonanceIcons.Download,
                 title = "需要授予 Shizuku 权限",
-                subtitle = "Sonance 只读取缓存目录里的视频文件与 entry.json，不会修改或删除 B 站的任何数据。",
+                subtitle = "Sonance 需要以 shell 身份读取缓存目录。只有你在列表里主动确认删除时，" +
+                    "才会动 B 站的缓存文件。",
                 actionLabel = "去授权",
                 onAction = {
                     // 必须是用户点击触发：系统弹窗拦一道，先解释清楚再问
@@ -216,38 +320,111 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         item {
-                            Row(
-                                Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        text = "共 ${entries.size} 个缓存",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = skin.textMuted
+                            if (selectionMode) {
+                                // 多选工具条：结构与歌曲列表的选择态一致（关闭 / 全选 / 删除）
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconAction(
+                                        icon = SonanceIcons.Close,
+                                        contentDescription = "退出多选",
+                                        onClick = {
+                                            selectionMode = false
+                                            selectedKeys = emptySet()
+                                        },
+                                        iconSize = 18.dp,
+                                        tint = skin.text
                                     )
-                                    // 总大小：这些缓存一共占了多少空间。
-                                    // 用户关心的就是这个 —— 手机上几百个缓存动辄几十 GB，
-                                    // 得先看见才知道该不该清理。
                                     Text(
-                                        text = "占用 ${formatSize(entries.sumOf { it.sizeBytes })}" +
-                                            (if (localBytes > 0) " · 已转存 ${formatSize(localBytes)}" else ""),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = skin.textMuted.copy(alpha = 0.75f)
+                                        text = "已选 ${selectedKeys.size} 个",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = skin.text,
+                                        modifier = Modifier
+                                            .padding(start = 2.dp)
+                                            .weight(1f)
+                                    )
+                                    val allSelected =
+                                        entries.isNotEmpty() && selectedKeys.size == entries.size
+                                    Text(
+                                        text = if (allSelected) "取消全选" else "全选",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (deleting) skin.textMuted else skin.accent,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable(enabled = !deleting) {
+                                                selectedKeys = if (allSelected) {
+                                                    emptySet()
+                                                } else {
+                                                    entries.map { it.key }.toSet()
+                                                }
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                    IconAction(
+                                        icon = SonanceIcons.Trash,
+                                        contentDescription = "删除选中缓存",
+                                        onClick = {
+                                            deleteTargets = entries.filter {
+                                                it.key in selectedKeys
+                                            }
+                                        },
+                                        iconSize = 18.dp,
+                                        tint = if (selectedKeys.isEmpty()) {
+                                            skin.textMuted
+                                        } else {
+                                            skin.danger
+                                        },
+                                        enabled = selectedKeys.isNotEmpty() && !deleting
                                     )
                                 }
-                                Text(
-                                    text = if (refreshing) "刷新中…" else "刷新",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (refreshing) skin.textMuted else skin.accent,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable(enabled = !refreshing) {
-                                            scope.launch { rescan() }
-                                        }
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
+                            } else {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            text = "共 ${entries.size} 个缓存",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = skin.textMuted
+                                        )
+                                        // 总大小：这些缓存一共占了多少空间。
+                                        // 用户关心的就是这个 —— 手机上几百个缓存动辄几十 GB，
+                                        // 得先看见才知道该不该清理。
+                                        Text(
+                                            text = "占用 ${formatSize(entries.sumOf { it.sizeBytes })}" +
+                                                (if (localBytes > 0) {
+                                                    " · 已转存 ${formatSize(localBytes)}"
+                                                } else {
+                                                    ""
+                                                }),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = skin.textMuted.copy(alpha = 0.75f)
+                                        )
+                                    }
+                                    // 长按已经取代 ⋮：在统计行常驻一句灰字提示，
+                                    // 纯文字、不是按钮，也不新增图标。
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = if (refreshing) "刷新中…" else "刷新",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Medium,
+                                            color = if (refreshing) skin.textMuted else skin.accent,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable(enabled = !refreshing) {
+                                                    scope.launch { rescan() }
+                                                }
+                                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                        )
+                                        Text(
+                                            text = "长按条目可更多操作",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = skin.textMuted.copy(alpha = 0.65f)
+                                        )
+                                    }
+                                }
                             }
                         }
                         items(entries, key = { it.key }) { entry ->
@@ -255,8 +432,25 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
                                 entry = entry,
                                 preparing = preparingKey == entry.key,
                                 progress = if (preparingKey == entry.key) prepareProgress else 0f,
-                                enabled = preparingKey == null,
-                                onClick = { play(entry) }
+                                enabled = preparingKey == null && !deleting,
+                                selectionMode = selectionMode,
+                                selected = entry.key in selectedKeys,
+                                onClick = {
+                                    if (selectionMode) {
+                                        selectedKeys = if (entry.key in selectedKeys) {
+                                            selectedKeys - entry.key
+                                        } else {
+                                            selectedKeys + entry.key
+                                        }
+                                    } else {
+                                        play(entry)
+                                    }
+                                },
+                                onDelete = { deleteTargets = listOf(entry) },
+                                onEnterMultiSelect = {
+                                    selectionMode = true
+                                    selectedKeys = setOf(entry.key)
+                                }
                             )
                         }
                     }
@@ -277,20 +471,36 @@ fun BiliCacheScreen(modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BiliRow(
     entry: BiliEntry,
     preparing: Boolean,
     progress: Float,
     enabled: Boolean,
-    onClick: () -> Unit
+    selectionMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+    onEnterMultiSelect: () -> Unit
 ) {
     val skin = LocalSkin.current
+    var actionsOpen by remember(entry.key) { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .clickable(enabled = enabled && entry.playable, onClick = onClick)
+            // 多选态下点整行就是勾选；普通态仍然只允许可播放的条目进入播放。
+            // 行尾不再有 ⋮：低频操作（删除 / 多选）收进长按弹出的动作面板。
+            .combinedClickable(
+                enabled = enabled && (selectionMode || entry.playable),
+                onClick = onClick,
+                onLongClick = if (enabled && !selectionMode) {
+                    { actionsOpen = true }
+                } else {
+                    null
+                }
+            )
             .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -346,7 +556,11 @@ private fun BiliRow(
 
         Spacer(Modifier.width(10.dp))
 
-        if (preparing) {
+        if (selectionMode) {
+            Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                SelectionCircle(selected = selected)
+            }
+        } else if (preparing) {
             Box(Modifier.width(56.dp), contentAlignment = Alignment.CenterEnd) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(
@@ -364,12 +578,32 @@ private fun BiliRow(
                 }
             }
         } else {
+            // 大小文字固定 56dp 右对齐：去掉 ⋮ 之后行尾宽度不变，
+            // 文字基线和删除前完全一致，列表看上去不会"整列往右挪"。
             Text(
                 text = formatSize(entry.sizeBytes),
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted
+                color = skin.textMuted,
+                modifier = Modifier.width(56.dp),
+                textAlign = TextAlign.End
             )
         }
+    }
+
+    // 长按动作面板：B站行只有"删除本条"和"多选删除"两件事
+    if (actionsOpen) {
+        RowActionSheet(
+            title = entry.displayTitle,
+            subtitle = listOf(entry.owner, entry.qualityLabel)
+                .filter { it.isNotBlank() }
+                .joinToString(" · ")
+                .ifBlank { null },
+            actions = listOf(
+                RowSheetAction("删除文件…", destructive = true, onClick = onDelete),
+                RowSheetAction("多选删除", destructive = true, onClick = onEnterMultiSelect)
+            ),
+            onDismiss = { actionsOpen = false }
+        )
     }
 }
 

@@ -7,7 +7,10 @@ import android.os.Build
 import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** 扫描曲库时的过滤规则 */
@@ -28,6 +31,13 @@ data class ScanOutcome(
     val excludedTotal: Int get() = excludedLocked + excludedUnsupported + excludedNonSong
 }
 
+/** 「扫描」面板里的一个可选目录：路径 + 展示名 + 曲目数 */
+data class ScanFolderInfo(
+    val path: String,
+    val name: String,
+    val songCount: Int
+)
+
 /**
  * 通过 MediaStore 扫描设备上的本地音频。
  *
@@ -41,7 +51,11 @@ class MediaRepository(private val context: Context) {
 
     suspend fun scan(
         filterShortAudio: Boolean = true,
-        filters: ScanFilters = ScanFilters()
+        filters: ScanFilters = ScanFilters(),
+        /** 只扫描这些目录（路径与 [ScanFolderInfo.path] 一致）；null = 全量扫描 */
+        folderPaths: Set<String>? = null,
+        /** 已检查的 MediaStore 行数，用于面板进度显示 */
+        onProgress: ((Int) -> Unit)? = null
     ): ScanOutcome = withContext(Dispatchers.IO) {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -81,6 +95,7 @@ class MediaRepository(private val context: Context) {
         var excludedUnsupported = 0
         var excludedNonSong = 0
         var excludedShort = 0
+        var scanned = 0
 
         try {
             context.contentResolver.query(
@@ -108,6 +123,9 @@ class MediaRepository(private val context: Context) {
                 }
 
                 while (cursor.moveToNext()) {
+                    coroutineContext.ensureActive()
+                    scanned++
+                    if (scanned % 64 == 0) onProgress?.invoke(scanned)
                     val duration = cursor.getLong(iDur)
                     val id = cursor.getLong(iId)
                     val rawTitle = cursor.getString(iTitle)?.trim().orEmpty()
@@ -123,6 +141,9 @@ class MediaRepository(private val context: Context) {
                         path.substringBeforeLast('/', "")
                     }
                     val folderName = folder.substringAfterLast('/').ifBlank { "根目录" }
+
+                    // 限定扫描范围：不在所选目录里的条目直接跳过（不参与任何排除计数）
+                    if (folderPaths != null && folder !in folderPaths) continue
 
                     val song = Song(
                         id = id,
@@ -172,6 +193,8 @@ class MediaRepository(private val context: Context) {
                     }
                 }
             }
+        } catch (c: CancellationException) {
+            throw c
         } catch (_: Exception) {
             // 权限缺失或媒体库异常时返回空表
         }
@@ -179,11 +202,13 @@ class MediaRepository(private val context: Context) {
         // 第二轮：只对可疑项读 64 字节文件头，按魔数定生死。
         // 名字带加密标记但能正常解出时长（= 已转换的成品）会被放行。
         for ((song, duration) in suspicious) {
+            coroutineContext.ensureActive()
             val byMagic = readIsLockedContainer(song.uri)
             val byHeuristic = LockedFormat.looksLikeLockedContainer(song.displayName) && duration <= 0
             if (byMagic || byHeuristic) excludedLocked++ else out += song
         }
 
+        onProgress?.invoke(scanned)
         ScanOutcome(
             songs = out,
             excludedLocked = excludedLocked,
@@ -192,6 +217,64 @@ class MediaRepository(private val context: Context) {
             excludedShort = excludedShort
         )
     }
+
+    /**
+     * 列出 MediaStore 里已有的音频目录，按目录聚合并统计曲目数。
+     *
+     * 只作为「扫描范围」的候选列表，不读取文件、不写库；权限缺失时返回空表，
+     * 由面板提示用户检查读取音乐权限。
+     */
+    suspend fun listFolders(): List<ScanFolderInfo> = withContext(Dispatchers.IO) {
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        }
+        val pathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.RELATIVE_PATH
+        } else {
+            @Suppress("DEPRECATION")
+            MediaStore.Audio.Media.DATA
+        }
+        val counts = LinkedHashMap<String, Int>()
+        try {
+            context.contentResolver.query(
+                collection,
+                arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.IS_MUSIC, pathColumn),
+                "${MediaStore.Audio.Media.IS_MUSIC} != 0",
+                null,
+                null
+            )?.use { cursor ->
+                val iPath = cursor.getColumnIndex(pathColumn)
+                if (iPath >= 0) {
+                    while (cursor.moveToNext()) {
+                        coroutineContext.ensureActive()
+                        val folder = folderOf(cursor.getString(iPath).orEmpty())
+                        counts[folder] = (counts[folder] ?: 0) + 1
+                    }
+                }
+            }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            // 权限缺失或媒体库异常时返回空表
+        }
+        counts.map { (path, count) ->
+            ScanFolderInfo(
+                path = path,
+                name = path.substringAfterLast('/').ifBlank { "根目录" },
+                songCount = count
+            )
+        }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.path })
+    }
+
+    /** 与 [scan] 中曲目目录计算保持完全一致的归一化（扫描范围用它做匹配） */
+    private fun folderOf(path: String): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            path.trimEnd('/')
+        } else {
+            path.substringBeforeLast('/', "")
+        }
 
     /**
      * 读文件头 64 字节，按魔数判断是否为已知加密容器（KGM/KGMA/KGG/VPR、NCM、KWM）。

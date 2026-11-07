@@ -1,5 +1,6 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -8,10 +9,17 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.graphicsLayer
@@ -45,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
@@ -53,6 +63,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -62,6 +73,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayMode
@@ -73,6 +85,7 @@ import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /* ============================================================
  * 传输控制（上一首 / 播放 / 下一首 / 随机 / 循环）
@@ -723,6 +736,15 @@ private fun TimeLabel(text: String) {
  * 正在播放侧栏（平板 / 桌面宽屏）
  * ============================================================ */
 
+/**
+ * 右侧面板的三层：封面 / 歌词 / 律动柱。
+ * 顺序与手机播放页 `PlayerLayer` 一致，横向滑动时环形轮转。
+ */
+private const val PANEL_LAYER_COVER = 0
+private const val PANEL_LAYER_LYRICS = 1
+private const val PANEL_LAYER_VISUALIZER = 2
+private const val PANEL_LAYER_COUNT = 3
+
 @Composable
 fun NowPlayingPanel(
     state: PlayerUiState,
@@ -737,7 +759,16 @@ fun NowPlayingPanel(
     onOpenQueue: () -> Unit,
     onFavorite: () -> Unit,
     isFavorite: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * 半透明面板：沉浸皮肤下让整页的封面玻璃背景透出来 ——
+     * 左侧列表已经是这个观感，右侧播放区原来是实心色，两边接不上。
+     */
+    translucent: Boolean = false,
+    /** 面板内**上滑** = 下一首（和手机播放页同一方向语义） */
+    onSwipeUp: (() -> Unit)? = null,
+    /** 面板内**下滑** = 上一首 */
+    onSwipeDown: (() -> Unit)? = null
 ) {
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
     val coverUri = remember(state.sourceUri) {
@@ -760,10 +791,86 @@ fun NowPlayingPanel(
         label = "dot"
     )
 
+    // ---- 面板内手势：上下切歌 / 左右切层 ----
+    //
+    // 手机上的三层是 HorizontalPager（跟手）。这里是只读预览面板，需求明确不要跟手位移，
+    // 所以改成「主轴判定 + 松手过阈值触发 + AnimatedContent 过渡」：
+    //   纵向：沿用原来的 56dp 阈值，上滑下一首、下滑上一首；
+    //   横向：同样 56dp，左滑下一层、右滑上一层，三层环形循环。
+    // 判定前**不消费**事件（子级 Slider 仍能正常拖动）；判定后只消费自己的主轴方向，
+    // 纵向不会切层、横向不会切歌。手势只挂在本面板上，左侧列表完全不受影响。
+    val swipeThreshold = rememberUpdatedState(with(LocalDensity.current) { 56.dp.toPx() })
+    val swipeUpNow = rememberUpdatedState(onSwipeUp)
+    val swipeDownNow = rememberUpdatedState(onSwipeDown)
+
+    // 右侧面板自己的当前层：**不和手机 FullPlayer 的 layerPager 共享**。
+    // 右侧是常驻预览，手机全屏播放页可能根本没打开；一旦共享，任一侧切层都会
+    // 把另一侧的状态劫持走，而两边的宽度/排版又完全不同，恢复时还得追着改。
+    var layer by remember { mutableIntStateOf(PANEL_LAYER_COVER) }
+    // 过渡方向：+1 新内容从右侧进（手指左滑），-1 从左侧进
+    var slideDir by remember { mutableIntStateOf(1) }
+
+    val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(skin.surface)
+            .background(if (translucent) skin.surface.copy(alpha = 0.46f) else skin.surface)
+            .pointerInput(Unit) {
+                val slop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var axis = 0 // 0 = 未判定，1 = 横向，2 = 纵向
+                    var dx = 0f
+                    var dy = 0f
+                    var aborted = false
+
+                    // 主轴判定：过 touch slop 才锁定方向；期间交给子级优先处理
+                    while (axis == 0) {
+                        val e = awaitPointerEvent()
+                        val c = e.changes.firstOrNull { it.id == down.id }
+                        if (c == null || !c.pressed || c.isConsumed) {
+                            aborted = true
+                            break
+                        }
+                        val d = c.positionChange()
+                        dx += d.x
+                        dy += d.y
+                        if (abs(dx) > slop || abs(dy) > slop) {
+                            axis = if (abs(dx) > abs(dy)) 1 else 2
+                            // 和原实现一致：阈值只算过 slop 之后的位移
+                            if (axis == 1) dx = 0f else dy = 0f
+                        }
+                    }
+
+                    if (!aborted && axis != 0) {
+                        // 主轴已锁定：后续位移全部归自己，并消费掉，避免和任何子级/祖先抢
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            val c = e.changes.firstOrNull { it.id == down.id }
+                            if (c == null || !c.pressed) break
+                            val d = c.positionChange()
+                            if (axis == 1) dx += d.x else dy += d.y
+                            c.consume()
+                        }
+                        val t = swipeThreshold.value
+                        if (axis == 1) {
+                            // 左滑 → 下一层；右滑 → 上一层（和手机 pager 的方向语义一致）
+                            if (dx <= -t) {
+                                slideDir = 1
+                                layer = (layer + 1) % PANEL_LAYER_COUNT
+                            } else if (dx >= t) {
+                                slideDir = -1
+                                layer = (layer + PANEL_LAYER_COUNT - 1) % PANEL_LAYER_COUNT
+                            }
+                        } else {
+                            if (dy <= -t) swipeUpNow.value?.invoke()
+                            else if (dy >= t) swipeDownNow.value?.invoke()
+                        }
+                    }
+                }
+            }
             .padding(horizontal = 22.dp, vertical = 18.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -784,33 +891,88 @@ fun NowPlayingPanel(
                 style = MaterialTheme.typography.labelMedium,
                 color = skin.accent
             )
+            Spacer(Modifier.weight(1f))
+            // 三层指示：只用小圆点，**不可点击**（面板内不提供任何设置/切换入口）
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                repeat(PANEL_LAYER_COUNT) { i ->
+                    Box(
+                        Modifier
+                            .size(4.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (i == layer) skin.accent
+                                else skin.textMuted.copy(alpha = 0.35f)
+                            )
+                    )
+                }
+            }
         }
 
-        // 封面自适应剩余高度，避免小高度窗口被挤压
-        Box(
-            Modifier
+        // 三层（封面 / 歌词 / 律动柱）复用封面原来那块区域。
+        // 过渡是淡入淡出 + 轻微位移，不做跟手位移预览（和右侧切歌同一手感）。
+        AnimatedContent(
+            targetState = layer,
+            transitionSpec = {
+                val dir = slideDir
+                (
+                    fadeIn(tween(220, delayMillis = 40)) +
+                        slideInHorizontally(tween(260)) { w -> dir * w / 10 }
+                    ).togetherWith(
+                        fadeOut(tween(150)) +
+                            slideOutHorizontally(tween(200)) { w -> -dir * w / 10 }
+                    )
+            },
+            label = "panelLayer",
+            modifier = Modifier
                 .weight(1f, fill = true)
                 .fillMaxWidth()
-                .padding(vertical = 16.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            androidx.compose.foundation.layout.BoxWithConstraints(
-                Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                val side = if (maxWidth < maxHeight) maxWidth else maxHeight
-                CoverArt(
-                    albumId = state.albumId,
-                    seed = state.title + state.artist,
-                    modifier = Modifier
-                        .size(side)
-                        .clip(RoundedCornerShape(14.dp)),
-                    cornerRadius = 14.dp,
-                    sizePx = 800,
-                    sourceUri = coverUri,
-                    songId = state.mediaId,
-                    coverKey = OnlineCover.keyOf(state.title, state.artist)
+                .padding(vertical = 16.dp)
+                .clipToBounds()
+        ) { l ->
+            when (l) {
+                PANEL_LAYER_LYRICS -> if (song != null) {
+                    // 只读歌词层：同一套解析/渲染（含逐字高亮），没有任何设置入口
+                    PanelLyrics(
+                        song = song,
+                        positionMs = state.positionMs,
+                        prefs = prefs,
+                        isPlaying = state.isPlaying,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            "暂无可展示的内容",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+
+                PANEL_LAYER_VISUALIZER -> PanelVisualizer(
+                    isPlaying = state.isPlaying,
+                    prefs = prefs,
+                    modifier = Modifier.fillMaxSize()
                 )
+
+                else -> androidx.compose.foundation.layout.BoxWithConstraints(
+                    Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val side = if (maxWidth < maxHeight) maxWidth else maxHeight
+                    CoverArt(
+                        albumId = state.albumId,
+                        seed = state.title + state.artist,
+                        modifier = Modifier
+                            .size(side)
+                            .clip(RoundedCornerShape(14.dp)),
+                        cornerRadius = 14.dp,
+                        sizePx = 800,
+                        sourceUri = coverUri,
+                        songId = state.mediaId,
+                        coverKey = OnlineCover.keyOf(state.title, state.artist)
+                    )
+                }
             }
         }
 

@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -63,6 +64,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,6 +79,7 @@ import com.sonance.player.playback.PcmBus
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -473,6 +476,118 @@ fun VisualizerOverlay(
                     prefs.vizGlassVisibility = it
                 },
                 onDismiss = { settingsOpen = false }
+            )
+        }
+    }
+}
+
+/* ============================================================
+ * 平板右侧面板：只读律动柱层
+ * ============================================================ */
+
+/**
+ * 右侧面板的柱数固定 32。
+ *
+ * 需求：面板只覆盖“数量”，颜色/渐变/物理参数/样式/粗细仍跟随全局。
+ * 这里用显式常量，**不读** [Prefs.vizBarCount]，所以以后全局默认值或上限
+ * 怎么改都不会影响面板；手机播放页依旧走全局数量。
+ */
+private const val PANEL_VIS_BAR_COUNT = 32
+
+/** 窄面板兜底：32 根柱之间至少留 2dp 间隙，避免糊成一片 */
+private val PANEL_MIN_BAR_GAP = 2.dp
+
+/**
+ * 右侧面板的律动柱层。
+ *
+ * 和全屏律动柱复用同一条真实数据链路（[AudioVisualizer] → `PcmBus` → [VizPhysics]），
+ * 几何按 `size.height / width` 的百分比算，所以面板变矮时柱子会整体等比缩放，
+ * 不需要额外适配。样式/配色/粗细/物理手感均读取全局设置，但**没有任何设置入口**：
+ * 没有齿轮、没有设置面板，面板里也放不下这些控件。
+ *
+ * 取不到实时频谱时仍会走同一套物理回退动画，并在顶部如实标注（和全屏页一致）。
+ */
+@Composable
+fun PanelVisualizer(
+    isPlaying: Boolean,
+    prefs: Prefs,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+
+    // 面板是只读预览：参数只在进入时读一次，手机设置页改了下一次切层/换歌自然生效
+    val style = remember { VizStyle.entries.getOrNull(prefs.vizStyle) ?: VizStyle.BARS }
+    // ★ 面板固定 32 根：显式覆盖，**不读** prefs.vizBarCount。
+    // 手机播放页仍是全局数量；以后把全局默认/上限改成别的值，这里也不受影响。
+    val barCount = PANEL_VIS_BAR_COUNT
+    val sensitivity = remember { prefs.vizSensitivity }
+    val mirror = remember { prefs.vizMirror }
+    val colorIndex = remember { prefs.vizColorIndex }
+    val barWidth = remember { prefs.vizBarWidth }
+    val attack = remember { prefs.vizAttack }
+    val decayDamping = remember { prefs.vizDecayDamping }
+    val gravity = remember { prefs.vizGravity }
+    val peakHoldTicks = remember { prefs.vizPeakHoldTicks }
+    val showPeak = remember { prefs.vizShowPeak }
+    val emaAlpha = remember { prefs.vizEmaAlpha }
+
+    val vizColor = VizColor.entries.getOrNull(colorIndex) ?: VizColor.SKIN
+    val barColor = if (vizColor.isSkin) skin.accent else Color(vizColor.main)
+    val barColorDim = if (vizColor.isSkin) skin.accentDim else Color(vizColor.dim)
+
+    val viz = remember(barCount) { AudioVisualizer(barCount) }
+    var live by remember { mutableStateOf(false) }
+
+    DisposableEffect(viz) {
+        live = viz.start(0)
+        onDispose { viz.stop() }
+    }
+
+    BoxWithConstraints(
+        modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(skin.bg, skin.surface, skin.bg)))
+    ) {
+        // 柱宽比继续跟随全局设置，只在 32 根柱会把间隙压没时才收窄：
+        // 以“至少留 2dp 间隙”为上限反推比例，面板够宽时全局值原样生效。
+        // 只影响本面板的绘制参数，不改全局设置；数量始终是 32。
+        val density = LocalDensity.current
+        val slotPx = with(density) { (maxWidth / barCount).toPx() }
+        val minGapPx = with(density) { PANEL_MIN_BAR_GAP.toPx() }
+        val fittedRatio = if (slotPx > 0f) 1f - minGapPx / slotPx else 1f
+        val effectiveBarWidth = barWidth.coerceAtMost(fittedRatio.coerceIn(0.25f, 1f))
+
+        VisualizerCanvas(
+            viz = viz,
+            live = live,
+            onLiveChange = { live = it },
+            isPlaying = isPlaying,
+            style = style,
+            mirror = mirror,
+            sensitivity = sensitivity,
+            showFps = false,
+            barWidthRatio = effectiveBarWidth,
+            attack = attack,
+            decayDamping = decayDamping,
+            gravity = gravity,
+            peakHoldTicks = peakHoldTicks,
+            showPeak = showPeak,
+            emaAlpha = emaAlpha,
+            color = barColor,
+            colorDim = barColorDim,
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // 拿不到真实频谱时如实告知（同全屏页），不假装是实时数据
+        if (!live) {
+            Text(
+                "未取到实时频谱 · 已回退动画",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 8.dp)
             )
         }
     }
@@ -916,7 +1031,7 @@ Column(
                     .heightIn(max = 520.dp)
                     .shadow(8.dp, RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
-                    .background(skin.surface2)
+                    .background(skin.surface2.solidSurface())
                     .border(1.dp, skin.border2, RoundedCornerShape(16.dp))
                     .clickable { /* 吃掉点击，避免穿透关闭 */ }
                     .verticalScroll(rememberScrollState())

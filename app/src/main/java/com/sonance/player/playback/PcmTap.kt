@@ -5,6 +5,7 @@ import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
+import kotlin.math.sqrt
 
 /**
  * 无锁环形缓冲：单生产者（音频线程）/ 单消费者（UI 线程），存单声道 float 采样。
@@ -79,6 +80,16 @@ object PcmBus {
     /** 已收到的数据块数，UI 用来判断"是否还在出新数据" */
     @Volatile
     var buffersSeen: Long = 0L
+
+    /**
+     * 最近一个音频缓冲的原始 RMS（0..1）。
+     *
+     * 在 [PcmTapProcessor.tap] 转单声道的那一层顺手累加平方和算出，**不额外遍历、不做 FFT**。
+     * 播放页的封面/晕染「呼吸」只需要一个整体能量，用不上频谱；这样比再实例化一套
+     * [AudioVisualizer] 便宜得多（后者只在律动柱那一层才有）。UI 侧再按 attack/release 平滑。
+     */
+    @Volatile
+    var rms: Float = 0f
 }
 
 /**
@@ -135,12 +146,14 @@ class PcmTapProcessor : BaseAudioProcessor() {
         PcmBus.ring.reset()
         PcmBus.ready = false
         PcmBus.buffersSeen = 0L
+        PcmBus.rms = 0f
     }
 
     override fun onReset() {
         PcmBus.ring.reset()
         PcmBus.ready = false
         PcmBus.buffersSeen = 0L
+        PcmBus.rms = 0f
     }
 
     /** 从 [buffer] 当前 position 读到底，转单声道 float 写进环形缓冲 */
@@ -155,6 +168,9 @@ class PcmTapProcessor : BaseAudioProcessor() {
 
         val enc = fmt.encoding
         var done = 0
+        // 顺手统计能量：同一轮采样循环里累加平方和，不额外遍历
+        var sumSq = 0f
+        var counted = 0
         while (done < frames) {
             val n = minOf(scratch.size, frames - done)
             var i = 0
@@ -169,12 +185,17 @@ class PcmTapProcessor : BaseAudioProcessor() {
                     }
                     c++
                 }
-                scratch[i] = sum / ch
+                val mono = sum / ch
+                scratch[i] = mono
+                sumSq += mono * mono
                 i++
             }
             PcmBus.ring.write(scratch, n)
+            counted += n
             done += n
         }
+
+        if (counted > 0) PcmBus.rms = sqrt(sumSq / counted)
 
         PcmBus.buffersSeen++
         if (!PcmBus.ready) {
