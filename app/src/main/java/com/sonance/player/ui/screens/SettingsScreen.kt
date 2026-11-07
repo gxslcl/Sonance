@@ -48,7 +48,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1446,6 +1449,7 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
                     chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
                     onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) }
                 )
+                PluginSourceRows(vm)
             }
 
             Spacer(Modifier.height(14.dp))
@@ -2097,4 +2101,87 @@ internal fun buildLastScanSubtitle(
         else -> "${mins / (24 * 60)} 天前"
     }
     return "上次扫描：$rel · $songCount 首 · $scopeText"
+}
+
+/**
+ * 内容源插件的导入与管理。
+ *
+ * 放在设置页而不是在线音乐页：导入是一次性配置，高频的「切换」用上面那排 chips。
+ * 不内置任何插件、不提供获取渠道；导入前把第三方脚本会发起网络请求这件事说清楚。
+ */
+@Composable
+private fun PluginSourceRows(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val text = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)
+                        ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                }.getOrNull()
+            }
+            vm.importPluginScript(text.orEmpty())
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
+    Text("内容源插件", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+    Spacer(Modifier.height(4.dp))
+
+    vm.pluginRecords.forEach { record ->
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    record.meta.platform,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = skin.text
+                )
+                Text(
+                    "v${record.meta.version} · ${if (record.enabled) "已启用" else "已停用"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
+            Switch(
+                checked = record.enabled,
+                onCheckedChange = { vm.setPluginEnabled(record.meta.id, it) },
+                colors = SwitchDefaults.colors(checkedThumbColor = skin.accent)
+            )
+            TextButton(onClick = { vm.removePlugin(record.meta.id) }) {
+                Text("删除", color = skin.textMuted, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = { launcher.launch("*/*") }) {
+            Text("导入插件 (.js)", color = skin.accent, style = MaterialTheme.typography.labelMedium)
+        }
+        vm.pluginHint?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+    }
+
+    Text(
+        "• 只支持 CommonJS 内容源插件（module.exports 导出 search / getMediaSource）；" +
+            "洛雪自定义源脚本是另一套协议，不能在这里导入\n" +
+            "• 依赖 cheerio / crypto-js 等第三方 npm 包的插件暂不支持\n" +
+            "• 本期打通搜索与在线播放，下载暂不走插件取流\n" +
+            "• 插件会在应用内发起网络请求，请只导入你信任且已获授权的内容源；" +
+            "应用不内置任何音源，也不提供插件获取渠道\n" +
+            "• 切换上方「音源」后，搜索结果就来自所选插件",
+        style = MaterialTheme.typography.labelSmall,
+        color = skin.textDim
+    )
 }

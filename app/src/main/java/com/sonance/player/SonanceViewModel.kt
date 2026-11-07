@@ -28,6 +28,9 @@ import com.sonance.player.data.CoverTagWriter
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.MediaFileDeleter
+import com.sonance.player.data.plugin.PluginOnlineSource
+import com.sonance.player.data.plugin.PluginRecord
+import com.sonance.player.data.plugin.PluginRepository
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.NeteaseSource
@@ -3008,6 +3011,50 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         recommendedLoading = false
     }
 
+    // ===== 内容源插件 =====
+
+    private val pluginRepo = PluginRepository.get(app)
+
+    /** 已安装插件，界面跟着它刷新 */
+    var pluginRecords by mutableStateOf(pluginRepo.list())
+        private set
+
+    /** 导入/启停的结果提示，只在设置页显示，不弹 toast 打断用户 */
+    var pluginHint by mutableStateOf<String?>(null)
+        private set
+
+    fun importPluginScript(script: String) {
+        viewModelScope.launch {
+            pluginHint = "正在校验插件…"
+            pluginRepo.install(script)
+                .onSuccess { record ->
+                    pluginRepo.refreshSources()
+                    pluginRecords = pluginRepo.list()
+                    pluginHint = "已导入「${record.meta.platform}」，可在上方切换"
+                }
+                .onFailure { pluginHint = "导入失败：${it.message}" }
+        }
+    }
+
+    fun setPluginEnabled(id: String, enabled: Boolean) {
+        pluginRepo.setEnabled(id, enabled)
+        pluginRepo.refreshSources()
+        pluginRecords = pluginRepo.list()
+        // 关掉的正好是当前源时，退回内置源，避免选中一个已不存在的 id
+        if (!enabled && onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
+        pluginHint = if (enabled) "已启用" else "已停用"
+    }
+
+    fun removePlugin(id: String) {
+        if (onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
+        pluginRepo.remove(id)
+        pluginRepo.refreshSources()
+        pluginRecords = pluginRepo.list()
+        pluginHint = "已删除"
+    }
+
+    fun clearPluginHint() { pluginHint = null }
+
     /** 正在跑的那次搜索。新的一次会取消它，理由见 [searchOnline] */
     private var onlineSearchJob: Job? = null
 
@@ -3271,9 +3318,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
         val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
         if (at < 0) return
-        // 已存到本地的那几首换成曲库里的副本 —— 直接播文件，不再联网取流
-        val songs = onlineSongs.map { localCopyOf(it) ?: it }
-        player.play(songs, at)
+
+        // 内置音源的地址是同步拼出来的，保持原来的零延迟路径
+        if (src !is PluginOnlineSource) {
+            player.play(onlineSongs.map { localCopyOf(it) ?: it }, at)
+            return
+        }
+        // 插件源的 getMediaSource 是异步 Promise：先在协程里预热，再用解析到的
+        // 地址覆盖 Song.uri。已存本地的歌仍走本地文件，不联网。
+        viewModelScope.launch {
+            src.prepareStreams(playable.map { it.remoteId })
+            val songs = onlineSongs.map { s ->
+                val url = src.streamUrl(s.remoteId.orEmpty())
+                if (url.isNotBlank() && localCopyOf(s) == null) {
+                    s.copy(uri = android.net.Uri.parse(url))
+                } else s
+            }.map { localCopyOf(it) ?: it }
+            player.play(songs, at)
+        }
     }
 
     /**

@@ -26,6 +26,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -176,6 +178,10 @@ fun OnlineScreen(
     Column(modifier.fillMaxSize()) {
 
         // ---- 搜索对象切换：单曲 / 歌单 ----
+        // 右边留一个「当前音源」快捷切换：装了插件后这里才出现（没装就不占位置）。
+        // 和设置页那排 chips 读写同一个 onlineSourceId，不会出现两份状态。
+        var sourceMenuExpanded by remember { mutableStateOf(false) }
+        val skin = LocalSkin.current
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -194,6 +200,34 @@ fun OnlineScreen(
                     )
                 }
             )
+            if (OnlineSources.all.size > 1) {
+                Spacer(Modifier.weight(1f))
+                Box {
+                    Text(
+                        text = (OnlineSources.byId(vm.onlineSourceId)?.label ?: "音源") + " ▾",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.accent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { sourceMenuExpanded = true }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                    DropdownMenu(
+                        expanded = sourceMenuExpanded,
+                        onDismissRequest = { sourceMenuExpanded = false }
+                    ) {
+                        OnlineSources.all.forEach { source ->
+                            DropdownMenuItem(
+                                text = { Text(source.label) },
+                                onClick = {
+                                    vm.changeOnlineSource(source.id)
+                                    sourceMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // ---- 搜索框 + 「只看可播」开关 ----
