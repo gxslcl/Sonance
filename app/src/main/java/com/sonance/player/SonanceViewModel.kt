@@ -2703,6 +2703,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /**
+     * 可选音源的可观察快照。
+     *
+     * `OnlineSources.all` 是普通 getter，插件增删后虽然变了，但 Compose 观察不到，
+     * 结果就是「插件列表里已经出现，上方 chips 却还是只有网易云」。
+     * 所以每次 refreshSources 之后都要把快照重新赋给这个 state。
+     */
+    var onlineSources by mutableStateOf(OnlineSources.all)
+        private set
+
+    /**
      * 用网易云补全**本地歌**的封面与歌词。默认关闭。
      *
      * 和「在线封面」「在线歌词」并列的第三个联网开关，同样是默认关。
@@ -3029,6 +3039,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             pluginRepo.install(script)
                 .onSuccess { record ->
                     pluginRepo.refreshSources()
+                    onlineSources = OnlineSources.all
                     pluginRecords = pluginRepo.list()
                     pluginHint = "已导入「${record.meta.platform}」，可在上方切换"
                 }
@@ -3039,6 +3050,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun setPluginEnabled(id: String, enabled: Boolean) {
         pluginRepo.setEnabled(id, enabled)
         pluginRepo.refreshSources()
+        onlineSources = OnlineSources.all
         pluginRecords = pluginRepo.list()
         // 关掉的正好是当前源时，退回内置源，避免选中一个已不存在的 id
         if (!enabled && onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
@@ -3049,6 +3061,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
         pluginRepo.remove(id)
         pluginRepo.refreshSources()
+        onlineSources = OnlineSources.all
         pluginRecords = pluginRepo.list()
         pluginHint = "已删除"
     }

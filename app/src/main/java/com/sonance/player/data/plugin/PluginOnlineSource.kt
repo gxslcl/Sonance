@@ -167,7 +167,12 @@ class PluginOnlineSource(
                 val o = JSONObject(raw)
                 o.optString("url").ifBlank { o.optString("src") }
             }.getOrElse { raw.trim('"') }
-            if (url.startsWith("http")) urlCache[id] = url
+            // 插件可以返回网络地址，也可以返回自己的本地/内容提供者地址
+            // （本地演示源、用户自建曲库都走这条），别只认 http。
+            if (url.startsWith("http") ||
+                url.startsWith("file://") ||
+                url.startsWith("content://")
+            ) urlCache[id] = url
         }
     }
 

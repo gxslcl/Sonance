@@ -72,8 +72,13 @@ class PluginRuntime(private val app: Context) {
                 val (body, err) = runCatching {
                     val o = JSONObject(optionsJson)
                     val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 12_000
-                    conn.readTimeout = 15_000
+                    // 插件可以按 axios 的习惯传 timeout；没传就用默认。
+                    // 上限 60s，避免插件随手写一个巨大值把 WebView 调用永久挂住
+                    val pluginTimeout = o.optInt("timeout", 0)
+                        .coerceIn(0, 60_000)
+                        .takeIf { it > 0 }
+                    conn.connectTimeout = pluginTimeout ?: 12_000
+                    conn.readTimeout = pluginTimeout ?: 15_000
                     conn.requestMethod = o.optString("method", "GET").uppercase()
                     conn.setRequestProperty(
                         "User-Agent",
@@ -252,16 +257,45 @@ class PluginRuntime(private val app: Context) {
     if (err) p.reject(new Error(err)); else p.resolve(utf8(b64));
   };
 
+  // axios 垫片：按 axios 的常用语义实现 GET/POST。
+  // 之前把 cfg 塞进 config 字段，而 native 桥只认 method/headers/body，
+  // params / headers / timeout 全丢、请求发到裸 URL —— 任何用
+  // axios.get(url, { params: {...} }) 的插件都跑不起来。这里补齐：
+  //   params  -> 序列化进 query string
+  //   headers -> 透传给 native 桥
+  //   timeout -> 交给 HttpURLConnection
+  //   response-> JSON 自动解析成对象（axios 默认行为），非 JSON 保留文本
   window.require = function (name) {
     if (name === 'axios') {
+      function buildUrl(url, params) {
+        if (!params) return url;
+        var parts = [];
+        Object.keys(params).forEach(function (k) {
+          var v = params[k];
+          if (v === undefined || v === null) return;
+          parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+        });
+        if (!parts.length) return url;
+        return url + (url.indexOf('?') >= 0 ? '&' : '?') + parts.join('&');
+      }
+      function request(method, url, cfg, body) {
+        cfg = cfg || {};
+        var options = { method: method, headers: cfg.headers || {}, body: body || '' };
+        if (cfg.timeout) options.timeout = cfg.timeout;
+        return window.__http(buildUrl(url, cfg.params), JSON.stringify(options))
+          .then(function (text) {
+            var data = text;
+            if (typeof text === 'string') {
+              try { data = JSON.parse(text); } catch (e) { /* 非 JSON 保留原文 */ }
+            }
+            return { data: data, status: 200 };
+          });
+      }
       return {
-        get: function (url, cfg) {
-          return window.__http(url, JSON.stringify({ method: 'GET', config: cfg || {} }))
-            .then(function (b) { return { data: b }; });
-        },
+        get: function (url, cfg) { return request('GET', url, cfg); },
         post: function (url, body, cfg) {
-          return window.__http(url, JSON.stringify({ method: 'POST', body: body, config: cfg || {} }))
-            .then(function (b) { return { data: b }; });
+          return request('POST', url, cfg,
+            typeof body === 'string' ? body : JSON.stringify(body || {}));
         }
       };
     }

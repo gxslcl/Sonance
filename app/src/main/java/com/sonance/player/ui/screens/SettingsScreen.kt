@@ -1446,8 +1446,8 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
                 )
                 Spacer(Modifier.height(8.dp))
                 ChipsRow(
-                    chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
-                    onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) }
+                    chips = vm.onlineSources.map { it.label to (it.id == vm.onlineSourceId) },
+                    onSelect = { vm.changeOnlineSource(vm.onlineSources[it].id) }
                 )
                 PluginSourceRows(vm)
             }

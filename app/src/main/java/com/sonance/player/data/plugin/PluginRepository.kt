@@ -57,8 +57,12 @@ class PluginRepository(context: Context) {
         runCatching {
             require(script.length in 20..(2 * 1024 * 1024)) { "脚本内容不合法（过大或为空）" }
             require(script.contains("module.exports")) { "不是 CommonJS 插件脚本" }
-            // 先真正加载一次，确认能执行、能读到 platform 与必需方法
-            val runtimeMeta = runtime.load("__probe__", script).getOrThrow()
+            // 探针的缓存键必须跟脚本内容绑定。用固定 "__probe__" 的话，
+            // load() 里的 `if (loadedFile == file) return currentMeta` 会让
+            // 第二个插件直接拿到第一个的元信息 —— platform 记错、同名覆盖
+            // 逻辑也会串台，表现为「装了 B 却显示 A」。
+            val probeKey = "__probe_${script.hashCode()}_${script.length}"
+            val runtimeMeta = runtime.load(probeKey, script).getOrThrow()
             require(runtimeMeta.platform.isNotBlank()) { "插件缺少 platform 字段，或脚本执行失败" }
             // 必需方法（search / getMediaSource）不在这里强校验：
             // 插件可以按需实现，真正调用到缺失方法时给明确报错即可。

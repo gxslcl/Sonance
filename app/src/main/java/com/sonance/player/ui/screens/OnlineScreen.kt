@@ -200,11 +200,12 @@ fun OnlineScreen(
                     )
                 }
             )
-            if (OnlineSources.all.size > 1) {
+            if (vm.onlineSources.size > 1) {
                 Spacer(Modifier.weight(1f))
                 Box {
                     Text(
-                        text = (OnlineSources.byId(vm.onlineSourceId)?.label ?: "音源") + " ▾",
+                        text = (vm.onlineSources.firstOrNull { it.id == vm.onlineSourceId }?.label
+                            ?: "音源") + " ▾",
                         style = MaterialTheme.typography.labelMedium,
                         color = skin.accent,
                         modifier = Modifier
@@ -216,7 +217,7 @@ fun OnlineScreen(
                         expanded = sourceMenuExpanded,
                         onDismissRequest = { sourceMenuExpanded = false }
                     ) {
-                        OnlineSources.all.forEach { source ->
+                        vm.onlineSources.forEach { source ->
                             DropdownMenuItem(
                                 text = { Text(source.label) },
                                 onClick = {
