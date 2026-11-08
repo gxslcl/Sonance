@@ -14,6 +14,7 @@ import android.util.Log
 import android.util.LruCache
 import android.util.Size
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 专辑封面加载。
@@ -102,7 +104,7 @@ object ArtworkLoader {
     private class Key(
         val albumId: Long,
         val size: Int,
-        val uriKey: Int,
+        val uriKey: String?,
         /**
          * 这首歌的在线封面缓存 key（见 [OnlineCover.keyOf]）。
          *
@@ -116,11 +118,11 @@ object ArtworkLoader {
                 other.size == size && other.uriKey == uriKey && other.coverKey == coverKey
 
         override fun hashCode(): Int =
-            (((albumId * 31L + size) * 31L + uriKey) * 31L + (coverKey?.hashCode() ?: 0)).hashCode()
+            (((albumId * 31L + size) * 31L + (uriKey?.hashCode() ?: 0)) * 31L + (coverKey?.hashCode() ?: 0)).hashCode()
     }
 
     private fun keyOf(albumId: Long, size: Int, sourceUri: Uri?, coverKey: String?): Key =
-        Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), coverKey)
+        Key(albumId, size, sourceUri?.toString(), coverKey)
 
     /**
      * **本地**封面（MediaStore / 内嵌）的缓存键 —— 不带 coverKey。
@@ -133,7 +135,14 @@ object ArtworkLoader {
      * 本地封面跟歌无关、只跟专辑和尺寸有关，所以单独用这个键共用一份结果。
      */
     private fun localKeyOf(albumId: Long, size: Int, sourceUri: Uri?): Key =
-        Key(albumId, size, if (albumId > 0) 0 else (sourceUri?.toString()?.hashCode() ?: 0), null)
+        Key(albumId, size, if (albumId > 0) null else sourceUri?.toString(), null)
+
+    /** 歌曲文件自己的内嵌封面不能复用整张专辑的缓存键。 */
+    private fun sourceKeyOf(albumId: Long, size: Int, sourceUri: Uri): Key =
+        Key(albumId, size, sourceUri.toString(), null)
+
+    private fun selectedKeyOf(albumId: Long, size: Int, sourceUri: Uri?, songId: Long): Key =
+        Key(albumId, size, sourceUri?.toString(), "\u0000selected:$songId")
 
     /** 尺寸档 ≤ 它算「缩略图」，和小图缓存分开算（见 [thumbCache]） */
     private const val THUMB_BUCKET = 256
@@ -186,7 +195,8 @@ object ArtworkLoader {
      * 确认过没有封面的条目，避免重复走一遍失败的 IPC / 文件解析。
      * 键与 [Key] 同构，未知专辑按 URI 区分，不会"一首没封面 = 全都没封面"。
      */
-    private val missing = HashSet<String>(256)
+    private val missing = HashMap<String, Long>(256)
+    private const val MISSING_RETRY_MS = 2_500L
 
     /**
      * [missing] / [coverMiss] 的版本号 —— 也就是「又确认了一首歌没有封面」。
@@ -201,9 +211,36 @@ object ArtworkLoader {
     var artworkGoneVersion by mutableIntStateOf(0)
         private set
 
+    /** 只有对应封面写入后才通知订阅它的列表项，避免批量补图刷新整张列表。 */
+    private val coverSignals = ConcurrentHashMap<String, MutableIntState>()
+    private val coverVersions = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+    private val selectedVersions = ConcurrentHashMap<Long, java.util.concurrent.atomic.AtomicInteger>()
+    private val selectedSignals = ConcurrentHashMap<Long, MutableIntState>()
+    var cacheResetVersion by mutableIntStateOf(0)
+        private set
+
+    fun coverRevision(key: String?): Int =
+        if (key == null) 0 else coverSignals.getOrPut(key) { mutableIntStateOf(0) }.intValue
+
+    fun selectedRevision(songId: Long): Int =
+        if (songId == 0L || songId == -1L) 0
+        else selectedSignals.getOrPut(songId) { mutableIntStateOf(0) }.intValue
+
+    fun selectedGeneration(songId: Long): Int =
+        selectedVersions.getOrPut(songId) { java.util.concurrent.atomic.AtomicInteger() }.get()
+
+    fun <T : Any> ifSelectedGeneration(songId: Long, expected: Int, block: () -> T): T? {
+        val version = selectedVersions.getOrPut(songId) { java.util.concurrent.atomic.AtomicInteger() }
+        return synchronized(version) { if (version.get() == expected) block() else null }
+    }
+
     /** 记一笔「这张也确认没有封面」。只有真的新增才推进版本号，避免无谓的重组 */
     private fun markMissing(key: String) {
-        val added = synchronized(missing) { missing.add(key) }
+        val now = System.currentTimeMillis()
+        val added = synchronized(missing) {
+            val previous = missing.put(key, now + MISSING_RETRY_MS)
+            previous == null || previous <= now
+        }
         if (added) artworkGoneVersion++
     }
 
@@ -215,13 +252,20 @@ object ArtworkLoader {
      * 于是晕染先套一层占位色、等磁盘封面解码完再突变，又变成闪一下。
      */
     fun isArtworkGone(albumId: Long, sourceUri: Uri?, coverKey: String?): Boolean {
-        if (!isMissingKey(missingKeyOf(albumId, sourceUri))) return false
+        if (!localSourcesMissing(albumId, sourceUri)) return false
         if (coverKey == null) return true
         return synchronized(coverMiss) { coverMiss.contains(coverKey) }
     }
 
     private fun missingKeyOf(albumId: Long, sourceUri: Uri?): String =
         if (albumId > 0) "a:$albumId" else "u:${sourceUri?.toString() ?: "?"}"
+
+    private fun sourceMissingKey(sourceUri: Uri?): String? =
+        localCoverSources(0L, sourceUri?.toString()).file
+
+    private fun localSourcesMissing(albumId: Long, sourceUri: Uri?): Boolean {
+        return allLocalSourcesMissing(localCoverSources(albumId, sourceUri?.toString()), ::isMissingKey)
+    }
 
     /**
      * 确认过「磁盘缓存里也没有这张下载封面」的 coverKey。
@@ -240,11 +284,41 @@ object ArtworkLoader {
     /** 封面刚写入缓存后调用，让上面那条短路失效 */
     fun forgetCoverMiss(coverKey: String?) {
         if (coverKey == null) return
-        // 从「没有」变回「可能有」，晕染那边也要重新判断
-        if (synchronized(coverMiss) { coverMiss.remove(coverKey) }) artworkGoneVersion++
-        // 色卡也要一起丢掉：这张封面**换掉了**（用户手动搜了一张新的），
-        // 留着旧色卡的话，屏幕上是新封面、背景却还是旧封面取出来的颜色。
-        forgetTint("t:c$coverKey")
+        val version = coverVersions.getOrPut(coverKey) { java.util.concurrent.atomic.AtomicInteger() }
+        synchronized(version) {
+            version.incrementAndGet()
+            // 从「没有」变回「可能有」，晕染那边也要重新判断
+            if (synchronized(coverMiss) { coverMiss.remove(coverKey) }) artworkGoneVersion++
+            forgetTint("t:c$coverKey")
+            // 已有的下载封面可能被手动更新；不能继续从内存拿到旧图。
+            listOf(thumbCache, largeCache).forEach { cache ->
+                cache.snapshot().keys.filter { it.coverKey == coverKey }.forEach(cache::remove)
+            }
+        }
+        val signal = coverSignals.getOrPut(coverKey) { mutableIntStateOf(0) }
+        synchronized(signal) { signal.intValue++ }
+    }
+
+    private fun coverGeneration(key: String?): Int =
+        if (key == null) 0 else coverVersions.getOrPut(key) { java.util.concurrent.atomic.AtomicInteger() }.get()
+
+    private fun <T : Any> ifCoverGeneration(key: String?, expected: Int, block: () -> T): T? {
+        if (key == null) return block()
+        val version = coverVersions.getOrPut(key) { java.util.concurrent.atomic.AtomicInteger() }
+        return synchronized(version) { if (version.get() == expected) block() else null }
+    }
+
+    fun invalidateSelected(songId: Long) {
+        val version = selectedVersions.getOrPut(songId) { java.util.concurrent.atomic.AtomicInteger() }
+        synchronized(version) {
+            version.incrementAndGet()
+            val marker = "\u0000selected:$songId"
+            listOf(thumbCache, largeCache).forEach { cache ->
+                cache.snapshot().keys.filter { it.coverKey == marker }.forEach(cache::remove)
+            }
+        }
+        val signal = selectedSignals.getOrPut(songId) { mutableIntStateOf(0) }
+        synchronized(signal) { signal.intValue++ }
     }
 
     /**
@@ -350,7 +424,8 @@ object ArtworkLoader {
      */
     fun tintOf(albumId: Long, sourceUri: Uri?, coverKey: String?): CoverTint? {
         if (coverKey != null) tints["t:c$coverKey"]?.let { return it }
-        return tints["t:" + missingKeyOf(albumId, sourceUri)]
+        tints["t:" + missingKeyOf(albumId, sourceUri)]?.let { return it }
+        return sourceMissingKey(sourceUri)?.let { tints["t:$it"] }
     }
 
     private fun rememberTint(key: String, bitmap: Bitmap) {
@@ -481,7 +556,7 @@ object ArtworkLoader {
 
     /** 已确认没有封面的 albumId —— 上层据此决定要不要走在线补全 */
     fun isMissing(albumId: Long): Boolean =
-        albumId <= 0 || synchronized(missing) { missing.contains("a:$albumId") }
+        albumId <= 0 || isMissingKey("a:$albumId")
 
     /**
      * **同步**查内存缓存，命中就立刻返回，否则 null。
@@ -507,7 +582,57 @@ object ArtworkLoader {
         val cache = cacheFor(size)
         // 先查本地键（同专辑共用），再查带 coverKey 的完整键
         cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
+        sourceUri?.takeUnless { it.isRemote() }?.let {
+            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return image }
+        }
         return cache.get(keyOf(albumId, size, sourceUri, coverKey))
+    }
+
+    fun peekSelected(albumId: Long, sizePx: Int, sourceUri: Uri?, songId: Long): ImageBitmap? {
+        if (songId == 0L || songId == -1L) return null
+        val size = bucketOf(sizePx)
+        return cacheFor(size).get(selectedKeyOf(albumId, size, sourceUri, songId))
+    }
+
+    /** 优先读取持久保存的手选封面；旧版已钉选的封面按原 key 非破坏性迁移。 */
+    suspend fun loadSelected(
+        context: Context,
+        albumId: Long,
+        sizePx: Int,
+        sourceUri: Uri?,
+        songId: Long,
+        coverKey: String?,
+        legacyPinned: Boolean
+    ): ImageBitmap? {
+        if (songId == 0L || songId == -1L) return null
+        peekSelected(albumId, sizePx, sourceUri, songId)?.let { return it }
+        val version = selectedGeneration(songId)
+        val size = bucketOf(sizePx)
+        return withContext(Dispatchers.IO) {
+            withDecodeGate {
+                val selectedBytes = CoverCache.lookupSelected(context, songId, sourceUri)
+                var decoded = selectedBytes?.let { decodeSampled(it, size, Bitmap.Config.ARGB_8888) }
+                if (decoded == null && legacyPinned && coverKey != null) {
+                    val legacy = CoverCache.lookup(context, coverKey)
+                    if (legacy is CoverCache.Lookup.Hit) {
+                        decoded = decodeSampled(legacy.bytes, size, Bitmap.Config.ARGB_8888)
+                        if (decoded != null && selectedBytes == null) {
+                            // 只复制可解码的旧图，不删除旧缓存；迁移失败仍可继续使用旧数据。
+                            ifSelectedGeneration(songId, version) {
+                                CoverCache.migrateSelectedIfAbsent(context, songId, sourceUri, legacy.bytes)
+                            }
+                        }
+                    }
+                }
+                val selectedBitmap = decoded ?: return@withDecodeGate null
+                val image = if (size > THUMB_BUCKET) fitLarge(selectedBitmap).asImageBitmap() else selectedBitmap.asImageBitmap()
+                ifSelectedGeneration(songId, version) {
+                    if (coverKey != null) rememberTint("t:c$coverKey", selectedBitmap)
+                    cacheFor(size).put(selectedKeyOf(albumId, size, sourceUri, songId), image)
+                    image
+                }
+            }
+        }
     }
 
     /**
@@ -619,17 +744,26 @@ object ArtworkLoader {
         // 缓存命中直接返回，不切线程、不看 paused。
         // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
         cache.get(localKey)?.let { return it }
+        sourceUri?.takeUnless { it.isRemote() }?.let {
+            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return image }
+        }
         cache.get(key)?.let { return it }
 
         // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
-        val localGone = isMissingKey(missingKeyOf(albumId, sourceUri))
+        val localGone = localSourcesMissing(albumId, sourceUri)
         val coverGone = coverKey == null || synchronized(coverMiss) { coverMiss.contains(coverKey) }
         // 磁盘缓存有货就**不能**短路：那个"没有"是上一次探测的结论，
         // 而磁盘上的图是那之后才写进去的（比如上次播放时解出来的大图）。
         // 漏掉这一条就是"明明加载过，重启后又是空的"之一。
-        val diskHas = ArtworkThumbCache.exists(context, missingKeyOf(albumId, sourceUri), size)
-        if (localGone && coverGone && !diskHas) return null
+        if (localGone && coverGone) {
+            val diskHas = withContext(Dispatchers.IO) {
+                ArtworkThumbCache.exists(context, missingKeyOf(albumId, sourceUri), size) ||
+                    (sourceMissingKey(sourceUri)?.let { ArtworkThumbCache.exists(context, it, size) } == true) ||
+                    CoverCache.hasCover(context, coverKey)
+            }
+            if (!diskHas) return null
+        }
 
         return decodeShared(context, albumId, size, key, localKey, sourceUri, coverKey)
     }
@@ -650,14 +784,20 @@ object ArtworkLoader {
         coverKey: String?
     ): ImageBitmap? {
         val job = synchronized(inFlight) {
+            val generation = ArtworkThumbCache.currentGeneration()
+            val coverGeneration = coverGeneration(coverKey)
             inFlight[key] ?: workScope.async(start = CoroutineStart.LAZY) {
                 try {
                     withDecodeGate {
+                        if (!ArtworkThumbCache.awaitGeneration(generation)) return@withDecodeGate null
                         val cache = cacheFor(size)
                         // 排队期间可能已经被别人解好了，再查一次
                         cache.get(localKey)?.let { return@withDecodeGate it }
+                        sourceUri?.takeUnless { it.isRemote() }?.let {
+                            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return@withDecodeGate image }
+                        }
                         cache.get(key)?.let { return@withDecodeGate it }
-                        decode(context, albumId, size, key, localKey, sourceUri, coverKey)
+                        decode(context, albumId, size, key, localKey, sourceUri, coverKey, generation, coverGeneration)
                     }
                 } finally {
                     synchronized(inFlight) { inFlight.remove(key) }
@@ -669,8 +809,13 @@ object ArtworkLoader {
         return job.await()
     }
 
-    private fun isMissingKey(key: String): Boolean =
-        synchronized(missing) { missing.contains(key) }
+    private fun isMissingKey(key: String): Boolean = synchronized(missing) {
+        val until = missing[key] ?: return@synchronized false
+        if (until > System.currentTimeMillis()) true else {
+            missing.remove(key)
+            false
+        }
+    }
 
     private fun decode(
         context: Context,
@@ -679,14 +824,21 @@ object ArtworkLoader {
         key: Key,
         localKey: Key,
         sourceUri: Uri?,
-        coverKey: String?
+        coverKey: String?,
+        generation: Long,
+        coverGeneration: Int
     ): ImageBitmap? {
-        val missKey = missingKeyOf(albumId, sourceUri)
+        val sources = localCoverSources(albumId, sourceUri?.toString())
+        val albumMissKey = sources.album
+        val sourceMissKey = sources.file
+        val diskKeys = listOfNotNull(albumMissKey, sourceMissKey).distinct()
         val cache = cacheFor(size)
         // 只有**本地**来源才配磁盘缩略图：在线歌的 sourceUri 是带时效的取流地址，
         // 拿它当键存下来的图第二天就是垃圾；而 coverKey 那条路本来就有 [CoverCache] 兜着。
-        val localSource = albumId > 0 || (sourceUri != null && !sourceUri.isRemote())
+        val localSource = diskKeys.isNotEmpty()
         var bitmap: Bitmap? = null
+        var resolvedKey = localKey
+        var resolvedDiskKey: String? = null
 
         // ---- 0) 磁盘封面缓存 ----
         // 进程重启后内存缓存是空的，但磁盘上还留着上次解码好的图。
@@ -695,24 +847,29 @@ object ArtworkLoader {
         // ⚠️ 这里**不再限制只查缩略图档**：播放页的 900px 之前被排除在外，
         // 于是每次进播放页都要重新探一遍 MediaStore，慢的时候就是"没有封面"。
         if (localSource) {
-            ArtworkThumbCache.lookup(context, missKey, size)?.let { bytes ->
+            for (diskKey in diskKeys) {
+                val bytes = ArtworkThumbCache.lookup(context, diskKey, size) ?: continue
                 val cached = runCatching {
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 }.getOrNull()
                 if (cached != null) {
-                    rememberTint("t:$missKey", cached)
                     val image = cached.asImageBitmap()
-                    cache.put(localKey, image)
-                    return image
+                    val cacheKey = if (diskKey == sourceMissKey && sourceUri != null) {
+                        sourceKeyOf(albumId, size, sourceUri)
+                    } else localKey
+                    return ArtworkThumbCache.ifCurrent(generation) {
+                        rememberTint("t:$diskKey", cached)
+                        cache.put(cacheKey, image)
+                        image
+                    }
                 }
-                // 文件坏了（比如写到一半被系统的清理任务截断）：当没有，继续往下探测
-                ArtworkThumbCache.remove(context, missKey, size)
+                // 若读到坏文件，只删除读到的版本，避免删掉并发写入的新封面。
+                ArtworkThumbCache.removeIfUnchanged(context, diskKey, size, bytes)
             }
         }
 
         // ---- 1) MediaStore 专辑封面 + 2) 音频文件内嵌封面 ----
-        if (!isMissingKey(missKey)) {
-            if (albumId > 0) {
+        if (albumMissKey != null && !isMissingKey(albumMissKey)) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     bitmap = runCatching {
                         context.contentResolver.loadThumbnail(
@@ -727,9 +884,11 @@ object ArtworkLoader {
                         }
                     }.getOrNull()
                 }
-            }
+                if (bitmap == null) ArtworkThumbCache.ifCurrent(generation) { markMissing(albumMissKey) }
+                else resolvedDiskKey = albumMissKey
+        }
 
-            if (bitmap == null && sourceUri != null && !sourceUri.isRemote()) {
+        if (bitmap == null && sourceUri != null && sourceMissKey != null && !isMissingKey(sourceMissKey)) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     bitmap = runCatching {
                         context.contentResolver.loadThumbnail(sourceUri, Size(size, size), null)
@@ -738,26 +897,30 @@ object ArtworkLoader {
                 if (bitmap == null) {
                     bitmap = readEmbeddedPicture(context, sourceUri, size)
                 }
-            }
-
-            if (bitmap == null) markMissing(missKey)
+                if (bitmap == null) ArtworkThumbCache.ifCurrent(generation) { markMissing(sourceMissKey) }
+                else {
+                    resolvedKey = sourceKeyOf(albumId, size, sourceUri)
+                    resolvedDiskKey = sourceMissKey
+                }
         }
 
         // 本地拿到图 → 按**本地键**缓存（同专辑、同尺寸的歌共用一份）。
         // 这是"同专辑逐首重复探测 MediaStore"的修复点。
         if (bitmap != null) {
+            val foundBitmap = bitmap
             // 解码已经发生过了，顺手把色卡算出来 —— 不额外解码，也不额外读文件
-            rememberTint("t:$missKey", bitmap)
             // 大图压到 [LARGE_PX]：不压的话三页分页器就能把大图 LRU 撑爆（见它的注释）
-            val fitted = if (size > THUMB_BUCKET) fitLarge(bitmap) else bitmap
+            val fitted = if (size > THUMB_BUCKET) fitLarge(foundBitmap) else foundBitmap
             val image = fitted.asImageBitmap()
-            cache.put(localKey, image)
+            val committed = ArtworkThumbCache.ifCurrent(generation) {
+                resolvedDiskKey?.let { rememberTint("t:$it", foundBitmap) }
+                cache.put(resolvedKey, image)
+                image
+            } ?: return null
             // 顺手落盘：下次冷启动滚到这里就不用再探 MediaStore 了。
             // 两个档位都存（大图档落盘时会自己缩到 768），播放页重启后也能立刻出图。
-            if (localSource) {
-                ArtworkThumbCache.store(context, missKey, size, fitted)
-            }
-            return image
+            resolvedDiskKey?.let { ArtworkThumbCache.store(context, it, size, fitted, generation) }
+            return committed
         }
 
         // ---- 3) 本地确实没有 → 用之前下载并落盘的在线封面 ----
@@ -767,7 +930,12 @@ object ArtworkLoader {
         if (coverKey != null) {
             val hit = CoverCache.lookup(context, coverKey)
             if (hit is CoverCache.Lookup.Hit) bitmap = decodeSampled(hit.bytes, size)
-            if (bitmap == null) markCoverMiss(coverKey)
+            if (bitmap == null) {
+                ifCoverGeneration(coverKey, coverGeneration) {
+                    ArtworkThumbCache.ifCurrent(generation) { markCoverMiss(coverKey) }
+                    Unit
+                }
+            }
         }
 
         if (bitmap == null) {
@@ -776,25 +944,37 @@ object ArtworkLoader {
             // 大图档是后来才加的，老用户磁盘上只有 256 档那份；
             // 与其给占位图，不如给一张稍软的真实封面。
             if (localSource && size > THUMB_BUCKET) {
-                ArtworkThumbCache.lookup(context, missKey, THUMB_BUCKET)?.let { bytes ->
+                for (diskKey in diskKeys) {
+                    val bytes = ArtworkThumbCache.lookup(context, diskKey, THUMB_BUCKET) ?: continue
                     val small = runCatching {
                         BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     }.getOrNull()
                     if (small != null) {
-                        rememberTint("t:$missKey", small)
                         val image = small.asImageBitmap()
-                        cache.put(localKey, image)
-                        return image
+                        val cacheKey = if (diskKey == sourceMissKey && sourceUri != null) {
+                            sourceKeyOf(albumId, size, sourceUri)
+                        } else localKey
+                        return ArtworkThumbCache.ifCurrent(generation) {
+                            rememberTint("t:$diskKey", small)
+                            cache.put(cacheKey, image)
+                            image
+                        }
                     }
-                    ArtworkThumbCache.remove(context, missKey, THUMB_BUCKET)
+                    ArtworkThumbCache.removeIfUnchanged(context, diskKey, THUMB_BUCKET, bytes)
                 }
             }
             return null
         }
-        if (coverKey != null) rememberTint("t:c$coverKey", bitmap)
-        val image = if (size > THUMB_BUCKET) fitLarge(bitmap).asImageBitmap() else bitmap.asImageBitmap()
-        cache.put(key, image)
-        return image
+        val foundBitmap = bitmap
+        val image = if (size > THUMB_BUCKET) fitLarge(foundBitmap).asImageBitmap() else foundBitmap.asImageBitmap()
+        val committed = ifCoverGeneration(coverKey, coverGeneration) {
+            ArtworkThumbCache.ifCurrent(generation) {
+                if (coverKey != null) rememberTint("t:c$coverKey", foundBitmap)
+                cache.put(key, image)
+                true
+            } ?: false
+        } ?: false
+        return if (committed) image else null
     }
 
     /** 等比缩到边长不超过 [LARGE_PX]；本来就小就原样返回，不做无谓的有损放大 */
@@ -829,7 +1009,11 @@ object ArtworkLoader {
         }
     }
 
-    private fun decodeSampled(bytes: ByteArray, target: Int): Bitmap? {
+    private fun decodeSampled(
+        bytes: ByteArray,
+        target: Int,
+        config: Bitmap.Config = Bitmap.Config.RGB_565
+    ): Bitmap? {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
         var sample = 1
@@ -837,7 +1021,7 @@ object ArtworkLoader {
         while (max / sample > target * 2) sample *= 2
         val real = BitmapFactory.Options().apply {
             inSampleSize = sample
-            inPreferredConfig = Bitmap.Config.RGB_565
+            inPreferredConfig = config
         }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, real)
     }
@@ -850,6 +1034,7 @@ object ArtworkLoader {
      * 别让调用方（可能正在主线程）等它。
      */
     fun clear(context: Context) {
+        val ticket = ArtworkThumbCache.prepareClear()
         thumbCache.evictAll()
         largeCache.evictAll()
         synchronized(missing) { missing.clear() }
@@ -857,8 +1042,9 @@ object ArtworkLoader {
         // 色卡也要清：封面缓存都清了，按旧封面算出来的颜色自然也不作数了
         tints.clear()
         artworkGoneVersion++
+        cacheResetVersion++
         onlineCovers.clear()
         val app = context.applicationContext
-        workScope.launch { ArtworkThumbCache.clear(app) }
+        workScope.launch { ArtworkThumbCache.clear(app, ticket) }
     }
 }

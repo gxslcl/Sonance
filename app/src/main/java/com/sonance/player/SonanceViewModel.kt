@@ -487,10 +487,55 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 用户看到的就是"重启后封面没了，得播一会才回来"。曲库一就位就把开头
      * 这些歌的封面提前解出来（命中磁盘缓存时几乎不花钱）。
      */
+    private var selectedCoverMigrationJob: Job? = null
+
+    /** 旧版手选图先复制到持久目录；旧缓存保留，不因迁移失败丢图。 */
+    private suspend fun preserveLegacySelectedCovers(
+        app: Application,
+        library: List<Song>,
+        verifyExisting: Boolean = false
+    ): Boolean =
+        withContext(Dispatchers.IO) {
+            for (song in library) {
+                if (!isActive) return@withContext false
+                if (song.id <= 0L || prefs.pinnedCoverUrl(song.id).isNullOrBlank()) continue
+                val version = ArtworkLoader.selectedGeneration(song.id)
+                if (prefs.pinnedCoverUrl(song.id).isNullOrBlank()) continue
+                if (CoverCache.hasSelected(app, song.id, song.uri)) {
+                    if (verifyExisting) {
+                        val bytes = CoverCache.lookupSelected(app, song.id, song.uri) ?: return@withContext false
+                        val bitmap = OnlineCover.decode(bytes, 128) ?: return@withContext false
+                        bitmap.recycle()
+                    }
+                    continue
+                }
+                val key = OnlineCover.keyOf(song.title, song.artist) ?: continue
+                val old = CoverCache.lookup(app, key)
+                if (old is CoverCache.Lookup.Hit) {
+                    val bitmap = OnlineCover.decode(old.bytes, 128) ?: return@withContext false
+                    bitmap.recycle()
+                    val migrated = ArtworkLoader.ifSelectedGeneration(song.id, version) {
+                        CoverCache.migrateSelectedIfAbsent(app, song.id, song.uri, old.bytes)
+                    }
+                    if (migrated == false) {
+                        return@withContext false
+                    }
+                }
+            }
+            true
+        }
+
     private fun warmUpCovers() {
         val app = getApplication<Application>()
-        // 够铺满第一屏再往下翻两三屏就够了，剩下的交给列表滚动时的预取
-        val list = songs.take(80)
+        if (selectedCoverMigrationJob?.isActive != true) {
+            val library = songs
+            selectedCoverMigrationJob = viewModelScope.launch {
+                preserveLegacySelectedCovers(app, library)
+            }
+        }
+        // 恢复列表位置附近少量预热，避免开头 80 个后台任务占住可见行的解码队列。
+        val start = (readLibraryScroll().firstOrNull()?.first ?: 0).coerceIn(0, songs.size)
+        val list = songs.drop(start).take(24)
         if (list.isEmpty()) return
         ArtworkLoader.warmUp(
             context = app,
@@ -2125,6 +2170,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun fetchOneCover(app: Application, song: Song): Boolean {
         val key = OnlineCover.keyOf(song.title, song.artist) ?: return false
+        if (ArtworkLoader.loadSelected(app, song.albumId, 128, song.uri, song.id, key,
+                !prefs.pinnedCoverUrl(song.id).isNullOrBlank()) != null) return false
         when (CoverCache.lookup(app, key)) {
             is CoverCache.Lookup.Hit -> return false
             CoverCache.Lookup.KnownMiss -> return false
@@ -2134,19 +2181,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
         val url = findCoverUrl(song)
         if (url.isNullOrBlank()) {
-            // 记一个"确认没有"，下次同一首不再打接口
-            CoverCache.store(app, key, null)
+            // 网络失败和真正无结果都可能返回 null；不能永久写成“无封面”。
             return false
         }
         val raw = OnlineCover.downloadBytes(url) ?: return false
-        CoverCache.store(app, key, raw)
+        if (!CoverCache.store(app, key, raw)) return false
         embedCoverToFile(app, song, raw)
         // 让「磁盘里也没有封面」那条短路失效：列表 200px 和播放页 900px 是两个缓存键，
         // 不失效的话另一个档位会一直以为没封面。
         //
         // 这里**不**调 `ArtworkLoader.putOnline`：批量下载的图若全部驻留内存，
         // 几百首就是几百张位图。写盘已经足够 —— 列表下次组合（滚动 / 重进）就会读到。
-        ArtworkLoader.forgetCoverMiss(key)
         return true
     }
 
@@ -2195,7 +2240,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 本地 / 内嵌有没有？顺手也算预热了缓存。
             // 传 key 之后，**之前下载落盘的封面也算"本地已有"** —— 于是不会再打接口。
             val local = withContext(Dispatchers.IO) {
-                ArtworkLoader.load(app, song.albumId, 320, song.uri, key)
+                ArtworkLoader.loadSelected(app, song.albumId, 320, song.uri, song.id, key,
+                    !prefs.pinnedCoverUrl(song.id).isNullOrBlank())
+                    ?: ArtworkLoader.load(app, song.albumId, 320, song.uri, key)
             }
             if (local != null) return@launch
 
@@ -2209,13 +2256,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
                 val url = findCoverUrl(song)
                 if (url.isNullOrBlank()) {
-                    // 记一个"确认没有"，下次同一首不再打接口
-                    CoverCache.store(app, key, null)
+                    // 网络超时不能持久化成“确定没有”，下次仍可重试。
                     return@withContext null
                 }
                 val raw = OnlineCover.downloadBytes(url)
                 if (raw != null) {
-                    CoverCache.store(app, key, raw)
+                    if (!CoverCache.store(app, key, raw)) return@withContext null
                     embedCoverToFile(app, song, raw)
                 }
                 raw
@@ -2225,11 +2271,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 刚写盘 → 让「磁盘里也没有封面」那条短路失效。
             // 必须做：列表要 200px、播放页要 900px，是两个缓存键，
             // 不失效的话另一个档位本次会话里会一直以为没封面。
-            if (bmp != null) ArtworkLoader.forgetCoverMiss(key)
-            ArtworkLoader.putOnline(song.id, bmp?.asImageBitmap())
             if (bmp == null) {
+                coverTried.remove(song.id)
+                ArtworkLoader.onlineCovers.remove(song.id)
                 android.util.Log.i("SonanceCover", "没补到封面：${song.title} - ${song.artist}")
             } else {
+                ArtworkLoader.putOnline(song.id, bmp.asImageBitmap())
                 // 通知栏 / 锁屏的 artworkUri 也要跟着换成刚下载的这张
                 player.refreshCurrentArtwork(song)
             }
@@ -2294,13 +2341,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     CoverCache.Lookup.KnownMiss -> return@withContext null
                     CoverCache.Lookup.Unknown -> Unit
                 }
-                OnlineCover.downloadBytes(url)?.also { CoverCache.store(app, key, it) }
+                val bytes = OnlineCover.downloadBytes(url) ?: return@withContext null
+                if (CoverCache.store(app, key, bytes)) bytes else null
             }
             if (raw == null) return@launch
 
             // 刚写盘 → 让「磁盘里也没有」那条短路失效（列表 200px 和播放页 900px
             // 是两个缓存键，不失效的话另一档本次会话里会一直以为没封面）
-            ArtworkLoader.forgetCoverMiss(key)
             ArtworkLoader.putOnline(song.id, OnlineCover.decode(raw, OnlineCover.FULL_PX)?.asImageBitmap())
             player.refreshCurrentArtwork(song)
         }
@@ -2329,14 +2376,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val app = getApplication<Application>()
             val song = songById(songId)
             coverSearching = true
+            if (song == null) {
+                coverSearching = false
+                coverNotice = "歌曲已不存在，无法保存封面"
+                return@launch
+            }
             val raw = withContext(Dispatchers.IO) { OnlineCover.downloadBytes(candidate.fullUrl) }
             if (raw == null) {
                 coverSearching = false
                 coverNotice = "这张封面下载失败，换一张试试"
                 return@launch
             }
+            val bmp = withContext(Dispatchers.IO) { OnlineCover.decode(raw, OnlineCover.FULL_PX) }
+            if (bmp == null) {
+                coverSearching = false
+                coverNotice = "这张封面无法解码，请换一张"
+                return@launch
+            }
+            ArtworkLoader.invalidateSelected(songId)
+            val version = ArtworkLoader.selectedGeneration(songId)
+            val saved = withContext(Dispatchers.IO) {
+                ArtworkLoader.ifSelectedGeneration(songId, version) {
+                    CoverCache.storeSelected(app, song.id, song.uri, raw)
+                }
+            }
+            if (saved == null) {
+                coverSearching = false
+                return@launch
+            }
+            if (!saved) {
+                coverSearching = false
+                coverNotice = "封面保存失败，请检查设备存储空间后重试"
+                return@launch
+            }
+            ArtworkLoader.invalidateSelected(songId)
             withContext(Dispatchers.IO) {
-                song?.let { CoverCache.store(app, OnlineCover.keyOf(it.title, it.artist), raw) }
+                CoverCache.store(app, OnlineCover.keyOf(song.title, song.artist), raw)
             }
 
             // 本地歌：顺手把封面写进**文件本身**，这样换设备、拷给别人、
@@ -2344,7 +2419,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             //
             // 只在这个入口写：自动补封面（ensureOnlineSongCover）是后台行为，
             // 不该在用户不知情的时候改他的文件。
-            val writeOutcome = if (song != null && song.isLocal) {
+            val writeOutcome = if (song.isLocal) {
                 withContext(Dispatchers.IO) { CoverTagWriter.write(app, song, raw) }
             } else {
                 null
@@ -2361,14 +2436,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 写了也永远不会被读，只是往 SharedPreferences 里堆垃圾（每首一个 key）。
             // 手选的封面本身已经落进 CoverCache，在线歌下次播放照样会用上。
             if (!isRemoteSongId(songId)) prefs.pinCoverUrl(songId, candidate.fullUrl)
-            val bmp = OnlineCover.decode(raw, OnlineCover.FULL_PX)
-            ArtworkLoader.putOnline(songId, bmp?.asImageBitmap())
+            ArtworkLoader.putOnline(songId, bmp.asImageBitmap())
             coverTried.add(songId)
             // 刚写盘：让缓存短路失效，并把通知栏 / 锁屏的封面一起换掉
-            song?.let {
-                ArtworkLoader.forgetCoverMiss(OnlineCover.keyOf(it.title, it.artist))
-                player.refreshCurrentArtwork(it)
-            }
+            player.refreshCurrentArtwork(song)
             coverSearching = false
             coverResults = emptyList()
             coverTargetSongId = 0L
@@ -2560,10 +2631,20 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val app = getApplication<Application>()
             val song = songById(songId)
-            withContext(Dispatchers.IO) {
-                song?.let { CoverCache.remove(app, OnlineCover.keyOf(it.title, it.artist)) }
-            }
+            // 先阻止后台旧缓存迁移，再删除文件；完成后再次通知可见行。
             prefs.pinCoverUrl(songId, null)
+            ArtworkLoader.invalidateSelected(songId)
+            val version = ArtworkLoader.selectedGeneration(songId)
+            withContext(Dispatchers.IO) {
+                ArtworkLoader.ifSelectedGeneration(songId, version) {
+                    song?.let {
+                        CoverCache.removeSelected(app, it.id, it.uri)
+                        CoverCache.remove(app, OnlineCover.keyOf(it.title, it.artist))
+                    }
+                    Unit
+                }
+            }
+            ArtworkLoader.invalidateSelected(songId)
             ArtworkLoader.putOnline(songId, null)
             coverTried.remove(songId)
             ArtworkLoader.clear(app)
@@ -2594,8 +2675,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearCoverCache() {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { CoverCache.clear(getApplication()) }
-            ArtworkLoader.clear(getApplication())
+            val app = getApplication<Application>()
+            if (!preserveLegacySelectedCovers(app, songs, verifyExisting = true)) {
+                showToast("手选封面保护失败，未清除缓存")
+                return@launch
+            }
+            withContext(Dispatchers.IO) { CoverCache.clear(app) }
+            ArtworkLoader.clear(app)
             coverTried.clear()
             coverCacheCount = 0
             showToast("已清除封面缓存")

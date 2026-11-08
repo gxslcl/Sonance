@@ -490,6 +490,7 @@ fun ArtistRow(
         seed = artist.name,
         albumId = artist.songs.firstOrNull()?.albumId ?: -1L,
         sourceUri = artist.songs.firstOrNull()?.uri,
+        songId = artist.songs.firstOrNull()?.id ?: -1L,
         coverKey = artist.songs.firstOrNull()
             ?.let { OnlineCover.keyOf(it.title, it.artist) },
         circular = true,
@@ -529,6 +530,7 @@ private fun EntityRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     sourceUri: android.net.Uri? = null,
+    songId: Long = -1L,
     coverKey: String? = null,
     leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     leadingTint: Color = Color.Unspecified
@@ -565,6 +567,7 @@ private fun EntityRow(
                     sizePx = 220,
                     showPlaceholderMark = false,
                     sourceUri = sourceUri,
+                    songId = songId,
                     coverKey = coverKey
                 )
             }

@@ -3,8 +3,10 @@ package com.sonance.player.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 解码后的封面**磁盘**缓存。
@@ -55,31 +57,52 @@ object ArtworkThumbCache {
      * 现在攒 40 张才扫一次，磁盘占用上限只是软约束，差这几十张无所谓。
      */
     private const val TRIM_EVERY = 40
+    private const val TOUCH_INTERVAL_MS = 60L * 60 * 1000
 
-    private var storesSinceTrim = 0
+    private val storesSinceTrim = AtomicInteger(0)
+    private val clears = CacheClearCoordinator()
+
+    /** 先登记清理屏障，再切到 IO 线程；新读写不会与清理交错。 */
+    internal fun prepareClear(): CacheClearCoordinator.Ticket = clears.prepareClear()
+    private fun awaitClear() = clears.awaitReady()
+    fun currentGeneration(): Long = clears.currentGeneration()
+    fun awaitGeneration(expected: Long): Boolean = clears.awaitGeneration(expected)
+    fun <T : Any> ifCurrent(expected: Long, block: () -> T): T? = clears.ifCurrent(expected, block)
 
     fun lookup(context: Context, key: String, size: Int): ByteArray? = runCatching {
+        awaitClear()
         val f = fileOf(context, key, size)
-        if (!f.exists() || f.length() == 0L) return@runCatching null
-        f.readBytes()
+        DurableCacheFile.read(f)?.takeIf { it.isNotEmpty() }?.also {
+            if (System.currentTimeMillis() - f.lastModified() > TOUCH_INTERVAL_MS) {
+                runCatching { f.setLastModified(System.currentTimeMillis()) }
+            }
+        }
     }.getOrNull()
 
     /** 只看在不在，不读内容 —— 给 [ArtworkLoader.load] 的短路判断用（省一次完整读文件） */
     fun exists(context: Context, key: String, size: Int): Boolean = runCatching {
+        awaitClear()
         val f = fileOf(context, key, size)
         f.exists() && f.length() > 0L
     }.getOrDefault(false)
 
-    fun store(context: Context, key: String, size: Int, bitmap: Bitmap) {
+    fun store(context: Context, key: String, size: Int, bitmap: Bitmap, expectedGeneration: Long) {
         runCatching {
+            awaitClear()
+            if (currentGeneration() != expectedGeneration) return@runCatching
             val dir = dirOf(context)
-            if (!dir.exists() && !dir.mkdirs()) return@runCatching
             val toSave = if (size > MAX_STORE_PX) downscale(bitmap, MAX_STORE_PX) else bitmap
-            fileOf(context, key, size).outputStream().use { out ->
-                toSave.compress(Bitmap.CompressFormat.JPEG, QUALITY, out)
+            val out = ByteArrayOutputStream()
+            if (!toSave.compress(Bitmap.CompressFormat.JPEG, QUALITY, out)) return@runCatching
+            val written = ifCurrent(expectedGeneration) {
+                DurableCacheFile.write(fileOf(context, key, size), out.toByteArray())
+            } ?: return@runCatching
+            if (!written) {
+                Log.w(TAG, "写封面缩略图失败：无法安全替换文件")
+                return@runCatching
             }
-            if (++storesSinceTrim >= TRIM_EVERY) {
-                storesSinceTrim = 0
+            if (storesSinceTrim.incrementAndGet() >= TRIM_EVERY &&
+                storesSinceTrim.getAndSet(0) >= TRIM_EVERY) {
                 trim(dir)
             }
         }.onFailure { Log.w(TAG, "写封面缓存失败: ${it.message}") }
@@ -99,11 +122,17 @@ object ArtworkThumbCache {
     }
 
     fun remove(context: Context, key: String, size: Int) {
-        runCatching { fileOf(context, key, size).delete() }
+        runCatching { DurableCacheFile.delete(fileOf(context, key, size)) }
     }
 
-    fun clear(context: Context) {
-        runCatching { dirOf(context).listFiles()?.forEach { it.delete() } }
+    fun removeIfUnchanged(context: Context, key: String, size: Int, bytes: ByteArray) {
+        runCatching { DurableCacheFile.deleteIfUnchanged(fileOf(context, key, size), bytes) }
+    }
+
+    internal fun clear(context: Context, ticket: CacheClearCoordinator.Ticket) {
+        clears.completeClear(ticket) {
+            runCatching { dirOf(context).listFiles()?.filter { it.name.endsWith(EXT) }?.forEach { DurableCacheFile.delete(it) } }
+        }
     }
 
     private fun dirOf(context: Context) = File(context.filesDir, DIR)
@@ -124,7 +153,7 @@ object ArtworkThumbCache {
 
     /** 先按条数、再按体积收：条数上限挡住小文件堆积，体积上限挡住个别大文件 */
     private fun trim(dir: File) {
-        val files = dir.listFiles() ?: return
+        val files = dir.listFiles()?.filter { it.name.endsWith(EXT) } ?: return
         var over = files.size - MAX_FILES
         var total = files.sumOf { it.length() }
         // 绝大多数情况都在限额内 —— 先算总量再决定要不要排序。
@@ -134,7 +163,7 @@ object ArtworkThumbCache {
         for (f in byAge) {
             if (over <= 0 && total <= MAX_BYTES) break
             val len = f.length()
-            if (f.delete()) {
+            if (DurableCacheFile.delete(f)) {
                 total -= len
                 over--
             }

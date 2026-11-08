@@ -59,6 +59,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -71,6 +72,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
@@ -523,6 +525,17 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     /** 沉浸式黑胶模式（铺在一切之上；关闭后音频不受影响） */
     var vinylOpen by remember { mutableStateOf(false) }
+    // 等黑胶页淡入完成再停止下层绘制；退出时立即恢复，保留原页面的组合状态。
+    var vinylCovered by remember { mutableStateOf(false) }
+    LaunchedEffect(vinylOpen) {
+        if (vinylOpen) {
+            delay(320)
+            vinylCovered = true
+        } else {
+            vinylCovered = false
+        }
+    }
+    val suppressVinylUnderlay = vinylOpen && vinylCovered
     var queueOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
@@ -735,6 +748,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 visibility = vm.shellGlassVisibility,
                 modifier = Modifier
                     .matchParentSize()
+                    .graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }
                     // 1.35 倍放大的封面会溢出边界，裁掉（歌词页同款）
                     .clipToBounds(),
                 scrimColor = skin.bg,
@@ -760,6 +774,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
         // 沉浸皮肤的字色随封面明暗逐歌重算 —— 只包住主界面子树；
         // 全屏播放页有自己的晕染背景与调色逻辑，维持原皮肤
+        Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }) {
         CompositionLocalProvider(LocalSkin provides adaptedSkin) {
         when (layout) {
             LayoutMode.COMPACT -> CompactLayout(
@@ -800,6 +815,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             )
         }
         }
+        }
 
         // ===== 全屏播放页 =====
         AnimatedVisibility(
@@ -809,6 +825,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(20f)
+                .graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }
                 // 兜底：个别 ROM 在横屏 hide() 之后仍会派发非零的 statusBars
                 // insets，那几处 statusBarsPadding() 就还会把内容往下推。
                 // 这里在播放页根节点把这段 inset 消费掉，子层统一拿到 0。
@@ -840,6 +857,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenEqualizer = openEqualizer,
                 onOpenSleepTimer = { sleepOpen = true },
                 onOpenVinyl = { vinylOpen = true },
+                coveredByVinyl = suppressVinylUnderlay,
                 sleepTimerActive = vm.sleepTimerLabel != null,
                 eqEnabled = vm.eqEnabled,
                 glowMode = vm.glowMode,

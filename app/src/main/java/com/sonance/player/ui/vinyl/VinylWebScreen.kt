@@ -328,8 +328,8 @@ fun VinylWebScreen(
     }
 
     // 封面推送：页面就绪后启动（重载后 onPageFinished 置回 true 会整段重跑）。
-    // 当前曲 ±6 张优先逐张推（80ms）；其余合并成批——一次 evaluateJavascript
-    // 带 5 张：大曲库逐张 250ms 要几十秒，滑列表比推送快，新碟片只能显示占位标签
+    // 当前曲 ±6 张优先逐张推；其余均匀错峰，避免一次往 WebView 注入多张
+    // base64 大图阻塞交互。页面只解码可见附近的封面，其余保留压缩数据。
     LaunchedEffect(webRef.value, queue, pageReady.value) {
         val wv = webRef.value ?: return@LaunchedEffect
         if (queue.isEmpty() || !pageReady.value) return@LaunchedEffect
@@ -348,15 +348,11 @@ fun VinylWebScreen(
             wv.post { wv.evaluateJavascript(js, null) }
             delay(80)
         }
-        order.drop(priorityCount).chunked(5).forEach { chunk ->
-            delay(300) // 优先窗口推完停一拍，避开入场操作高峰
-            val entries = chunk.mapNotNull { i ->
-                coverDataUrl(context, queue[i])?.let { "\"$i\":\"$it\"" }
-            }
-            if (entries.isNotEmpty()) {
-                val js = bridgeInject("window.__vinyl.setCovers({${entries.joinToString(",")}});")
-                wv.post { wv.evaluateJavascript(js, null) }
-            }
+        order.drop(priorityCount).forEach { i ->
+            delay(60)
+            val url = coverDataUrl(context, queue[i]) ?: return@forEach
+            val js = bridgeInject("window.__vinyl.setCover($i, \"$url\");")
+            wv.post { wv.evaluateJavascript(js, null) }
         }
     }
 
@@ -532,18 +528,37 @@ private suspend fun coverDataUrl(context: android.content.Context, song: Song): 
             // 磁盘下载封面（coverKey 是在线补图/手选封面/在线歌共用的落盘键）。
             // 旧实现漏传 coverKey —— 封面只存在 CoverCache 里的歌全部返回 null，
             // 表现为黑胶页部分碟片没有封面
-            val img = ArtworkLoader.online(song.id)
+            val coverKey = OnlineCover.keyOf(song.title, song.artist)
+            val img = ArtworkLoader.loadSelected(
+                context, song.albumId, 640, song.uri, song.id, coverKey,
+                song.id > 0 && !Prefs(context).pinnedCoverUrl(song.id).isNullOrBlank()
+            ) ?: ArtworkLoader.online(song.id)
                 ?: ArtworkLoader.load(
                     // 640：转盘大碟用 1024 纹理（标签区约 664px），320 在 2x 屏上是
                     // 被放大 2 倍再采样——封面上那层细纹/字就是糊的
                     context, song.albumId, 640, song.uri,
-                    OnlineCover.keyOf(song.title, song.artist)
+                    coverKey
                 )
                 ?: return@withContext null
             val bmp = img.asAndroidBitmap()
-            val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, 78, out)
-            "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            // 在线内存封面可能远大于请求尺寸；限制最长边，减少桥传输及 WebView 解码开销。
+            val longestSide = maxOf(bmp.width, bmp.height)
+            val scaled = if (longestSide > 640) {
+                val scale = 640f / longestSide
+                Bitmap.createScaledBitmap(
+                    bmp,
+                    (bmp.width * scale).toInt().coerceAtLeast(1),
+                    (bmp.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else bmp
+            try {
+                val out = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, 78, out)
+                "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            } finally {
+                if (scaled !== bmp) scaled.recycle()
+            }
         } catch (e: Exception) {
             null
         }

@@ -5,6 +5,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -46,6 +53,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -124,26 +132,26 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        // ===== 皮肤（默认收起：14 套预览卡展开会把下面所有设置挤到好几屏之外）=====
-        var skinExpanded by rememberSaveable { mutableStateOf(false) }
+        // ===== 底部播放条（形态 + 玻璃）=====
+        MiniPlayerSettingsSection(vm = vm)
+
+        // ===== 可收起模块 =====
+        // 所有可折叠区块集中排在播放条之后；下面是原来平铺的常驻设置项。
+        // 展开状态由 FoldState 统一记住，页面重建不会全部回到默认。
         CollapsibleSection(
+            id = "skin",
             title = "外观皮肤",
             summary = "当前：${vm.skin.name} · 共 ${Skins.all.size} 套",
-            icon = SonanceIcons.Palette,
-            expanded = skinExpanded,
-            onToggle = { skinExpanded = !skinExpanded }
+            icon = SonanceIcons.Palette
         ) {
             SkinGrid(current = vm.skin, onSelect = { vm.changeSkin(it) })
         }
 
-        // ===== 应用图标（同样默认收起）=====
-        var iconExpanded by rememberSaveable { mutableStateOf(false) }
         CollapsibleSection(
+            id = "appIcon",
             title = "应用图标",
             summary = "${AppIcons.all.size} 款 · 点击更换桌面图标",
-            icon = SonanceIcons.Palette,
-            expanded = iconExpanded,
-            onToggle = { iconExpanded = !iconExpanded }
+            icon = SonanceIcons.GridView
         ) {
             Text(
                 "切换后桌面图标会在几秒内刷新；部分第三方桌面可能需要重启桌面。",
@@ -154,8 +162,80 @@ fun SettingsScreen(
             AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
         }
 
-        // ===== 底部播放条（形态 + 玻璃）=====
-        MiniPlayerSettingsSection(vm = vm)
+        CollapsibleSection(
+            id = "formatCompat",
+            title = "格式与兼容性",
+            summary = "系统解码支持范围 · 私有加密容器说明",
+            icon = SonanceIcons.Waveform,
+            defaultExpanded = true
+        ) {
+            FormatCompatContent(vm = vm)
+        }
+
+        CollapsibleSection(
+            id = "cleanup",
+            title = "乐库清理与合并",
+            summary = "排除 ${vm.lastScanOutcome?.excludedTotal ?: 0} 项 · 已隐藏 ${vm.hiddenCount} 首",
+            icon = SonanceIcons.Refresh,
+            defaultExpanded = true
+        ) {
+            SettingsGroupLabel("曲库清理")
+            LibraryCleanupContent(vm = vm)
+            Spacer(Modifier.height(18.dp))
+            SettingsGroupLabel("重复与同名歌曲")
+            DuplicateCleanupContent(vm = vm)
+        }
+
+        CollapsibleSection(
+            id = "overview",
+            title = "曲库概览",
+            summary = "${vm.songs.size} 首 · ${vm.albums.size} 张专辑",
+            icon = SonanceIcons.Layers
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatBox("歌曲", "${vm.songs.size}", Modifier.weight(1f))
+                StatBox("专辑", "${vm.albums.size}", Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatBox("艺术家", "${vm.artists.size}", Modifier.weight(1f))
+                StatBox("收藏", "${vm.favorites.size}", Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatBox("总时长", formatDuration(vm.totalDurationMs), Modifier.weight(1f))
+                StatBox("占用空间", formatSize(vm.totalSizeBytes), Modifier.weight(1f))
+            }
+        }
+
+        CollapsibleSection(
+            id = "online",
+            title = "在线音乐",
+            summary = if (vm.onlineMusicEnabled) "已开启在线搜索与播放" else "在线搜索 · 封面歌词补全",
+            icon = SonanceIcons.Search
+        ) {
+            OnlineMusicContent(vm = vm)
+        }
+
+        CollapsibleSection(
+            id = "widget",
+            title = "桌面小组件",
+            summary = "${WIDGET_STYLES.size} 种样式 · 长按桌面 → 小组件 里添加",
+            icon = SonanceIcons.GridView
+        ) {
+            WidgetSettingsContent(vm = vm)
+        }
+
+        // ===== 以下为平铺（不可收起）设置项 =====
 
         // ===== 播放控制（播放/暂停键的触感与外观）=====
         PlayControlSettingsSection(vm = vm)
@@ -204,15 +284,6 @@ fun SettingsScreen(
             )
         }
 
-        // ===== 格式与兼容性 =====
-        FormatCompatSection(vm = vm)
-
-        // ===== 曲库清理 =====
-        LibraryCleanupSection(vm = vm)
-
-        // ===== 重复 / 同名歌曲 =====
-        DuplicateCleanupSection(vm = vm)
-
         // ===== 私有格式还原 =====
         // 默认隐藏。在「关于」里连点署名 10 次才会出现，且只保持一小时
         // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
@@ -222,41 +293,11 @@ fun SettingsScreen(
         // 与「私有格式还原」共用同一个彩蛋开关
         if (vm.conversionUnlocked) NeteaseCacheSection(vm = vm)
 
-        // ===== 统计 =====
-        SettingsSection(title = "曲库概览") {
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                StatBox("歌曲", "${vm.songs.size}", Modifier.weight(1f))
-                StatBox("专辑", "${vm.albums.size}", Modifier.weight(1f))
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                StatBox("艺术家", "${vm.artists.size}", Modifier.weight(1f))
-                StatBox("收藏", "${vm.favorites.size}", Modifier.weight(1f))
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                StatBox("总时长", formatDuration(vm.totalDurationMs), Modifier.weight(1f))
-                StatBox("占用空间", formatSize(vm.totalSizeBytes), Modifier.weight(1f))
-            }
-        }
-
         // ===== 播放与音效 =====
         PlaybackSettingsSection(
             vm = vm,
             onOpenEqualizer = onOpenEqualizer
         )
-
-        // ===== 桌面小组件 =====
-        WidgetSettingsSection(vm = vm)
 
         // ===== 歌词 =====
         LyricsSettingsSection(vm = vm)
@@ -350,9 +391,6 @@ fun SettingsScreen(
             }
         }
 
-        // ===== 在线音乐 =====
-        OnlineMusicSettingsSection(vm = vm)
-
         // ===== 关于 =====
         SettingsSection(title = "关于") {
             Column(Modifier.padding(vertical = 6.dp)) {
@@ -411,7 +449,6 @@ private val SETTINGS_SLEEP_MINUTES = listOf(15, 30, 45, 60, 90)
  */
 private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
-    var expanded by rememberSaveable { mutableStateOf(false) }
     val float = vm.miniPlayerStyle == MiniPlayerStyle.FLOAT
     val summary = buildString {
         append("当前：").append(vm.miniPlayerStyle.label)
@@ -420,11 +457,10 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
         }
     }
     CollapsibleSection(
+        id = "miniPlayer",
         title = "底部播放条",
         summary = summary,
-        icon = SonanceIcons.Music,
-        expanded = expanded,
-        onToggle = { expanded = !expanded }
+        icon = SonanceIcons.Music
     ) {
         Text(
             "「悬浮卡片」离屏边有间距、大圆角带投影，可以叠毛玻璃 / 液态玻璃；" +
@@ -987,18 +1023,11 @@ private val WIDGET_STYLES = listOf(
 )
 
 @Composable
-private fun WidgetSettingsSection(vm: SonanceViewModel) {
+private fun WidgetSettingsContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val context = androidx.compose.ui.platform.LocalContext.current
-    var expanded by rememberSaveable { mutableStateOf(false) }
 
-    CollapsibleSection(
-        title = "桌面小组件",
-        summary = "${WIDGET_STYLES.size} 种样式 · 长按桌面 → 小组件 里添加",
-        icon = SonanceIcons.GridView,
-        expanded = expanded,
-        onToggle = { expanded = !expanded }
-    ) {
+    Column(Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             WIDGET_STYLES.forEach { w ->
                 Row(
@@ -1547,9 +1576,9 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
         SettingsActionRow(
             title = "清除封面缓存",
             subtitle = if (vm.coverCacheCount == 0) {
-                "当前没有缓存"
+                "当前没有下载缓存；手选封面会保留"
             } else {
-                "已缓存 ${vm.coverCacheCount} 张封面，清除后下次会重新联网找"
+                "已缓存 ${vm.coverCacheCount} 张封面，清除后可重新联网找；手选封面会保留"
             },
             onClick = { vm.clearCoverCache() },
             actionLabel = "清除"
@@ -1563,10 +1592,10 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
  * ============================================================ */
 
 @Composable
-private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
+private fun OnlineMusicContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
 
-    SettingsSection(title = "在线音乐") {
+    Column(Modifier.fillMaxWidth()) {
         SettingsSwitchRow(
             title = "在线搜索与播放",
             subtitle = "开启后可以在「在线音乐」页搜索并播放网络歌曲。默认关闭 —— " +
@@ -1691,13 +1720,13 @@ private fun OnlineMusicSettingsSection(vm: SonanceViewModel) {
  * ============================================================ */
 
 @Composable
-private fun DuplicateCleanupSection(vm: SonanceViewModel) {
+private fun DuplicateCleanupContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val report = vm.duplicateReport
     // 点「清理」先弹这里选处理方式。null=没弹；true=连同名一起；false=只清重复
     var cleanDialog by remember { mutableStateOf<Boolean?>(null) }
 
-    SettingsSection(title = "重复与同名歌曲") {
+    Column(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(vertical = 4.dp)) {
             Text(
                 "默认只从曲库列表里隐藏，随时可以恢复；点「清理」时也可以选择删除文件。",
@@ -2025,16 +2054,22 @@ private fun SkinCard(
  * [summary] 会一直显示在标题下面，收起状态下也能看到「当前是哪套皮肤 / 有多少款图标」，
  * 不至于因为折叠而丢失信息。
  */
+/** 折叠状态：进程内共享的展开记忆，页面重建 / 来回切页后不会回到默认值 */
+private object FoldState {
+    val expanded = mutableStateMapOf<String, Boolean>()
+}
+
 @Composable
 private fun CollapsibleSection(
+    id: String,
     title: String,
     summary: String,
     icon: ImageVector,
-    expanded: Boolean,
-    onToggle: () -> Unit,
+    defaultExpanded: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val skin = LocalSkin.current
+    val expanded = FoldState.expanded[id] ?: defaultExpanded
     Column(
         Modifier
             .fillMaxWidth()
@@ -2044,7 +2079,7 @@ private fun CollapsibleSection(
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggle)
+                .clickable { FoldState.expanded[id] = !expanded }
                 .padding(horizontal = 14.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -2079,9 +2114,16 @@ private fun CollapsibleSection(
                     .rotate(if (expanded) 180f else 0f)
             )
         }
-        // 只在展开时组合内容：40 款图标卡每张都要解码一个矢量预览，
-        // 收起来就不该付这份钱
-        if (expanded) {
+        // 高度过渡用动画；收起后内容会被移除，重内容（图标网格 / 预览卡）不付组合成本
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(180)),
+            exit = shrinkVertically(
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(120))
+        ) {
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -2091,6 +2133,17 @@ private fun CollapsibleSection(
             }
         }
     }
+}
+
+/** 折叠模块内部的分组小标题（例如「曲库清理」/「重复与同名歌曲」） */
+@Composable
+internal fun SettingsGroupLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = LocalSkin.current.textMuted
+    )
+    Spacer(Modifier.height(10.dp))
 }
 
 @Composable

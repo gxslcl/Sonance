@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
@@ -248,6 +249,8 @@ fun FullPlayer(
     vinylMode: Boolean = false,
     /** 双击封面那个面板切黑碟模式 */
     onVinylModeChange: (Boolean) -> Unit = {},
+    /** 被沉浸式黑胶完全遮住时暂停仅供本页面使用的动画与预取。 */
+    coveredByVinyl: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -364,8 +367,8 @@ fun FullPlayer(
 
     // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
     // 只取前后各一首 —— 队列可能有几千首，不能遍历。
-    LaunchedEffect(state.queueIndex, queue.size) {
-        if (queue.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl) {
+        if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
         val idx = state.queueIndex
         listOfNotNull(queue.getOrNull(idx + 1), queue.getOrNull(idx - 1)).forEach { s ->
             ArtworkLoader.prefetchTint(
@@ -407,16 +410,17 @@ fun FullPlayer(
     // 分页器 → 播放器：只在页面「落定」后切歌，避免滑动过程中反复触发。
     // 用 rememberUpdatedState 读取最新 queueIndex，否则快照流里会捕获到旧值。
     val latestState by rememberUpdatedState(state)
+    val latestCoveredByVinyl by rememberUpdatedState(coveredByVinyl)
     LaunchedEffect(pagerState, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
         snapshotFlow { pagerState.settledPage }.collect { page ->
-            if (page != latestState.queueIndex) onPlayAt(page)
+            if (!latestCoveredByVinyl && page != latestState.queueIndex) onPlayAt(page)
         }
     }
 
     // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列时把页面跟过去。
-    LaunchedEffect(state.queueIndex, queue.size) {
-        if (queue.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl) {
+        if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
         val target = state.queueIndex.coerceIn(0, queue.lastIndex)
         if (pagerState.settledPage != target && !pagerState.isScrollInProgress) {
             //
@@ -444,8 +448,8 @@ fun FullPlayer(
 
     // 「页面可见」= 停在封面层。切到歌词 / 律动柱层后不再推进；
     // 暂停后仍然继续跑 600ms 把包络收回去，收干净立即 break，不留空转。
-    val breathActive = state.isPlaybackActive && layer == PlayerLayer.COVER
-    val coverFrozen = coverTouched || pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
+    val breathActive = state.isPlaybackActive && layer == PlayerLayer.COVER && !coveredByVinyl
+    val coverFrozen = coveredByVinyl || coverTouched || pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
         state.isBuffering || (queue.isNotEmpty() && pagerState.settledPage != state.queueIndex)
 
     LaunchedEffect(breathActive, coverFrozen, layer, state.mediaId) {
@@ -666,12 +670,34 @@ fun FullPlayer(
                 // 标题独立居中于整条栏，不受左右图标数量影响
                 // 顶部状态：只留律动小图标（用户要求去掉文字），播放中三柱跳动、暂停时压平
                 Box(Modifier.align(Alignment.Center)) {
-                    PlayingStateIndicator(
-                        isPlaying = state.isPlaybackActive,
-                        accent = headerAccent,
-                        idle = headerIdle
-                    )
+                    if (!coveredByVinyl) {
+                        PlayingStateIndicator(
+                            isPlaying = state.isPlaybackActive,
+                            accent = headerAccent,
+                            idle = headerIdle
+                        )
+                    }
                 }
+
+                // 收起热区：顶栏左侧 2/3 整片都能触发「收起播放页」，
+                // 覆盖左上角箭头与中间的律动指示器；右侧图标（黑胶 / 定时器）所在的
+                // 1/3 不铺热区，保留各自点击。热区高度只等于这条 56dp 顶栏，
+                // 不会拦到下面封面区的上下滑手势。
+                //
+                // 透明层压在 IconAction 之上，点击只会走这一条路径（onClose），
+                // 不与箭头自身的 onClick 叠加，避免收起两次。
+                Box(
+                    Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxWidth(2f / 3f)
+                        .fillMaxHeight()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            if (layer == PlayerLayer.COVER) onClose() else goToLayer(PlayerLayer.COVER)
+                        }
+                )
             }
 
             if (queue.isEmpty()) {
@@ -746,7 +772,7 @@ fun FullPlayer(
                         // 更新时把相邻页也拖进重组。
                         positionMs = if (isCurrent) state.positionMs else 0L,
                         durationMs = if (isCurrent && state.durationMs > 0) state.durationMs else song.durationMs,
-                        isPlaying = if (isCurrent) state.isPlaying else false,
+                        isPlaying = isCurrent && state.isPlaying && !coveredByVinyl,
                         // A preview is about to autoplay. Never render it as paused during the swipe.
                         controlsPlaying = pagerPlayButtonActive(isCurrent, state),
                         // 暂停/播放缩放与呼吸已合并为三页共享的最终尺寸。
@@ -834,7 +860,7 @@ fun FullPlayer(
         else -> if (currentSong != null) {
             VisualizerOverlay(
                 song = currentSong,
-                isPlaying = state.isPlaying,
+                isPlaying = state.isPlaying && !coveredByVinyl,
                 positionMs = state.positionMs,
                 durationMs = if (state.durationMs > 0) {
                     state.durationMs
@@ -908,7 +934,7 @@ private fun PlayingStateIndicator(
         )
     }
 
-    Canvas(Modifier.size(width = 22.dp, height = 18.dp)) {
+    Canvas(Modifier.size(width = 22.dp, height = 12.dp)) {
         val barW = barWidth.toPx()
         val gap = (size.width - barW * 3f) / 2f
         val maxH = size.height
@@ -1608,10 +1634,10 @@ private fun GlowSheet(
 
 /** 封面圆角唯一来源：投影、裁剪、内容绘制全部引用它，防止切换路径上形状漂移 */
 private val CoverCornerRadius = 20.dp
-private const val COVER_LIFT_PX = 20f
+private const val COVER_LIFT_PX = 40f
 
 /**
- * 保留弹性区域的 0.41 : 0.59 排布，再将封面整体上移 20 个物理像素。
+ * 保留弹性区域的 0.41 : 0.59 排布，再将封面整体上移 [COVER_LIFT_PX] 个物理像素。
  * 不修改布局尺寸，歌词态不套这一层，仍占满整块。
  */
 @Composable

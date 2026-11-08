@@ -34,29 +34,11 @@ import com.sonance.player.ui.theme.LocalSkin
  * 并提供一键重新清理的入口。
  */
 @Composable
-fun LibraryCleanupSection(vm: SonanceViewModel) {
+fun LibraryCleanupContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val scanning = vm.scanState == ScanState.SCANNING
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(skin.surface)
-            .padding(14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = SonanceIcons.Refresh,
-                contentDescription = null,
-                tint = skin.accent,
-                modifier = Modifier.size(17.dp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("曲库清理", style = MaterialTheme.typography.titleMedium, color = skin.text)
-        }
-
-        Spacer(Modifier.height(10.dp))
+    Column(Modifier.fillMaxWidth()) {
         Text(
             "扫描时会自动把无法播放的、不属于歌曲的条目挡在曲库之外，避免它们混进列表。\n" +
                 "这里显示最近一次扫描的排除结果，也可以随时手动清理一遍。",

@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 在线封面的本地缓存（借鉴 [LyricsCache] 的做法）。
@@ -23,6 +24,8 @@ object CoverCache {
 
     private const val TAG = "SonanceCover"
     private const val DIR = "cover_cache"
+    // 用户手选封面是持久数据，不参与普通缓存的自动淘汰。
+    private const val SELECTED_DIR = "selected_covers"
     private const val EXT = ".jpg"
 
     /**
@@ -46,7 +49,9 @@ object CoverCache {
     /** 距上次访问不足 1 小时就不重复写时间戳，省掉滚动列表时的元数据写 */
     private const val TOUCH_INTERVAL_MS = 60L * 60 * 1000
 
-    private var storesSinceTrim = 0
+    private val storesSinceTrim = AtomicInteger(0)
+    // 老版本可能把网络异常写成空文件。空结果仅短期有效，避免永久阻止恢复。
+    private const val MISS_TTL_MS = 10L * 60 * 1000
 
     /** 查询结果。和 [LyricsCache.Lookup] 一样是**三态** —— */
     sealed interface Lookup {
@@ -71,8 +76,16 @@ object CoverCache {
         return try {
             val f = fileOf(context, key)
             if (!f.exists()) return Lookup.Unknown
-            val b = f.readBytes()
-            if (b.isEmpty()) Lookup.KnownMiss else {
+            val b = DurableCacheFile.read(f) ?: return Lookup.Unknown
+            if (b.isEmpty()) {
+                val age = System.currentTimeMillis() - f.lastModified()
+                if (age in 0 until MISS_TTL_MS) Lookup.KnownMiss else Lookup.Unknown
+            } else {
+                // 旧版可能留下中断写入或服务器错误页面；保留旧文件，但不把坏数据当成有效命中。
+                if (!hasReadableImageHeader(b)) {
+                    Log.w(TAG, "缓存封面不可解码，将尝试重新获取")
+                    return Lookup.Unknown
+                }
                 touch(f)
                 Lookup.Hit(b)
             }
@@ -93,24 +106,57 @@ object CoverCache {
         }
     }
 
-    fun store(context: Context, key: String?, bytes: ByteArray?) {
-        if (key == null) return
+    fun store(context: Context, key: String?, bytes: ByteArray?): Boolean {
+        if (key == null) return false
         try {
+            if (bytes != null && bytes.isNotEmpty() && !hasReadableImageHeader(bytes)) {
+                Log.w(TAG, "封面数据不可解码，保留已有文件")
+                return false
+            }
             val dir = dirOf(context)
-            if (!dir.exists() && !dir.mkdirs()) return
-            fileOf(context, key).writeBytes(bytes ?: ByteArray(0))
-            if (++storesSinceTrim >= TRIM_EVERY) {
-                storesSinceTrim = 0
+            if (!DurableCacheFile.write(fileOf(context, key), bytes ?: ByteArray(0),
+                    sync = bytes != null, preserveNonEmpty = true)) {
+                Log.w(TAG, "写封面缓存失败：无法安全替换文件")
+                return false
+            }
+            if (bytes != null && bytes.isNotEmpty()) ArtworkLoader.forgetCoverMiss(key)
+            if (storesSinceTrim.incrementAndGet() >= TRIM_EVERY &&
+                storesSinceTrim.getAndSet(0) >= TRIM_EVERY) {
                 trim(dir)
             }
+            return true
         } catch (t: Throwable) {
             Log.w(TAG, "写封面缓存失败: ${t.message}")
+            return false
         }
+    }
+
+    /** 手选封面独立存储；保存成功后才允许界面报告已更新。 */
+    fun storeSelected(context: Context, songId: Long, sourceUri: Uri?, bytes: ByteArray): Boolean {
+        val saved = selectedStore(context).store(songId, sourceUri?.toString(), bytes)
+        if (!saved) Log.w(TAG, "保存手选封面失败：无法安全写入")
+        return saved
+    }
+
+    fun lookupSelected(context: Context, songId: Long, sourceUri: Uri?): ByteArray? {
+        return selectedStore(context).lookup(songId, sourceUri?.toString())
+    }
+
+    fun hasSelected(context: Context, songId: Long, sourceUri: Uri?): Boolean {
+        return selectedStore(context).exists(songId, sourceUri?.toString())
+    }
+
+    fun migrateSelectedIfAbsent(context: Context, songId: Long, sourceUri: Uri?, bytes: ByteArray): Boolean {
+        return selectedStore(context).migrateIfAbsent(songId, sourceUri?.toString(), bytes)
+    }
+
+    fun removeSelected(context: Context, songId: Long, sourceUri: Uri?) {
+        selectedStore(context).remove(songId, sourceUri?.toString())
     }
 
     fun remove(context: Context, key: String?) {
         if (key == null) return
-        runCatching { fileOf(context, key).delete() }
+        runCatching { DurableCacheFile.delete(fileOf(context, key)) }
     }
 
     /**
@@ -151,22 +197,32 @@ object CoverCache {
     }.getOrDefault(0L)
 
     fun clear(context: Context) {
-        runCatching { dirOf(context).listFiles()?.forEach { it.delete() } }
+        runCatching { dirOf(context).listFiles()?.filter { it.name.endsWith(EXT) }?.forEach { DurableCacheFile.delete(it) } }
     }
 
     private fun dirOf(context: Context) = java.io.File(context.filesDir, DIR)
     private fun fileOf(context: Context, key: String) = java.io.File(dirOf(context), "$key$EXT")
 
+    private fun selectedStore(context: Context) = SelectedCoverStore(java.io.File(context.filesDir, SELECTED_DIR))
+
+    private fun hasReadableImageHeader(bytes: ByteArray): Boolean = try {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        options.outWidth > 0 && options.outHeight > 0
+    } catch (_: Exception) {
+        false
+    }
+
     /** 先按条数、再按体积收；删除顺序按 lastModified（≈ 最后访问时间）从旧到新 */
     private fun trim(dir: java.io.File) {
-        val files = dir.listFiles() ?: return
+        val files = dir.listFiles()?.filter { it.name.endsWith(EXT) } ?: return
         var overCount = files.size - MAX_FILES
         var total = files.sumOf { it.length() }
         if (overCount <= 0 && total <= MAX_BYTES) return
         for (f in files.sortedBy { it.lastModified() }) {
             if (overCount <= 0 && total <= MAX_BYTES) break
             val len = f.length()
-            if (runCatching { f.delete() }.getOrDefault(false)) {
+            if (runCatching { DurableCacheFile.delete(f) }.getOrDefault(false)) {
                 total -= len
                 overCount--
             }

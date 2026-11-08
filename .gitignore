@@ -43,6 +43,7 @@ Thumbs.db
 /.apklist.txt
 /res/
 /.apkx/
+/vinyl-theme-preview/
 
 # ---------- Python（tools 下的辅助脚本）----------
 __pycache__/

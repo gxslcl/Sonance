@@ -48,7 +48,7 @@ import com.sonance.player.ui.theme.LocalSkin
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun FormatCompatSection(vm: SonanceViewModel) {
+fun FormatCompatContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val context = LocalContext.current
     val result = vm.compatResult
@@ -71,25 +71,7 @@ fun FormatCompatSection(vm: SonanceViewModel) {
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(skin.surface)
-            .padding(14.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = SonanceIcons.Waveform,
-                contentDescription = null,
-                tint = skin.accent,
-                modifier = Modifier.size(17.dp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("格式与兼容性", style = MaterialTheme.typography.titleMedium, color = skin.text)
-        }
-
-        Spacer(Modifier.height(10.dp))
+    Column(Modifier.fillMaxWidth()) {
         Text(
             "本播放器直接调用系统解码器。下面这些格式能否播放，取决于文件和系统，而不是播放器本身。",
             style = MaterialTheme.typography.bodySmall,

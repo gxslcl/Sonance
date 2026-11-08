@@ -76,8 +76,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.Prefs
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -108,21 +110,37 @@ fun CoverArt(
     coverKey: String? = null
 ) {
     val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context.applicationContext) }
+    val coverRevision = ArtworkLoader.coverRevision(coverKey)
+    val selectedRevision = ArtworkLoader.selectedRevision(songId)
+    val resetVersion = ArtworkLoader.cacheResetVersion
+    val legacyPinned = remember(songId, coverKey, resetVersion) {
+        songId > 0L && !prefs.pinnedCoverUrl(songId).isNullOrBlank()
+    }
     // 首帧就直接读内存缓存 —— 已加载过的封面必须立刻出现，不能先给占位图。
     // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
     //   表现就是"滚回来还要等半秒"。）
     // sizePx 也进 key：尺寸档变了要重新 peek，否则播放页会拿到列表留下的缩略图。
     // peekAny（不是 peek）：本尺寸档没现成的就先用缩略图档那份顶上，
     // 免得播放页在解码 900px 的那几百毫秒里先闪一张占位图。
-    var bitmap by remember(albumId, sizePx, sourceUri, coverKey) {
+    var bitmap by remember(albumId, sizePx, sourceUri, coverKey, resetVersion) {
         mutableStateOf(ArtworkLoader.peekAny(albumId, sizePx, sourceUri, coverKey))
+    }
+    var selected by remember(albumId, sizePx, sourceUri, songId, selectedRevision, resetVersion) {
+        mutableStateOf(ArtworkLoader.peekSelected(albumId, sizePx, sourceUri, songId))
     }
 
     // 这里**故意不把 ArtworkLoader.paused 放进 key**：放进去的话，滚动开始和结束
     // 各会重启一次本 effect，可见的几十行同时重新发起加载 —— 那正是
     // "停下来还要等 0.5~1 秒"的成因。滚动中要不要降并发由 ArtworkLoader 内部决定
     // （见 withDecodeGate），界面这边只管发起。
-    LaunchedEffect(albumId, sizePx, sourceUri, coverKey) {
+    LaunchedEffect(albumId, sizePx, sourceUri, songId, coverKey, coverRevision, selectedRevision, resetVersion) {
+        val chosen = ArtworkLoader.loadSelected(context, albumId, sizePx, sourceUri, songId, coverKey, legacyPinned)
+        if (chosen != null) {
+            selected = chosen
+            return@LaunchedEffect
+        }
+        selected = null
         // 缓存命中：同步取，不走协程
         ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey)?.let {
             bitmap = it
@@ -132,7 +150,14 @@ fun CoverArt(
         // 只在拿到图时赋值：load() 返回 null 只代表"这次没取到"（可能因为这张
         // 确实没有封面），**不能**拿它去覆盖已有的图 —— 早先这么写会让
         // 滚动时封面闪回占位图。
-        ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)?.let { bitmap = it }
+        val loaded = ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)
+        if (loaded != null) {
+            bitmap = loaded
+        } else {
+            // 临时媒体服务/文件读失败不视为永久无图；可见行稍后重试一次。
+            delay(2_800)
+            ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)?.let { bitmap = it }
+        }
     }
 
     // 读 SnapshotStateMap：在线封面补进来时这里会自动重组
@@ -149,7 +174,7 @@ fun CoverArt(
         // ① `ensureCover` 自动补的，而它只在本地确实没有封面时才会去补；
         // ② `applyCover` 用户手选的，那就该盖过本地封面。
         // 值为 null（"确认没有"的哨兵）时 `online` 返回 null，自然回落到本地封面。
-        val bmp = online ?: bitmap
+        val bmp = selected ?: online ?: bitmap
         if (bmp != null) {
             Image(
                 bitmap = bmp,
