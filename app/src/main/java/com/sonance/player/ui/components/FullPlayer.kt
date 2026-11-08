@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
@@ -89,6 +90,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -112,6 +114,7 @@ import com.sonance.player.sync.GroupPhase
 import com.sonance.player.sync.GroupRole
 import com.sonance.player.sync.GroupUiState
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.isCompactLandscapePhone
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.solidSurface
@@ -1658,10 +1661,20 @@ private fun PlayerPage(
         val boxW = maxWidth
         val boxH = maxHeight
         val isWide = boxW >= 620.dp && boxW > boxH
+        /**
+         * 手机横屏细长屏（20:9 转过来那种）。这个形态高度特别矮，
+         * 沿用通用横屏参数会让封面几乎撑满整屏、内容重心偏下。
+         * 判据与「隐藏状态栏」共用 [isCompactLandscapePhone]，两处必须同步。
+         */
+        val compactPhone = isCompactLandscapePhone(LocalConfiguration.current)
         // 单次 BoxWithConstraints：原实现里再嵌了一层只为算封面边长，把这一层去掉，
         // 封面尺寸在外层一次算好，少一轮 measure。
         val portraitSide = if (!isWide) (if (boxW < boxH) boxW else boxH) else 0.dp
-        val landscapeSide = if (isWide) landscapeCoverSize(boxW, boxH) else 0.dp
+        val landscapeSide = when {
+            !isWide -> 0.dp
+            compactPhone -> landscapeCoverSizeCompact(boxW, boxH)
+            else -> landscapeCoverSize(boxW, boxH)
+        }
         // onGloballyPositioned 报的是像素，横屏推封面矩形时要用来算边长
         val landscapeSidePx = with(LocalDensity.current) { landscapeSide.toPx() }
 
@@ -1677,9 +1690,16 @@ private fun PlayerPage(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 36.dp, vertical = 6.dp),
+                    .padding(
+                        // 手机横屏：两侧多留一点，底部比顶部多留，把整体重心往上提
+                        if (compactPhone) PaddingValues(
+                            start = 48.dp, top = 4.dp, end = 48.dp, bottom = 34.dp
+                        ) else PaddingValues(horizontal = 36.dp, vertical = 6.dp)
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(40.dp)
+                horizontalArrangement = Arrangement.spacedBy(
+                    if (compactPhone) 56.dp else 40.dp
+                )
             ) {
                 Box(
                     modifier = Modifier
@@ -2110,6 +2130,21 @@ private fun GroupStatusStrip(state: GroupUiState, onClick: () -> Unit) {
 private fun landscapeCoverSize(width: Dp, height: Dp): Dp {
     val byHeight = height - 28.dp
     val byWidth = width * 0.44f
+    return if (byHeight < byWidth) byHeight else byWidth
+}
+
+/**
+ * 手机横屏细长屏专用的封面尺寸。
+ *
+ * 通用公式取 `height - 28.dp`，在这种矮窗口里等于让封面占满 ~81% 屏高，
+ * 上下几乎不留白，视觉上又大又贴底。这里改成按高度取 68%、按宽度取 34%，
+ * 两者取小 —— 实测在这个比例下封面约 600dp 见方，上下各留出明显呼吸空间。
+ *
+ * 只被 [isCompactLandscapePhone] 命中的形态调用，平板/其它横屏仍走原公式。
+ */
+private fun landscapeCoverSizeCompact(width: Dp, height: Dp): Dp {
+    val byHeight = height * 0.68f
+    val byWidth = width * 0.34f
     return if (byHeight < byWidth) byHeight else byWidth
 }
 

@@ -4,6 +4,9 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -22,6 +25,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,6 +63,9 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -134,6 +142,47 @@ private fun resolveLayout(widthDp: Int, heightDp: Int): LayoutMode = when {
     widthDp < 600 -> LayoutMode.COMPACT
     widthDp < 960 -> LayoutMode.MEDIUM
     else -> LayoutMode.EXPANDED
+}
+
+/**
+ * 按条件隐藏/恢复状态栏。
+ *
+ * 隐藏之后系统不再派发 `statusBars` insets，Compose 的 `statusBarsPadding()`
+ * 会自动归零 —— 于是播放页顶栏、歌词页、律动柱那几处 padding 一起失效，
+ * 内容自己顶到屏幕最上沿，**不需要改任何一处布局代码**。
+ *
+ * 只隐藏 statusBars，不动 navigationBars：横屏手势条还在，返回操作不会丢。
+ * 用 `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`，用户下拉仍能临时看到时间/通知。
+ */
+@Composable
+private fun PlayerStatusBarImmersive(enabled: Boolean) {
+    val view = LocalView.current
+
+    fun apply(hide: Boolean) {
+        val window = (view.context as? Activity)?.window ?: return
+        val controller = WindowCompat.getInsetsController(window, view)
+        if (hide) {
+            controller.hide(WindowInsetsCompat.Type.statusBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            controller.show(WindowInsetsCompat.Type.statusBars())
+        }
+    }
+
+    DisposableEffect(enabled) {
+        apply(enabled)
+        onDispose {
+            // 组合销毁（退出页面 / Activity 结束）一定把状态栏还回去，
+            // 否则整个应用此后都没有状态栏
+            apply(false)
+        }
+    }
+
+    // 切后台再回来时，系统可能已经把状态栏恢复了；重新对齐一次。
+    // ON_STOP 主动恢复，避免把「隐藏」状态带到最近任务列表/其他界面。
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { apply(enabled) }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { apply(false) }
 }
 
 sealed interface Detail {
@@ -469,6 +518,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     val layout = resolveLayout(configuration.screenWidthDp, configuration.screenHeightDp)
 
     var fullPlayerOpen by rememberSaveable { mutableStateOf(false) }
+
+    // 手机横屏 + 全屏播放页：状态栏不参与布局，内容顶到最上沿。
+    // 收起播放页 / 转回竖屏 / 切后台都会自动恢复，见 PlayerStatusBarImmersive。
+    val immersivePlayer = fullPlayerOpen && isCompactLandscapePhone(configuration)
+    PlayerStatusBarImmersive(enabled = immersivePlayer)
+
     /** 沉浸式黑胶模式（铺在一切之上；关闭后音频不受影响） */
     var vinylOpen by remember { mutableStateOf(false) }
     var queueOpen by rememberSaveable { mutableStateOf(false) }
@@ -768,6 +823,14 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(20f)
+                // 兜底：个别 ROM 在横屏 hide() 之后仍会派发非零的 statusBars
+                // insets，那几处 statusBarsPadding() 就还会把内容往下推。
+                // 这里在播放页根节点把这段 inset 消费掉，子层统一拿到 0。
+                // 只对「手机横屏播放页」生效，其它形态的 padding 原样保留。
+                .then(
+                    if (immersivePlayer) Modifier.consumeWindowInsets(WindowInsets.statusBars)
+                    else Modifier
+                )
         ) {
             FullPlayer(
                 state = playerState,
