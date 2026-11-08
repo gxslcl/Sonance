@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -343,7 +344,12 @@ fun IconAction(
     }
 }
 
-/** 圆形控制按钮，可高亮表示激活 */
+/**
+ * 圆形控制按钮，可高亮表示激活。
+ *
+ * [highlight] 为 false 时不画圆形底色 —— 参考样机里的模式 / 跳过按钮都是
+ * 「纯图标、无外框」，只有激活色（tint）变化，没有背景块。
+ */
 @Composable
 fun CtrlButton(
     icon: ImageVector,
@@ -353,14 +359,15 @@ fun CtrlButton(
     size: Dp = 36.dp,
     iconSize: Dp = 18.dp,
     active: Boolean = false,
-    tint: Color = LocalSkin.current.textDim
+    tint: Color = LocalSkin.current.textDim,
+    highlight: Boolean = true
 ) {
     val skin = LocalSkin.current
     Box(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(if (active) skin.accentGlow else Color.Transparent)
+            .background(if (highlight && active) skin.accentGlow else Color.Transparent)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -395,7 +402,9 @@ fun PlayPauseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     size: Dp = 52.dp,
-    iconSize: Dp = 22.dp
+    iconSize: Dp = 22.dp,
+    /** Shared gradient palette supplied by the main/mini/floating players. */
+    palette: PlayButtonPalette? = null
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
@@ -428,7 +437,9 @@ fun PlayPauseButton(
     } else 0f
 
     // 播放态渐变缓旋（对应样机的 slowOrbit 11s）
-    val orbit = if (isPlaying) {
+    val orbit = if (palette != null) {
+        rememberButtonOrbit(isPlaying).floatValue
+    } else if (isPlaying) {
         rememberInfiniteTransition(label = "orbit").animateFloat(
             initialValue = 0f, targetValue = 360f,
             animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing)),
@@ -438,17 +449,34 @@ fun PlayPauseButton(
 
     // 播放态的有机 blob 形变进度（对应样机 organicDropletMorph 5.5s alternate）。
     // 四组关键帧取自参考样机的 border-radius 百分比，绘制时插值成圆角矩形路径。
+    //
+    // 必须是 Reverse（A→B→A 往返），不能用手误写成默认的 Restart：
+    // 关键帧的首帧（keys[0]）与末帧（keys[3]）形状不同，Restart 在循环点会
+    // 直接把形状从末帧拽回首帧 —— 表现就是「播到结尾顿一下再跳回初始」。
+    // Reverse 让它在两个端点连续折返，接缝处形状与速度都连续。
     val morph = if (isPlaying) {
         rememberInfiniteTransition(label = "morph").animateFloat(
             initialValue = 0f, targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(5500, easing = LinearEasing)),
+            animationSpec = infiniteRepeatable(
+                tween(5500, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
             label = "morph"
         ).value
     } else -1f // -1 = 暂停态，画正圆
 
-    val gradientColors = listOf(
-        Color(0xFF38BDF8), Color(0xFF6366F1), Color(0xFFEC4899)
-    )
+    // Shared colored buttons pause without abruptly dropping glow/scale.
+    val shownBreath = if (palette != null) {
+        animateFloatAsState(breath, tween(250), label = "mainButtonBreath").value
+    } else breath
+    val playingBlend = if (palette != null) {
+        animateFloatAsState(if (isPlaying) 1f else 0f, tween(350), label = "mainButtonGlow").value
+    } else if (isPlaying) 1f else 0f
+
+    val gradientColors = palette?.let { listOf(it.light, it.main, it.deep) }
+        ?: listOf(Color(0xFF38BDF8), Color(0xFF6366F1), Color(0xFFEC4899))
+    // 复用同一条 Path：形变逐帧重算，但不再每帧新建对象（减少 GC / 分配抖动）
+    val blobPath = remember { Path() }
 
     Box(
         modifier = modifier.size(size),
@@ -457,27 +485,36 @@ fun PlayPauseButton(
         // ---- 光晕（glow）：画在裁剪外，让它能溢出按钮圆界 ----
         // 播放时呼吸变大、更亮；暂停时保留一圈微弱底光
         if (glowEnabled) {
+            // 光晕必须是「画布边缘处透明度已经到 0」的径向渐变，否则就是一个方块。
+            //
+            // 旧实现把画布写成 matchParentSize()（只有按钮本体那么大），却画了
+            // 半径 1.4×r 的圆 —— 超出的部分被 Canvas 的绘制边界硬裁掉，留下
+            // 一个 alpha 还没归零的直角矩形，这就是用户看到的「浅色透明方块」。
+            //
+            // 现在：画布放大到 1.5 倍按钮尺寸（requiredSize 不受父约束，居中溢出
+            // 也不会被裁），渐变半径正好等于画布半径 —— 1.0 停靠点是全透明，
+            // 边缘自然消失；同时光斑仍能溢出按钮圆界，和样机一致。
             Canvas(
                 Modifier
-                    .matchParentSize()
+                    .requiredSize(size * 1.5f)
                     .graphicsLayer {
-                        val s = 1f + breath * 0.08f
+                        val s = 1f + shownBreath * 0.08f
                         scaleX = s
                         scaleY = s
-                        alpha = if (isPlaying) 0.95f else 0.5f
+                        alpha = 0.5f + 0.45f * playingBlend
                     }
             ) {
                 val r = this.size.minDimension / 2f
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            Color(0xFF6366F1).copy(alpha = 0.65f),
-                            Color(0xFFEC4899).copy(alpha = 0.30f),
+                            (palette?.main ?: Color(0xFF6366F1)).copy(alpha = 0.65f),
+                            (palette?.deep ?: Color(0xFFEC4899)).copy(alpha = 0.30f),
                             Color.Transparent
                         ),
-                        center = center, radius = r * 1.4f
+                        center = center, radius = r
                     ),
-                    radius = r * 1.4f
+                    radius = r
                 )
             }
         }
@@ -502,8 +539,8 @@ fun PlayPauseButton(
                     .matchParentSize()
                     .padding(2.dp)
                     .graphicsLayer {
-                        scaleX = 1f + breath * 0.035f
-                        scaleY = 1f + breath * 0.035f
+                        scaleX = 1f + shownBreath * 0.035f
+                        scaleY = 1f + shownBreath * 0.035f
                     }
             ) {
                 val w = this.size.width
@@ -518,7 +555,7 @@ fun PlayPauseButton(
                 if (morph < 0f) {
                     drawCircle(brush = brush)
                 } else {
-                    drawPath(organicBlobPath(w, h, morph), brush)
+                    drawPath(organicBlobPath(blobPath, w, h, morph), brush)
                 }
             }
 
@@ -557,7 +594,7 @@ fun PlayPauseButton(
                     style = iconStyle,
                     scale = iconScale,
                     stage = iconSize,
-                    tint = skin.onAccent
+                    tint = palette?.icon ?: skin.onAccent
                 )
             }
         }
@@ -672,13 +709,15 @@ private fun FluidPlayIcon(
  * 归一化规则处理相邻半径之和超边长的情况。progress=0 时也会是圆润的
  * 不规则形状（不是圆），暂停态不走这条路径、直接画正圆。
  */
-private fun organicBlobPath(w: Float, h: Float, progress: Float): Path {
-    val keys = arrayOf(
-        floatArrayOf(24f, 76f, 60f, 40f, 26f, 58f, 42f, 74f),
-        floatArrayOf(68f, 32f, 34f, 66f, 56f, 24f, 76f, 44f),
-        floatArrayOf(36f, 64f, 26f, 74f, 64f, 40f, 60f, 36f),
-        floatArrayOf(54f, 46f, 76f, 24f, 32f, 68f, 32f, 68f)
-    )
+private val BLOB_MORPH_KEYS = arrayOf(
+    floatArrayOf(24f, 76f, 60f, 40f, 26f, 58f, 42f, 74f),
+    floatArrayOf(68f, 32f, 34f, 66f, 56f, 24f, 76f, 44f),
+    floatArrayOf(36f, 64f, 26f, 74f, 64f, 40f, 60f, 36f),
+    floatArrayOf(54f, 46f, 76f, 24f, 32f, 68f, 32f, 68f)
+)
+
+private fun organicBlobPath(path: Path, w: Float, h: Float, progress: Float): Path {
+    val keys = BLOB_MORPH_KEYS
     val seg = (progress.coerceIn(0f, 1f)) * 3f
     val i = minOf(2, seg.toInt())
     val t = seg - i
@@ -701,17 +740,17 @@ private fun organicBlobPath(w: Float, h: Float, progress: Float): Path {
     tlV *= fLeft; blV *= fLeft; trV *= fRight; brV *= fRight
 
     val rect = androidx.compose.ui.geometry.Rect(0f, 0f, w, h)
-    return Path().apply {
-        addRoundRect(
-            androidx.compose.ui.geometry.RoundRect(
-                rect,
-                topLeft = CornerRadius(w * tlH, h * tlV),
-                topRight = CornerRadius(w * trH, h * trV),
-                bottomRight = CornerRadius(w * brH, h * brV),
-                bottomLeft = CornerRadius(w * blH, h * blV)
-            )
+    path.rewind()
+    path.addRoundRect(
+        androidx.compose.ui.geometry.RoundRect(
+            rect,
+            topLeft = CornerRadius(w * tlH, h * tlV),
+            topRight = CornerRadius(w * trH, h * trV),
+            bottomRight = CornerRadius(w * brH, h * brV),
+            bottomLeft = CornerRadius(w * blH, h * blV)
         )
-    }
+    )
+    return path
 }
 
 /**
@@ -760,6 +799,14 @@ fun SonanceSlider(
     inactiveColor: Color = LocalSkin.current.surface3,
     alwaysShowThumb: Boolean = false,
     enabled: Boolean = true,
+    /**
+     * 填充色的终点色：传了就用 [activeColor] → 该色的横向渐变
+     * （参考样机的进度条 accent-secondary → accent-primary）。
+     * 不传则沿用原来的单色填充。
+     */
+    gradientEnd: Color? = null,
+    /** 拇指外圈加一层柔光（参考样机 0 0 0 3px accent-soft），进度条用 */
+    thumbHalo: Boolean = false,
     /**
      * 手势结束（松手 / 精确点击落地）后回调一次。
      *
@@ -836,19 +883,44 @@ fun SonanceSlider(
             )
             val w = size.width * safe
             if (w > 0.5f) {
-                drawRoundRect(
-                    color = activeColor,
-                    topLeft = Offset(0f, cy - h / 2f),
-                    size = Size(w, h),
-                    cornerRadius = radius
-                )
+                val end = gradientEnd
+                if (end != null) {
+                    // 横向渐变：起点暗、终点亮，和样机一致
+                    drawRoundRect(
+                        brush = Brush.linearGradient(
+                            colors = listOf(activeColor, end),
+                            start = Offset(0f, cy),
+                            end = Offset(size.width, cy)
+                        ),
+                        topLeft = Offset(0f, cy - h / 2f),
+                        size = Size(w, h),
+                        cornerRadius = radius
+                    )
+                } else {
+                    drawRoundRect(
+                        color = activeColor,
+                        topLeft = Offset(0f, cy - h / 2f),
+                        size = Size(w, h),
+                        cornerRadius = radius
+                    )
+                }
             }
             if (alwaysShowThumb || pressed) {
-                val r = thumbSize.toPx() / 2f
+                // 样机：按住时拇指放大到 1.3 倍
+                val r = thumbSize.toPx() / 2f * (if (pressed) 1.3f else 1f)
+                val thumbColor = gradientEnd ?: activeColor
+                val cx = w.coerceIn(r, size.width - r)
+                if (thumbHalo) {
+                    drawCircle(
+                        color = thumbColor.copy(alpha = 0.25f),
+                        radius = r + 3.dp.toPx(),
+                        center = Offset(cx, cy)
+                    )
+                }
                 drawCircle(
-                    color = activeColor,
+                    color = thumbColor,
                     radius = r,
-                    center = Offset(w.coerceIn(r, size.width - r), cy)
+                    center = Offset(cx, cy)
                 )
             }
         }

@@ -28,18 +28,6 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- 多设备同步：MulticastLock（mDNS 发现）与 WifiLock（锁屏后保持对时精度） -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <!-- NSD（mDNS）发现权限：Android 12 及以下要定位，13 起要 NEARBY_WIFI_DEVICES -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="32" />
-    <uses-permission
-        android:name="android.permission.NEARBY_WIFI_DEVICES"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="33" />
 
     <!-- 后台播放与通知 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

@@ -11,6 +11,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -115,26 +117,21 @@ fun TransportControls(
     ctrlIcon: Dp = 18.dp,
     playSize: Dp = 52.dp,
     playIcon: Dp = 22.dp,
-    gap: Dp = 6.dp
+    gap: Dp = 6.dp,
+    playButtonPalette: PlayButtonPalette? = null
 ) {
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally)
     ) {
-        CtrlButton(
-            icon = when (playMode) {
-                PlayMode.SHUFFLE -> SonanceIcons.Shuffle
-                PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
-                PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
-            },
-            contentDescription = playMode.label,
+        // 模式按钮：参考样机是「纯图标 + 主题色」，没有圆形背景块；
+        // 切换时图标缩到 0.65 并淡出，再淡入 —— 对应样机的 switching 类
+        PlayModeCtrlButton(
+            playMode = playMode,
             onClick = onCyclePlayMode,
             size = ctrlSize,
-            iconSize = ctrlIcon,
-            // 列表循环是"默认档"，不高亮；随机 / 单曲循环是用户特意选的，给强调色。
-            // 全亮的话这个按钮永远带色，就看不出"我改过设置"了。
-            active = playMode != PlayMode.REPEAT_ALL
+            iconSize = ctrlIcon
         )
         CtrlButton(
             icon = SonanceIcons.Prev,
@@ -147,7 +144,8 @@ fun TransportControls(
             isPlaying = isPlaying,
             onClick = onPlayPause,
             size = playSize,
-            iconSize = playIcon
+            iconSize = playIcon,
+            palette = playButtonPalette
         )
         CtrlButton(
             icon = SonanceIcons.Next,
@@ -163,6 +161,50 @@ fun TransportControls(
                 onClick = onOpenQueue,
                 size = ctrlSize,
                 iconSize = ctrlIcon
+            )
+        }
+    }
+}
+
+/**
+ * 播放模式按钮：纯图标、主题色、无外框。
+ *
+ * 切换模式时图标先缩小到 0.65 并淡出，再淡入新图标 —— 参考样机的
+ * `switching` 过渡（140ms）。没有背景块是为了和样机一致：整排控制键
+ * 只有中心的水滴按钮带「面」，两侧都是线条 / 图形。
+ */
+@Composable
+private fun PlayModeCtrlButton(
+    playMode: PlayMode,
+    onClick: () -> Unit,
+    size: Dp,
+    iconSize: Dp
+) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        AnimatedContent(
+            targetState = playMode,
+            transitionSpec = {
+                (fadeIn(tween(140)) + scaleIn(tween(140), initialScale = 0.65f)) togetherWith
+                    (fadeOut(tween(140)) + scaleOut(tween(140), targetScale = 0.65f))
+            },
+            label = "playModeIcon"
+        ) { mode ->
+            androidx.compose.material3.Icon(
+                imageVector = when (mode) {
+                    PlayMode.SHUFFLE -> SonanceIcons.Shuffle
+                    PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
+                    PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
+                },
+                contentDescription = mode.label,
+                tint = skin.accent,
+                modifier = Modifier.size(iconSize)
             )
         }
     }
@@ -479,6 +521,7 @@ private fun RowScope.MiniPlayerBody(
     onNext: () -> Unit
 ) {
     val skin = LocalSkin.current
+    val palette = rememberPlayerControlPalette(state, song)
     CoverArt(
         albumId = state.albumId,
         seed = state.title + state.artist,
@@ -518,15 +561,17 @@ private fun RowScope.MiniPlayerBody(
     if (progressRing) {
         PlayPauseRing(
             frac = frac,
-            isPlaying = state.isPlaying,
-            onClick = onPlayPause
+            isPlaying = state.isPlaybackActive,
+            onClick = onPlayPause,
+            palette = palette
         )
     } else {
         PlayPauseButton(
-            isPlaying = state.isPlaying,
+            isPlaying = state.isPlaybackActive,
             onClick = onPlayPause,
             size = 40.dp,
-            iconSize = 18.dp
+            iconSize = 18.dp,
+            palette = palette
         )
     }
     CtrlButton(
@@ -551,7 +596,8 @@ private fun RowScope.MiniPlayerBody(
 private fun PlayPauseRing(
     frac: Float,
     isPlaying: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    palette: PlayButtonPalette
 ) {
     val skin = LocalSkin.current
     Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
@@ -585,7 +631,8 @@ private fun PlayPauseRing(
             isPlaying = isPlaying,
             onClick = onClick,
             size = 32.dp,
-            iconSize = 14.dp
+            iconSize = 14.dp,
+            palette = palette
         )
     }
 }
@@ -610,6 +657,7 @@ fun PlayerBar(
     modifier: Modifier = Modifier,
     height: Dp = 78.dp
 ) {
+    val palette = rememberPlayerControlPalette(state, song)
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
     val coverUri = remember(state.sourceUri) {
         state.sourceUri?.let { android.net.Uri.parse(it) }
@@ -671,7 +719,7 @@ fun PlayerBar(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             TransportControls(
-                isPlaying = state.isPlaying,
+                isPlaying = state.isPlaybackActive,
                 playMode = PlayMode.of(state.shuffle, state.repeat),
                 onCyclePlayMode = onCyclePlayMode,
                 onPrev = onPrev,
@@ -682,7 +730,8 @@ fun PlayerBar(
                 ctrlIcon = 15.dp,
                 playSize = 36.dp,
                 playIcon = 16.dp,
-                gap = 4.dp
+                gap = 4.dp,
+                playButtonPalette = palette
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -770,6 +819,7 @@ fun NowPlayingPanel(
     /** 面板内**下滑** = 上一首 */
     onSwipeDown: (() -> Unit)? = null
 ) {
+    val palette = rememberPlayerControlPalette(state, song)
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
     val coverUri = remember(state.sourceUri) {
         state.sourceUri?.let { android.net.Uri.parse(it) }
@@ -1014,12 +1064,13 @@ fun NowPlayingPanel(
         Spacer(Modifier.height(16.dp))
 
         TransportControls(
-            isPlaying = state.isPlaying,
+            isPlaying = state.isPlaybackActive,
             playMode = PlayMode.of(state.shuffle, state.repeat),
             onCyclePlayMode = onCyclePlayMode,
             onPrev = onPrev,
             onPlayPause = onPlayPause,
-            onNext = onNext
+            onNext = onNext,
+            playButtonPalette = palette
             // 下面那行已经有队列图标了，这里不重复放
         )
 

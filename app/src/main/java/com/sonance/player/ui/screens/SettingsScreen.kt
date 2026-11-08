@@ -75,6 +75,8 @@ import com.sonance.player.ui.components.AdaptModeRow
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
+import com.sonance.player.data.LyricPlaybarStyle
+import com.sonance.player.data.PlayButtonColorMode
 import com.sonance.player.data.Prefs
 import com.sonance.player.R
 import com.sonance.player.ui.components.PillButton
@@ -158,6 +160,9 @@ fun SettingsScreen(
         // ===== 播放控制（播放/暂停键的触感与外观）=====
         PlayControlSettingsSection(vm = vm)
 
+        // ===== 全局图标套系（原型原版 / 极简线条 / 实心圆润）=====
+        IconSetSettingsSection(vm = vm)
+
         // ===== 列表外观（行分隔方式）=====
         ListAppearanceSection(vm = vm)
 
@@ -216,11 +221,6 @@ fun SettingsScreen(
         // ===== 网易云缓存嗅探并转换 =====
         // 与「私有格式还原」共用同一个彩蛋开关
         if (vm.conversionUnlocked) NeteaseCacheSection(vm = vm)
-
-        // ===== 多设备调试 =====
-        // 正式界面不出现 IP / 端口输入框；这里只是真机联调时绕过 mDNS 的兜底入口，
-        // 与上面两个内部工具共用同一个彩蛋开关。
-        if (vm.conversionUnlocked) GroupDebugSection()
 
         // ===== 统计 =====
         SettingsSection(title = "曲库概览") {
@@ -584,6 +584,29 @@ private fun PlayControlSettingsSection(vm: SonanceViewModel) {
         )
         Spacer(Modifier.height(10.dp))
 
+        Text("播放／暂停按钮配色", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlayButtonColorMode.entries.forEach { mode ->
+                val selected = mode == vm.playBtnColorMode
+                Box(
+                    Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) skin.accentGlow else skin.surface2)
+                        .border(if (selected) 1.dp else 0.dp,
+                            if (selected) skin.accent else Color.Transparent, RoundedCornerShape(10.dp))
+                        .clickable { vm.changePlayBtnColorMode(mode) }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(mode.label, style = MaterialTheme.typography.labelMedium,
+                        color = if (selected) skin.accent else skin.textMuted)
+                }
+            }
+        }
+        Text("播放主界面、列表页与歌词悬浮播放器共用配色。当前风格保留蓝紫粉渐变；主题和封面模式生成协调渐变，切换时平滑过渡。",
+            style = MaterialTheme.typography.labelSmall, color = skin.textDim,
+            modifier = Modifier.padding(top = 6.dp, bottom = 12.dp))
+
         // ---- 图标样式（三种）----
         Text("图标样式", style = MaterialTheme.typography.titleSmall, color = skin.text)
         Spacer(Modifier.height(8.dp))
@@ -643,6 +666,66 @@ private fun PlayControlSettingsSection(vm: SonanceViewModel) {
             checked = vm.playBtnHaptics,
             onCheckedChange = { vm.changePlayBtnHaptics(it) }
         )
+    }
+}
+
+/**
+ * 全局图标套系：原型原版 / 极简线条 / 实心圆润。
+ *
+ * 作用于所有使用 [SonanceIcons] 里原型覆盖图标的位置：播放页顶栏、控制排、
+ * 信息行、列表行、队列面板、侧栏导航。点击即时生效（写入 IconSetState），
+ * 无需重启；选择持久化在 Prefs.iconSet。
+ */
+@Composable
+private fun IconSetSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    SettingsSection(title = "图标风格") {
+        Text(
+            "原型播放页里的图标做了三套：默认按 HTML 原样；极简线条去掉细节；" +
+                "实心圆润加重块面。切换后播放页、列表、队列、导航一起换，立即生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                0 to "原型原版",
+                1 to "极简线条",
+                2 to "实心圆润"
+            ).forEach { (id, label) ->
+                val on = id == vm.iconSet
+                val (prev, heart, queue) = SonanceIcons.previewSet(id)
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeIconSet(id) }
+                        .padding(vertical = 9.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(prev, null, tint = skin.text, modifier = Modifier.size(16.dp))
+                        Icon(heart, null, tint = skin.text, modifier = Modifier.size(16.dp))
+                        Icon(queue, null, tint = skin.text, modifier = Modifier.size(16.dp))
+                    }
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -999,12 +1082,39 @@ private fun LyricsSettingsSection(vm: SonanceViewModel) {
 
     SettingsSection(title = "歌词") {
         SettingsSwitchRow(
-            title = "歌词页播放按钮",
-            subtitle = "在歌词页底部显示上一曲 / 播放暂停 / 下一曲三个按钮。" +
-                "经典和圆盘两种歌词模式都遵循这一个开关。",
+            title = "歌词页播放器",
+            subtitle = "在歌词页底部显示播放控制，可切换三个按钮或悬浮播放器。" +
+                "四种全屏歌词模式都遵循这一个开关。",
             checked = vm.lyricsPlaybarEnabled,
             onCheckedChange = { vm.changeLyricsPlaybar(it) }
         )
+        if (vm.lyricsPlaybarEnabled) {
+            Text("播放器样式", style = MaterialTheme.typography.labelMedium, color = skin.textMuted,
+                modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LyricPlaybarStyle.entries.forEach { style ->
+                    val selected = style == vm.lyricsPlaybarStyle
+                    Box(
+                        Modifier.weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(if (selected) 1.dp else 0.dp,
+                                if (selected) skin.accent else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clickable { vm.changeLyricsPlaybarStyle(style) }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(style.label, style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textMuted)
+                    }
+                }
+            }
+            if (vm.lyricsPlaybarStyle == LyricPlaybarStyle.FLOAT) {
+                Text("与列表页悬浮播放器共用外观、进度显示及滑动阈值设置；左滑下一首、右滑上一首，点击卡片返回播放主界面。",
+                    style = MaterialTheme.typography.labelSmall, color = skin.textDim,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
+            }
+        }
         SettingsSwitchRow(
             title = "在线歌词（LrcAPI）",
             subtitle = "本地内嵌歌词找不到时，联网向歌词接口要一份。默认关闭 —— 打开后才会联网，" +
@@ -1980,81 +2090,6 @@ private fun CollapsibleSection(
                 content()
             }
         }
-    }
-}
-
-@Composable
-private fun GroupDebugSection() {
-    val skin = LocalSkin.current
-    val context = LocalContext.current
-    val prefs = remember { Prefs(context) }
-    var open by remember { mutableStateOf(false) }
-    var ip by remember { mutableStateOf("") }
-
-    SettingsSection(title = "多设备调试") {
-        SettingsActionRow(
-            title = "手动连接主机",
-            subtitle = "mDNS 发现失败时，用同一 Wi-Fi 下主机的 IP 直连。仅用于真机联调。",
-            actionLabel = "连接",
-            onClick = {
-                ip = prefs.groupLastHost?.substringBefore(':').orEmpty()
-                open = true
-            }
-        )
-        if (prefs.groupLastHost != null) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "上次连接：${prefs.groupLastHost}",
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.textDim
-            )
-        }
-    }
-
-    if (open) {
-        AlertDialog(
-            onDismissRequest = { open = false },
-            containerColor = skin.surface,
-            title = { Text("手动连接主机", color = skin.text) },
-            text = {
-                Column {
-                    Text(
-                        "输入主机在局域网里的 IP（端口默认 47801）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = skin.textMuted
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = ip,
-                        onValueChange = { ip = it },
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = skin.accent,
-                            unfocusedBorderColor = skin.border2,
-                            focusedTextColor = skin.text,
-                            unfocusedTextColor = skin.text,
-                            cursorColor = skin.accent
-                        )
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val host = ip.trim().substringBefore(':')
-                    val port = ip.trim().substringAfter(':', "").takeIf { it.isNotBlank() }
-                        ?.toIntOrNull() ?: com.sonance.player.sync.GroupProtocol.TCP_PORT
-                    if (host.isNotBlank()) {
-                        com.sonance.player.sync.GroupManager.connectManual(host, port)
-                    }
-                    open = false
-                }) { Text("连接", color = skin.accent) }
-            },
-            dismissButton = {
-                TextButton(onClick = { open = false }) { Text("取消", color = skin.textMuted) }
-            }
-        )
     }
 }
 

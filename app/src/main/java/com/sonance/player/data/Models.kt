@@ -126,19 +126,38 @@ enum class LyricAdaptMode(val id: String, val label: String, val hint: String) {
 /**
  * 歌词页的**展现模式**。
  *
- * 同一份歌词、同一套调色逻辑，两种排版：
- * - [CLASSIC] 现在的样子：逐行列表，当前句高亮，跟着唱；
- * - [TILTED] 「圆盘」：圆心在屏幕左侧，歌词贴在大圆的右侧弧面上绕着圆心
- *   逆时针转，当前句放得特别大、远处的行淡化模糊，更偏"看"而不是"跟"。
- *   （id 用 "tilted" 是历史原因 —— 最早的版本是整页倾斜 5° 的排版，后来
- *   按用户反馈改成了圆盘转动，id 不变是为了不丢已保存的设置。）
+ * 仅用于全屏歌词；其他入口继续使用经典列表。
+ * 旧圆盘的 tilted id 已移除，读取旧设置时回退到经典模式。
  */
 enum class LyricStyle(val id: String, val label: String) {
     CLASSIC("classic", "经典"),
-    TILTED("tilted", "圆盘");
+    FLUID("fluid", "流体声波景深"),
+    VINYL("vinyl", "黑胶环形声轨"),
+    SPATIAL("spatial", "3D 双向深空星廊");
 
     companion object {
         fun fromId(id: String?): LyricStyle = entries.firstOrNull { it.id == id } ?: CLASSIC
+    }
+}
+
+/** 全屏歌词底部控制样式，独立于列表页迷你播放器的形态。 */
+enum class LyricPlaybarStyle(val id: String, val label: String) {
+    BUTTONS("buttons", "三个播放按钮"),
+    FLOAT("float", "悬浮播放器");
+
+    companion object {
+        fun fromId(id: String?): LyricPlaybarStyle = entries.firstOrNull { it.id == id } ?: BUTTONS
+    }
+}
+
+/** 播放页、列表播放条与歌词悬浮播放器共用的播放/暂停按钮配色。 */
+enum class PlayButtonColorMode(val id: String, val label: String) {
+    ORIGINAL("original", "当前风格"),
+    THEME("theme", "跟随主题"),
+    COVER("cover", "跟随封面");
+
+    companion object {
+        fun fromId(id: String?): PlayButtonColorMode = entries.firstOrNull { it.id == id } ?: ORIGINAL
     }
 }
 

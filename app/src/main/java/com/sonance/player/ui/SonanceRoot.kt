@@ -84,9 +84,6 @@ import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongMetaEditor
 import com.sonance.player.data.formatDuration
-import com.sonance.player.sync.GroupManager
-import com.sonance.player.sync.GroupRole
-import com.sonance.player.ui.group.GroupSheet
 import com.sonance.player.data.formatSize
 import com.sonance.player.playback.BiliVideoSession
 import com.sonance.player.playback.PlayerUiState
@@ -527,7 +524,6 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     /** 沉浸式黑胶模式（铺在一切之上；关闭后音频不受影响） */
     var vinylOpen by remember { mutableStateOf(false) }
     var queueOpen by rememberSaveable { mutableStateOf(false) }
-    var groupOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
     var eqOpen by remember { mutableStateOf(false) }
@@ -580,41 +576,31 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 队列页 / 播放页要按 id 反查它们，映射必须重建。
     val songMap = remember(vm.songs, vm.onlineRevision) { vm.songMap() }
 
-    // 多设备：从机播放的是主机推过来的远端曲目，mediaId 是负数，不在 songMap 里。
-    // 这里给它合成一个占位 Song，播放页 / 队列页才不会因为「查不到歌」而空白。
-    val groupState by GroupManager.state.collectAsStateWithLifecycle()
-    val remoteSong = remember(
-        playerState.mediaId, groupState.trackTitle, groupState.trackArtist,
-        groupState.trackAlbum, groupState.trackDurationMs
-    ) {
-        val title = groupState.trackTitle
-        if (playerState.mediaId < 0 && title != null && groupState.role == GroupRole.GUEST) {
-            Song(
-                id = playerState.mediaId,
-                title = title,
-                artist = groupState.trackArtist,
-                album = groupState.trackAlbum,
+    // 分页器的数据源必须和播放器时间轴严格 1:1：
+    // `queueIds` 里可能有被隐藏/清理、或扫描后已不在 songs 里的曲目，
+    // 之前用 mapNotNull 会把这些 id 静默丢掉，导致页号与播放器索引错位 ——
+    // 用户滑到第 N 页时声音切到播放器第 N 首，页面却显示压缩列表里的另一首
+    // （表现为「切歌后封面/歌名还停在上一首」）。这里改成占位补位，绝不丢项。
+    val queue = remember(playerState.queueIds, songMap) {
+        playerState.queueIds.map { id ->
+            songMap[id] ?: Song(
+                id = id,
+                title = "未知歌曲",
+                artist = "",
+                album = "",
                 albumId = -1L,
-                durationMs = groupState.trackDurationMs,
+                durationMs = 0L,
                 uri = android.net.Uri.EMPTY,
                 folderPath = "",
                 folderName = "",
-                displayName = title,
+                displayName = "",
                 sizeBytes = 0L,
                 dateAddedSec = 0L,
                 track = 0
             )
-        } else null
+        }
     }
-    val queue = remember(playerState.queueIds, songMap, remoteSong) {
-        playerState.queueIds.mapNotNull { songMap[it] ?: remoteSong?.takeIf { s -> s.id == it } }
-    }
-    val currentSong = songMap[playerState.mediaId] ?: remoteSong?.takeIf { it.id == playerState.mediaId }
-
-    // 主机收到入组请求时，不管当前在哪个页面都把多设备面板拉起来，好让确认框出现
-    LaunchedEffect(groupState.pendingPeerId) {
-        if (groupState.pendingPeerId != null) groupOpen = true
-    }
+    val currentSong = songMap[playerState.mediaId]
 
     // ===== 沉浸皮肤：背景 = 当前播放封面的液态玻璃，字色随封面明暗自适应 =====
     val context = LocalContext.current
@@ -865,9 +851,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
                 onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
                 vinylMode = vm.vinylMode,
-                onVinylModeChange = { vm.changeVinylMode(it) },
-                groupState = groupState,
-                onOpenGroup = { groupOpen = true }
+                onVinylModeChange = { vm.changeVinylMode(it) }
             )
         }
 
@@ -952,10 +936,6 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     if (sleepOpen) {
         SleepTimerSheet(vm = vm, onDismiss = { sleepOpen = false })
-    }
-
-    if (groupOpen) {
-        GroupSheet(onDismiss = { groupOpen = false })
     }
 
     // 打开专辑详情时收起全屏播放页

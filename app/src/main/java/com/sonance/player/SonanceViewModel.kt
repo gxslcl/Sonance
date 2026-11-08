@@ -57,6 +57,8 @@ import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
 import com.sonance.player.data.LyricAdaptMode
+import com.sonance.player.data.LyricPlaybarStyle
+import com.sonance.player.data.PlayButtonColorMode
 import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.LyricsCache
 import com.sonance.player.data.LyricsRepository
@@ -95,6 +97,7 @@ import com.sonance.player.playback.EqPreset
 import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerController
 import com.sonance.player.playback.RepeatMode
+import com.sonance.player.ui.icon.IconSetState
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
@@ -1538,13 +1541,21 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** 歌词页底部的三个播放按钮（上一曲 / 播放暂停 / 下一曲）显不显示，经典 / 倾斜两种模式共用 */
+    /** 歌词页底部播放控制显不显示，四种全屏模式共用 */
     var lyricsPlaybarEnabled by mutableStateOf(prefs.lyricsPlaybar)
         private set
 
     fun changeLyricsPlaybar(value: Boolean) {
         lyricsPlaybarEnabled = value
         prefs.lyricsPlaybar = value
+    }
+
+    var lyricsPlaybarStyle by mutableStateOf(prefs.lyricsPlaybarStyle)
+        private set
+
+    fun changeLyricsPlaybarStyle(value: LyricPlaybarStyle) {
+        lyricsPlaybarStyle = value
+        prefs.lyricsPlaybarStyle = value
     }
 
     fun changeLyricsT2S(value: Boolean) {
@@ -1678,9 +1689,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.playBtnGlow = value
     }
 
+    var playBtnColorMode by mutableStateOf(prefs.playBtnColorMode)
+        private set
+
+    fun changePlayBtnColorMode(value: PlayButtonColorMode) {
+        playBtnColorMode = value
+        prefs.playBtnColorMode = value
+    }
+
     /** 图标样式：0=经典 1=液态 2=极简（与 Prefs.playBtnIconStyle 对应） */
     var playBtnIconStyle by mutableIntStateOf(prefs.playBtnIconStyle)
         private set
+
+    /** 全局图标套系：0=原型原版 1=极简线条 2=实心圆润（Prefs.iconSet + IconSetState 双写） */
+    var iconSet by mutableIntStateOf(prefs.iconSet)
+        private set
+
+    fun changeIconSet(value: Int) {
+        iconSet = value.coerceIn(0, 2)
+        prefs.iconSet = iconSet
+        IconSetState.set(iconSet)
+    }
 
     fun changePlayBtnIconStyle(value: Int) {
         playBtnIconStyle = value.coerceIn(0, 2)
@@ -4081,8 +4110,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun songMap(): Map<Long, Song> {
         val base = songs.associateBy { it.id }
-        if (onlineSongMap.isEmpty()) return base
-        return base + onlineSongMap
+        // 队列里可能还有被「清理重复」隐藏、或扫描后暂时不在 songs 里的曲目。
+        // 这里把上一次扫描的全量结果并进来，保证 queueIds 都能解析到对象，
+        // 否则分页器页号会和播放器索引错位（切歌后信息停在上一首的根因之一）。
+        val all = lastScanOutcome?.songs?.associateBy { it.id }.orEmpty()
+        val merged = if (all.isEmpty()) base else all + base
+        if (onlineSongMap.isEmpty()) return merged
+        return merged + onlineSongMap
     }
 
     // ===== 随机播放 =====

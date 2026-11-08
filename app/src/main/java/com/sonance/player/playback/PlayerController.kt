@@ -15,7 +15,6 @@ import com.sonance.player.data.CoverCache
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.Song
-import com.sonance.player.sync.GroupManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,6 +81,8 @@ data class PlayerUiState(
     val hasItem: Boolean = false,
     val isPlaying: Boolean = false,
     val isBuffering: Boolean = false,
+    /** Playback intent survives seek/buffering; isPlaying still means audio is actually advancing. */
+    val playWhenReady: Boolean = false,
     val mediaId: Long = -1L,
     val title: String = "",
     val artist: String = "",
@@ -98,7 +99,14 @@ data class PlayerUiState(
     val queueIndex: Int = -1,
     /** 最近一次播放失败的原因（已翻译成中文），由 UI 取走后清空 */
     val errorMessage: String? = null
-)
+) {
+    /** Pause-button state, not a clock source for lyrics/progress extrapolation. */
+    val isPlaybackActive: Boolean get() = isPlaying || playWhenReady
+}
+
+/** Buffering/seek is not pause; ended and failed playback must still show the play action. */
+internal fun activePlaybackIntent(playWhenReady: Boolean, playbackState: Int, hasError: Boolean): Boolean =
+    playWhenReady && playbackState != Player.STATE_ENDED && !hasError
 
 /**
  * UI 侧的播放控制器：桥接 MediaController ↔ Compose 状态。
@@ -186,7 +194,7 @@ class PlayerController(private val context: Context) {
                             "item=$failedTitle uri=$failedUri msg=$message",
                         error
                     )
-                    _state.update { it.copy(errorMessage = message) }
+                    _state.update { it.copy(errorMessage = message, isPlaying = false, playWhenReady = false) }
                 }
             })
             _state.update { it.copy(connected = true) }
@@ -234,6 +242,7 @@ class PlayerController(private val context: Context) {
                 hasItem = player.mediaItemCount > 0,
                 isPlaying = player.isPlaying,
                 isBuffering = player.playbackState == Player.STATE_BUFFERING,
+                playWhenReady = activePlaybackIntent(player.playWhenReady, player.playbackState, player.playerError != null),
                 mediaId = id,
                 title = meta?.title?.toString().orEmpty(),
                 artist = meta?.artist?.toString().orEmpty(),
@@ -489,12 +498,11 @@ class PlayerController(private val context: Context) {
     }
 
     fun togglePlay() {
-        // 组内从机的播放/暂停交给主机决定：本地只发命令，由主机锚点驱动所有设备
-        if (GroupManager.interceptGuestCommand("toggle")) return
         val c = controller ?: return
         if (c.mediaItemCount == 0) return
-        if (c.isPlaying) c.pause() else {
+        if (activePlaybackIntent(c.playWhenReady, c.playbackState, c.playerError != null)) c.pause() else {
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
+            if (c.playbackState == Player.STATE_ENDED) c.seekToDefaultPosition()
             c.play()
         }
     }
@@ -559,7 +567,6 @@ class PlayerController(private val context: Context) {
      * 行为一致：永远往后走一首，最后一首回到第一首，不存在"切不动"的尽头。
      */
     fun next() {
-        if (GroupManager.interceptGuestCommand("next")) return
         val c = controller ?: return
         lastNotifiedId = -1L
         val count = c.mediaItemCount
@@ -570,7 +577,6 @@ class PlayerController(private val context: Context) {
     }
 
     fun previous() {
-        if (GroupManager.interceptGuestCommand("prev")) return
         val c = controller ?: return
         val count = c.mediaItemCount
         if (count <= 0) return
@@ -595,16 +601,9 @@ class PlayerController(private val context: Context) {
     }
 
     fun seekTo(ms: Long) {
-        if (GroupManager.interceptGuestCommand("seek", ms)) return
         val c = controller ?: return
         c.seekTo(ms.coerceAtLeast(0L))
         _state.update { it.copy(positionMs = ms.coerceAtLeast(0L)) }
-    }
-
-    /** 多设备同步的从机纠偏会走这里（主机锚点下发的速率微调） */
-    fun setSpeed(speed: Float) {
-        val c = controller ?: return
-        c.setPlaybackSpeed(speed.coerceIn(0.5f, 2f))
     }
 
     fun setVolume(value: Float) {

@@ -18,7 +18,6 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.sonance.player.MainActivity
 import com.sonance.player.data.OnlineCover
-import com.sonance.player.sync.GroupManager
 import com.sonance.player.widget.SonanceWidgets
 
 /**
@@ -69,9 +68,6 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         player.addListener(widgetSync)
-
-        // 多设备同步：把本服务的播放器交给 GroupManager，组会话随服务生命周期存活
-        GroupManager.attach(this, player)
     }
 
     /**
@@ -161,7 +157,6 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
-        GroupManager.detach()
         mediaSession?.run {
             player.removeListener(widgetSync)
             player.release()

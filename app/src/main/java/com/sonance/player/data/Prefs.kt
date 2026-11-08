@@ -61,6 +61,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_PLAY_BTN_GLOW, true)
         set(v) = sp.edit().putBoolean(KEY_PLAY_BTN_GLOW, v).apply()
 
+    var playBtnColorMode: PlayButtonColorMode
+        get() = PlayButtonColorMode.fromId(sp.getString(KEY_PLAY_BTN_COLOR_MODE, null))
+        set(v) = sp.edit().putString(KEY_PLAY_BTN_COLOR_MODE, v.id).apply()
+
     /**
      * 播放/暂停按钮内部的图标样式。0=经典（实心播放/暂停图标）、
      * 1=液态（参考样机的三杆弹簧变形）、2=极简（细线三角/双杠）。
@@ -74,6 +78,14 @@ class Prefs(context: Context) {
     var playBtnIconScale: Int
         get() = sp.getInt(KEY_PLAY_BTN_ICON_SCALE, 100).coerceIn(60, 170)
         set(v) = sp.edit().putInt(KEY_PLAY_BTN_ICON_SCALE, v.coerceIn(60, 170)).apply()
+
+    /**
+     * 全局图标套系：0=原型原版（HTML 1:1）、1=极简线条、2=实心圆润。
+     * 播放页控制排、顶栏、信息行、列表行、队列面板一起跟随。
+     */
+    var iconSet: Int
+        get() = sp.getInt(KEY_ICON_SET, 0).coerceIn(0, 2)
+        set(v) = sp.edit().putInt(KEY_ICON_SET, v.coerceIn(0, 2)).apply()
 
     /**
      * 晕染浓度。
@@ -334,29 +346,23 @@ class Prefs(context: Context) {
         get() = LyricAdaptMode.fromId(sp.getString(KEY_LYRICS_ADAPT, null))
         set(v) = sp.edit().putString(KEY_LYRICS_ADAPT, v.id).apply()
 
-    /** 歌词页的展现模式（经典 / 倾斜），全局设置 */
+    /** 全屏歌词的四种展现模式，全局设置 */
     var lyricsStyle: LyricStyle
         get() = LyricStyle.fromId(sp.getString(KEY_LYRICS_STYLE, null))
         set(v) = sp.edit().putString(KEY_LYRICS_STYLE, v.id).apply()
 
     /**
-     * 歌词页底部的三个播放按钮（上一曲 / 播放暂停 / 下一曲）显不显示。
-     * 独立于展现模式 —— 经典 / 倾斜两种模式都遵循这一个开关。
+     * 歌词页底部播放控制显不显示（三个按钮或悬浮播放器）。
+     * 独立于展现模式 —— 四种模式都遵循这一个开关。
      */
     var lyricsPlaybar: Boolean
         get() = sp.getBoolean(KEY_LYRICS_PLAYBAR, false)
         set(v) = sp.edit().putBoolean(KEY_LYRICS_PLAYBAR, v).apply()
 
-    /**
-     * 圆盘歌词的圆盘半径（屏宽的倍数）。越大弧面越平、行越不倾斜；
-     * 全屏歌词页外观面板的「圆盘大小」滑杆可调。
-     */
-    var lyricsDiscRadius: Float
-        get() = sp.getFloat(KEY_LYRICS_DISC_RADIUS, DEFAULT_LYRICS_DISC_RADIUS)
-            .coerceIn(MIN_LYRICS_DISC_RADIUS, MAX_LYRICS_DISC_RADIUS)
-        set(v) = sp.edit()
-            .putFloat(KEY_LYRICS_DISC_RADIUS, v.coerceIn(MIN_LYRICS_DISC_RADIUS, MAX_LYRICS_DISC_RADIUS))
-            .apply()
+    /** 新样式不改变旧开关；没有保存过样式的用户继续使用原有三个按钮。 */
+    var lyricsPlaybarStyle: LyricPlaybarStyle
+        get() = LyricPlaybarStyle.fromId(sp.getString(KEY_LYRICS_PLAYBAR_STYLE, null))
+        set(v) = sp.edit().putString(KEY_LYRICS_PLAYBAR_STYLE, v.id).apply()
 
     /**
      * 歌词进度偏移，**按歌记忆**：不同歌的歌词源不同、偏差方向也不同，
@@ -1137,31 +1143,6 @@ class Prefs(context: Context) {
         }
     }
 
-    /**
-     * 多设备同步：本机在组里显示的名字（默认取机型，可被用户改）。
-     * 只做本地展示，不参与配对鉴权。
-     */
-    var groupDeviceName: String
-        get() = sp.getString(KEY_GROUP_NAME, null)?.takeIf { it.isNotBlank() }
-            ?: android.os.Build.MODEL.orEmpty().ifBlank { "Android" }
-        set(v) = sp.edit().putString(KEY_GROUP_NAME, v.trim().take(24)).apply()
-
-    /** 最近一次手动连接的主机地址（调试入口用，正式流程靠 NSD） */
-    var groupLastHost: String?
-        get() = sp.getString(KEY_GROUP_LAST_HOST, null)
-        set(v) = sp.edit().putString(KEY_GROUP_LAST_HOST, v).apply()
-
-    /**
-     * 输出延迟校准结果，按「机型 + 输出路由」分开存。
-     * 同一台手机插拔耳机/连蓝牙都要用不同的值，混用会把同步搞坏。
-     */
-    fun groupOutputLatency(model: String, route: String): Long =
-        sp.getInt(KEY_GROUP_LATENCY + model + "_" + route, -1).toLong()
-
-    fun setGroupOutputLatency(model: String, route: String, ms: Long) {
-        sp.edit().putInt(KEY_GROUP_LATENCY + model + "_" + route, ms.toInt()).apply()
-    }
-
     companion object {
         /** 晕染浓度的可调范围（界面上的滑块直接用这两个值） */
         const val MIN_GLOW_STRENGTH = 0.02f
@@ -1178,9 +1159,7 @@ class Prefs(context: Context) {
 
         private const val KEY_GLOW_MODE = "glow_mode"
         private const val KEY_GLOW_STRENGTH = "glow_strength"
-        private const val KEY_GROUP_NAME = "group_device_name"
-        private const val KEY_GROUP_LAST_HOST = "group_last_host"
-        private const val KEY_GROUP_LATENCY = "group_latency_"
+        private const val KEY_ICON_SET = "icon_set"
         private const val KEY_GLOW_TRANSITION = "glow_transition"
         private const val KEY_GLOW_FADE_MS = "glow_fade_ms"
         private const val KEY_ART_TRANSITION = "art_transition_mode"
@@ -1190,6 +1169,7 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
         private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
         private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
+        private const val KEY_PLAY_BTN_COLOR_MODE = "play_btn_color_mode"
         private const val KEY_PLAY_BTN_ICON_STYLE = "play_btn_icon_style"
         private const val KEY_PLAY_BTN_ICON_SCALE = "play_btn_icon_scale"
         private const val KEY_SKIN = "skin_id"
@@ -1259,17 +1239,12 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_FONT_BUMPED = "lyrics_font_bumped"
         private const val KEY_LYRICS_STYLE = "lyrics_style"
         private const val KEY_LYRICS_PLAYBAR = "lyrics_playbar"
+        private const val KEY_LYRICS_PLAYBAR_STYLE = "lyrics_playbar_style"
         private const val KEY_LYRICS_OFFSETS = "lyrics_offsets"
-        private const val KEY_LYRICS_DISC_RADIUS = "lyrics_disc_radius"
 
         /** 歌词偏移的步进与上限。0.1 秒的细步长（0.5 太粗，副歌前奏常常就差两三拍）；±10 秒之外基本是歌词匹配错了，调也没用 */
         const val LYRICS_OFFSET_STEP_MS = 100L
         const val MAX_LYRICS_OFFSET_MS = 10_000L
-
-        /** 圆盘半径的默认值与可调范围（屏宽的倍数） */
-        const val DEFAULT_LYRICS_DISC_RADIUS = 5.5f
-        const val MIN_LYRICS_DISC_RADIUS = 3.0f
-        const val MAX_LYRICS_DISC_RADIUS = 10.0f
 
         private const val KEY_GLASS_CLEARED = "glass_cleared"
         private const val KEY_GLASS_STYLE = "glass_style"

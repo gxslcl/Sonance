@@ -262,7 +262,7 @@ fun VisualizerOverlay(
                 )
         )
 
-        // ===== 右上角：设置齿轮 =====
+        // ===== 右上角：与全屏歌词一致的外观图标 =====
         //
         // **关闭按钮去掉了**（用户要求）：收起播放页可以左右滑动切层、
         // 也可以按系统返回键（[FullPlayer] 里有 BackHandler 把非封面层退回封面层），
@@ -275,10 +275,10 @@ fun VisualizerOverlay(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconAction(
-                icon = SonanceIcons.Settings,
+                icon = SonanceIcons.Layers,
                 contentDescription = "律动柱设置",
                 onClick = { settingsOpen = true },
-                iconSize = 20.dp,
+                iconSize = 19.dp,
                 tint = if (settingsOpen) skin.accent else skin.textDim
             )
         }
