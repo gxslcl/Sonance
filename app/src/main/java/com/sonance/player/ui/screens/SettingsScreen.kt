@@ -155,6 +155,9 @@ fun SettingsScreen(
         // ===== 底部播放条（形态 + 玻璃）=====
         MiniPlayerSettingsSection(vm = vm)
 
+        // ===== 播放控制（播放/暂停键的触感与外观）=====
+        PlayControlSettingsSection(vm = vm)
+
         // ===== 列表外观（行分隔方式）=====
         ListAppearanceSection(vm = vm)
 
@@ -561,6 +564,114 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 value = (vm.miniSwipeRightPct - 5) / 55f
             ) { f -> vm.changeMiniSwipeRightPct((5 + f * 55).roundToInt()) }
         }
+    }
+}
+
+/**
+ * 播放控制：播放/暂停键的触感与外观（图标样式 / 图标大小 / 光晕 / 震动）。
+ *
+ * 作用于全屏播放页、底部播放条、正在播放面板里共用的那颗液态水滴播放键。
+ */
+@Composable
+private fun PlayControlSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    SettingsSection(title = "播放控制") {
+        Text(
+            "全屏播放页的播放/暂停键：点击有震动反馈（可关），" +
+                "播放时光晕呼吸、图标在播放与暂停间弹簧变形。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+
+        // ---- 图标样式（三种）----
+        Text("图标样式", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                0 to "经典",
+                1 to "液态",
+                2 to "极简"
+            ).forEach { (id, label) ->
+                val on = id == vm.playBtnIconStyle
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changePlayBtnIconStyle(id) }
+                        .padding(vertical = 9.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    PlayIconStylePreview(style = id, color = skin.text)
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        // ---- 图标大小 ----
+        Spacer(Modifier.height(12.dp))
+        SliderLine(
+            label = "图标",
+            valueText = "${vm.playBtnIconScale}%",
+            value = (vm.playBtnIconScale - 60f) / 110f
+        ) { f -> vm.changePlayBtnIconScale((60 + f * 110).roundToInt()) }
+
+        // ---- 光晕 ----
+        Spacer(Modifier.height(4.dp))
+        SettingsSwitchRow(
+            title = "光晕",
+            subtitle = "播放键外圈的渐变光斑，播放时随节奏呼吸",
+            checked = vm.playBtnGlow,
+            onCheckedChange = { vm.changePlayBtnGlow(it) }
+        )
+
+        // ---- 震动反馈 ----
+        SettingsSwitchRow(
+            title = "震动反馈",
+            subtitle = "点击播放/暂停时触发手机的触感震动",
+            checked = vm.playBtnHaptics,
+            onCheckedChange = { vm.changePlayBtnHaptics(it) }
+        )
+    }
+}
+
+/** 「图标样式」选项卡里的小预览图标（暂停态的双杠形状，静态绘制） */
+@Composable
+private fun PlayIconStylePreview(style: Int, color: Color) {
+    androidx.compose.foundation.Canvas(Modifier.size(width = 20.dp, height = 20.dp)) {
+        val w = size.width
+        val h = size.height
+        // 三种样式的双杠只是粗细 / 圆角 / 端点比例不同，微调区分
+        val params = when (style) {
+            2 -> Triple(0.12f, 0.5f, 0.12f)   // 极简：细杆
+            1 -> Triple(0.20f, 0.72f, 0.5f)   // 液态：粗圆杆
+            else -> Triple(0.18f, 0.66f, 0.3f) // 经典
+        }
+        val (barWk, hk, rk) = params
+        val barW = w * barWk
+        drawRoundRect(
+            color,
+            topLeft = androidx.compose.ui.geometry.Offset(w * 0.24f, h * (1f - hk) / 2f + h * 0.05f),
+            size = androidx.compose.ui.geometry.Size(barW, h * hk),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(barW * rk)
+        )
+        drawRoundRect(
+            color,
+            topLeft = androidx.compose.ui.geometry.Offset(w * 0.58f, h * (1f - hk) / 2f + h * 0.05f),
+            size = androidx.compose.ui.geometry.Size(barW, h * hk),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(barW * rk)
+        )
     }
 }
 
@@ -2176,7 +2287,10 @@ private fun PluginSourceRows(vm: SonanceViewModel) {
     Text(
         "• 只支持 CommonJS 内容源插件（module.exports 导出 search / getMediaSource）；" +
             "洛雪自定义源脚本是另一套协议，不能在这里导入\n" +
-            "• 依赖 cheerio / crypto-js 等第三方 npm 包的插件暂不支持\n" +
+            "• axios 垫片支持 params / headers / timeout / JSON 响应；" +
+            "依赖 cheerio / crypto-js 等第三方 npm 包的插件暂不支持\n" +
+            "• 插件若用 http 明文接口，域名需在明文白名单（network_security_config）里，" +
+            "不在名单里的域名会被系统直接拦掉\n" +
             "• 本期打通搜索与在线播放，下载暂不走插件取流\n" +
             "• 插件会在应用内发起网络请求，请只导入你信任且已获授权的内容源；" +
             "应用不内置任何音源，也不提供插件获取渠道\n" +

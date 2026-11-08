@@ -46,6 +46,36 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putFloat(KEY_VINYL_SFX_VOLUME, v.coerceIn(0f, 1f)).apply()
 
     /**
+     * 播放/暂停按钮的触感震动反馈。默认开启 ——
+     * 用户要求「点击暂停和播放的时候要有震动反馈」，设置页可关。
+     */
+    var playBtnHaptics: Boolean
+        get() = sp.getBoolean(KEY_PLAY_BTN_HAPTICS, true)
+        set(v) = sp.edit().putBoolean(KEY_PLAY_BTN_HAPTICS, v).apply()
+
+    /**
+     * 播放/暂停按钮的外圈光晕。默认开启（参考样机默认亮着光晕），
+     * 播放态光晕会随呼吸律动；设置页可关，关掉后只保留按钮本体的干净渐变。
+     */
+    var playBtnGlow: Boolean
+        get() = sp.getBoolean(KEY_PLAY_BTN_GLOW, true)
+        set(v) = sp.edit().putBoolean(KEY_PLAY_BTN_GLOW, v).apply()
+
+    /**
+     * 播放/暂停按钮内部的图标样式。0=经典（实心播放/暂停图标）、
+     * 1=液态（参考样机的三杆弹簧变形）、2=极简（细线三角/双杠）。
+     * 默认 1 —— 用户指定参考那个液态按钮。
+     */
+    var playBtnIconStyle: Int
+        get() = sp.getInt(KEY_PLAY_BTN_ICON_STYLE, 1).coerceIn(0, 2)
+        set(v) = sp.edit().putInt(KEY_PLAY_BTN_ICON_STYLE, v.coerceIn(0, 2)).apply()
+
+    /** 播放/暂停按钮内部图标的大小档（百分比 60~170，100 为原设计值） */
+    var playBtnIconScale: Int
+        get() = sp.getInt(KEY_PLAY_BTN_ICON_SCALE, 100).coerceIn(60, 170)
+        set(v) = sp.edit().putInt(KEY_PLAY_BTN_ICON_SCALE, v.coerceIn(60, 170)).apply()
+
+    /**
      * 晕染浓度。
      *
      * 默认 0.60 是「能一眼看出来、但不抢封面」的档位 ——
@@ -1158,6 +1188,10 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_MODE = "player_vinyl_mode"
         private const val KEY_VINYL_SFX_ENABLED = "player_vinyl_sfx_enabled"
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
+        private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
+        private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
+        private const val KEY_PLAY_BTN_ICON_STYLE = "play_btn_icon_style"
+        private const val KEY_PLAY_BTN_ICON_SCALE = "play_btn_icon_scale"
         private const val KEY_SKIN = "skin_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"

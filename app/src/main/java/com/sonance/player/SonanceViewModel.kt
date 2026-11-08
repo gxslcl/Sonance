@@ -1660,6 +1660,42 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.miniCardOpacity = miniCardOpacity
     }
 
+    // ===== 播放/暂停按钮：触感与外观（设置页「播放控制」区） =====
+
+    var playBtnHaptics by mutableStateOf(prefs.playBtnHaptics)
+        private set
+
+    fun changePlayBtnHaptics(value: Boolean) {
+        playBtnHaptics = value
+        prefs.playBtnHaptics = value
+    }
+
+    var playBtnGlow by mutableStateOf(prefs.playBtnGlow)
+        private set
+
+    fun changePlayBtnGlow(value: Boolean) {
+        playBtnGlow = value
+        prefs.playBtnGlow = value
+    }
+
+    /** 图标样式：0=经典 1=液态 2=极简（与 Prefs.playBtnIconStyle 对应） */
+    var playBtnIconStyle by mutableIntStateOf(prefs.playBtnIconStyle)
+        private set
+
+    fun changePlayBtnIconStyle(value: Int) {
+        playBtnIconStyle = value.coerceIn(0, 2)
+        prefs.playBtnIconStyle = playBtnIconStyle
+    }
+
+    /** 图标大小档（百分比 60~170） */
+    var playBtnIconScale by mutableIntStateOf(prefs.playBtnIconScale)
+        private set
+
+    fun changePlayBtnIconScale(value: Int) {
+        playBtnIconScale = value.coerceIn(60, 170)
+        prefs.playBtnIconScale = playBtnIconScale
+    }
+
     /** 悬浮卡片上进度用环还是用线（两者都开就重复，所以做成三选一） */
     var miniProgressStyle by mutableStateOf(MiniProgressStyle.of(prefs.miniProgressStyle))
         private set

@@ -163,6 +163,9 @@ class PluginRuntime(private val app: Context) {
                 primaryKey = o.optJSONArray("primaryKey")?.let { arr ->
                     (0 until arr.length()).map { arr.optString(it) }
                 } ?: emptyList(),
+                methods = o.optJSONArray("methods")?.let { arr ->
+                    (0 until arr.length()).map { arr.optString(it) }
+                } ?: emptyList(),
             )
             loadedFile = file
             currentMeta = meta

@@ -110,8 +110,21 @@ fun VinylWebScreen(
         val observer = LifecycleEventObserver { _, event ->
             webRef.value?.let { wv ->
                 when (event) {
-                    Lifecycle.Event.ON_PAUSE -> wv.onPause()
-                    Lifecycle.Event.ON_RESUME -> wv.onResume()
+                    Lifecycle.Event.ON_PAUSE -> {
+                        // 退后台：WebView 自身暂停 + 显式关掉页面渲染循环（双保险，
+                        // 不能依赖 WebView 的 rAF 节流；页面内 setRenderActive 会
+                        // cancelAnimationFrame，回前台再重启）
+                        wv.onPause()
+                        wv.evaluateJavascript(
+                            "window.__vinyl && window.__vinyl.setRenderActive(false)", null
+                        )
+                    }
+                    Lifecycle.Event.ON_RESUME -> {
+                        wv.onResume()
+                        wv.evaluateJavascript(
+                            "window.__vinyl && window.__vinyl.setRenderActive(true)", null
+                        )
+                    }
                     else -> {}
                 }
             }
@@ -128,25 +141,34 @@ fun VinylWebScreen(
         }
     }
 
-    // 挖孔屏（前置摄像头）桥传：用 DisplayCutout.boundingRectTop 精确矩形自动
-    // 检测摄像头位置（含偏左/偏右机型），转 dp 后推给页面——胶囊据此对准
-    // 挖孔实际位置并只比挖孔大一圈；无挖孔设备 rect 为空，页面回落常规样式。
-    // boundingRect API 需 API 28+，低版本设备无挖孔屏，直接视为无挖孔
+    // 顶部安全区桥传：不再只取挖孔矩形，而是把 WindowInsets 里两类真实几何一起推给页面：
+    //  displayCutout() → 挖孔实矩形 boundingRectTop + 四边 safeInset（null 机型时为 0），
+    //  statusBars() → 状态栏高度（用 IgnoringVisibility 取真实值，黑胶页隐藏状态栏时
+    //  也不会读到 0，退到后台重新显示时胶囊不会跳位）。
+    // 页面据此把胶囊整块下移到安全区下沿，居中/左上/右上挖孔都只是下移量不同，
+    // 不写死机型数值；旋转/折叠态变化时由 setOnApplyWindowInsetsListener 重推。
     val cutoutInsetReceiver = { wv: android.webkit.WebView ->
+        val d = wv.resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
+        val insets = wv.rootWindowInsets
+        val compat = insets?.let { WindowInsetsCompat.toWindowInsetsCompat(it, wv) }
+        val cutoutSafe = compat?.getInsets(WindowInsetsCompat.Type.displayCutout())
+        val status = compat?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars())
         val rect = if (android.os.Build.VERSION.SDK_INT >= 28) {
-            wv.rootWindowInsets?.displayCutout?.boundingRectTop
+            insets?.displayCutout?.boundingRectTop
         } else {
             null
         }
-        val d = wv.resources.displayMetrics.density
-        val payload = if (rect == null || rect.isEmpty) {
-            "null"
-        } else {
-            val l = rect.left / d; val r = rect.right / d
-            val t = rect.top / d; val b = rect.bottom / d
-            val sw = wv.width / d
-            "{\"l\":$l,\"r\":$r,\"t\":$t,\"b\":$b,\"sw\":$sw}"
-        }
+        val l = (rect?.left ?: 0) / d
+        val r = (rect?.right ?: 0) / d
+        val t = (rect?.top ?: 0) / d
+        val b = (rect?.bottom ?: 0) / d
+        val safeTop = (cutoutSafe?.top ?: 0) / d
+        val safeLeft = (cutoutSafe?.left ?: 0) / d
+        val safeRight = (cutoutSafe?.right ?: 0) / d
+        val statusTop = (status?.top ?: 0) / d
+        val payload = "{\"l\":$l,\"r\":$r,\"t\":$t,\"b\":$b," +
+            "\"safeTop\":$safeTop,\"safeLeft\":$safeLeft,\"safeRight\":$safeRight," +
+            "\"statusTop\":$statusTop}"
         wv.evaluateJavascript(bridgeInject("window.__vinyl.setCutout($payload);"), null)
     }
 
@@ -512,13 +534,15 @@ private suspend fun coverDataUrl(context: android.content.Context, song: Song): 
             // 表现为黑胶页部分碟片没有封面
             val img = ArtworkLoader.online(song.id)
                 ?: ArtworkLoader.load(
-                    context, song.albumId, 320, song.uri,
+                    // 640：转盘大碟用 1024 纹理（标签区约 664px），320 在 2x 屏上是
+                    // 被放大 2 倍再采样——封面上那层细纹/字就是糊的
+                    context, song.albumId, 640, song.uri,
                     OnlineCover.keyOf(song.title, song.artist)
                 )
                 ?: return@withContext null
             val bmp = img.asAndroidBitmap()
             val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, 72, out)
+            bmp.compress(Bitmap.CompressFormat.JPEG, 78, out)
             "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         } catch (e: Exception) {
             null

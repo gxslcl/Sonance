@@ -4,6 +4,11 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -72,6 +77,8 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.foundation.Canvas
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -719,13 +726,14 @@ fun FullPlayer(
                 }
 
                 // 标题独立居中于整条栏，不受左右图标数量影响
-                // 播放 / 暂停两态：和宽屏的 NowPlayingPanel 保持同一套文案
-                Text(
-                    text = if (state.isPlaying) "正在播放" else "已暂停",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = skin.textMuted,
-                    modifier = Modifier.align(Alignment.Center)
-                )
+                // 顶部状态：只留律动小图标（用户要求去掉文字），播放中三柱跳动、暂停时压平
+                Box(Modifier.align(Alignment.Center)) {
+                    PlayingStateIndicator(
+                        isPlaying = state.isPlaying,
+                        accent = skin.accent,
+                        idle = skin.textMuted
+                    )
+                }
             }
 
             // 已入组时顶部常驻一条连接状态：点进去就是多设备面板
@@ -914,6 +922,51 @@ fun FullPlayer(
  * （封面 → 歌词 → 律动柱 → 封面 …，反方向同理）。
  */
 private enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
+
+/**
+ * 顶部状态条左侧的「播放中 / 已暂停」律动小图标（参考样机的 mini-eq）。
+ *
+ * 播放中：三根小柱错拍跳动（accent 色）；已暂停：三根小柱齐平压低（灰）。
+ * 替换顶栏原来的纯文字状态，让状态一眼可辨。
+ */
+@Composable
+private fun PlayingStateIndicator(
+    isPlaying: Boolean,
+    accent: Color,
+    idle: Color
+) {
+    val transition = rememberInfiniteTransition(label = "stateEq")
+    // 三根柱错拍：StartOffset 把相位错开（对应样机 0 / 0.2s / 0.35s 的 delay）
+    val bars = listOf(0, 150, 260).map { offset ->
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = if (isPlaying) 1f else 0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(750, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+                initialStartOffset = StartOffset(offset)
+            ),
+            label = "eqBar$offset"
+        ).value
+    }
+
+    Canvas(Modifier.size(width = 22.dp, height = 18.dp)) {
+        val barW = size.width / 5f
+        val gap = (size.width - barW * 3f) / 2f
+        val maxH = size.height
+        val minH = size.height * 0.22f
+        val color = if (isPlaying) accent else idle
+        bars.forEachIndexed { i, p ->
+            val h = minH + (maxH - minH) * p
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x = i * (barW + gap), y = maxH - h),
+                size = Size(barW, h),
+                cornerRadius = CornerRadius(barW / 2f)
+            )
+        }
+    }
+}
 
 /**
  * 环形轮播的起始页号。

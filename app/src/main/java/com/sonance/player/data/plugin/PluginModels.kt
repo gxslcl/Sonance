@@ -16,6 +16,14 @@ data class PluginMeta(
     val srcUrl: String?,
     /** 插件声明的主键字段，用于把返回的媒体项映射成稳定的 remoteId */
     val primaryKey: List<String>,
+    /**
+     * 插件实际导出的方法名（运行时加载后回传）。
+     *
+     * MusicFree 协议里很多方法是"可选实现"，而宿主必须按能力路由调用：
+     * 比如取曲目列表，有的插件给 [getMusicSheetInfo]，有的（kg.js 这类
+     * 榜单型源）只给 getTopListDetail。没有这份清单就只能瞎猜。
+     */
+    val methods: List<String> = emptyList(),
 ) {
     /** 稳定 id：来自 platform，不随文件重命名变化 */
     val id: String get() = "plugin:$platform"
@@ -60,6 +68,7 @@ object PluginCodec {
         put("author", r.meta.author)
         put("srcUrl", r.meta.srcUrl ?: "")
         put("primaryKey", r.meta.primaryKey.joinToString(","))
+        put("methods", r.meta.methods.joinToString(","))
         put("file", r.file)
         put("enabled", r.enabled)
     }
@@ -70,9 +79,14 @@ object PluginCodec {
             version = o.optString("version", "0.0.0"),
             author = o.optString("author"),
             srcUrl = o.optString("srcUrl").takeIf { it.isNotBlank() },
-            primaryKey = o.optString("primaryKey").split(",").filter { it.isNotBlank() },
+            primaryKey = stringList(o.optString("primaryKey")),
+            methods = stringList(o.optString("methods")),
         ),
         file = o.optString("file"),
         enabled = o.optBoolean("enabled", true),
     )
+
+    /** "a,b,c" ↔ List<String> 的共同解析，recordFromJson 和 methods 共用 */
+    private fun stringList(raw: String): List<String> =
+        raw.split(",").filter { it.isNotBlank() }
 }

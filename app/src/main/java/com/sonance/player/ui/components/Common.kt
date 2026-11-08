@@ -1,11 +1,16 @@
 package com.sonance.player.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -17,6 +22,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -52,11 +61,13 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +77,8 @@ import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import kotlin.math.cos
+import kotlin.math.sin
 
 /** 矮屏（手机横屏等）紧凑布局开关 */
 val LocalDenseLayout = androidx.compose.runtime.staticCompositionLocalOf { false }
@@ -360,7 +373,22 @@ fun CtrlButton(
     }
 }
 
-/** 实心强调色播放键 */
+/**
+ * 液态水滴播放/暂停键（参考样机样式）。
+ *
+ * 结构（从外到内）：
+ * - 光晕：径向渐变软边光斑（不用 blur，兼容低版本），播放时呼吸律动，
+ *   暂停时保留一圈微弱底光；设置里可整体关掉；
+ * - 水滴本体：cyan→indigo→rose 的 135° 线性渐变圆，播放时渐变缓慢旋转 +
+ *   整体轻微呼吸，按下果冻缩放（0.88）；
+ * - 玻璃高光：左上角一道固定白色高光；
+ * - 图标：三种样式可切（经典 / 液态三杆弹簧变形 / 极细细线），
+ *   大小可在设置里缩放（60%~170%）；
+ * - 触感：点击触发系统震动反馈（可在设置关闭）；
+ *   点击瞬间还有一圈向外扩散的水波纹。
+ *
+ * 外占位尺寸沿用 [size]，布局不受影响。
+ */
 @Composable
 fun PlayPauseButton(
     isPlaying: Boolean,
@@ -370,22 +398,341 @@ fun PlayPauseButton(
     iconSize: Dp = 22.dp
 ) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
+    // SP 读取极轻（框架有内存缓存），设置页改完回到播放页重组时自然拿到新值
+    val prefs = remember(context) { com.sonance.player.data.Prefs(context.applicationContext) }
+    val glowEnabled = prefs.playBtnGlow
+    val iconStyle = prefs.playBtnIconStyle
+    val iconScale = prefs.playBtnIconScale / 100f
+    val view = androidx.compose.ui.platform.LocalView.current
+
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.88f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 600f),
+        label = "pressScale"
+    )
+
+    // 点击水波纹：0 → 1 的一次性扩散
+    val ripple = remember { androidx.compose.animation.core.Animatable(1f) }
+    val rippleVal = ripple.value
+
+    // 播放态呼吸（幅度很小，是"活着"不是"晃眼"）
+    val breath = if (isPlaying) {
+        rememberInfiniteTransition(label = "breath").animateFloat(
+            initialValue = 0f, targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(2200), RepeatMode.Reverse),
+            label = "breath"
+        ).value
+    } else 0f
+
+    // 播放态渐变缓旋（对应样机的 slowOrbit 11s）
+    val orbit = if (isPlaying) {
+        rememberInfiniteTransition(label = "orbit").animateFloat(
+            initialValue = 0f, targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing)),
+            label = "orbit"
+        ).value
+    } else 135f
+
+    // 播放态的有机 blob 形变进度（对应样机 organicDropletMorph 5.5s alternate）。
+    // 四组关键帧取自参考样机的 border-radius 百分比，绘制时插值成圆角矩形路径。
+    val morph = if (isPlaying) {
+        rememberInfiniteTransition(label = "morph").animateFloat(
+            initialValue = 0f, targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(5500, easing = LinearEasing)),
+            label = "morph"
+        ).value
+    } else -1f // -1 = 暂停态，画正圆
+
+    val gradientColors = listOf(
+        Color(0xFF38BDF8), Color(0xFF6366F1), Color(0xFFEC4899)
+    )
+
     Box(
-        modifier = modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(skin.accent)
-            .clickable(onClick = onClick),
+        modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        androidx.compose.material3.Icon(
+        // ---- 光晕（glow）：画在裁剪外，让它能溢出按钮圆界 ----
+        // 播放时呼吸变大、更亮；暂停时保留一圈微弱底光
+        if (glowEnabled) {
+            Canvas(
+                Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        val s = 1f + breath * 0.08f
+                        scaleX = s
+                        scaleY = s
+                        alpha = if (isPlaying) 0.95f else 0.5f
+                    }
+            ) {
+                val r = this.size.minDimension / 2f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color(0xFF6366F1).copy(alpha = 0.65f),
+                            Color(0xFFEC4899).copy(alpha = 0.30f),
+                            Color.Transparent
+                        ),
+                        center = center, radius = r * 1.4f
+                    ),
+                    radius = r * 1.4f
+                )
+            }
+        }
+
+        // ---- 可点击的按钮本体（水滴 + 高光 + 波纹 + 图标）----
+        // 不加圆形裁剪：播放态的水滴会做有机 blob 形变（边角伸出圆界），
+        // 裁了就退化回圆；点击热区是按钮的方形 bounds（52dp 内），可接受
+        Box(
+            Modifier
+                .size(size)
+                .scale(pressScale)
+                .clickable(interactionSource = interaction, indication = null) {
+                    if (prefs.playBtnHaptics) {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    }
+                    onClick()
+                }
+        ) {
+            // 水滴本体（有机 blob 形变 + 渐变随播放旋转 + 呼吸）
+            Canvas(
+                Modifier
+                    .matchParentSize()
+                    .padding(2.dp)
+                    .graphicsLayer {
+                        scaleX = 1f + breath * 0.035f
+                        scaleY = 1f + breath * 0.035f
+                    }
+            ) {
+                val w = this.size.width
+                val h = this.size.height
+                val angleRad = Math.toRadians(orbit.toDouble() - 45.0)
+                val dir = Offset(cos(angleRad).toFloat(), sin(angleRad).toFloat())
+                val brush = Brush.linearGradient(
+                    colors = gradientColors,
+                    start = center - dir * this.size.minDimension / 2f,
+                    end = center + dir * this.size.minDimension / 2f
+                )
+                if (morph < 0f) {
+                    drawCircle(brush = brush)
+                } else {
+                    drawPath(organicBlobPath(w, h, morph), brush)
+                }
+            }
+
+            // 玻璃高光（固定光源，静态绘制）
+            Canvas(Modifier.matchParentSize().padding(2.dp)) {
+                drawCircle(
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.32f),
+                            Color.White.copy(alpha = 0.04f),
+                            Color.Transparent
+                        ),
+                        start = Offset(this.size.width * 0.15f, this.size.height * 0.1f),
+                        end = Offset(this.size.width * 0.65f, this.size.height * 0.6f)
+                    )
+                )
+            }
+
+            // 点击水波纹（限制在圆内扩散，避免被裁剪截断成突兀的直线）
+            if (rippleVal < 1f) {
+                Canvas(Modifier.matchParentSize()) {
+                    val r = this.size.minDimension / 2f
+                    val t = rippleVal
+                    drawCircle(
+                        color = Color.White.copy(alpha = (1f - t) * 0.55f),
+                        radius = r * (0.55f + 0.45f * t),
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
+                }
+            }
+
+            // 中心图标
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                FluidPlayIcon(
+                    isPlaying = isPlaying,
+                    style = iconStyle,
+                    scale = iconScale,
+                    stage = iconSize,
+                    tint = skin.onAccent
+                )
+            }
+        }
+    }
+
+    // 波纹驱动：点击释放时启动一次 0 → 1 的扩散
+    androidx.compose.runtime.LaunchedEffect(interaction) {
+        interaction.interactions.collect { i ->
+            if (i is PressInteraction.Release) {
+                ripple.snapTo(0f)
+                ripple.animateTo(1f, tween(650, easing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)))
+            }
+        }
+    }
+}
+
+/**
+ * 播放/暂停键的中心图标，三种样式：
+ * - 0 经典：实心播放/暂停矢量图标（原版）；
+ * - 1 液态：三根圆角短杆在「三角(播放) ↔ 双杠(暂停)」之间弹簧变形（参考样机）；
+ * - 2 极简：细线三角 / 细双杠。
+ *
+ * [scale] 是设置里的图标大小档（1.0 为原设计），[stage] 是基准图标框。
+ */
+@Composable
+private fun FluidPlayIcon(
+    isPlaying: Boolean,
+    style: Int,
+    scale: Float,
+    stage: Dp,
+    tint: Color
+) {
+    when (style) {
+        0 -> androidx.compose.material3.Icon(
             imageVector = if (isPlaying) com.sonance.player.ui.icon.SonanceIcons.Pause
             else com.sonance.player.ui.icon.SonanceIcons.Play,
             contentDescription = if (isPlaying) "暂停" else "播放",
-            tint = skin.onAccent,
-            modifier = Modifier.size(iconSize)
+            tint = tint,
+            modifier = Modifier.size(stage * scale)
+        )
+        2 -> Canvas(Modifier.size(stage * scale)) {
+            val w = this.size.width
+            val h = this.size.height
+            if (isPlaying) {
+                val barW = w * 0.13f
+                val gap = w * 0.14f
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(w / 2f - gap - barW, h * 0.18f),
+                    size = Size(barW, h * 0.64f),
+                    cornerRadius = CornerRadius(barW / 2f)
+                )
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(w / 2f + gap, h * 0.18f),
+                    size = Size(barW, h * 0.64f),
+                    cornerRadius = CornerRadius(barW / 2f)
+                )
+            } else {
+                val p = Path().apply {
+                    moveTo(w * 0.26f, h * 0.16f)
+                    lineTo(w * 0.82f, h * 0.5f)
+                    lineTo(w * 0.26f, h * 0.84f)
+                    close()
+                }
+                drawPath(p, color = tint)
+            }
+        }
+        else -> {
+            // 液态三杆：杆宽/高/位移都按 stage 取比例，弹簧动画跟随播放态
+            val springSpec = androidx.compose.animation.core.spring<Float>(
+                dampingRatio = 0.55f, stiffness = 380f
+            )
+            val s = stage * scale
+            val barW = s * 0.20f
+
+            // 各杆的播放态目标：|← 杆 →|（双杠）；暂停态：三角（两根斜杆 + 左脊）
+            val topTx by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) -0.24f else 0.12f, springSpec, label = "topTx")
+            val topTy by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0f else -0.16f, springSpec, label = "topTy")
+            val topRot by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0f else -55f, springSpec, label = "topRot")
+            val botTx by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0.24f else 0.12f, springSpec, label = "botTx")
+            val botTy by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0f else 0.16f, springSpec, label = "botTy")
+            val botRot by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0f else 55f, springSpec, label = "botRot")
+            val spineTx by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) -0.24f else -0.19f, springSpec, label = "spineTx")
+            val spineAlpha by androidx.compose.animation.core.animateFloatAsState(
+                if (isPlaying) 0f else 1f,
+                androidx.compose.animation.core.tween(280), label = "spineAlpha")
+            val barH by androidx.compose.animation.core.animateDpAsState(
+                if (isPlaying) s * 0.76f else s * 0.72f,
+                androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 380f),
+                label = "barH")
+
+            FluidBar(barW, barH, tint, s * topTx, s * topTy, topRot, 1f)
+            FluidBar(barW, barH, tint, s * botTx, s * botTy, botRot, 1f)
+            FluidBar(barW, barH, tint, s * spineTx, 0.dp, 0f, spineAlpha)
+        }
+    }
+}
+
+/**
+ * 有机 blob 形变路径（对应参考样机 organicDropletMorph 的 border-radius 动画）。
+ *
+ * [progress] ∈ [0,1]，在四组关键帧之间插值；每组 8 个百分比 = 四角水平半径
+ * （TL TR BR BL）+ 四角垂直半径（TL TR BR BL），按 CSS border-radius 的
+ * 归一化规则处理相邻半径之和超边长的情况。progress=0 时也会是圆润的
+ * 不规则形状（不是圆），暂停态不走这条路径、直接画正圆。
+ */
+private fun organicBlobPath(w: Float, h: Float, progress: Float): Path {
+    val keys = arrayOf(
+        floatArrayOf(24f, 76f, 60f, 40f, 26f, 58f, 42f, 74f),
+        floatArrayOf(68f, 32f, 34f, 66f, 56f, 24f, 76f, 44f),
+        floatArrayOf(36f, 64f, 26f, 74f, 64f, 40f, 60f, 36f),
+        floatArrayOf(54f, 46f, 76f, 24f, 32f, 68f, 32f, 68f)
+    )
+    val seg = (progress.coerceIn(0f, 1f)) * 3f
+    val i = minOf(2, seg.toInt())
+    val t = seg - i
+    val a = keys[i]
+    val b = keys[i + 1]
+    var tlH = (a[0] + (b[0] - a[0]) * t) / 100f
+    var trH = (a[1] + (b[1] - a[1]) * t) / 100f
+    var brH = (a[2] + (b[2] - a[2]) * t) / 100f
+    var blH = (a[3] + (b[3] - a[3]) * t) / 100f
+    var tlV = (a[4] + (b[4] - a[4]) * t) / 100f
+    var trV = (a[5] + (b[5] - a[5]) * t) / 100f
+    var brV = (a[6] + (b[6] - a[6]) * t) / 100f
+    var blV = (a[7] + (b[7] - a[7]) * t) / 100f
+    // CSS 归一化：每条边上相邻两个半径之和超过边长时等比缩小
+    val fTop = minOf(1f, 1f / (tlH + trH).coerceAtLeast(1e-4f))
+    val fBottom = minOf(1f, 1f / (brH + blH).coerceAtLeast(1e-4f))
+    val fLeft = minOf(1f, 1f / (tlV + blV).coerceAtLeast(1e-4f))
+    val fRight = minOf(1f, 1f / (trV + brV).coerceAtLeast(1e-4f))
+    tlH *= fTop; trH *= fTop; brH *= fBottom; blH *= fBottom
+    tlV *= fLeft; blV *= fLeft; trV *= fRight; brV *= fRight
+
+    val rect = androidx.compose.ui.geometry.Rect(0f, 0f, w, h)
+    return Path().apply {
+        addRoundRect(
+            androidx.compose.ui.geometry.RoundRect(
+                rect,
+                topLeft = CornerRadius(w * tlH, h * tlV),
+                topRight = CornerRadius(w * trH, h * trV),
+                bottomRight = CornerRadius(w * brH, h * brV),
+                bottomLeft = CornerRadius(w * blH, h * blV)
+            )
         )
     }
+}
+
+/**
+ * 液态图标的单根圆角短杆（[tx]/[ty] 位移按 [width]/[height] 同量纲的 dp 值） */
+@Composable
+private fun FluidBar(
+    width: Dp, height: Dp, color: Color,
+    tx: Dp, ty: Dp, rotation: Float, alpha: Float
+) {
+    Box(
+        Modifier
+            .size(width, height)
+            .graphicsLayer {
+                translationX = tx.toPx()
+                translationY = ty.toPx()
+                rotationZ = rotation
+                this.alpha = alpha
+            }
+            .clip(RoundedCornerShape(width / 2f))
+            .background(color)
+    )
 }
 
 /* ============================================================

@@ -11,11 +11,13 @@
        文字纯白高对比、底轨高可见度——两套主题都是暗调，只切可读性档位 */
     :root {
       --outer-bg: #191411;
-      /* 挖孔（前置摄像头）自适应变量，由原生桥 setCutout 注入精确几何：
-         cx=胶囊中心X（居中机型 50%） y=胶囊顶部 h=挖孔高度；无桥/无挖孔回落常规样式 */
+      /* 顶部安全区变量，由原生桥 setCutout 注入真实 WindowInsets：
+         cx=胶囊中心X（水平居中） y=胶囊顶部（挖孔/状态栏下沿 + 间距，胶囊不压在挖孔上）
+         safe-l/safe-r=DisplayCutout 左右安全边距（限宽用）；无桥/无挖孔回落常规样式 */
       --cutout-cx: 50%;
-      --cutout-y: 0px;
-      --cutout-h: 0px;
+      --cutout-y: 8px;
+      --safe-l: 0px;
+      --safe-r: 0px;
       /* 背景不再死黑：烘焙暖咖 + 琥珀聚光底色，白天防屏幕镜面反光且光影浓郁 */
       --bg-spot: #573d29;
       --bg-mid: #2f231b;
@@ -373,31 +375,37 @@
       filter: var(--icon-drop-shadow);
     }
 
-    /* 顶部胶囊：自动对准前置摄像头（原生桥推 DisplayCutout 精确矩形）——
-       中心 X = 挖孔中心（居中机型仍用 50%），垂直居中于挖孔，
-       高度 = 挖孔高 + 10px 呼吸（下限 36px），只比摄像头大一圈不臃肿；
-       无挖孔设备：y=0、h=0 → 回落 36px 常规高度居中样式 */
+    /* 顶部胶囊：整块落在挖孔/状态栏安全区「下沿」而不是扣在摄像头上面——
+       位置由原生桥 setCutout 用真实 WindowInsets（displayCutout + statusBars）
+       算出的 --cutout-y 决定，旋转/折叠/不同挖孔位置都会重推，不写死机型数值。
+       高度固定 28px：不再按挖孔高度撑高，视觉上是一枚小标签而不是一块面板 */
     .top-center-pill {
       pointer-events: auto;
       cursor: pointer;
       position: absolute;
       left: var(--cutout-cx, 50%);
-      top: var(--cutout-y, 0px);
+      top: var(--cutout-y, 8px);
       transform: translateX(-50%);
       display: flex;
       align-items: center;
-      gap: 7px;
-      height: max(calc(var(--cutout-h, 0px) + 10px), 36px);
-      padding: 0 22px;
+      justify-content: center;
+      gap: 5px;
+      height: 28px;
+      max-width: calc(100vw - var(--safe-l, 0px) - var(--safe-r, 0px) - 24px);
+      padding: 0 13px;
+      box-sizing: border-box;
       border-radius: 999px;
       background: #08080a;
       border: 1px solid rgba(255, 255, 255, 0.1);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 500;
-      letter-spacing: 0.04em;
+      line-height: 1;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      overflow: visible;
       color: var(--text-primary);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
-      transition: all 0.25s ease;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+      transition: top 0.25s ease, border-color 0.25s ease, color 0.25s ease;
     }
 
     .top-center-pill:hover {
@@ -406,11 +414,12 @@
     }
 
     .pill-dot {
-      width: 6px;
-      height: 6px;
+      width: 5px;
+      height: 5px;
+      flex: 0 0 5px;
       border-radius: 50%;
       background: var(--amber-main);
-      box-shadow: 0 0 8px var(--amber-main);
+      box-shadow: 0 0 6px var(--amber-main);
       animation: dotBreath 2.6s ease-in-out infinite;
     }
 
@@ -1219,14 +1228,15 @@
         //（封面走内存缓存推得快），此时 SONGS 还没建——只缓存，
         // setQueue 重建时 textureFor→createVinylDiscTexture 会从这里取到封面
         coverImages.set(idx, img);
-        songTextures.delete(idx);
+        songTextures.delete(idx + "@512");
+        songTextures.delete(idx + "@1024");
         if (!SONGS[idx]) return;
         if (state.playingSongId === idx && activeVinylMat) {
-          activeVinylMat.map = textureFor(idx);
+          activeVinylMat.map = textureFor(idx, true);
           activeVinylMat.needsUpdate = true;
         }
         if (state.droppingSongId === idx && transitionMat) {
-          transitionMat.map = textureFor(idx);
+          transitionMat.map = textureFor(idx, true);
           transitionMat.needsUpdate = true;
         }
         const item = queueItems[idx];
@@ -1237,6 +1247,8 @@
           item.mat.map = textureFor(idx);
           item.mat.needsUpdate = true;
         }
+        // 暂停静止时换封面也要出一帧，否则新纹理看不到
+        wakeRender();
       };
       img.src = dataUrl;
     }
@@ -1255,28 +1267,30 @@
     }
 
     window.__vinyl = {
-      // 原生推挖孔（前置摄像头）精确矩形 {l,r,t,b,sw}（dp，含偏左/偏右机型）：
-      // 胶囊自动对准摄像头实际位置——中心 X 对挖孔中心、垂直居中于挖孔、
-      // 高度只比挖孔大一圈；null=无挖孔设备，回落常规样式
+      // 原生推顶部安全区几何（单位 dp）：
+      //   l/r/t/b = DisplayCutout.boundingRectTop（挖孔真实矩形，偏左/偏右机型同样适用）
+      //   safeTop/safeLeft/safeRight = WindowInsets.displayCutout() 的四边安全边距
+      //   statusTop = statusBars 高度（用 IgnoringVisibility 取到真实值，状态栏隐藏时也有效）
+      // 胶囊不再「扣在挖孔上」——整块下移到安全区下沿 + 6px，所以居中式、左上、右上
+      // 挖孔都只是让下移量变大，不需要按机型调数值；旋转/折叠后原生会重推
       setCutout(info) {
         const root = document.documentElement.style;
-        let cx, holeH, y;
-        if (!info || !(info.b - info.t > 0)) {
-          cx = null; holeH = 0; y = 0;
-        } else {
-          const holeW = info.r - info.l;
-          holeH = info.b - info.t;
-          // 胶囊尺寸：高 = 挖孔高 + 上下各 5px 呼吸，下限 36px；中心 = 挖孔中心
-          const pillH = Math.max(holeH + 10, 36);
-          const cxPx = info.l + holeW / 2;
-          // 挖孔水平位置贴近屏幕中线（±14px 内）时直接用 50%，
-          // 消除 dp 取整造成的细微偏移；偏侧机型按实际中心对位
-          cx = Math.abs(cxPx - info.sw / 2) <= 14 ? null : cxPx;
-          y = Math.max(2, info.t + holeH / 2 - pillH / 2);
-        }
-        root.setProperty("--cutout-h", holeH + "px");
-        root.setProperty("--cutout-y", y + "px");
-        root.setProperty("--cutout-cx", cx === null ? "50%" : cx + "px");
+        const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
+        const holeBottom = info && info.b > info.t ? num(info.b) : 0;
+        const topSafe = Math.max(holeBottom, num(info && info.safeTop), num(info && info.statusTop));
+        // 有安全区就在它下沿留 6px 呼吸；无挖孔且状态栏为 0 的设备贴顶 8px
+        const pillTop = topSafe > 0 ? topSafe + 6 : 8;
+        root.setProperty("--cutout-y", pillTop + "px");
+        root.setProperty("--cutout-cx", "50%");
+        root.setProperty("--safe-l", num(info && info.safeLeft) + "px");
+        root.setProperty("--safe-r", num(info && info.safeRight) + "px");
+        wakeRender();
+      },
+
+      // 原生 Lifecycle 推前台/后台：退后台时真正停掉渲染循环（配合 WebView.onPause）
+      setRenderActive(active) {
+        nativeVisible = !!active;
+        if (pageActive()) wakeRender(); else stopRenderLoop();
       },
 
       // 原生推歌单：[{title, artist, duration(秒)}]，idx=当前播放序号，isPlaying=是否在播
@@ -1305,11 +1319,12 @@
         if (typeof vol === "number" && vol > 0) state.volume = vol;
         state.isMuted = !!muted;
         rebuildQueueWindow(cur);
-        activeVinylMat.map = textureFor(cur);
+        activeVinylMat.map = textureFor(cur, true);
         activeVinylMat.color.set(0xffffff);
         activeVinylMat.needsUpdate = true;
         updateUI();
         updateProgressDOM();
+        wakeRender();
       },
 
       // 原生推真实播放状态（500ms 校准 + 状态突变即时推）
@@ -1350,6 +1365,11 @@
         }
         updateUI();
         updateProgressDOM();
+        // 只在「开始出声/切到缓冲/外部切歌」时唤醒；暂停态的 500ms 校准推送
+        // 不会反复拉起已经停下来的渲染循环
+        if (state.audioState === "Playing" || state.audioState === "Buffering") {
+          wakeRender();
+        }
       },
 
       // 批量推封面：{ "idx": "dataURL", ... } —— 大曲库逐张推太慢（滑列表追不上），
@@ -1643,20 +1663,26 @@
       }
     })();
 
+    // 像素比跟随真实设备 DPR，上限 2.0。此前写死 1.5：在 2x/3x 屏上逻辑像素被
+    // 上采样，主碟封面和金色沟槽都发虚（用户反馈的「分辨率偏低/锯齿」主因）。
+    // 2.0 已覆盖绝大多数 2x 屏；2.6~3x 屏按 2.0 封顶，避免像素量再翻一倍把 GPU
+    // 压死——观感优先，但不拿分辨率换帧率。
+    const MAX_RENDER_DPR = 2.0;
+    const renderDpr = () => Math.min(window.devicePixelRatio || 1, MAX_RENDER_DPR);
+    const initialDpr = renderDpr();
+
     // alpha:false：Android WebView 上 alpha:true 的 WebGL 缓冲在硬件合成时
     // 可能被整帧丢弃（画面全黑但事件正常——canvas 透出 CSS 近黑底），不透明缓冲最稳
     const renderer = new THREE.WebGLRenderer({
       canvas,
-      // MSAA 保留：1.0x 逻辑分辨率下无 AA 的边缘锯齿明显；像素量已是原来的
-      // 1/4，加回 MSAA 的总成本仍远低于原 1.5x+AA 配置（FPS 探针验证不掉帧）
-      antialias: true,
+      // DPR 接近/达到 2x 时关掉 MSAA：像素密度已经足够细，4x MSAA 只是纯带宽
+      // 开销（卡顿的可疑项之一）；低 DPR 设备（<1.9）仍保留 AA 防边缘锯齿。
+      // 这是「减无效开销」而不是降分辨率。
+      antialias: initialDpr < 1.9,
       alpha: false,
       powerPreference: "high-performance"
     });
-    // 像素比 1.5：手机端用户反馈 1.25 下毛边/锯齿明显，适当回调分辨率提升
-    // 边缘细腻度（Lambert 化/阴影 512/几何减面的 GPU 减负仍在，1.5x 是画质优先
-    // 权衡值）；FPS 探针验证——若掉帧明显再回落 1.25
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setPixelRatio(initialDpr);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     // 阴影按需重绘（见 animate 内 shadowDirty 检测）：匀速旋转的转盘/碟片圆对称，
@@ -1777,27 +1803,30 @@
 
     // 共享黑胶底图：黑底、沟槽（~33 圈 arc）、中孔对所有碟片完全相同，预渲染一次。
     // 旧实现每张碟面纹理都重画一遍沟槽——而 textureFor 会在封面推送后被删缓存重建，
-    // 点击落片瞬间同步执行，录屏实测造成 60-80ms 画面冻结
-    let vinylBaseCanvas = null;
-    function getVinylBaseCanvas() {
-      if (vinylBaseCanvas) return vinylBaseCanvas;
+    // 点击落片瞬间同步执行，录屏实测造成 60-80ms 画面冻结。
+    // 按尺寸缓存两份：队列小碟 512、转盘主碟 1024（主碟在屏幕上铺得很大，
+    // 512 的标签区只有 332px，2x 屏上放大约 3 倍，封面上细纹/字会糊）
+    const vinylBaseCanvases = new Map();
+    function getVinylBaseCanvas(size) {
+      if (vinylBaseCanvases.has(size)) return vinylBaseCanvases.get(size);
       const c = document.createElement("canvas");
-      c.width = 512;
-      c.height = 512;
+      c.width = size;
+      c.height = size;
       const ctx = c.getContext("2d");
-      const cx = 256, cy = 256;
-      // 封面/标签区半径 166：外圈黑边（沟槽）宽约 78 ≈ 半径 1/3（封面占碟面约 2/3）
-      const LABEL_R = 166;
+      const k = size / 512;
+      const cx = size / 2, cy = size / 2;
+      // 封面/标签区半径 166（512 基准）：外圈黑边（沟槽）宽约 78 ≈ 半径 1/3
+      const LABEL_R = 166 * k;
 
       ctx.fillStyle = "#111111";
       ctx.beginPath();
-      ctx.arc(cx, cy, 250, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 250 * k, 0, Math.PI * 2);
       ctx.fill();
 
-      for (let r = LABEL_R + 4; r < 244; r += 2.2) {
+      for (let r = LABEL_R + 4 * k; r < 244 * k; r += 2.2 * k) {
         const alpha = (r % 18 < 2) ? 0.08 : 0.22 + (Math.sin(r * 0.3) * 0.06);
         ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.22})`;
-        ctx.lineWidth = 0.9;
+        ctx.lineWidth = 0.9 * k;
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.stroke();
@@ -1805,23 +1834,24 @@
 
       ctx.fillStyle = "#181716";
       ctx.beginPath();
-      ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 9 * k, 0, Math.PI * 2);
       ctx.fill();
 
-      vinylBaseCanvas = c;
+      vinylBaseCanvases.set(size, c);
       return c;
     }
 
-    function createVinylDiscTexture(song) {
+    function createVinylDiscTexture(song, size) {
       const c = document.createElement("canvas");
-      c.width = 512;
-      c.height = 512;
+      c.width = size;
+      c.height = size;
       const ctx = c.getContext("2d");
-      const cx = 256, cy = 256;
-      const LABEL_R = 166;
+      const k = size / 512;
+      const cx = size / 2, cy = size / 2;
+      const LABEL_R = 166 * k;
 
       // 沟槽底图整张复用，仅标签区（封面/占位标签）按歌重绘
-      ctx.drawImage(getVinylBaseCanvas(), 0, 0);
+      ctx.drawImage(getVinylBaseCanvas(size), 0, 0);
 
       const cover = coverImages.get(song && song.id);
       if (cover) {
@@ -1835,9 +1865,9 @@
         ctx.drawImage(cover, cx - w / 2, cy - h / 2, w, h);
         ctx.restore();
         ctx.strokeStyle = "rgba(229, 169, 76, 0.5)";
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 3 * k;
         ctx.beginPath();
-        ctx.arc(cx, cy, LABEL_R + 1.5, 0, Math.PI * 2);
+        ctx.arc(cx, cy, LABEL_R + 1.5 * k, 0, Math.PI * 2);
         ctx.stroke();
       } else {
         // 无封面：原版标签设计（等比放大到 LABEL_R/84 倍）
@@ -1877,7 +1907,8 @@
       // 省 mipmap 链生成与多级上传——纹理首次渲染上传是落片动画冻结来源之一
       tex.generateMipmaps = false;
       tex.minFilter = THREE.LinearFilter;
-      tex.anisotropy = 4;
+      // 各向异性 8：主碟是倾斜俯视，斜角采样下纹理会被过度拉伸成糊边
+      tex.anisotropy = 8;
       return tex;
     }
 
@@ -1918,19 +1949,21 @@
 
     const walnutTex = createWalnutWoodTexture();
     const sheenTex = createAnisotropicSheenTexture();
-    // 惰性纹理缓存：索引 -> CanvasTexture（歌单注入后按需创建，配合队列 20+5 增补）
+    // 惰性纹理缓存：键 = 索引@尺寸（512=队列小碟，1024=转盘主碟/落片过渡碟）
     const songTextures = new Map();
     const coverImages = new Map(); // 索引 -> HTMLImageElement（原生推 base64 封面）
-    function textureFor(i) {
-      if (!songTextures.has(i)) {
+    function textureFor(i, hiRes) {
+      const size = hiRes ? 1024 : 512;
+      const key = i + "@" + size;
+      if (!songTextures.has(key)) {
         // 索引越界时走兜底碟面，避免 createVinylDiscTexture(undefined) 抛错中断初始化
         const song = SONGS[i] || {
           title: "未知曲目", artist: "",
           labelColor: "#3a4f7a", accentColor: "#c9d7f2", catalog: "SLN-???"
         };
-        songTextures.set(i, createVinylDiscTexture(song));
+        songTextures.set(key, createVinylDiscTexture(song, size));
       }
-      return songTextures.get(i);
+      return songTextures.get(key);
     }
 
     /********************************************************************
@@ -2430,13 +2463,15 @@
 
       // 引用判等后再赋值：needsUpdate 触发纹理重新提交（texImage2D 阻塞渲染线程），
       // 同一张纹理重复绑定是无谓的落片冻结来源
-      const t = textureFor(targetSongId);
+      const t = textureFor(targetSongId, true);
       if (transitionMat.map !== t) {
         transitionMat.map = t;
         transitionMat.color.set(0xffffff);
         transitionMat.needsUpdate = true;
       }
       transitionRecord.visible = true;
+      // 落片动画是「暂停态也可能发生」的动画，必须显式拉起渲染循环
+      wakeRender();
 
       // 520ms：唱片沿主轴气垫缓冲触盘，发出低频闷响，无缝切换转盘贴图
       setTimeout(() => {
@@ -2447,7 +2482,7 @@
         audioEngine.playPlatterThud();
         state.playingSongId = targetSongId;
         // 同一张纹理（transitionMat 已传过 GPU），引用相同就跳过重提交
-        const t = textureFor(targetSongId);
+        const t = textureFor(targetSongId, true);
         if (activeVinylMat.map !== t) {
           activeVinylMat.map = t;
           activeVinylMat.needsUpdate = true;
@@ -3190,6 +3225,9 @@
      * 11. 主渲染循环（物理弹簧按键、三段式自然抛物线落片、唱臂起落、呼吸感）
      ********************************************************************/
     let lastViewportW = -1, lastViewportH = -1;
+    // onResize 在脚本末尾会被同步调用一次，那时渲染循环的状态变量尚未初始化
+    // （let/const 处于 TDZ），用这个就绪标记避免首次调用抛 ReferenceError
+    let renderLoopReady = false;
     let cameraBaseZ = 8.2; // 拉远倍率的基础距离（由视口宽高比决定），实际 z = 基础 × cameraZoom
     function onResize() {
       const w = viewportEl.clientWidth;
@@ -3197,12 +3235,19 @@
       // 布局未就绪（AndroidView 组合早于 WebView 布局）：跳过，等帧检查再试，
       // 避免把 canvas 内联尺寸设成 0 导致渲染面积丢失
       if (w <= 0 || h <= 0) return;
+      // 缩放/旋转/跨屏（DPR 变化）时重取像素比，再按新比值重建 drawing buffer
+      const dpr = renderDpr();
+      if (Math.abs(renderer.getPixelRatio() - dpr) > 1e-3) renderer.setPixelRatio(dpr);
       renderer.setSize(w, h);
       camera.aspect = w / h;
       cameraBaseZ = (w / h < 0.5) ? 8.6 : 8.2;
       camera.updateProjectionMatrix();
       lastViewportW = w;
       lastViewportH = h;
+      // 尺寸变化会重建 drawing buffer（内容被清空），暂停态循环已停时
+      // 必须补一帧，否则旋转屏幕后画面会黑一下。
+      // 首次同步调用 onResize 时渲染循环的状态变量还没初始化（TDZ），用就绪标记跳过
+      if (renderLoopReady) wakeRender();
     }
     window.addEventListener("resize", onResize);
     if (typeof ResizeObserver !== "undefined") new ResizeObserver(onResize).observe(viewportEl);
@@ -3215,6 +3260,39 @@
     }
 
     let lastFrameTime = performance.now();
+
+    // ===== 渲染循环开关：不可见 / 暂停静止时真正停下 =====
+    // 旧实现 animate 每帧无条件 requestAnimationFrame：App 退后台、播放暂停、
+    // 甚至页面被遮住时仍在空转渲染，白烧 GPU/主线程（卡顿成因之一）。
+    // 这里把 rAF 做成可停可启：页面可见 && 原生前台 && 还有动画在跑才继续；
+    // 暂停且全部弹簧/惯性收敛后连续 12 帧（≈200ms）就 cancelAnimationFrame。
+    let rafHandle = 0;
+    let loopRunning = false;
+    let pageVisible = !document.hidden; // 页面自身可见性（WebView 被遮挡/退后台）
+    let nativeVisible = true;           // 原生 Lifecycle 推送（ON_PAUSE → false）
+    const pageActive = () => pageVisible && nativeVisible;
+    let idleFrames = 0;
+
+    function wakeRender() {
+      if (!renderLoopReady) return; // 脚本初始化完成前不启动循环
+      idleFrames = 0;
+      if (!loopRunning && pageActive()) {
+        loopRunning = true;
+        lastFrameTime = performance.now();
+        rafHandle = requestAnimationFrame(animate);
+      }
+    }
+    function stopRenderLoop() {
+      loopRunning = false;
+      if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = 0; }
+    }
+    document.addEventListener("visibilitychange", () => {
+      pageVisible = !document.hidden;
+      if (pageActive()) wakeRender(); else stopRenderLoop();
+    });
+    // 任意按下（3D 拖拽/选歌/手势）都可能引起画面变化，统一顺带唤醒
+    document.addEventListener("pointerdown", wakeRender, { capture: true, passive: true });
+    document.addEventListener("wheel", wakeRender, { passive: true });
 
     // 首帧上报：原生遮罩等这一刻才淡出（3D 引擎初始化的半秒纯黑被盖住）
     let firstFrameSent = false;
@@ -3229,15 +3307,28 @@
     // （45-120fps 来回跳）反而显卡顿，稳定 60fps 节奏观感更顺；输入响应由
     // pointer 事件驱动（≤16ms 内必有画面反馈），跟手性不受影响
     let lastRenderAt = 0;
+    // 进度 DOM 写节流时间戳（20Hz）：见 animate 内说明
+    let lastProgressDomAt = 0;
+    // 调试抽屉在 WebView 内被 display:none 隐藏：缓存引用并只在可见时写，
+    // 省掉每帧 getElementById + 对隐藏节点的 textContent 写
+    const dbgYawEl = (function () {
+      const el = document.getElementById("dbg-yaw");
+      return el && el.getClientRects().length ? el : null;
+    })();
     // 阴影按需重绘的状态镜像（上一帧值）
     let lastShadowTonearmAngle = 0, lastShadowTonearmLift = 0.085, lastShadowBtnOffset = 0, lastShadowQueueY = -999;
     // FPS 探针计数
     let fpsFrameCount = 0, fpsWindowStart = performance.now();
 
     function animate(now) {
-      requestAnimationFrame(animate);
+      rafHandle = 0;
+      // 页面不可见（退后台/被遮挡）直接收手，不排下一帧
+      if (!pageActive()) { loopRunning = false; return; }
 
-      if (now - lastRenderAt < 14) return;
+      if (now - lastRenderAt < 14) {
+        rafHandle = requestAnimationFrame(animate);
+        return;
+      }
       lastRenderAt = now;
 
       // FPS 探针：rAF 实际执行频率 ≈ 显示帧率（GPU 跑不满时被 vsync 节流），
@@ -3259,10 +3350,14 @@
         onResize();
       }
 
-      // 歌单未注入前只渲染空场景（原生 onPageFinished 后立刻推数据）
+      // 歌单未注入前只渲染空场景（原生 onPageFinished 后立刻推数据）；
+      // 连续 12 帧仍是空场景就停循环，等 setQueue 唤醒
       if (!SONGS.length) {
         renderer.render(scene, camera);
         reportFirstFrame();
+        idleFrames++;
+        if (idleFrames > 12) { loopRunning = false; return; }
+        rafHandle = requestAnimationFrame(animate);
         return;
       }
 
@@ -3287,8 +3382,10 @@
       turntableYawGroup.rotation.y = state.turntableYaw;
       sheenMesh.rotation.z = -state.turntableYaw * 0.65;
 
-      const normDeg = ((normalizeAngle(state.turntableYaw) * 180) / Math.PI).toFixed(1);
-      document.getElementById("dbg-yaw").textContent = `${normDeg}°`;
+      if (dbgYawEl !== null) {
+        const normDeg = ((normalizeAngle(state.turntableYaw) * 180) / Math.PI).toFixed(1);
+        dbgYawEl.textContent = `${normDeg}°`;
+      }
 
       // 2. 3D 实体圆形按钮物理弹簧按压与 LED 状态灯环更新
       const springStiffness = 180;
@@ -3425,7 +3522,12 @@
       if (isActuallyPlaying && !isScrubbingProgress) {
         // 本地插值平滑推进；真实进度由原生 500ms 校准（播完自动下一首也由原生驱动）
         state.currentTime = Math.min(state.currentTime + dt, playingSong.duration);
-        updateProgressDOM();
+        // DOM 写按 20Hz 节流（50ms）：进度条/歌词每帧改 style/textContent 会持续
+        // 触发 style/layout，是播放态主线程开销的大头；20Hz 人眼仍然连续
+        if (now - lastProgressDomAt >= 50) {
+          lastProgressDomAt = now;
+          updateProgressDOM();
+        }
       }
 
       const progressRatio = state.currentTime / playingSong.duration;
@@ -3492,6 +3594,31 @@
 
       renderer.render(scene, camera);
       reportFirstFrame();
+
+      // 收敛判定：播放中 / 落片 / 惯性 / 弹簧 / 镜头过渡 任一项还在动就继续；
+      // 暂停且全部静止后连续 12 帧（≈200ms）→ 停掉 rAF，静止画面留在 canvas 上
+      const stillAnimating =
+        isActuallyPlaying || state.ceremonyActive ||
+        Math.abs(state.scrollTarget - state.scrollPosition) > 0.01 ||
+        Math.abs(state.yawVelocity) > 0.01 ||
+        Math.abs(state.physicalBtnVelocity) > 0.01 ||
+        Math.abs(state.physicalBtnOffset) > 0.002 ||
+        Math.abs(state.tonearmAngle - targetArmAngle) > 0.002 ||
+        Math.abs(state.tonearmLift - targetLift) > 0.002 ||
+        Math.abs(camera.position.z - targetCamZ) > 0.002 ||
+        Math.abs(turntablePitchGroup.position.z - targetTurntableZ) > 0.01 ||
+        Math.abs(queueGroup.position.y - targetQueueY) > 0.01 ||
+        Math.abs(turntablePitchGroup.position.y - targetTurntableY) > 0.01;
+      if (stillAnimating) {
+        idleFrames = 0;
+      } else {
+        idleFrames++;
+      }
+      if (idleFrames > 12) {
+        loopRunning = false;
+        return;
+      }
+      rafHandle = requestAnimationFrame(animate);
     }
 
     // WebGL 上下文丢失（GPU 重置/驱动回收）：直接可视化提示，避免无声黑屏
@@ -3521,7 +3648,8 @@
     }, 3000);
 
     updateUI();
-    requestAnimationFrame(animate);
+    renderLoopReady = true;
+    wakeRender();
   </script>
 </body>
 </html>
