@@ -138,6 +138,14 @@ class PlayerController(private val context: Context) {
      */
     private var repeatState: RepeatMode = RepeatMode.OFF
 
+    /**
+     * 播放速度（0.5–2.5 倍）。
+     *
+     * 与 [repeatState] 同一个坑：连接 MediaController 是异步的，冷启动恢复时
+     * [setSpeed] 可能还没连上。先记住，连上后补一次（见 [connect]）。
+     */
+    private var speedState: Float = 1f
+
     private var pendingRequest: PlayRequest? = null
     private var controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
 
@@ -173,6 +181,10 @@ class PlayerController(private val context: Context) {
             controller = c
             // 冷启动恢复时 [setRepeat] 可能早于连接完成：这里补上记住的模式
             c.repeatMode = repeatState.toPlayerRepeat()
+            // 同理补上播放速度（1f 不用写，播放器默认就是 1f）
+            if (speedState != 1f) {
+                c.playbackParameters = c.playbackParameters.withSpeed(speedState)
+            }
             // 随机始终由 App 自己的队列实现，播放器标志固定关掉
             if (c.shuffleModeEnabled) c.shuffleModeEnabled = false
             c.addListener(object : Player.Listener {
@@ -598,6 +610,19 @@ class PlayerController(private val context: Context) {
         val prevIndex = c.currentMediaItemIndex - 1
         c.seekToDefaultPosition(prevIndex)
         if (!c.isPlaying) c.play()
+    }
+
+    /**
+     * 设置播放速度（0.5–2.5 倍，音调不变）。
+     *
+     * 未连上时只记住，连上后由 [connect] 补一次 —— 冷启动恢复现场的速度设定
+     * 可能赶在连接完成之前。
+     */
+    fun setSpeed(value: Float) {
+        speedState = value.coerceIn(0.5f, 2.5f)
+        controller?.let { c ->
+            c.playbackParameters = c.playbackParameters.withSpeed(speedState)
+        }
     }
 
     fun seekTo(ms: Long) {

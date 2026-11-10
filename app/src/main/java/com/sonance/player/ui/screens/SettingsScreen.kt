@@ -16,6 +16,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
@@ -35,6 +38,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -167,7 +171,7 @@ fun SettingsScreen(
             title = "格式与兼容性",
             summary = "系统解码支持范围 · 私有加密容器说明",
             icon = SonanceIcons.Waveform,
-            defaultExpanded = true
+            defaultExpanded = false
         ) {
             FormatCompatContent(vm = vm)
         }
@@ -177,7 +181,7 @@ fun SettingsScreen(
             title = "乐库清理与合并",
             summary = "排除 ${vm.lastScanOutcome?.excludedTotal ?: 0} 项 · 已隐藏 ${vm.hiddenCount} 首",
             icon = SonanceIcons.Refresh,
-            defaultExpanded = true
+            defaultExpanded = false
         ) {
             SettingsGroupLabel("曲库清理")
             LibraryCleanupContent(vm = vm)
@@ -399,6 +403,44 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.titleSmall,
                     color = skin.text
                 )
+                Spacer(Modifier.height(6.dp))
+                // 版本号 + 基线导出入口：长按版本号把当前设置导出成出厂基线 JSON。
+                // 导出是只读的，不改变本机任何设置；以后要更新出厂默认值时，
+                // 重新导出并替换 app/src/main/assets/settings_baseline.json 即可
+                // （机制见 SettingsBaseline 的类注释）。
+                val versionLabel = remember(context) {
+                    runCatching {
+                        context.packageManager
+                            .getPackageInfo(context.packageName, 0).versionName
+                    }.getOrNull().orEmpty()
+                }
+                Column(
+                    Modifier.pointerInput(Unit) {
+                        detectTapGestures(
+                            onLongPress = {
+                                val file = vm.exportSettingsBaseline()
+                                Toast.makeText(
+                                    context,
+                                    if (file != null) "已导出设置基线：${file.absolutePath}"
+                                    else "导出失败",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        )
+                    }
+                ) {
+                    Text(
+                        "版本 ${versionLabel.ifBlank { "—" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.text.copy(alpha = 0.45f)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "长按版本号可导出当前设置为基线文件",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.text.copy(alpha = 0.30f)
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 // 署名。连点 10 次会解锁「私有格式还原」区块 —— 彩蛋，界面上不做任何暗示：
                 // 不加下划线、不加点击水波，看起来就是一行普通的落款
@@ -1726,6 +1768,9 @@ private fun DuplicateCleanupContent(vm: SonanceViewModel) {
     // 点「清理」先弹这里选处理方式。null=没弹；true=连同名一起；false=只清重复
     var cleanDialog by remember { mutableStateOf<Boolean?>(null) }
 
+    // 已排除文件夹的管理弹窗
+    var excludedDirsOpen by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(vertical = 4.dp)) {
             Text(
@@ -1783,6 +1828,17 @@ private fun DuplicateCleanupContent(vm: SonanceViewModel) {
                 onClick = { vm.restoreHiddenSongs() },
                 actionLabel = "恢复"
             )
+
+            SettingsActionRow(
+                title = "已排除的文件夹",
+                subtitle = if (vm.excludedDirs.isEmpty()) {
+                    "没有排除任何文件夹（排除入口在文件夹详情页 ⁝ 菜单）"
+                } else {
+                    "${vm.excludedDirs.size} 个文件夹，点此查看与恢复"
+                },
+                onClick = { excludedDirsOpen = true },
+                actionLabel = "管理"
+            )
         }
     }
 
@@ -1812,6 +1868,45 @@ private fun DuplicateCleanupContent(vm: SonanceViewModel) {
                     cleanDialog = null
                     vm.cleanDuplicates(includeSameName = includeSameName)
                 }) { Text("仅隐藏") }
+            }
+        )
+    }
+
+    // 已排除文件夹：查看与逐个恢复（恢复后自动重扫入库）
+    if (excludedDirsOpen) {
+        AlertDialog(
+            onDismissRequest = { excludedDirsOpen = false },
+            title = { Text("已排除的文件夹") },
+            text = {
+                if (vm.excludedDirs.isEmpty()) {
+                    Text("当前没有排除任何文件夹")
+                } else {
+                    Column(
+                        Modifier
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        vm.excludedDirs.sorted().forEach { path ->
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    path,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = skin.text,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = { vm.restoreExcludedFolder(path) }) {
+                                    Text("恢复")
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { excludedDirsOpen = false }) { Text("关闭") }
             }
         )
     }

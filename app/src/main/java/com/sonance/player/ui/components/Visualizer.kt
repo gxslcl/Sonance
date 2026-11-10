@@ -130,9 +130,21 @@ fun VisualizerOverlay(
     positionMs: Long,
     durationMs: Long,
     prefs: Prefs,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 播放页「隐藏状态栏」开关：开启后顶栏图标 5 秒淡出到 alpha 0.15（仍可点） */
+    hideStatusBar: Boolean = false
 ) {
     val skin = LocalSkin.current
+
+    var chromeDimmed by remember { mutableStateOf(false) }
+    LaunchedEffect(hideStatusBar) {
+        if (hideStatusBar) {
+            delay(5000)
+            chromeDimmed = true
+        } else {
+            chromeDimmed = false
+        }
+    }
 
     var style by remember { mutableStateOf(VizStyle.entries.getOrNull(prefs.vizStyle) ?: VizStyle.BARS) }
     var barCount by remember { mutableStateOf(prefs.vizBarCount) }
@@ -271,6 +283,7 @@ fun VisualizerOverlay(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
+                .graphicsLayer { alpha = if (chromeDimmed) 0.15f else 1f }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

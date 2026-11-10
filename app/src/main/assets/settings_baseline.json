@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "exportedAt": 1794230357750,
+  "settings": {
+    "skin_id": {
+      "type": "STRING",
+      "value": "chinese_red"
+    },
+    "icon_set": {
+      "type": "INT",
+      "value": 2
+    },
+    "glow_mode": {
+      "type": "STRING",
+      "value": "immersive"
+    },
+    "glow_strength": {
+      "type": "FLOAT",
+      "value": 0.8471113
+    },
+    "glow_transition": {
+      "type": "STRING",
+      "value": "swipe"
+    },
+    "glow_fade_ms": {
+      "type": "INT",
+      "value": 1283
+    },
+    "art_transition_mode": {
+      "type": "STRING",
+      "value": "fade"
+    },
+    "art_fade_ms": {
+      "type": "INT",
+      "value": 850
+    },
+    "top_bar_logo_id": {
+      "type": "STRING",
+      "value": "s2_4"
+    },
+    "app_display_name": {
+      "type": "STRING",
+      "value": "你好新朋友"
+    },
+    "sort_field": {
+      "type": "STRING",
+      "value": "ARTIST"
+    },
+    "sort_asc": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "list_row_style": {
+      "type": "INT",
+      "value": 0
+    },
+    "list_cover_scale": {
+      "type": "INT",
+      "value": 1
+    },
+    "scroll_haptic_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "play_mode": {
+      "type": "STRING",
+      "value": "SHUFFLE"
+    },
+    "player_vinyl_mode": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "player_vinyl_sfx_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "player_vinyl_sfx_volume": {
+      "type": "FLOAT",
+      "value": 0.39359906
+    },
+    "play_btn_glow": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "play_btn_color_mode": {
+      "type": "STRING",
+      "value": "cover"
+    },
+    "play_btn_icon_style": {
+      "type": "INT",
+      "value": 1
+    },
+    "play_btn_icon_scale": {
+      "type": "INT",
+      "value": 74
+    },
+    "eq_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "eq_preset": {
+      "type": "STRING",
+      "value": "VOCAL"
+    },
+    "eq_custom_bands": {
+      "type": "STRING",
+      "value": ""
+    },
+    "lyrics_t2s": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "lyrics_font_sp": {
+      "type": "INT",
+      "value": 23
+    },
+    "lyrics_adapt_mode": {
+      "type": "STRING",
+      "value": "all"
+    },
+    "lyrics_style": {
+      "type": "STRING",
+      "value": "vinyl"
+    },
+    "lyrics_playbar": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "lyrics_playbar_style": {
+      "type": "STRING",
+      "value": "float"
+    },
+    "lock_screen_lyrics": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "glass_style": {
+      "type": "INT",
+      "value": 4
+    },
+    "glass_blur_dp": {
+      "type": "INT",
+      "value": 48
+    },
+    "glass_visibility": {
+      "type": "INT",
+      "value": 92
+    },
+    "shell_glass_style": {
+      "type": "INT",
+      "value": 4
+    },
+    "shell_glass_blur_dp": {
+      "type": "INT",
+      "value": 80
+    },
+    "shell_glass_visibility": {
+      "type": "INT",
+      "value": 32
+    },
+    "viz_glass_style": {
+      "type": "INT",
+      "value": 4
+    },
+    "viz_glass_blur_dp": {
+      "type": "INT",
+      "value": 48
+    },
+    "viz_glass_visibility": {
+      "type": "INT",
+      "value": 92
+    },
+    "online_cover_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "mini_player_style": {
+      "type": "INT",
+      "value": 1
+    },
+    "mini_glass_style": {
+      "type": "INT",
+      "value": 4
+    },
+    "mini_glass_blur_dp": {
+      "type": "INT",
+      "value": 58
+    },
+    "mini_glass_visibility": {
+      "type": "INT",
+      "value": 92
+    },
+    "mini_progress_style": {
+      "type": "INT",
+      "value": 2
+    },
+    "mini_swipe_left_pct": {
+      "type": "INT",
+      "value": 20
+    },
+    "mini_swipe_right_pct": {
+      "type": "INT",
+      "value": 13
+    },
+    "mini_height_scale": {
+      "type": "INT",
+      "value": 115
+    },
+    "mini_cover_scale": {
+      "type": "INT",
+      "value": 135
+    },
+    "viz_style": {
+      "type": "INT",
+      "value": 0
+    },
+    "viz_bars": {
+      "type": "INT",
+      "value": 32
+    },
+    "viz_mirror": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "viz_color_index": {
+      "type": "INT",
+      "value": 0
+    },
+    "viz_bar_width": {
+      "type": "FLOAT",
+      "value": 0.6816211
+    },
+    "viz_show_fps": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "viz_show_lyrics": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "viz_show_peak": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "online_lyrics_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "online_music_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "online_music_source": {
+      "type": "STRING",
+      "value": "netease"
+    },
+    "online_hide_unplayable": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "online_download_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "online_download_wifi_only": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "netease_fill_enabled": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "sniff_targets": {
+      "type": "STRING_SET",
+      "value": [
+        "NETEASE"
+      ]
+    }
+  }
+}

@@ -101,7 +101,40 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                 ToggleSwitch(checked = vm.eqEnabled, onChange = { vm.toggleEq(it) })
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(18.dp))
+
+            // ---- 人声 / 伴奏（原播放页底部入口，用户要求收进均衡器面板）----
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = SonanceIcons.Mic,
+                    contentDescription = null,
+                    tint = if (vm.karaokeEnabled) skin.accent else skin.textMuted,
+                    modifier = Modifier.width(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("人声与伴奏", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text(
+                        "伴奏 = 中置声道消除，仅对双声道有效；单声道歌曲无变化",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textDim
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PresetChip(label = "原唱", selected = !vm.karaokeEnabled) {
+                    vm.setKaraoke(false)
+                }
+                PresetChip(label = "伴奏", selected = vm.karaokeEnabled) {
+                    vm.setKaraoke(true)
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
 
             // ---- 预设 ----
             Text("预设", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)

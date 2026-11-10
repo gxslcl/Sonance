@@ -51,6 +51,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -59,6 +61,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -229,6 +232,14 @@ fun FullPlayer(
     sleepTimerActive: Boolean = false,
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean = false,
+    /** 当前播放速度（0.5–2.5 倍） */
+    playbackSpeed: Float = 1f,
+    /** 设置播放速度 */
+    onSetSpeed: (Float) -> Unit = {},
+    /** 播放页是否隐藏状态栏（三层通用；封面页顶部按钮不做淡出） */
+    lyricsHideStatusBar: Boolean = false,
+    /** 全屏歌词页：改「隐藏状态栏」开关 */
+    onLyricsHideStatusBarChange: (Boolean) -> Unit = {},
     /** 播放页封面的颜色往哪边晕开 */
     glowMode: GlowMode = GlowMode.AROUND,
     /** 晕染浓度 */
@@ -797,6 +808,8 @@ fun FullPlayer(
                         onOpenCover = onOpenCover,
                         onOpenEqualizer = onOpenEqualizer,
                         eqEnabled = eqEnabled,
+                        playbackSpeed = playbackSpeed,
+                        onSetSpeed = onSetSpeed,
                         prefs = prefs,
                         // 内嵌歌词自动调色的素材：SWIPE 下三帧按页对号入座（[上一页,当前页,下一页]），
                         // FADE 下只有当前页有；非当前页传 null，歌词维持皮肤配色
@@ -852,6 +865,8 @@ fun FullPlayer(
                 onPlayPause = onPlayPause,
                 onNext = onNext,
                 onOpenPlayer = { goToLayer(PlayerLayer.COVER) },
+                hideStatusBar = lyricsHideStatusBar,
+                onHideStatusBarChange = onLyricsHideStatusBarChange,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -868,7 +883,8 @@ fun FullPlayer(
                     currentSong.durationMs
                 },
                 prefs = prefs,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                hideStatusBar = lyricsHideStatusBar
             )
         }
         }
@@ -896,8 +912,10 @@ fun FullPlayer(
 /**
  * 播放页的三层。三者首尾相连成一个环，左右滑动可以一直转下去
  * （封面 → 歌词 → 律动柱 → 封面 …，反方向同理）。
+ *
+ * 非 private：SonanceRoot 要读它决定「歌词页是否隐藏状态栏」。
  */
-private enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
+enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
 
 /**
  * 顶部状态条左侧的「播放中 / 已暂停」律动小图标（参考样机的 mini-eq）。
@@ -1685,6 +1703,10 @@ private fun PlayerPage(
     onOpenEqualizer: () -> Unit,
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean,
+    /** 当前播放速度（0.5–2.5 倍） */
+    playbackSpeed: Float,
+    /** 设置播放速度 */
+    onSetSpeed: (Float) -> Unit,
     prefs: Prefs,
     /** 当前页的晕染烘焙位图：内嵌歌词据此折算背景色带（跟随全屏歌词的调色设置）；非当前页传 null */
     glowImage: ImageBitmap?,
@@ -1863,7 +1885,7 @@ private fun PlayerPage(
                         onToggleLyrics = onToggleLyrics
                     )
                     Spacer(Modifier.height(14.dp))
-                    ProgressBlock(frac, positionMs, durationMs, onSeek)
+                    ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
                     Spacer(Modifier.height(16.dp))
                     TransportControls(
                         isPlaying = controlsPlaying,
@@ -1990,7 +2012,7 @@ private fun PlayerPage(
                     onToggleLyrics = onToggleLyrics
                 )
                 Spacer(Modifier.height(12.dp))
-                ProgressBlock(frac, positionMs, durationMs, onSeek)
+                ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
                 Spacer(Modifier.height(14.dp))
                 TransportControls(
                     isPlaying = controlsPlaying,
@@ -2153,7 +2175,9 @@ private fun ProgressBlock(
     frac: Float,
     positionMs: Long,
     durationMs: Long,
-    onSeek: (Long) -> Unit
+    onSeek: (Long) -> Unit,
+    playbackSpeed: Float,
+    onSetSpeed: (Float) -> Unit
 ) {
     val skin = LocalSkin.current
     Column(Modifier.fillMaxWidth()) {
@@ -2176,6 +2200,37 @@ private fun ProgressBlock(
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                 color = skin.textMuted
             )
+            // 播放速度胶囊：夹在两个时间中间，点开选速菜单。
+            // 非 1.0x 时亮主题色，一眼能看出"正在快进/慢放"。
+            Box {
+                var speedOpen by remember { mutableStateOf(false) }
+                Text(
+                    text = formatSpeed(playbackSpeed),
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    fontWeight = FontWeight.Medium,
+                    color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { speedOpen = true }
+                        .padding(horizontal = 10.dp, vertical = 2.dp)
+                )
+                DropdownMenu(expanded = speedOpen, onDismissRequest = { speedOpen = false }) {
+                    SPEED_STEPS.forEach { v ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    formatSpeed(v),
+                                    color = if (v == playbackSpeed) skin.accent else skin.text
+                                )
+                            },
+                            onClick = {
+                                speedOpen = false
+                                onSetSpeed(v)
+                            }
+                        )
+                    }
+                }
+            }
             Text(
                 formatDuration(durationMs),
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
@@ -2185,12 +2240,18 @@ private fun ProgressBlock(
     }
 }
 
+/** 倍速档位：0.5×–2.0×。超过 2 倍对音乐播放意义不大，就不给更大的档了 */
+private val SPEED_STEPS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+
+/** "1.0×" / "0.75×" 这种统一两位小数位的写法，菜单与胶囊都用它 */
+private fun formatSpeed(v: Float): String =
+    (if (v % 1f == 0f) "${v.toInt()}.0" else "$v") + "×"
+
 /**
  * 播放键下面那一排：**音量 + 均衡器**（收藏已上移到信息行左侧）。
  *
  * 参考样机 bottom-utility：左边是静音图标（在 [VolumeSlider] 内部），
- * 中间音量条，右边均衡器。均衡器图标在样机里始终是主题色，
- * 这里也不再按「是否开启」变色 —— 颜色是入口标识，开关状态在面板里看。
+ * 中间音量条，右侧音效入口。人声/伴奏开关已收进均衡器面板。
  */
 @Composable
 private fun BottomRow(

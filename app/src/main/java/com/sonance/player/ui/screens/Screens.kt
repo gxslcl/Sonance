@@ -81,6 +81,7 @@ import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.MediaRepository
+import com.sonance.player.data.MusicFolder
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.data.ViewMode
@@ -157,7 +158,14 @@ fun SongList(
      * 从列表移除某一首的回调。**传 null 就不在菜单里显示这一项** ——
      * 专辑 / 艺术家这些聚合页里，"移除"该作用于哪一层说不清，摆出来只会误导。
      */
-    onRemoveFromLibrary: ((Song) -> Unit)? = null
+    onRemoveFromLibrary: ((Song) -> Unit)? = null,
+    /**
+     * 是否把「当前播放歌曲是否在可见区内」上报给 [SonanceViewModel.currentSongVisible]。
+     *
+     * 只有**当前显示在 Pager 里的列表页**才传 true：Pager 会预组合相邻页，
+     * 多页同时上报会互相覆盖。
+     */
+    reportCurrentVisibility: Boolean = false
 ) {
     val context = LocalContext.current
     val dense = LocalDenseLayout.current
@@ -170,6 +178,26 @@ fun SongList(
     val currentId = playerState.mediaId
     val isPlaying = playerState.isPlaying
     val favorites = vm.favorites
+
+    // 「回到当前播放」按钮的可见性：基于 LazyListState 的真实可视区间，
+    // 当前歌所在行滚出屏幕才显示按钮，滚回来就隐藏。snapshotFlow 会在
+    // 每次 layoutInfo 变化（滚动/数据变化）时重新求值，不是距离阈值近似。
+    val currentIndex = remember(songs, currentId) {
+        if (currentId <= 0L) -1 else songs.indexOfFirst { it.id == currentId }
+    }
+    if (reportCurrentVisibility) {
+        LaunchedEffect(listState, currentIndex) {
+            snapshotFlow {
+                currentIndex >= 0 &&
+                    listState.layoutInfo.visibleItemsInfo.any { it.index == currentIndex }
+            }
+                .distinctUntilChanged()
+                .collect { vm.currentSongVisible = it }
+        }
+        DisposableEffect(Unit) {
+            onDispose { vm.currentSongVisible = false }
+        }
+    }
 
     // 「删除文件」的二次确认。状态放在**列表这一层**而不是每一行里：
     // 对话框要盖住整个列表；确认后把目标歌交给 vm，真正的删除还要过
@@ -582,7 +610,8 @@ fun SongsScreen(
     playerState: PlayerUiState,
     modifier: Modifier = Modifier,
     onOpenFolder: (String) -> Unit = {},
-    onOpenAlbum: (Album) -> Unit = {}
+    onOpenAlbum: (Album) -> Unit = {},
+    reportCurrentVisibility: Boolean = false
 ) {
     var mode by rememberSaveable { mutableStateOf(0) }
     val dense = LocalDenseLayout.current
@@ -751,7 +780,8 @@ fun SongsScreen(
                         queueSongs = playQueue,
                         // 「全部歌曲」是曲库本身，"从列表移除"在这一页才说得清
                         onRemoveFromLibrary = removeSong,
-                        listState = listState
+                        listState = listState,
+                        reportCurrentVisibility = reportCurrentVisibility
                     )
                     FastScrollBar(
                         itemCount = { list.size },
@@ -925,6 +955,37 @@ fun FoldersScreen(
 ) {
     val dense = LocalDenseLayout.current
     val folders = vm.folders
+
+    // ===== 排除文件夹：多选 / 长按单排 / 置灰展示 / 点击恢复 =====
+    var selectMode by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(emptySet<String>()) }
+    var singleExclude by remember { mutableStateOf<MusicFolder?>(null) }
+    var batchConfirm by remember { mutableStateOf(false) }
+    var restorePath by remember { mutableStateOf<String?>(null) }
+
+    // 退出多选时清空勾选；多选态返回键只退出多选，不离开文件夹页。
+    LaunchedEffect(selectMode) { if (!selectMode) selected = emptySet() }
+    BackHandler(enabled = selectMode) { selectMode = false }
+
+    // 显示列表 = 可见文件夹 + 已排除路径（置灰占位）。排除项来自偏好，重扫后仍在。
+    val entries = remember(folders, vm.excludedDirs) {
+        val visible = folders.map { FolderEntry(it, excluded = false) }
+        val known = folders.mapTo(HashSet()) { it.path }
+        val hidden = vm.excludedDirs
+            .filter { it !in known }
+            .map { path ->
+                FolderEntry(
+                    folder = MusicFolder(
+                        path = path,
+                        name = path.substringAfterLast('/').ifBlank { path },
+                        songs = emptyList()
+                    ),
+                    excluded = true
+                )
+            }
+        (visible + hidden).sortedBy { it.folder.name.lowercase() }
+    }
+
     Column(modifier.fillMaxSize()) {
         ListHeader(
             query = vm.searchQuery,
@@ -934,17 +995,37 @@ fun FoldersScreen(
             onSort = vm::changeSort,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
             actions = {
-                PillButton(
-                    label = if (vm.scanState == ScanState.SCANNING) "扫描中…" else "重新扫描",
-                    onClick = { vm.scan() },
-                    filled = false
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (selectMode) {
+                        PillButton(
+                            label = "取消",
+                            onClick = { selectMode = false },
+                            filled = false
+                        )
+                        PillButton(
+                            label = "排除 (${selected.size})",
+                            onClick = { batchConfirm = true },
+                            enabled = selected.isNotEmpty()
+                        )
+                    } else {
+                        PillButton(
+                            label = "排除",
+                            onClick = { selectMode = true },
+                            filled = false
+                        )
+                        PillButton(
+                            label = if (vm.scanState == ScanState.SCANNING) "扫描中…" else "重新扫描",
+                            onClick = { vm.scan() },
+                            filled = false
+                        )
+                    }
+                }
             }
         )
         Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
         if (vm.scanState == ScanState.SCANNING && vm.songs.isEmpty()) {
             LoadingState(title = "正在扫描本地音乐…", subtitle = "首次扫描可能需要几秒钟")
-        } else if (folders.isEmpty()) {
+        } else if (entries.isEmpty()) {
             EmptyState(
                 icon = SonanceIcons.Folder,
                 title = "还没有文件夹",
@@ -963,13 +1044,105 @@ fun FoldersScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                items(folders, key = { it.path }) { folder ->
-                    FolderRow(folder = folder, onClick = { onOpenFolder(folder.path) })
+                items(entries, key = { it.folder.path }) { entry ->
+                    val folder = entry.folder
+                    FolderRow(
+                        folder = folder,
+                        excluded = entry.excluded,
+                        selectMode = selectMode,
+                        selected = folder.path in selected,
+                        onClick = {
+                            when {
+                                entry.excluded -> restorePath = folder.path
+                                selectMode -> {
+                                    selected = if (folder.path in selected) {
+                                        selected - folder.path
+                                    } else {
+                                        selected + folder.path
+                                    }
+                                }
+                                else -> onOpenFolder(folder.path)
+                            }
+                        },
+                        onLongClick = if (!entry.excluded && !selectMode) {
+                            { singleExclude = folder }
+                        } else {
+                            null
+                        }
+                    )
                 }
             }
         }
     }
+
+    // ---- 单文件夹排除确认 ----
+    singleExclude?.let { folder ->
+        AlertDialog(
+            onDismissRequest = { singleExclude = null },
+            title = { Text("排除此文件夹？") },
+            text = {
+                Text(
+                    if (folder.songs.isEmpty()) {
+                        "「${folder.name}」将不再显示在文件夹列表和曲库中，文件不会被删除。"
+                    } else {
+                        "「${folder.name}」中的 ${folder.songs.size} 首歌曲将从列表中移除，文件不会被删除。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.excludeFolder(folder.path)
+                    singleExclude = null
+                }) { Text("排除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { singleExclude = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // ---- 批量排除确认 ----
+    if (batchConfirm) {
+        AlertDialog(
+            onDismissRequest = { batchConfirm = false },
+            title = { Text("排除选中的文件夹？") },
+            text = {
+                Text("已选 ${selected.size} 个文件夹，其中的歌曲将从列表中移除，文件不会被删除。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.excludeFolders(selected)
+                    batchConfirm = false
+                    selectMode = false
+                }) { Text("排除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { batchConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // ---- 恢复已排除文件夹 ----
+    restorePath?.let { path ->
+        val name = path.substringAfterLast('/').ifBlank { path }
+        AlertDialog(
+            onDismissRequest = { restorePath = null },
+            title = { Text("恢复此文件夹？") },
+            text = { Text("「$name」将解除排除，并重新扫描把歌曲加回曲库。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.restoreExcludedFolder(path)
+                    restorePath = null
+                }) { Text("恢复") }
+            },
+            dismissButton = {
+                TextButton(onClick = { restorePath = null }) { Text("取消") }
+            }
+        )
+    }
 }
+
+private data class FolderEntry(val folder: MusicFolder, val excluded: Boolean)
 
 /* ============================================================
  * 最近播放 / 我的收藏
@@ -979,7 +1152,8 @@ fun FoldersScreen(
 fun RecentScreen(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    reportCurrentVisibility: Boolean = false
 ) {
     val dense = LocalDenseLayout.current
     // 依赖 recentEntries 而不是 recentIds —— 最近播放现在也含在线歌
@@ -1009,7 +1183,12 @@ fun RecentScreen(
                 subtitle = "听过的歌会自动出现在这里"
             )
         } else {
-            SongList(songs = list, vm = vm, playerState = playerState)
+            SongList(
+                songs = list,
+                vm = vm,
+                playerState = playerState,
+                reportCurrentVisibility = reportCurrentVisibility
+            )
         }
     }
 }
@@ -1018,7 +1197,8 @@ fun RecentScreen(
 fun FavoritesScreen(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    reportCurrentVisibility: Boolean = false
 ) {
     val dense = LocalDenseLayout.current
     val list = remember(vm.songs, vm.favorites, vm.sortField, vm.sortAscending, vm.searchQuery) {
@@ -1044,7 +1224,12 @@ fun FavoritesScreen(
                 subtitle = "点歌单里的小心心，把喜欢的歌收进来"
             )
         } else {
-            SongList(songs = list, vm = vm, playerState = playerState)
+            SongList(
+                songs = list,
+                vm = vm,
+                playerState = playerState,
+                reportCurrentVisibility = reportCurrentVisibility
+            )
         }
     }
 }
@@ -1063,7 +1248,12 @@ fun SongCollectionScreen(
     modifier: Modifier = Modifier,
     coverAlbumId: Long = songs.firstOrNull()?.albumId ?: -1L,
     coverUri: android.net.Uri? = songs.firstOrNull()?.uri,
-    showCover: Boolean = true
+    showCover: Boolean = true,
+    /**
+     * 无封面头部（[showCover] = false，文件夹详情走这里）的 ⁝ 溢出菜单内容。
+     * 文件夹详情用它放「排除此文件夹」。
+     */
+    headerOverflow: (@Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -1127,7 +1317,8 @@ fun SongCollectionScreen(
                 sortAscending = vm.sortAscending,
                 onSort = vm::changeSort,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-                actions = { m -> QuickActions(songs = songs, vm = vm, modifier = m) }
+                actions = { m -> QuickActions(songs = songs, vm = vm, modifier = m) },
+                overflow = headerOverflow
             )
         }
 
@@ -1606,7 +1797,8 @@ fun LibraryPagerScreen(
                                 scrollToCurrentSignal = vm.scrollToCurrentSignal,
                                 listState = pageState,
                                 queueSongs = playQueue,
-                                onRemoveFromLibrary = removeSong
+                                onRemoveFromLibrary = removeSong,
+                                reportCurrentVisibility = realIndex(page) == liveIndex
                             )
                         }
                     }
@@ -1624,7 +1816,8 @@ fun LibraryPagerScreen(
                                 vm = vm,
                                 playerState = playerState,
                                 scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                listState = pageState
+                                listState = pageState,
+                                reportCurrentVisibility = realIndex(page) == liveIndex
                             )
                         }
                     }
@@ -1642,7 +1835,8 @@ fun LibraryPagerScreen(
                                 vm = vm,
                                 playerState = playerState,
                                 scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                listState = pageState
+                                listState = pageState,
+                                reportCurrentVisibility = realIndex(page) == liveIndex
                             )
                         }
                     }

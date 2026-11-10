@@ -30,15 +30,17 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // 音频链路：均衡器 → PCM 取样器。
+        // 音频链路：均衡器 → 卡拉OK（人声/伴奏）→ PCM 取样器。
         //
         // 顺序有讲究：均衡器放在前面，取样器放在后面，于是可视化读到的是
         // **用户实际听到的声音** —— 开了低音增强，柱子也真的往低频那边动。
         // 反过来（取样在前）就会出现"调了音效但柱子没反应"的割裂感。
+        // 卡拉OK夹在中间：伴奏模式输出的就是最终听感，柱子同样跟着走。
         val eq = EqProcessor()
+        val karaoke = KaraokeProcessor()
         val tap = PcmTapProcessor()
         val audioSink = DefaultAudioSink.Builder(this)
-            .setAudioProcessors(arrayOf<AudioProcessor>(eq, tap))
+            .setAudioProcessors(arrayOf<AudioProcessor>(eq, karaoke, tap))
             .build()
 
         val player = ExoPlayer.Builder(this)

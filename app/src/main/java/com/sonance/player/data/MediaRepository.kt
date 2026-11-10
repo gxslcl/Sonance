@@ -17,7 +17,9 @@ import kotlinx.coroutines.withContext
 data class ScanFilters(
     val excludeLocked: Boolean = true,
     val excludeUnsupported: Boolean = true,
-    val excludeNonSongFolders: Boolean = true
+    val excludeNonSongFolders: Boolean = true,
+    /** 用户排除的文件夹路径（含子文件夹）；空 = 不做此过滤 */
+    val excludedDirs: Set<String> = emptySet()
 )
 
 /** 一次扫描的结果：可用曲库 + 各类被排除的数量 */
@@ -144,6 +146,11 @@ class MediaRepository(private val context: Context) {
 
                     // 限定扫描范围：不在所选目录里的条目直接跳过（不参与任何排除计数）
                     if (folderPaths != null && folder !in folderPaths) continue
+
+                    // 用户排除的文件夹（含子文件夹）：整支剪掉，不参与排除计数
+                    if (filters.excludedDirs.isNotEmpty() &&
+                        filters.excludedDirs.any { ex -> folder == ex || folder.startsWith("$ex/") }
+                    ) continue
 
                     val song = Song(
                         id = id,
@@ -392,14 +399,21 @@ class MediaRepository(private val context: Context) {
             return if (ascending) songs.sortedWith(cmp) else songs.sortedWith(cmp.reversed())
         }
 
-        fun search(songs: List<Song>, query: String): List<Song> {
+        fun search(
+            songs: List<Song>,
+            query: String,
+            pinyin: Map<Long, String> = emptyMap()
+        ): List<Song> {
             if (query.isBlank()) return songs
             val q = query.trim().lowercase()
+            // 拼音查询同样去掉空格，让 "zhou jie lun" 也能命中
+            val pinyinQ = q.replace(" ", "")
             return songs.filter {
                 it.title.lowercase().contains(q) ||
                     it.artist.lowercase().contains(q) ||
                     it.album.lowercase().contains(q) ||
-                    it.folderName.lowercase().contains(q)
+                    it.folderName.lowercase().contains(q) ||
+                    (pinyinQ.isNotEmpty() && pinyin[it.id]?.contains(pinyinQ) == true)
             }
         }
 

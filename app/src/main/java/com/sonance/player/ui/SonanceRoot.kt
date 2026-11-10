@@ -102,9 +102,11 @@ import com.sonance.player.ui.components.equalizeScrimAlphas
 import com.sonance.player.ui.components.IconAction
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.MiniPlayer
+import com.sonance.player.ui.components.MenuRow
 import com.sonance.player.ui.components.NowPlayingPanel
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.PlayerBar
+import com.sonance.player.ui.components.PlayerLayer
 import com.sonance.player.ui.components.SideNavigation
 import com.sonance.player.ui.components.ToastHost
 import com.sonance.player.ui.icon.SonanceIcons
@@ -519,9 +521,11 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     var fullPlayerOpen by rememberSaveable { mutableStateOf(false) }
 
     // 手机横屏 + 全屏播放页：状态栏不参与布局，内容顶到最上沿。
-    // 收起播放页 / 转回竖屏 / 切后台都会自动恢复，见 PlayerStatusBarImmersive。
-    val immersivePlayer = fullPlayerOpen && isCompactLandscapePhone(configuration)
-    PlayerStatusBarImmersive(enabled = immersivePlayer)
+    // 另外：用户在外观面板开了「隐藏状态栏」→ 播放页三层（封面 / 歌词 / 律动柱）一并沉浸。
+    // 收起播放页 / 关闭开关 / 转回竖屏 / 切后台都会自动恢复，见 PlayerStatusBarImmersive。
+    val hideStatusBar = fullPlayerOpen &&
+        (isCompactLandscapePhone(configuration) || vm.lyricsHideStatusBar)
+    PlayerStatusBarImmersive(enabled = hideStatusBar)
 
     /** 沉浸式黑胶模式（铺在一切之上；关闭后音频不受影响） */
     var vinylOpen by remember { mutableStateOf(false) }
@@ -571,14 +575,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
     BackHandler(enabled = !fullPlayerOpen && detail != null) { detail = null }
-    // 设置页按返回 → 回主页面（「全部歌曲」），而不是直接退出应用。
+    // 设置页 / 在线音乐页 / 文件夹页按返回 → 回主页面（「全部歌曲」），而不是直接退出应用。
     //
     // 必须注册在上面两个之后：BackHandler 是「后注册且 enabled 的优先」，
     // 放在前面会被全屏播放页 / 详情页抢走。另外这里刻意要求 detail == null ——
-    // 详情页的返回优先级要高于设置页。
+    // 详情页的返回优先级要高于这些顶层页面。
     BackHandler(
         enabled = !fullPlayerOpen && detail == null &&
-            (vm.tab == LibraryTab.SETTINGS || vm.tab == LibraryTab.ONLINE)
+            (vm.tab == LibraryTab.SETTINGS || vm.tab == LibraryTab.ONLINE ||
+                vm.tab == LibraryTab.FOLDERS)
     ) {
         vm.selectTab(LibraryTab.SONGS)
     }
@@ -831,7 +836,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 // 这里在播放页根节点把这段 inset 消费掉，子层统一拿到 0。
                 // 只对「手机横屏播放页」生效，其它形态的 padding 原样保留。
                 .then(
-                    if (immersivePlayer) Modifier.consumeWindowInsets(WindowInsets.statusBars)
+                    if (hideStatusBar) Modifier.consumeWindowInsets(WindowInsets.statusBars)
                     else Modifier
                 )
         ) {
@@ -860,6 +865,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 coveredByVinyl = suppressVinylUnderlay,
                 sleepTimerActive = vm.sleepTimerLabel != null,
                 eqEnabled = vm.eqEnabled,
+                playbackSpeed = vm.playbackSpeed,
+                onSetSpeed = { vm.changePlaybackSpeed(it) },
+                lyricsHideStatusBar = vm.lyricsHideStatusBar,
+                onLyricsHideStatusBarChange = { vm.changeLyricsHideStatusBar(it) },
                 glowMode = vm.glowMode,
                 glowStrength = vm.glowStrength,
                 glowTransition = vm.glowTransition,
@@ -1070,12 +1079,25 @@ private fun CompactLayout(
                         // 已经停在在线音乐页时变成 ✕ —— 和设置页同一条规则：
                         // 这类"全屏接管"的页面，原样图标点上去毫无反应，看着就像坏了。
                         val inOnline = vm.tab == LibraryTab.ONLINE
+                        // 在线音乐关闭时，这一格不再有「进在线页」的意义，改成刷新本地曲库。
+                        // 刷新走 vm.scan()，内部使用 currentScanFilters()，已排除文件夹不会被扫回来。
+                        val refreshOnly = !inOnline && !vm.onlineMusicEnabled
                         IconAction(
-                            icon = if (inOnline) SonanceIcons.Close else SonanceIcons.Cloud,
-                            contentDescription = if (inOnline) "关闭在线音乐" else "在线音乐",
+                            icon = when {
+                                inOnline -> SonanceIcons.Close
+                                refreshOnly -> SonanceIcons.Refresh
+                                else -> SonanceIcons.Cloud
+                            },
+                            contentDescription = when {
+                                inOnline -> "关闭在线音乐"
+                                refreshOnly -> "刷新本地曲库"
+                                else -> "在线音乐"
+                            },
                             onClick = {
                                 if (inOnline) {
                                     vm.selectTab(LibraryTab.SONGS)
+                                } else if (refreshOnly) {
+                                    vm.scan()
                                 } else {
                                     vm.selectTab(LibraryTab.ONLINE)
                                     onCloseDetail()
@@ -1126,7 +1148,8 @@ private fun CompactLayout(
                             playerState = playerState,
                             detail = detail,
                             onOpenDetail = onOpenDetail,
-                            onOpenEqualizer = onOpenEqualizer
+                            onOpenEqualizer = onOpenEqualizer,
+                            reportCurrentVisibility = detail == null
                         )
                     }
 
@@ -1134,9 +1157,10 @@ private fun CompactLayout(
                     // 内容区已为悬浮卡让位 8dp，这里再补 2dp —— 正好「距悬浮播放窗
                     // 上方 10dp、距屏幕右缘 15dp」；经典贴底时内容区不让位，改贴 10dp。
                     // 点击走 requestScrollToCurrent，滚动逻辑复用 SongList 里的定位 effect。
-                    // 只画图标不带底/边框，44dp 的 Box 保留完整点击面积；
-                    // 圆形裁剪让点击水波纹也按圆扩散，不露方框。
-                    if (detail == null && vm.tab.inPager && playerState.hasItem) {
+                    // 44dp 的 Box 保留完整点击面积；圆形裁剪让点击水波纹也按圆扩散，不露方框。
+                    // 当前播放歌已在可见区内时隐藏；不在可见区才出现。
+                    // 一层极浅的圆形底（用 skin.text 派生，深浅皮肤都看得见）。
+                    if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
@@ -1144,13 +1168,14 @@ private fun CompactLayout(
                                 .padding(bottom = if (floating) 2.dp else 10.dp)
                                 .size(44.dp)
                                 .clip(CircleShape)
+                                .background(skin.text.copy(alpha = 0.06f), CircleShape)
                                 .clickable { vm.requestScrollToCurrent() },
                             contentAlignment = Alignment.Center
                         ) {
                             androidx.compose.material3.Icon(
                                 imageVector = SonanceIcons.Locate,
                                 contentDescription = "定位到正在播放的歌曲",
-                                tint = skin.text.copy(alpha = 0.62f),
+                                tint = skin.text.copy(alpha = 0.86f),
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -1319,7 +1344,8 @@ private fun MediumLayout(
                         playerState = playerState,
                         detail = detail,
                         onOpenDetail = onOpenDetail,
-                        onOpenEqualizer = onOpenEqualizer
+                        onOpenEqualizer = onOpenEqualizer,
+                        reportCurrentVisibility = detail == null
                     )
                 }
             }
@@ -1446,13 +1472,14 @@ private fun ExpandedLayout(
                                 playerState = playerState,
                                 detail = detail,
                                 onOpenDetail = onOpenDetail,
-                                onOpenEqualizer = onOpenEqualizer
+                                onOpenEqualizer = onOpenEqualizer,
+                                reportCurrentVisibility = detail == null
                             )
                         }
 
                         // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
                         // 平板列表原来没有这个入口，长曲库里找回正在播放的歌只能手滚
-                        if (detail == null && vm.tab.inPager && playerState.hasItem) {
+                        if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -1461,13 +1488,14 @@ private fun ExpandedLayout(
                                     .padding(bottom = if (floating) miniReserve + 8.dp else 10.dp)
                                     .size(44.dp)
                                     .clip(CircleShape)
+                                    .background(skin.text.copy(alpha = 0.06f), CircleShape)
                                     .clickable { vm.requestScrollToCurrent() },
                                 contentAlignment = Alignment.Center
                             ) {
                                 androidx.compose.material3.Icon(
                                     imageVector = SonanceIcons.Locate,
                                     contentDescription = "定位到正在播放的歌曲",
-                                    tint = skin.text.copy(alpha = 0.62f),
+                                    tint = skin.text.copy(alpha = 0.86f),
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -1569,7 +1597,12 @@ private fun ScreenBody(
     detail: Detail?,
     onOpenDetail: (Detail) -> Unit,
     /** 设置页里的"调节均衡器"要打开的是 Shell 层的面板，所以把回调透传下去 */
-    onOpenEqualizer: () -> Unit
+    onOpenEqualizer: () -> Unit,
+    /**
+     * 是否上报「当前播放歌曲是否在列表可见区内」。只有宽屏（无 Pager）
+     * 的歌曲/最近/收藏列表传 true；手机 Pager 由 LibraryPagerScreen 自己处理。
+     */
+    reportCurrentVisibility: Boolean = false
 ) {
     val skin = LocalSkin.current
 
@@ -1614,14 +1647,48 @@ private fun ScreenBody(
                 if (folder == null) {
                     EmptyState(SonanceIcons.Folder, "文件夹不存在", "可能已被移除或重新扫描")
                 } else {
+                    // 「排除此文件夹」：整支从曲库列表剔除（文件不动），
+                    // 恢复入口在 设置 → 乐库清理与合并 → 已排除的文件夹。
+                    var confirmExclude by remember { mutableStateOf(false) }
                     SongCollectionScreen(
                         title = folder.name,
                         subtitle = "${folder.songs.size} 首 · ${folder.path}",
                         songs = folder.songs,
                         vm = vm,
                         playerState = playerState,
-                        showCover = false
+                        showCover = false,
+                        headerOverflow = {
+                            MenuRow(
+                                icon = SonanceIcons.FolderMinus,
+                                label = "排除此文件夹",
+                                selected = false,
+                                onClick = { confirmExclude = true }
+                            )
+                        }
                     )
+                    if (confirmExclude) {
+                        AlertDialog(
+                            onDismissRequest = { confirmExclude = false },
+                            title = { Text("排除文件夹") },
+                            text = {
+                                Text(
+                                    "把「${folder.name}」从曲库列表排除？\n\n" +
+                                        "其中 ${folder.songs.size} 首歌曲将不再出现在任何列表中，" +
+                                        "文件不会被删除。\n" +
+                                        "可在 设置 → 乐库清理与合并 → 已排除的文件夹 中恢复。"
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    confirmExclude = false
+                                    vm.excludeFolder(folder.path)
+                                }) { Text("排除") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { confirmExclude = false }) { Text("取消") }
+                            }
+                        )
+                    }
                 }
             }
 
@@ -1641,7 +1708,8 @@ private fun ScreenBody(
             vm = vm,
             playerState = playerState,
             onOpenFolder = { onOpenDetail(Detail.FolderDetail(it)) },
-            onOpenAlbum = { onOpenDetail(Detail.AlbumDetail(it.albumId)) }
+            onOpenAlbum = { onOpenDetail(Detail.AlbumDetail(it.albumId)) },
+            reportCurrentVisibility = reportCurrentVisibility
         )
 
         LibraryTab.ALBUMS -> AlbumsScreen(
@@ -1660,7 +1728,11 @@ private fun ScreenBody(
             onOpenFolder = { onOpenDetail(Detail.FolderDetail(it)) }
         )
 
-        LibraryTab.RECENT -> RecentScreen(vm = vm, playerState = playerState)
+        LibraryTab.RECENT -> RecentScreen(
+            vm = vm,
+            playerState = playerState,
+            reportCurrentVisibility = reportCurrentVisibility
+        )
 
         LibraryTab.ONLINE -> OnlineScreen(
             vm = vm,
@@ -1668,7 +1740,11 @@ private fun ScreenBody(
             onOpenPlaylist = { onOpenDetail(Detail.PlaylistDetail(it)) }
         )
 
-        LibraryTab.FAVORITES -> FavoritesScreen(vm = vm, playerState = playerState)
+        LibraryTab.FAVORITES -> FavoritesScreen(
+            vm = vm,
+            playerState = playerState,
+            reportCurrentVisibility = reportCurrentVisibility
+        )
 
         LibraryTab.SETTINGS -> SettingsScreen(
             vm = vm,

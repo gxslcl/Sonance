@@ -57,6 +57,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -90,6 +91,7 @@ import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.solidSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -116,6 +118,10 @@ fun LyricsOverlay(
     onNext: () -> Unit,
     /** 与列表页点击卡片打开播放器一致：从歌词层返回播放主界面。 */
     onOpenPlayer: () -> Unit,
+    /** 是否隐藏系统状态栏（外观面板里的开关，状态由 SonanceRoot 落地） */
+    hideStatusBar: Boolean = false,
+    /** 改「隐藏状态栏」开关 */
+    onHideStatusBarChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -138,6 +144,17 @@ fun LyricsOverlay(
      * 分开放只是让顶栏多一个认不出来的图标。
      */
     var showAppearance by remember { mutableStateOf(false) }
+
+    // 打开「隐藏状态栏」后，顶栏图标 5 秒后淡到几乎不可见（alpha 0.15），但仍可点击。
+    var chromeDimmed by remember { mutableStateOf(false) }
+    LaunchedEffect(hideStatusBar) {
+        if (hideStatusBar) {
+            delay(5000)
+            chromeDimmed = true
+        } else {
+            chromeDimmed = false
+        }
+    }
 
     // 背景玻璃：本地状态，改了立刻写回 prefs
     var glassStyle by remember(song.id) { mutableStateOf(GlassStyle.of(prefs.glassStyle)) }
@@ -273,6 +290,7 @@ fun LyricsOverlay(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
+                    .graphicsLayer { alpha = if (chromeDimmed) 0.15f else 1f }
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -452,6 +470,26 @@ fun LyricsOverlay(
         // 原来嵌在三段式 Column 里，一展开就把歌词区挤掉一截；现在直接盖在
         // 歌词上方（顶栏之下）：展开时歌词照常滚动、面板下缘以下的当前句依旧
         // 可见。高度按内容撑开，矮屏给 72% 屏高上限 + 滚动兜底。
+        // 面板打开时，先铺一层全屏触摸拦截：面板以外的区域既不响应点击、
+        // 也不会触发任何「点外部关闭」。拦截层写在面板之前（绘制在其下），
+        // 面板自身仍可交互；顶栏 54dp 不拦，保证「外观」按钮可关闭面板。
+        if (showAppearance) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(top = 54.dp)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent(PointerEventPass.Initial)
+                                    .changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+            )
+        }
+
         if (showAppearance) {
             Column(
                 Modifier
@@ -511,6 +549,11 @@ fun LyricsOverlay(
                         style = it
                         prefs.lyricsStyle = it
                     },
+                    skin = skin
+                )
+                StatusBarRow(
+                    hide = hideStatusBar,
+                    onHideChange = onHideStatusBarChange,
                     skin = skin
                 )
                 OffsetRow(
@@ -822,6 +865,56 @@ private fun StyleRow(
             style = MaterialTheme.typography.labelSmall,
             color = skin.textMuted,
             fontSize = 10.sp
+        )
+    }
+}
+
+/**
+ * 「隐藏状态栏」开关行：全屏歌词页顶到屏幕上沿，纯沉浸浏览。
+ *
+ * 状态落地在 SonanceRoot（`PlayerStatusBarImmersive`），这里只上报开关值 ——
+ * 因为隐藏/恢复状态栏要在**播放页外层**做，歌词页自己管不了窗口 insets。
+ * 开关即时生效；下拉屏幕仍能临时呼出状态栏看时间/通知。
+ */
+@Composable
+private fun StatusBarRow(
+    hide: Boolean,
+    onHideChange: (Boolean) -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "隐藏状态栏",
+                style = MaterialTheme.typography.labelLarge,
+                color = skin.text
+            )
+            Text(
+                "歌词顶到屏幕上沿；下拉可临时呼出",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                fontSize = 10.sp
+            )
+        }
+        androidx.compose.material3.Switch(
+            checked = hide,
+            onCheckedChange = onHideChange,
+            modifier = Modifier.height(24.dp),
+            colors = androidx.compose.material3.SwitchDefaults.colors(
+                checkedThumbColor = skin.onAccent,
+                checkedTrackColor = skin.accent,
+                uncheckedThumbColor = skin.textMuted,
+                uncheckedTrackColor = skin.surface3
+            )
         )
     }
 }

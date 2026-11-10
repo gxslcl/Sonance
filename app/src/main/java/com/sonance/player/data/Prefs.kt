@@ -15,8 +15,17 @@ import org.json.JSONObject
 /** 轻量持久化：收藏、最近播放、皮肤、排序、视图模式 */
 class Prefs(context: Context) {
 
-    private val sp: SharedPreferences =
+    private val rawPrefs: SharedPreferences =
         context.applicationContext.getSharedPreferences("sonance_prefs", Context.MODE_PRIVATE)
+
+    /**
+     * 出厂基线（见 [SettingsBaseline]）：首次启动/清数据后，本地未写过的 key
+     * 返回基线里的值；升级安装不覆盖已有设置。
+     */
+    private val baseline: Map<String, Any> = SettingsBaseline.load(context.applicationContext)
+    private val baselineApplied: Boolean = SettingsBaseline.seedIfFresh(rawPrefs, baseline)
+    private val sp: SharedPreferences =
+        BaselineSharedPreferences(rawPrefs, baseline, baselineApplied)
 
     /** 播放页封面颜色往背景上晕开的包裹方式（见 [GlowMode]） */
     var glowMode: String
@@ -446,6 +455,15 @@ class Prefs(context: Context) {
 
         ed.apply()
     }
+
+    /**
+     * 只读导出当前设置 → `Android/data/<包名>/files/settings_baseline.json`。
+     *
+     * 入口在设置「关于」长按版本号。导出内容只包含 [SettingsBaseline.specs]
+     * 白名单里的外观/行为偏好，不含路径、播放现场、收藏歌单等设备相关数据。
+     */
+    fun exportSettingsBaseline(context: Context): java.io.File? =
+        SettingsBaseline.export(context.applicationContext, rawPrefs)
 
     // ===== 歌词页背景玻璃 =====
 
@@ -898,6 +916,27 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_EQ_BANDS, null) ?: ""
         set(v) = sp.edit().putString(KEY_EQ_BANDS, v).apply()
 
+    // ===== 播放速度 =====
+
+    /** 播放速度（0.5–2.5 倍）。音调保持不变（time-stretch） */
+    var playSpeed: Float
+        get() = sp.getFloat(KEY_PLAY_SPEED, 1f).coerceIn(0.5f, 2.5f)
+        set(v) = sp.edit().putFloat(KEY_PLAY_SPEED, v.coerceIn(0.5f, 2.5f)).apply()
+
+    // ===== 人声/伴奏（卡拉OK）=====
+
+    /** true = 伴奏模式（中置消除），false = 原唱直通 */
+    var karaokeEnabled: Boolean
+        get() = sp.getBoolean(KEY_KARAOKE_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_KARAOKE_ENABLED, v).apply()
+
+    // ===== 全屏歌词页 =====
+
+    /** 全屏歌词页是否隐藏系统状态栏（沉浸浏览，下拉可临时呼出） */
+    var lyricsHideStatusBar: Boolean
+        get() = sp.getBoolean(KEY_LYRICS_HIDE_STATUS_BAR, false)
+        set(v) = sp.edit().putBoolean(KEY_LYRICS_HIDE_STATUS_BAR, v).apply()
+
     // ===== 曲库隐藏（清理重复 / 同名歌曲只从列表隐藏，不动文件）=====
 
     /** 被隐藏的曲目 id，逗号分隔 */
@@ -909,6 +948,26 @@ class Prefs(context: Context) {
         val raw = hiddenSongIds
         if (raw.isBlank()) return emptySet()
         return raw.split(',').mapNotNull { it.trim().toLongOrNull() }.toSet()
+    }
+
+    // ===== 排除文件夹（歌曲不再出现在列表中，文件不动）=====
+
+    /** 被排除的文件夹路径（`Song.folderPath` 同款相对路径），stringSet 存储 */
+    var excludedDirs: Set<String>
+        get() = sp.getStringSet(KEY_EXCLUDED_DIRS, emptySet()) ?: emptySet()
+        set(v) = sp.edit().putStringSet(KEY_EXCLUDED_DIRS, v).apply()
+
+    /**
+     * 某个文件夹（含其子文件夹）是否被排除。
+     *
+     * 精确匹配 + 前缀匹配（加 `/` 防止「/Music/A」误伤「/Music/AB」）。
+     * 扫描过滤与缓存曲库的显示过滤都用这一条规则，两边口径永远一致。
+     */
+    fun isFolderExcluded(folderPath: String): Boolean {
+        if (folderPath.isBlank() || excludedDirs.isEmpty()) return false
+        return excludedDirs.any { ex ->
+            folderPath == ex || folderPath.startsWith("$ex/")
+        }
     }
 
     // ===== 歌曲库缓存：上次扫描结果 JSON + 时间戳 =====
@@ -1298,6 +1357,10 @@ class Prefs(context: Context) {
         const val MIN_LYRICS_FONT = 14
         const val MAX_LYRICS_FONT = 30
         private const val KEY_HIDDEN_IDS = "hidden_song_ids"
+        private const val KEY_PLAY_SPEED = "play_speed"
+        private const val KEY_KARAOKE_ENABLED = "karaoke_enabled"
+        private const val KEY_LYRICS_HIDE_STATUS_BAR = "lyrics_hide_status_bar"
+        private const val KEY_EXCLUDED_DIRS = "excluded_dirs"
         private const val KEY_SONGS_CACHE = "songs_cache_json"
         private const val KEY_SCAN_AT = "last_scan_at"
         private const val KEY_COMPAT_TREE = "compat_tree_uri"

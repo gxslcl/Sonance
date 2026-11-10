@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -499,27 +500,59 @@ fun ArtistRow(
     )
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun FolderRow(
     folder: MusicFolder,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 已排除的文件夹：置灰显示，点击走「恢复」询问 */
+    excluded: Boolean = false,
+    /** 多选模式：右侧显示勾选圈 */
+    selectMode: Boolean = false,
+    selected: Boolean = false,
+    onLongClick: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     EntityRow(
         title = folder.name,
-        subtitle = "${folder.songs.size} 首 · ${folder.path}",
+        subtitle = if (excluded) "已排除 · ${folder.path}" else "${folder.songs.size} 首 · ${folder.path}",
         seed = folder.path,
         albumId = folder.songs.firstOrNull()?.albumId ?: -1L,
         sourceUri = folder.songs.firstOrNull()?.uri,
         circular = false,
         onClick = onClick,
-        modifier = modifier,
+        modifier = modifier.then(
+            if (excluded) Modifier.graphicsLayer { alpha = 0.45f } else Modifier
+        ),
         leadingIcon = SonanceIcons.Folder,
-        leadingTint = skin.accent
+        leadingTint = if (excluded) skin.textDim else skin.accent,
+        onLongClick = onLongClick,
+        trailing = if (selectMode && !excluded) {
+            {
+                Box(
+                    Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(if (selected) skin.accent else Color.Transparent)
+                        .border(1.5.dp, if (selected) skin.accent else skin.textMuted, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (selected) {
+                        androidx.compose.material3.Icon(
+                            imageVector = SonanceIcons.Check,
+                            contentDescription = null,
+                            tint = skin.bg,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                }
+            }
+        } else null
     )
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun EntityRow(
     title: String,
@@ -533,14 +566,22 @@ private fun EntityRow(
     songId: Long = -1L,
     coverKey: String? = null,
     leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
-    leadingTint: Color = Color.Unspecified
+    leadingTint: Color = Color.Unspecified,
+    onLongClick: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(9.dp))
-            .clickable(onClick = onClick)
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    Modifier.clickable(onClick = onClick)
+                }
+            )
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -591,14 +632,18 @@ private fun EntityRow(
             )
         }
         Spacer(Modifier.width(8.dp))
-        androidx.compose.material3.Icon(
-            imageVector = SonanceIcons.ArrowLeft,
-            contentDescription = null,
-            tint = skin.textMuted,
-            modifier = Modifier
-                .size(16.dp)
-                .rotate(180f)
-        )
+        if (trailing != null) {
+            trailing()
+        } else {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.ArrowLeft,
+                contentDescription = null,
+                tint = skin.textMuted,
+                modifier = Modifier
+                    .size(16.dp)
+                    .rotate(180f)
+            )
+        }
     }
 }
 

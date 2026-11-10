@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,7 @@ import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.MediaRepository
 import com.sonance.player.data.MusicFolder
 import com.sonance.player.data.Prefs
+import com.sonance.player.data.PinyinIndex
 import com.sonance.player.data.ScanFilters
 import com.sonance.player.data.decodeSongsFromJson
 import com.sonance.player.data.findDuplicates
@@ -94,6 +96,7 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqBus
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.playback.KaraokeBus
 import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerController
 import com.sonance.player.playback.RepeatMode
@@ -432,7 +435,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private fun currentScanFilters(): ScanFilters = ScanFilters(
         excludeLocked = scanExcludeLocked,
         excludeUnsupported = scanExcludeUnsupported,
-        excludeNonSongFolders = scanExcludeNonSongFolders
+        excludeNonSongFolders = scanExcludeNonSongFolders,
+        excludedDirs = prefs.excludedDirs
     )
     /**
      * 「左右滑动切换」提示是否已经展示过。
@@ -675,6 +679,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (list.isNotEmpty()) {
                     val visible = filterHidden(list)
                     songs = visible
+                    rebuildPinyinIndex(visible)
                     albums = MediaRepository.groupAlbums(visible)
                     artists = MediaRepository.groupArtists(visible)
                     folders = MediaRepository.groupFolders(visible)
@@ -1194,6 +1199,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyScanOutcome(outcome: ScanOutcome) {
         songs = filterHidden(outcome.songs)
+        rebuildPinyinIndex(songs)
         // 扫描会清掉封面缓存，这里重新预热一遍（见 warmUpCovers 的说明）
         warmUpCovers()
         albums = MediaRepository.groupAlbums(songs)
@@ -1202,10 +1208,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         lastScanOutcome = outcome
     }
 
-    /** 曲库里被用户"清理"掉（只从列表隐藏）的曲目 */
+    /** 曲库里被用户"清理"掉（只从列表隐藏）或所在文件夹被排除的曲目 */
     private fun filterHidden(all: List<Song>): List<Song> {
         val hidden = prefs.hiddenIdSet()
-        return if (hidden.isEmpty()) all else all.filter { it.id !in hidden }
+        val dirsEmpty = prefs.excludedDirs.isEmpty()
+        if (hidden.isEmpty() && dirsEmpty) return all
+        return all.filter { it.id !in hidden && !prefs.isFolderExcluded(it.folderPath) }
     }
 
     // ===== 清理重复 / 同名歌曲（只隐藏，不动文件）=====
@@ -1418,6 +1426,51 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 重新扫描一次把完整曲库拿回来（缓存里已经是过滤后的了）
         scan()
         showToast("已恢复隐藏的曲目")
+    }
+
+    // ===== 排除文件夹（歌曲不再出现在列表中，文件不动）=====
+
+    /** 被排除的文件夹路径集合（与 [Prefs.isFolderExcluded] 同一条规则） */
+    var excludedDirs by mutableStateOf(prefs.excludedDirs)
+        private set
+
+    /**
+     * 排除一个文件夹：立即从内存曲库剔除并重新分组，文件不动。
+     * 之后每次扫描都会按同一规则把它挡在外面（[currentScanFilters]）。
+     */
+    fun excludeFolder(path: String) = excludeFolders(listOf(path))
+
+    /** 批量排除文件夹（文件夹页多选）。规则与单删一致，一次重建列表、只弹一次提示。 */
+    fun excludeFolders(paths: Collection<String>) {
+        val fresh = paths.filter { it.isNotBlank() && it !in prefs.excludedDirs }.distinct()
+        if (fresh.isEmpty()) return
+        prefs.excludedDirs = prefs.excludedDirs + fresh
+        excludedDirs = prefs.excludedDirs
+
+        val before = songs.size
+        val visible = songs.filter { !prefs.isFolderExcluded(it.folderPath) }
+        val removed = before - visible.size
+        songs = visible
+        albums = MediaRepository.groupAlbums(visible)
+        artists = MediaRepository.groupArtists(visible)
+        folders = MediaRepository.groupFolders(visible)
+        prefs.songsCacheJson = encodeSongsToJson(visible)
+        showToast(
+            when {
+                fresh.size == 1 && removed > 0 -> "已排除该文件夹（$removed 首）· 文件未删除"
+                fresh.size == 1 -> "已排除该文件夹 · 文件未删除"
+                removed > 0 -> "已排除 ${fresh.size} 个文件夹（$removed 首）· 文件未删除"
+                else -> "已排除 ${fresh.size} 个文件夹 · 文件未删除"
+            }
+        )
+    }
+
+    /** 恢复某个被排除的文件夹：移出黑名单后重扫入库 */
+    fun restoreExcludedFolder(path: String) {
+        prefs.excludedDirs = prefs.excludedDirs - path
+        excludedDirs = prefs.excludedDirs
+        showToast("已恢复，正在重新扫描")
+        scan()
     }
 
     fun scan() {
@@ -2717,6 +2770,19 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scrollToCurrentSignal++
     }
 
+    /**
+     * 当前播放歌曲是否已经在列表可见区内。由**当前显示的列表页**根据
+     * `LazyListState.layoutInfo.visibleItemsInfo` 实时上报；悬浮的
+     * 「回到当前播放」按钮据此隐藏/显示。
+     */
+    var currentSongVisible by mutableStateOf(false)
+
+    /**
+     * 设置「关于」长按版本号：把当前设置导出成出厂基线 JSON（只读，不改本地值）。
+     * @return 导出的文件；失败返回 null
+     */
+    fun exportSettingsBaseline(): java.io.File? = prefs.exportSettingsBaseline(getApplication())
+
     fun changeSkin(value: Skin) {
         skin = value
         prefs.skinId = value.id
@@ -3937,8 +4003,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 派生数据 =====
 
+    /**
+     * 拼音索引：songId → "全拼 首字母"。
+     *
+     * 扫描/缓存加载完成后在后台线程构建，搜索时只做字符串 contains，不阻塞输入。
+     * 索引没就绪时为空 Map，搜索自然退化为「原名匹配」。
+     */
+    private var pinyinIndex by mutableStateOf<Map<Long, String>>(emptyMap())
+
+    private fun rebuildPinyinIndex(list: List<Song>) {
+        viewModelScope.launch {
+            val index = withContext(Dispatchers.Default) {
+                list.associate {
+                    it.id to PinyinIndex.build("${it.title} ${it.artist} ${it.album}")
+                }
+            }
+            pinyinIndex = index
+        }
+    }
+
     fun visibleSongs(): List<Song> {
-        val searched = MediaRepository.search(songs, searchQuery)
+        val searched = MediaRepository.search(songs, searchQuery, pinyinIndex)
         return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
 
@@ -3966,7 +4051,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun favoriteSongs(): List<Song> {
-        val searched = MediaRepository.search(songs.filter { favorites.contains(it.id) }, searchQuery)
+        val searched = MediaRepository.search(
+            songs.filter { favorites.contains(it.id) },
+            searchQuery,
+            pinyinIndex
+        )
         return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
     }
 
@@ -4015,6 +4104,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 自定义值一旦存在就以它为准（用户拖过的成果不能被预设抹掉）
         eqEnabled = if (custom != null) prefs.eqEnabled else prefs.eqEnabled && preset != EqPreset.OFF
         pushEq()
+        // 卡拉OK 与播放速度：进程重建后同样要和播放器/音频链路重新对齐
+        KaraokeBus.enabled = prefs.karaokeEnabled
+        player.setSpeed(prefs.playSpeed)
     }
 
     /**
@@ -4076,6 +4168,44 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun pushEq() {
         EqBus.update(eqEnabled, eqBands)
+    }
+
+    // ===== 人声/伴奏（卡拉OK）=====
+
+    /** true = 伴奏模式（中置消除），false = 原唱直通 */
+    var karaokeEnabled by mutableStateOf(prefs.karaokeEnabled)
+        private set
+
+    fun toggleKaraoke() = setKaraoke(!karaokeEnabled)
+
+    fun setKaraoke(value: Boolean) {
+        karaokeEnabled = value
+        prefs.karaokeEnabled = value
+        KaraokeBus.enabled = value
+        showToast(if (value) "伴奏模式（人声消除，效果因歌而异）" else "已切回原唱")
+    }
+
+    // ===== 播放速度 =====
+
+    /** 播放速度（0.5–2.5 倍），跨歌、跨进程保持 */
+    var playbackSpeed by mutableFloatStateOf(prefs.playSpeed)
+        private set
+
+    fun changePlaybackSpeed(value: Float) {
+        playbackSpeed = value.coerceIn(0.5f, 2.5f)
+        prefs.playSpeed = playbackSpeed
+        player.setSpeed(playbackSpeed)
+    }
+
+    // ===== 全屏歌词页 =====
+
+    /** 全屏歌词页是否隐藏系统状态栏 */
+    var lyricsHideStatusBar by mutableStateOf(prefs.lyricsHideStatusBar)
+        private set
+
+    fun changeLyricsHideStatusBar(value: Boolean) {
+        lyricsHideStatusBar = value
+        prefs.lyricsHideStatusBar = value
     }
 
     /** 解析持久化的自定义曲线；长度不对或含脏数据都返回 null（回落到预设） */
