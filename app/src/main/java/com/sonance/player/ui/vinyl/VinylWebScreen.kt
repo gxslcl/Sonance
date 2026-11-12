@@ -451,7 +451,7 @@ private fun bridgeInject(statement: String): String =
     "(function r(n){if(window.__vinyl){$statement}else if(n>0)setTimeout(function(){r(n-1)},120)})(30);"
 
 private fun pushQueue(wv: WebView, json: String, state: PlayerUiState) {
-    val js = "window.__vinyl && window.__vinyl.setQueue($json, ${state.queueIndex}, ${state.isPlaying}, ${state.volume}, ${state.volume <= 0.001f});"
+    val js = "window.__vinyl && window.__vinyl.setQueue($json, ${state.queueIndex}, ${state.isPlaying}, ${state.userVolume}, ${state.userVolume <= 0.001f});"
     wv.post { wv.evaluateJavascript(js, null) }
 }
 

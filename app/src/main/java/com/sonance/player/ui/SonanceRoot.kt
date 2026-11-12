@@ -131,7 +131,6 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.SonanceTheme
 import com.sonance.player.ui.vinyl.VinylWebScreen
-import com.sonance.player.ui.wall.CoverWallWebScreen
 import com.sonance.player.ui.wall.NativeCoverWallScreen
 import com.sonance.player.ui.components.CoverPickerDialog
 
@@ -541,18 +540,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             vinylCovered = false
         }
     }
-    /** 沉浸式封面墙：与黑胶同一套「盖稳即停绘」范式；入口都在主界面，二者不会同时打开 */
-    var coverWallOpen by remember { mutableStateOf(false) }
-    var wallCovered by remember { mutableStateOf(false) }
-    LaunchedEffect(coverWallOpen) {
-        if (coverWallOpen) {
-            delay(320)
-            wallCovered = true
-        } else {
-            wallCovered = false
-        }
-    }
-    /** 原生封面墙（Compose 复刻）：与 WebView 版并列、互不删除，入口图标一模一样 */
+    /** 沉浸式封面墙（原生 Compose）：与黑胶同一套「盖稳即停绘」范式 */
     var nativeWallOpen by remember { mutableStateOf(false) }
     var nativeWallCovered by remember { mutableStateOf(false) }
     LaunchedEffect(nativeWallOpen) {
@@ -564,7 +552,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         }
     }
     // 黑胶 / 封面墙任一盖稳后，下层（主界面 + 播放页）统一停绘、冻结动画
-    val suppressVinylUnderlay = (vinylOpen && vinylCovered) || (coverWallOpen && wallCovered) || (nativeWallOpen && nativeWallCovered)
+    val suppressVinylUnderlay = (vinylOpen && vinylCovered) || (nativeWallOpen && nativeWallCovered)
     var queueOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
@@ -782,11 +770,6 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 封面墙入口（顶栏图标 / 视图弹层共用）：先收输入法，避免光标手柄飘在墙上
     val openCoverWall: () -> Unit = {
         dismissInput()
-        coverWallOpen = true
-    }
-    // 原生封面墙入口（同款图标，紧挨 WebView 版）：进去后顶部有「原生渲染」标识
-    val openNativeWall: () -> Unit = {
-        dismissInput()
         nativeWallOpen = true
     }
 
@@ -845,8 +828,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
-                onOpenCoverWall = openCoverWall,
-                onOpenNativeWall = openNativeWall
+                onOpenCoverWall = openCoverWall
             )
 
             LayoutMode.MEDIUM -> MediumLayout(
@@ -859,8 +841,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
-                onOpenCoverWall = openCoverWall,
-                onOpenNativeWall = openNativeWall
+                onOpenCoverWall = openCoverWall
             )
 
             LayoutMode.EXPANDED -> ExpandedLayout(
@@ -873,8 +854,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
-                onOpenCoverWall = openCoverWall,
-                onOpenNativeWall = openNativeWall
+                onOpenCoverWall = openCoverWall
             )
         }
         }
@@ -910,9 +890,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onPlayAt = { vm.player.playAt(it) },
                 onToggleFavorite = { vm.toggleFavorite(it) },
                 onCyclePlayMode = { vm.cyclePlayMode() },
-                onPrev = { vm.player.previous() },
+                onPrev = { vm.previousOrRandom() },
                 onPlayPause = { vm.player.togglePlay() },
-                onNext = { vm.player.next() },
+                onNext = { vm.nextOrRandom() },
                 onSeek = { vm.player.seekTo(it) },
                 onVolume = { vm.player.setVolume(it) },
                 onOpenQueue = { queueOpen = true },
@@ -966,35 +946,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             )
         }
 
-        // ===== 沉浸式封面墙 =====
-        AnimatedVisibility(
-            visible = coverWallOpen,
-            enter = fadeIn(tween(280)),
-            exit = fadeOut(tween(240)),
-            modifier = Modifier
-                .fillMaxSize()
-                .zIndex(36f)
-        ) {
-            CoverWallWebScreen(
-                state = playerState,
-                albums = vm.albums,
-                songs = vm.songs,
-                favorites = vm.favorites,
-                onClose = { coverWallOpen = false },
-                onPlayAlbum = { wa, idx ->
-                    val song = wa.tracks.getOrNull(idx) ?: wa.tracks.firstOrNull()
-                    if (song != null) vm.playFrom(wa.playContext, song)
-                },
-                // playNext 插在当前项之后：倒序插入才能保持专辑原顺序
-                onQueueAlbum = { wa -> wa.tracks.asReversed().forEach { vm.player.playNext(it) } },
-                onTogglePlay = { vm.player.togglePlay() },
-                onPrev = { vm.player.previous() },
-                onNext = { vm.player.next() },
-                onSeek = { vm.player.seekTo(it) }
-            )
-        }
-
-        // ===== 原生封面墙（Compose 复刻，与 WebView 版并列、互不删除） =====
+        // ===== 沉浸式封面墙（原生 Compose） =====
         AnimatedVisibility(
             visible = nativeWallOpen,
             enter = fadeIn(tween(280)),
@@ -1011,7 +963,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onClose = { nativeWallOpen = false },
                 onPlayAlbum = { wa, idx ->
                     val song = wa.tracks.getOrNull(idx) ?: wa.tracks.firstOrNull()
-                    if (song != null) vm.playFrom(wa.playContext, song)
+                    if (song != null) vm.playOrdered(wa.tracks, song)
                 },
                 onQueueAlbum = { wa -> wa.tracks.asReversed().forEach { vm.player.playNext(it) } },
                 onTogglePlay = { vm.player.togglePlay() },
@@ -1118,8 +1070,7 @@ private fun CompactLayout(
     onOpenFullPlayer: () -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
-    onOpenCoverWall: () -> Unit,
-    onOpenNativeWall: () -> Unit
+    onOpenCoverWall: () -> Unit
 ) {
     val skin = LocalSkin.current
     // 「视图」弹层：专辑 / 艺术家 / 文件夹 —— 从底栏下沉到这里
@@ -1193,24 +1144,8 @@ private fun CompactLayout(
                                 skin.textDim
                             }
                         )
-                        // ② 封面墙：沉浸式 3D 浏览全部专辑（设置 / 在线页不显示）
-                        if (vm.tab != LibraryTab.SETTINGS && vm.tab != LibraryTab.ONLINE) {
-                            IconAction(
-                                icon = SonanceIcons.CoverWall,
-                                contentDescription = "封面墙",
-                                onClick = onOpenCoverWall,
-                                iconSize = 19.dp,
-                                tint = skin.textDim
-                            )
-                            // 原生封面墙：图标与上面一模一样，紧挨着；进去后顶部有「原生渲染」标识
-                            IconAction(
-                                icon = SonanceIcons.CoverWall,
-                                contentDescription = "封面墙（原生）",
-                                onClick = onOpenNativeWall,
-                                iconSize = 19.dp,
-                                tint = skin.textDim
-                            )
-                        }
+                        // ② 封面墙入口已移到曲库筛选行的「随便听听」胶囊
+                        //（LibraryPagerScreen 表头），顶栏不再放小图标。
                         // ③ 在线音乐：云图标进（不跟本地搜索框抢放大镜）；
                         // 已经停在在线音乐页时变成 ✕ —— 和设置页同一条规则：
                         // 这类"全屏接管"的页面，原样图标点上去毫无反应，看着就像坏了。
@@ -1276,7 +1211,8 @@ private fun CompactLayout(
                         LibraryPagerScreen(
                             vm = vm,
                             playerState = playerState,
-                            onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) }
+                            onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) },
+                            onOpenCoverWall = onOpenCoverWall
                         )
                     } else {
                         ScreenBody(
@@ -1479,8 +1415,7 @@ private fun MediumLayout(
     onOpenFullPlayer: () -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
-    onOpenCoverWall: () -> Unit,
-    onOpenNativeWall: () -> Unit
+    onOpenCoverWall: () -> Unit
 ) {
     val skin = LocalSkin.current
     Row(Modifier.fillMaxSize()) {
@@ -1520,14 +1455,6 @@ private fun MediumLayout(
                                 icon = SonanceIcons.CoverWall,
                                 contentDescription = "封面墙",
                                 onClick = onOpenCoverWall,
-                                iconSize = 19.dp,
-                                tint = skin.textDim
-                            )
-                            // 原生封面墙：图标与上面一模一样，紧挨着；进去后顶部有「原生渲染」标识
-                            IconAction(
-                                icon = SonanceIcons.CoverWall,
-                                contentDescription = "封面墙（原生）",
-                                onClick = onOpenNativeWall,
                                 iconSize = 19.dp,
                                 tint = skin.textDim
                             )
@@ -1587,8 +1514,7 @@ private fun ExpandedLayout(
     onOpenFullPlayer: () -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
-    onOpenCoverWall: () -> Unit,
-    onOpenNativeWall: () -> Unit
+    onOpenCoverWall: () -> Unit
 ) {
     val skin = LocalSkin.current
     val configuration = LocalConfiguration.current
@@ -1661,14 +1587,6 @@ private fun ExpandedLayout(
                                     icon = SonanceIcons.CoverWall,
                                     contentDescription = "封面墙",
                                     onClick = onOpenCoverWall,
-                                    iconSize = 19.dp,
-                                    tint = skin.textDim
-                                )
-                                // 原生封面墙：图标与上面一模一样，紧挨着；进去后顶部有「原生渲染」标识
-                                IconAction(
-                                    icon = SonanceIcons.CoverWall,
-                                    contentDescription = "封面墙（原生）",
-                                    onClick = onOpenNativeWall,
                                     iconSize = 19.dp,
                                     tint = skin.textDim
                                 )
@@ -1755,9 +1673,9 @@ private fun ExpandedLayout(
                     // 原来这里传 null，导致只能展示封面
                     song = vm.songById(playerState.mediaId),
                     onCyclePlayMode = { vm.cyclePlayMode() },
-                    onPrev = { vm.player.previous() },
+                    onPrev = { vm.previousOrRandom() },
                     onPlayPause = { vm.player.togglePlay() },
-                    onNext = { vm.player.next() },
+                    onNext = { vm.nextOrRandom() },
                     onVolume = { vm.player.setVolume(it) },
                     onSeek = { vm.player.seekTo(it) },
                     onOpenQueue = onOpenQueue,
@@ -1769,8 +1687,8 @@ private fun ExpandedLayout(
                     // 与左侧列表是同一层背景（不再是一块实心色）
                     translucent = skin.immersive,
                     // 面板内上下滑切歌，方向和手机播放页一致：上滑下一首、下滑上一首
-                    onSwipeUp = { vm.player.next() },
-                    onSwipeDown = { vm.player.previous() },
+                    onSwipeUp = { vm.nextOrRandom() },
+                    onSwipeDown = { vm.previousOrRandom() },
                     modifier = Modifier
                         .width(if (wide) 344.dp else 312.dp)
                         .fillMaxHeight()

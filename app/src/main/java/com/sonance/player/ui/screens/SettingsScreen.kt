@@ -292,6 +292,8 @@ private fun SettingsCategoryPage(
                 onOpenEqualizer = onOpenEqualizer
             )
 
+            AudioOutputSettingsSection(vm = vm)
+
             PlayControlSettingsSection(vm = vm)
 
             PlayerVisualsSettingsSection(vm = vm)
@@ -1283,6 +1285,58 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
                 selected = vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.AFTER_CURRENT
             ) { vm.setSleepAfterCurrent() }
         }
+    }
+}
+
+/**
+ * 播放输出与衔接：USB 独占（bit-perfect）、无缝播放、淡入淡出、播放提示。
+ */
+@Composable
+private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
+    val summary = buildString {
+        append(if (vm.usbExclusiveEnabled) "USB 独占开" else "USB 独占关")
+        append(if (vm.gaplessEnabled) " · 无缝" else " · 曲间停顿")
+        if (vm.crossfadeEnabled) append(" · 淡化 ${vm.crossfadeSec} 秒")
+        if (vm.playToastEnabled) append(" · 播放提示开")
+    }
+    CollapsibleSection(
+        id = "audioOutput",
+        title = "USB 独占 · 无缝 · 淡入淡出",
+        summary = summary,
+        icon = SonanceIcons.Volume
+    ) {
+        SettingsSwitchRow(
+            title = "USB 独占输出",
+            subtitle = "bit-perfect 直通 USB DAC / 耳机，绕过系统混音器（需 Android 14+，参考海贝音乐）",
+            checked = vm.usbExclusiveEnabled,
+            onCheckedChange = { vm.changeUsbExclusive(it) }
+        )
+        SettingsSwitchRow(
+            title = "无缝播放",
+            subtitle = "曲目之间无间隙衔接；关闭后自动续播时插入短暂停顿",
+            checked = vm.gaplessEnabled,
+            onCheckedChange = { vm.changeGapless(it) }
+        )
+        SettingsSwitchRow(
+            title = "淡入淡出",
+            subtitle = "曲目结束前音量渐弱、新曲渐强，切歌更柔和",
+            checked = vm.crossfadeEnabled,
+            onCheckedChange = { vm.changeCrossfade(it) }
+        )
+        if (vm.crossfadeEnabled) {
+            Spacer(Modifier.height(4.dp))
+            SliderLine(
+                label = "淡化时长",
+                valueText = "${vm.crossfadeSec} 秒",
+                value = (vm.crossfadeSec - 1) / 9f
+            ) { f -> vm.changeCrossfadeSec((1 + f * 9).roundToInt()) }
+        }
+        SettingsSwitchRow(
+            title = "播放提示",
+            subtitle = "切歌 / 起播时弹出「正在播放 · 歌名」提示",
+            checked = vm.playToastEnabled,
+            onCheckedChange = { vm.changePlayToast(it) }
+        )
     }
 }
 

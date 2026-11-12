@@ -1483,7 +1483,8 @@ fun LibraryPagerScreen(
     playerState: PlayerUiState,
     modifier: Modifier = Modifier,
     onOpenFolder: (String) -> Unit = {},
-    onOpenAlbum: (Album) -> Unit = {}
+    onOpenAlbum: (Album) -> Unit = {},
+    onOpenCoverWall: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -1690,8 +1691,12 @@ fun LibraryPagerScreen(
             actions = { m ->
                 Row(
                     m.heightIn(min = 36.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // 封面墙入口：从顶栏小图标移到这里（chips 右边、播放模式键左边），
+                    // 图标 + 文字「随便听听」，空列表时也保留入口。
+                    RandomListenEntry(onClick = onOpenCoverWall)
                     if (currentList.isNotEmpty()) {
                         QuickActions(songs = currentList, vm = vm)
                     }
@@ -2352,6 +2357,40 @@ private fun LetterIndexBar(
 }
 
 /** 三段式页签（可点，与滑动双向联动）。 */
+/**
+ * 封面墙入口「随便听听」：筛选行右侧的强调色胶囊（图标 + 文字），
+ * 替代原来顶栏里的小图标 —— 位置更显眼、语义更直白。
+ * 底色 / 描边 / 文字统一走皮肤强调色，和选中 chip 同一套视觉语言。
+ */
+@Composable
+private fun RandomListenEntry(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(skin.accent.copy(alpha = if (skin.isLight) 0.10f else 0.16f))
+            .border(1.dp, skin.accent.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Icon(
+            imageVector = SonanceIcons.CoverWall,
+            contentDescription = null,
+            tint = skin.accent,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = "随便听听",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.accent,
+            maxLines = 1
+        )
+    }
+}
+
 @Composable
 private fun LibrarySegmented(
     labels: List<String>,

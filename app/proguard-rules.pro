@@ -37,8 +37,8 @@
 -keep class com.sonance.player.ui.icon.SonanceIcons$* { *; }
 
 # 别再 -keep 整个项目，让 R8 真正起作用。
-# WebView 桥：JS 按方法名反射调用 @JavascriptInterface 方法（黑胶 VinylBridge /
-# 封面墙 WallBridge）。R8 默认会改名/裁剪，桥就断了 —— 按注解显式保住方法名。
+# WebView 桥：JS 按方法名反射调用 @JavascriptInterface 方法（黑胶 VinylBridge）。
+# R8 默认会改名/裁剪，桥就断了 —— 按注解显式保住方法名。
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

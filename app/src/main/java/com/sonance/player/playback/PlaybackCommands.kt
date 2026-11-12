@@ -65,20 +65,12 @@ object PlaybackCommands {
         if (!player.isPlaying) player.play()
     }
 
-    /** 队首再往前绕到队尾；唱过 4 秒则先回本首开头（主流播放器惯例）。 */
+    /** 上一曲就是上一曲：队首再往前绕到队尾，不做「唱过几秒先回本首开头」的惯例。 */
     private fun previous(player: Player) {
         val count = player.mediaItemCount
         if (count <= 0) return
-        if (player.currentMediaItemIndex <= 0) {
-            player.seekToDefaultPosition(count - 1)
-            if (!player.isPlaying) player.play()
-            return
-        }
-        if (player.currentPosition > 4000L) {
-            player.seekTo(0)
-            return
-        }
-        player.seekToDefaultPosition(player.currentMediaItemIndex - 1)
+        val prevIndex = if (player.currentMediaItemIndex <= 0) count - 1 else player.currentMediaItemIndex - 1
+        player.seekToDefaultPosition(prevIndex)
         if (!player.isPlaying) player.play()
     }
 }

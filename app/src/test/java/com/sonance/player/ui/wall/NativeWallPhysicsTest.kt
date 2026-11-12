@@ -113,22 +113,22 @@ class NativeWallPhysicsTest {
         e.markInput(uptime)
         assertTrue(e.step(uptime, dt, silent))
         assertFalse(e.active(uptime))
-        assertEquals(12_000L, e.idleDelay(uptime)!!)
-        for (elapsed in listOf(1000L, 8000L, 11_999L)) {
+        assertEquals(8_000L, e.idleDelay(uptime)!!)
+        for (elapsed in listOf(1000L, 5000L, 7_999L)) {
             assertFalse(e.active(uptime + elapsed))
             assertFalse(e.step(uptime + elapsed, dt, silent))
-            assertEquals(12_000L - elapsed, e.idleDelay(uptime + elapsed)!!)
+            assertEquals(8_000L - elapsed, e.idleDelay(uptime + elapsed)!!)
         }
-        assertTrue(e.active(uptime + 12_000L))
-        assertTrue(e.driftCond(uptime + 12_000L))
-        assertNull(e.idleDelay(uptime + 12_000L))
-        assertTrue(e.step(uptime + 12_000L, dt, silent))
+        assertTrue(e.active(uptime + 8_000L))
+        assertTrue(e.driftCond(uptime + 8_000L))
+        assertNull(e.idleDelay(uptime + 8_000L))
+        assertTrue(e.step(uptime + 8_000L, dt, silent))
         assertEquals(9f * dt, e.scrollY, 0f)
         assertEquals(0f, e.vel, 0f)
         e.tune.drift = false
-        assertFalse(e.active(uptime + 12_001L))
-        assertNull(e.idleDelay(uptime + 12_001L))
-        assertFalse(e.step(uptime + 12_016L, dt, silent))
+        assertFalse(e.active(uptime + 8_001L))
+        assertNull(e.idleDelay(uptime + 8_001L))
+        assertFalse(e.step(uptime + 8_016L, dt, silent))
     }
 
     @Test
@@ -140,11 +140,11 @@ class NativeWallPhysicsTest {
         assertNull(e.idleDelay(uptime))
         e.tune.drift = true
         assertFalse(e.active(uptime + 4000L))
-        assertEquals(8000L, e.idleDelay(uptime + 4000L)!!)
+        assertEquals(4000L, e.idleDelay(uptime + 4000L)!!)
         e.markInput(uptime + 5000L)
         e.step(uptime + 5000L, dt, silent)
         assertFalse(e.active(uptime + 12_000L))
-        assertEquals(5000L, e.idleDelay(uptime + 12_000L)!!)
+        assertEquals(1000L, e.idleDelay(uptime + 12_000L)!!)
         e.obscured = true
         assertFalse(e.active(uptime + 17_000L))
         assertNull(e.idleDelay(uptime + 17_000L))

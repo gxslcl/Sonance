@@ -48,6 +48,7 @@ private var liveService: PlaybackService? = null
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var transitions: TransitionEffects? = null
 
     override fun onCreate() {
         // 必须先于 super.onCreate()：MediaSessionService 在 super 里就会建通知管理器，
@@ -102,6 +103,13 @@ class PlaybackService : MediaSessionService() {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+
+        // 曲目衔接（无缝开关 + 淡入淡出）与 USB 独占：都跟着服务生命周期走
+        transitions = TransitionEffects(player, this).also {
+            player.addListener(it)
+            it.start()
+        }
+        UsbExclusive.syncWithPrefs(this)
 
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(sessionActivity)
@@ -315,10 +323,15 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         mediaSession?.run {
+            transitions?.let {
+                player.removeListener(it)
+                it.release()
+            }
             player.removeListener(widgetSync)
             player.release()
             release()
         }
+        transitions = null
         mediaSession = null
         if (liveService == this) liveService = null
         super.onDestroy()

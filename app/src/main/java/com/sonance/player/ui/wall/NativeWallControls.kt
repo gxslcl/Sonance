@@ -3,6 +3,10 @@ package com.sonance.player.ui.wall
 import android.content.Context
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -59,6 +63,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
@@ -74,8 +79,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sonance.player.data.Album
+import com.sonance.player.data.Prefs
+import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
 import com.sonance.player.playback.PlayerUiState
+import com.sonance.player.ui.components.CtrlButton
+import com.sonance.player.ui.components.PlayPauseButton
+import com.sonance.player.ui.components.rememberPlayButtonPalette
+import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.isActive
 import kotlin.math.roundToInt
 
@@ -206,6 +219,7 @@ internal fun WallPlaybackControls(
     state: PlayerUiState,
     album: WallAlbum,
     preview: Boolean,
+    coverColor: Color,
     modifier: Modifier = Modifier,
     onToggle: () -> Unit,
     onPrev: () -> Unit,
@@ -238,6 +252,14 @@ internal fun WallPlaybackControls(
     val durationMs = (if (showingAlbum) album.tracks.firstOrNull()?.durationMs ?: 0L else state.durationMs).coerceAtLeast(0L)
     val positionMs = if (showingAlbum) 0L else state.positionMs.coerceIn(0L, durationMs)
     val isPlaying = state.isPlaybackActive && !showingAlbum
+    // 水滴播放键与普通播放页同源：配色档位（封面 / 主题 / 原版）、光晕、
+    // 图标样式与缩放全部跟随设置；封面色取当前专辑主色。
+    val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context) }
+    val skin = LocalSkin.current
+    val playPalette = rememberPlayButtonPalette(
+        prefs.playBtnColorMode, listOf(coverColor), skin.accent, skin.onAccent
+    )
     // 预览不能 seek 到后台正在播放的另一张专辑。
     val canSeek = !showingAlbum && durationMs > 0L
     val latestDuration by rememberUpdatedState(durationMs)
@@ -322,27 +344,36 @@ internal fun WallPlaybackControls(
             Text(formatDuration(durationMs), color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
         }
         Spacer(Modifier.height(10.dp))
+        // 与普通播放页同款：两侧线性上一首 / 下一首 + 中间液态水滴播放键
+        // （光晕 / 图标样式 / 缩放 / 配色档位都跟随设置），不再是白底圆饼。
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 14.dp).staggeredEntrance(3),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            Modifier.fillMaxWidth().staggeredEntrance(3),
+            horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                Modifier.size(52.dp).clip(CircleShape).semantics { contentDescription = "上一首" }
-                    .clickable(role = Role.Button, onClick = onPrev),
-                contentAlignment = Alignment.Center
-            ) { WallGlyph("prev", Color.White, 28.dp) }
-            Box(
-                Modifier.size(72.dp).clip(CircleShape).background(Color.White)
-                    .semantics { contentDescription = if (isPlaying) "暂停" else "播放" }
-                    .clickable(role = Role.Button, onClick = onToggle),
-                contentAlignment = Alignment.Center
-            ) { WallGlyph(if (isPlaying) "pause" else "play", Color(0xFF111111), 30.dp) }
-            Box(
-                Modifier.size(52.dp).clip(CircleShape).semantics { contentDescription = "下一首" }
-                    .clickable(role = Role.Button, onClick = onNext),
-                contentAlignment = Alignment.Center
-            ) { WallGlyph("next", Color.White, 28.dp) }
+            CtrlButton(
+                icon = SonanceIcons.Prev,
+                contentDescription = "上一首",
+                onClick = onPrev,
+                size = 46.dp,
+                iconSize = 24.dp,
+                tint = Color.White.copy(alpha = 0.85f)
+            )
+            PlayPauseButton(
+                isPlaying = isPlaying,
+                onClick = onToggle,
+                size = 62.dp,
+                iconSize = 26.dp,
+                palette = playPalette
+            )
+            CtrlButton(
+                icon = SonanceIcons.Next,
+                contentDescription = "下一首",
+                onClick = onNext,
+                size = 46.dp,
+                iconSize = 24.dp,
+                tint = Color.White.copy(alpha = 0.85f)
+            )
         }
         Spacer(Modifier.height(14.dp))
         Row(
@@ -657,4 +688,116 @@ internal fun resetTune(t: WallTune) {
     t.gyroDeg = defaults.gyroDeg; t.parallax = defaults.parallax; t.drift = defaults.drift
     t.haptics = defaults.haptics; t.vinyl = defaults.vinyl
     t.autoPlay = defaults.autoPlay; t.seed = defaults.seed
+}
+
+/**
+ * 封面墙的一个墙面单元：一张真实专辑，或曲库专辑太少时按单曲展开的一张「单曲卡」。
+ *
+ * [tracks] 是翻面列表里展示的曲目；[playContext] 是点播放时交给播放器的队列上下文 ——
+ * 专辑卡两者相同（整张专辑入队），单曲卡展示一首、但队列仍是全曲库（下一首有得切）。
+ */
+data class WallAlbum(
+    val key: String,
+    val name: String,
+    val artist: String,
+    val fav: Boolean,
+    val tracks: List<Song>,
+    val playContext: List<Song>
+)
+
+/**
+ * 专辑聚合 + 稀疏兜底：聚合专辑少于 24 张时按单曲展开，保证墙面铺满。
+ * key 是不透明标识（专辑 = albumId+专辑名，与 groupAlbums 的分组键一致；
+ * 单曲 = 歌曲 id），收藏专辑由布局引擎优先排进焦点大格。
+ */
+fun buildWallAlbums(albums: List<Album>, songs: List<Song>, favorites: Set<Long>): List<WallAlbum> {
+    if (songs.isEmpty()) return emptyList()
+    if (albums.size >= WALL_ALBUM_THRESHOLD) {
+        return albums.map { a ->
+            WallAlbum(
+                key = "a:${a.albumId}:${a.name}",
+                name = a.name,
+                artist = a.artist,
+                fav = a.songs.any { it.id in favorites },
+                tracks = a.songs,
+                playContext = a.songs
+            )
+        }
+    }
+    return songs.map { s ->
+        WallAlbum(
+            key = "s:${s.id}",
+            name = s.title,
+            artist = s.artist,
+            fav = s.id in favorites,
+            tracks = listOf(s),
+            playContext = songs
+        )
+    }
+}
+
+private const val WALL_ALBUM_THRESHOLD = 24
+
+/**
+ * 「随便听听」随机挑一个墙面单元：排除当前专辑与最近听过的，
+ * 全被排除时退回全体里随机。封面墙与主播放界面「单曲队列手动切歌直接随机」
+ * 共用这一份挑选规则，保证两边行为一致。
+ */
+fun pickRandomWallAlbum(
+    all: List<WallAlbum>,
+    currentKey: String?,
+    recent: Collection<String>
+): WallAlbum? {
+    if (all.isEmpty()) return null
+    val candidates = all.filter { it.key != currentKey && it.key !in recent }
+    return candidates.randomOrNull() ?: all.randomOrNull()
+}
+
+/**
+ * 四级分级震动，波形时长与滚动节流窗口一致：
+ *  L1 质感短脉冲（滚动节拍，时长按速度给）/ L2 确认 / L3 冲击 / L4 蓄力序列。
+ * 「轻 / 强」两档缩放时长与幅值；不支持幅值控制的马达忽略幅值项仍然会震。
+ */
+internal fun performWallHaptic(context: Context, level: Int, durMs: Int, strength: String) {
+    if (strength == "off" || level !in 1..4) return
+    runCatching {
+        val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+        if (vibrator?.hasVibrator() != true) return
+        val strong = strength == "strong"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val effect = when (level) {
+                1 -> VibrationEffect.createOneShot(
+                    ((if (durMs > 0) durMs else 9) * (if (strong) 1.6f else 1f)).toLong().coerceAtLeast(4L),
+                    if (strong) 180 else 110
+                )
+                2 -> VibrationEffect.createOneShot(if (strong) 26L else 16L, if (strong) 230 else 150)
+                3 -> VibrationEffect.createOneShot(if (strong) 50L else 32L, 255)
+                else -> {
+                    val timings = if (strong) longArrayOf(0, 10, 32, 14, 24, 20, 16, 32)
+                    else longArrayOf(0, 6, 36, 9, 28, 13, 20, 22)
+                    val amps = if (strong) intArrayOf(0, 120, 0, 170, 0, 210, 0, 255)
+                    else intArrayOf(0, 80, 0, 120, 0, 150, 0, 190)
+                    VibrationEffect.createWaveform(timings, amps, -1)
+                }
+            }
+            vibrator.vibrate(effect)
+        } else {
+            @Suppress("DEPRECATION")
+            when (level) {
+                1 -> vibrator.vibrate(((if (durMs > 0) durMs else 9) * (if (strong) 1.6f else 1f)).toLong())
+                2 -> vibrator.vibrate(if (strong) 26L else 16L)
+                3 -> vibrator.vibrate(if (strong) 50L else 32L)
+                else -> vibrator.vibrate(
+                    if (strong) longArrayOf(10, 32, 14, 24, 20, 16, 32)
+                    else longArrayOf(6, 36, 9, 28, 13, 20, 22),
+                    -1
+                )
+            }
+        }
+    }
 }

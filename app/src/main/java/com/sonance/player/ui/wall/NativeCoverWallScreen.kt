@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -154,7 +155,9 @@ fun NativeCoverWallScreen(
     var resumed by remember {
         mutableStateOf(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
-    val top = max(
+    // 状态栏在本页隐藏，卡片内容冲顶；图标仍按状态栏/刘海高度落位。
+    val top = 0f
+    val barsTop = max(
         WindowInsets.statusBarsIgnoringVisibility.getTop(density),
         WindowInsets.displayCutout.getTop(density)
     ).toFloat()
@@ -180,6 +183,7 @@ fun NativeCoverWallScreen(
     val lastHaptic = remember { LongArray(5) }
     val heavyUntil = remember { longArrayOf(0L) }
     var discAngle by remember { mutableStateOf(0f) }
+    var drifting by remember { mutableStateOf(false) }
 
     fun wakeUp() {
         engine.dirty = true
@@ -407,6 +411,29 @@ fun NativeCoverWallScreen(
         wakeUp()
     }
 
+    // 队列耗尽（手动下一曲 / 自动播完末首）→ 收起聚焦，回到「随便听听」随机切歌。
+    fun leaveToRandom() {
+        closeFocus()
+        scope.launch {
+            withTimeoutOrNull(1600L) { while (focus != null) delay(50L) }
+            randomListen()
+        }
+    }
+
+    // 自动播完：顺序队列中间的续播由播放器完成；末首结束后回到「随便听听」继续随机。
+    val endHandledId = remember { mutableStateOf(-1L) }
+    LaunchedEffect(state.mediaId, state.isPlaybackActive) {
+        if (preview || !state.hasItem || state.isPlaybackActive) return@LaunchedEffect
+        val dur = state.durationMs
+        if (dur <= 0L || state.positionMs < dur - 300L) return@LaunchedEffect
+        if (endHandledId.value == state.mediaId) return@LaunchedEffect
+        val tracks = focus?.album?.tracks ?: return@LaunchedEffect
+        val idx = tracks.indexOfFirst { it.id == state.mediaId }
+        if (idx < 0 || idx < tracks.size - 1) return@LaunchedEffect
+        endHandledId.value = state.mediaId
+        leaveToRandom()
+    }
+
     DisposableEffect(owner) {
         val activity = context as? Activity
         val controller = activity?.window?.let { WindowCompat.getInsetsController(it, it.decorView) }
@@ -421,6 +448,7 @@ fun NativeCoverWallScreen(
                 wakeUp()
             } else if (event == Lifecycle.Event.ON_PAUSE) {
                 resumed = false
+                drifting = false
                 engine.dragging = false
                 engine.vel = 0f
                 engine.pressing?.let { engine.releaseTile(it) }
@@ -492,8 +520,8 @@ fun NativeCoverWallScreen(
                 val now = wallNow()
                 if (now - last < 32L) return
                 last = now
-                val tx = ((x - baseX) / 0.25f).coerceIn(-1f, 1f)
-                val ty = ((y - baseY) / 0.25f).coerceIn(-1f, 1f)
+                val tx = ((x - baseX) / 0.16f).coerceIn(-1f, 1f)
+                val ty = ((y - baseY) / 0.16f).coerceIn(-1f, 1f)
                 if (abs(tx - engine.gxT) < 0.008f && abs(ty - engine.gyT) < 0.008f) return
                 engine.gxT = tx
                 engine.gyT = ty
@@ -514,14 +542,13 @@ fun NativeCoverWallScreen(
         }
     }
 
-    LaunchedEffect(wallAlbums, viewport, tune.gap, tune.seed, top, d) {
+    LaunchedEffect(wallAlbums, viewport, tune.gap, tune.seed, d) {
         if (viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
         val next = buildWallLayout(
             wallAlbums,
             viewport.width / d,
             viewport.height / d,
             tune.gap,
-            top / d,
             tune.seed
         )
         engine.scrollY = clamp(engine.scrollY, 0f, next.maxY)
@@ -606,6 +633,8 @@ fun NativeCoverWallScreen(
         while (isActive) {
             val frame = withFrameNanos { it }
             val now = wallNow()
+            val driftNow = engine.driftCond(now)
+            if (driftNow != drifting) drifting = driftNow
             val dt = ((frame - last) / 1e9f).coerceIn(0.001f, 0.05f)
             last = frame
             if (engine.pressing == null) pressHaptic = false
@@ -669,18 +698,24 @@ fun NativeCoverWallScreen(
     val width = viewport.width.toFloat()
     val height = viewport.height.toFloat()
     val available = height - top - bottom
-    // 播放页改为「居中小封面 + 默认歌词 + 底部控件」的纵向布局。
-    val heroSize = min(width * 0.46f, available * 0.28f).coerceAtLeast(1f)
+    // 播放页「小封面 + 默认歌词 + 底部控件」纵向布局：
+    // 封面从顶角图标行（barsTop+10dp、按钮 38dp）下方起步，不再压在图标上；
+    // 控件区按内容实际高度取值并贴底 —— 原来取 42% 屏高，内容填不满，
+    // 底部留一大块空白、视觉重心偏上。省出的空间归歌词（三行歌词垂直居中），
+    // 整块内容上下撑满，重心自然落到屏幕中部。
+    val heroSize = min(width * 0.62f, available * 0.34f).coerceAtLeast(1f)
     val heroX = (width - heroSize) / 2f
-    val heroY = top + 54f * d
+    val heroY = max(top + 54f * d, barsTop + 56f * d)
     val coverBottom = heroY + heroSize
     val lyricsTop = coverBottom + 10f * d
-    val controlsHeight = (available * 0.42f).coerceAtLeast(240f * d)
+    val controlsHeight = (306f * d).coerceAtMost(available * 0.5f).coerceAtLeast(1f)
     val controlsTop = height - bottom - controlsHeight
     val lyricsHeight = (controlsTop - lyricsTop - 6f * d).coerceAtLeast(1f)
     val backSize = min(width - 36f * d, available - 100f * d).coerceAtLeast(1f)
     val backX = (width - backSize) / 2
     val backY = top + (available - backSize) / 2
+    // 自动滚动开始后顶角图标渐隐到 0.2（仍可点）；任何操作重置空闲计时后渐变恢复。
+    val iconsAlpha by animateFloatAsState(if (drifting) 0.2f else 1f, tween(600), label = "wallIcons")
 
     Box(
         modifier
@@ -820,8 +855,8 @@ fun NativeCoverWallScreen(
                         if (sy > engine.heightCss + 260f || sy + t.size < -260f) continue
                         val p = poses[t.album.key] ?: continue
                         visibleTiles.add(t)
-                        p.x = (t.x + engine.gxR * t.span / 6f * 10f) * d
-                        p.y = (sy + engine.gyR * t.span / 6f * 10f) * d
+                        p.x = (t.x + engine.gxR * t.span / 6f * 16f) * d
+                        p.y = (sy + engine.gyR * t.span / 6f * 16f) * d
                         p.size = t.size * d
                         val ny = clamp((p.y + p.size / 2 - size.height / 2) / (size.height / 2), -1.7f, 1.7f)
                         val ang = ny * tune.maxAngle * 0.017453293f * engine.curve
@@ -883,15 +918,20 @@ fun NativeCoverWallScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(top = with(density) { top.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
+                .graphicsLayer { alpha = iconsAlpha }
+                .padding(top = with(density) { barsTop.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             GlassIconButton(if (focus == null) "exit" else "chevron") {
+                engine.markInput(wallNow())
+                wakeUp()
                 haptic(2, "返回")
                 if (focus == null) cbClose.value() else closeFocus()
             }
             GlassIconButton("tune") {
+                engine.markInput(wallNow())
+                wakeUp()
                 haptic(2, "调参")
                 tuning = true
             }
@@ -1121,6 +1161,7 @@ fun NativeCoverWallScreen(
                         prefs = prefs,
                         onSeek = { if (!preview && state.hasItem) cbSeek.value(it) },
                         isPlaying = state.isPlaybackActive && !preview && state.hasItem,
+                        compact = true,
                         modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)
                     )
             }
@@ -1140,6 +1181,7 @@ fun NativeCoverWallScreen(
                         state,
                         tile.album,
                         preview,
+                        coverColor = Color(tile.spec.mainColor),
                         onToggle = {
                             haptic(2, "播放控制")
                             if (preview) {
@@ -1153,7 +1195,9 @@ fun NativeCoverWallScreen(
                         },
                         onNext = {
                             haptic(2, "下一首")
-                            cbNext.value()
+                            val tracks = tile.album.tracks
+                            val idx = tracks.indexOfFirst { it.id == state.mediaId }
+                            if (idx < 0 || idx >= tracks.size - 1) leaveToRandom() else cbNext.value()
                         },
                         onSeek = {
                             haptic(1, "进度", 7)
@@ -1165,15 +1209,20 @@ fun NativeCoverWallScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(top = with(density) { top.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
+                    .graphicsLayer { alpha = iconsAlpha }
+                    .padding(top = with(density) { barsTop.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 GlassIconButton("chevron") {
+                    engine.markInput(wallNow())
+                    wakeUp()
                     haptic(2, "返回")
                     if (back) flipFocus(false) else closeFocus()
                 }
                 GlassIconButton("tune") {
+                    engine.markInput(wallNow())
+                    wakeUp()
                     tuning = true
                     haptic(2, "调参")
                 }

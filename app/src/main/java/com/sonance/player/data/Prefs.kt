@@ -70,6 +70,35 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_PLAY_BTN_GLOW, true)
         set(v) = sp.edit().putBoolean(KEY_PLAY_BTN_GLOW, v).apply()
 
+    /**
+     * USB 独占输出（bit-perfect 直通，参考海贝音乐的实现思路）。
+     * 需要 Android 14+ 且接着 USB 音频设备：绕过系统混音器，
+     * 让媒体流按原始采样率/位深直达 USB DAC。默认关闭。
+     */
+    var usbExclusiveEnabled: Boolean
+        get() = sp.getBoolean(KEY_USB_EXCLUSIVE, false)
+        set(v) = sp.edit().putBoolean(KEY_USB_EXCLUSIVE, v).apply()
+
+    /** 无缝播放（gapless）。默认开启：曲目之间无间隙衔接；关闭后曲间插入短暂停顿。 */
+    var gaplessEnabled: Boolean
+        get() = sp.getBoolean(KEY_GAPLESS, true)
+        set(v) = sp.edit().putBoolean(KEY_GAPLESS, v).apply()
+
+    /** 淡入淡出。默认关闭：开启后曲目结束前音量渐弱、新曲渐强。 */
+    var crossfadeEnabled: Boolean
+        get() = sp.getBoolean(KEY_CROSSFADE, false)
+        set(v) = sp.edit().putBoolean(KEY_CROSSFADE, v).apply()
+
+    /** 淡入淡出时长（秒），1–10，默认 3。 */
+    var crossfadeSec: Int
+        get() = sp.getInt(KEY_CROSSFADE_SEC, 3).coerceIn(1, 10)
+        set(v) = sp.edit().putInt(KEY_CROSSFADE_SEC, v.coerceIn(1, 10)).apply()
+
+    /** 播放提示：切歌/起播时 toast「正在播放 · 歌名」。默认开启，设置里可关。 */
+    var playToastEnabled: Boolean
+        get() = sp.getBoolean(KEY_PLAY_TOAST, true)
+        set(v) = sp.edit().putBoolean(KEY_PLAY_TOAST, v).apply()
+
     var playBtnColorMode: PlayButtonColorMode
         get() = PlayButtonColorMode.fromId(sp.getString(KEY_PLAY_BTN_COLOR_MODE, null))
         set(v) = sp.edit().putString(KEY_PLAY_BTN_COLOR_MODE, v.id).apply()
@@ -1272,6 +1301,11 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
         private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
         private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
+        private const val KEY_USB_EXCLUSIVE = "usb_exclusive_enabled"
+        private const val KEY_GAPLESS = "gapless_enabled"
+        private const val KEY_CROSSFADE = "crossfade_enabled"
+        private const val KEY_CROSSFADE_SEC = "crossfade_sec"
+        private const val KEY_PLAY_TOAST = "play_toast_enabled"
         private const val KEY_PLAY_BTN_COLOR_MODE = "play_btn_color_mode"
         private const val KEY_PLAY_BTN_ICON_STYLE = "play_btn_icon_style"
         private const val KEY_PLAY_BTN_ICON_SCALE = "play_btn_icon_scale"

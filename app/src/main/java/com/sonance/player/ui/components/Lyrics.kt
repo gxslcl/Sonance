@@ -1232,6 +1232,8 @@ fun InlineLyrics(
     isPlaying: Boolean = false,
     /** 当前页的晕染烘焙位图 —— 歌词颜色跟随全屏歌词页的调色设置时，拿它折算背景色带 */
     glowImage: ImageBitmap? = null,
+    /** 紧凑模式：只渲染「上一句 / 当前句 / 下一句」三行，行距收紧、两侧字号与透明度降级 */
+    compact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -1276,6 +1278,17 @@ fun InlineLyrics(
     // positionMs 每 500ms 驱动重组，在歌词页调完关掉这里最多半秒就跟上
     val offsetMs = prefs.lyricsOffsetMs(song.title, song.artist)
 
+    if (compact) {
+        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            when (lyrics) {
+                is Lyrics.Synced -> ThreeLineLyrics(lyrics.lines, positionMs - offsetMs, fontSize, skin)
+                is Lyrics.Plain -> ThreeLinePlain(lyrics.lines, fontSize, skin)
+                else -> Unit
+            }
+        }
+        return
+    }
+
     Box(modifier.fillMaxSize()) {
         when {
             loading -> Text(
@@ -1315,6 +1328,70 @@ fun InlineLyrics(
             )
 
             else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize, bgProfile, adaptMode)
+        }
+    }
+}
+
+/** 紧凑三行：上一句 / 当前句 / 下一句，字号与透明度向两侧递减，行距 6dp。 */
+@Composable
+private fun ThreeLineLyrics(lines: List<LyricLine>, positionMs: Long, fontSizeSp: Int, skin: Skin) {
+    if (lines.isEmpty()) return
+    val idx = lines.indexAt(positionMs).coerceIn(0, lines.size - 1)
+    val side = (fontSizeSp - 4).coerceAtLeast(11)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        lines.getOrNull(idx - 1)?.let {
+            Text(
+                it.text,
+                fontSize = side.sp,
+                color = skin.textMuted.copy(alpha = 0.55f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
+        Text(
+            lines[idx].text,
+            fontSize = fontSizeSp.sp,
+            fontWeight = FontWeight.W500,
+            color = skin.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
+        )
+        lines.getOrNull(idx + 1)?.let {
+            Text(
+                it.text,
+                fontSize = side.sp,
+                color = skin.textMuted.copy(alpha = 0.4f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThreeLinePlain(lines: List<String>, fontSizeSp: Int, skin: Skin) {
+    if (lines.isEmpty()) return
+    val side = (fontSizeSp - 4).coerceAtLeast(11)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        lines.take(3).forEachIndexed { i, text ->
+            Text(
+                text,
+                fontSize = if (i == 0) fontSizeSp.sp else side.sp,
+                fontWeight = if (i == 0) FontWeight.W500 else FontWeight.Normal,
+                color = if (i == 0) skin.text else skin.textMuted.copy(alpha = if (i == 1) 0.55f else 0.4f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

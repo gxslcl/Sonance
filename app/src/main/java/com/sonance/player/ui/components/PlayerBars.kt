@@ -755,7 +755,7 @@ fun PlayerBar(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             VolumeSlider(
-                volume = state.volume,
+                volume = state.userVolume,
                 onVolumeChange = onVolume,
                 modifier = Modifier.width(118.dp)
             )
@@ -1089,7 +1089,7 @@ fun NowPlayingPanel(
                 tint = if (isFavorite) skin.accent else skin.textMuted
             )
             VolumeSlider(
-                volume = state.volume,
+                volume = state.userVolume,
                 onVolumeChange = onVolume,
                 modifier = Modifier.weight(1f)
             )

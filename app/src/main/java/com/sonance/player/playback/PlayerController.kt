@@ -95,6 +95,14 @@ data class PlayerUiState(
     val shuffle: Boolean = false,
     val repeat: RepeatMode = RepeatMode.OFF,
     val volume: Float = 1f,
+    /**
+     * 用户设定的音量（音量条显示它）。
+     *
+     * [volume] 是播放器**瞬时**音量：淡入淡出 / 切歌淡出期间它会从 0 爬升或降落，
+     * 若音量条绑定它，每次切歌都会看到「归零再慢慢涨起来」。用户音量只在
+     * [setVolume] 时写入，同步播放器状态时不覆盖。
+     */
+    val userVolume: Float = 1f,
     val queueIds: List<Long> = emptyList(),
     val queueIndex: Int = -1,
     /** 最近一次播放失败的原因（已翻译成中文），由 UI 取走后清空 */
@@ -602,21 +610,21 @@ class PlayerController(private val context: Context) {
      *
      * [fadeMs] > 0 且正在播放时，先把当前曲目音量在 fadeMs 内渐降到 0 再切换
      * （黑胶页唱臂抬起时传 150ms 极短淡出，消除音频硬截断叠上机械音效的突兀感），
-     * 完成后恢复用户音量并起播新曲。恢复值取 [_state.value.volume]——它是
-     * [setVolume] 即时写入的用户设定，不受淡出操作污染。
+     * 完成后恢复用户音量并起播新曲。恢复值取 [_state].userVolume —— 它只由
+     * [setVolume] 写入；[PlayerUiState.volume] 是瞬时音量，会被淡出本身污染。
      */
     fun playAt(index: Int, fadeMs: Long = 0L) {
         val c = controller ?: return
         if (index !in 0 until c.mediaItemCount) return
         fadeJob?.cancel()
         // 上一个淡出协程若被打断会停在半途音量上，先复原
-        c.volume = _state.value.volume
+        c.volume = _state.value.userVolume
         if (index == c.currentMediaItemIndex) {
             togglePlay()
         } else if (fadeMs > 0L && c.isPlaying) {
             lastNotifiedId = -1L
             fadeJob = scope.launch {
-                val target = _state.value.volume
+                val target = _state.value.userVolume
                 val steps = 5
                 repeat(steps) { step ->
                     if (!c.isPlaying) {
@@ -687,8 +695,9 @@ class PlayerController(private val context: Context) {
 
     fun setVolume(value: Float) {
         val c = controller ?: return
-        c.volume = value.coerceIn(0f, 1f)
-        _state.update { it.copy(volume = value.coerceIn(0f, 1f)) }
+        val v = value.coerceIn(0f, 1f)
+        c.volume = v
+        _state.update { it.copy(volume = v, userVolume = v) }
     }
 
     /**
@@ -759,7 +768,7 @@ class PlayerController(private val context: Context) {
         val c = controller ?: return
         c.clearMediaItems()
         lastNotifiedId = -1L
-        _state.update { PlayerUiState(connected = true, volume = it.volume) }
+        _state.update { PlayerUiState(connected = true, volume = it.volume, userVolume = it.userVolume) }
     }
 
     fun release() {

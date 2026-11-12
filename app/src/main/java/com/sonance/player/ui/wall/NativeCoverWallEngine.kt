@@ -683,18 +683,17 @@ private val TPL = arrayOf(
     Tpl('J', 1f, 6f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 2), intArrayOf(4, 2, 2), intArrayOf(4, 4, 2), intArrayOf(0, 4, 2), intArrayOf(2, 4, 2)))
 )
 
-/** 在 CSS 像素空间铺墙（widthCss / heightCss / topInsetCss 均为 CSS px）。 */
+/** 在 CSS 像素空间铺墙（widthCss / heightCss 均为 CSS px），卡片自顶部冲顶铺满。 */
 internal fun buildWallLayout(
     albums: List<WallAlbum>,
     widthCss: Float,
     heightCss: Float,
     gapCss: Float,
-    topInsetCss: Float,
     seed: Int
 ): WallLayout {
     val pad = 10f
     val gap = gapCss
-    val top = (56f + topInsetCss).roundToInt().toFloat()
+    val top = 0f
     val bottom = 150f
     val unit = (widthCss - pad * 2f + gap) / 6f
     val r = WallRng(seed)
@@ -845,13 +844,13 @@ internal class WallEngine(val tune: WallTune) {
         tune.drift && maxY > 0f && !busy && !playerOpen && !obscured &&
             !dragging && pressing == null && anim == null && !lockPending && vel == 0f && !outOfBounds()
 
-    fun driftCond(nowMs: Long): Boolean = canDrift() && nowMs - lastInput >= 12_000L
+    fun driftCond(nowMs: Long): Boolean = canDrift() && nowMs - lastInput >= 8_000L
 
-    /** 仅等待漂移的 12 秒门槛时返回剩余毫秒；不可漂移或已到期返回 null（到期由 active 接管）。 */
+    /** 仅等待漂移的 8 秒门槛时返回剩余毫秒；不可漂移或已到期返回 null（到期由 active 接管）。 */
     fun idleDelay(now: Long): Long? {
         if (!canDrift()) return null
         val elapsed = (now - lastInput).coerceAtLeast(0L)
-        return if (elapsed < 12_000L) 12_000L - elapsed else null
+        return if (elapsed < 8_000L) 8_000L - elapsed else null
     }
 
     // 滚动（自动 / 手动）时不再随速度追加弯曲与倾斜动效：弯曲恒为静止弯曲度，

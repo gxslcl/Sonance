@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -355,30 +356,9 @@ fun FullPlayer(
     }
 
     val buttonPalette = rememberPlayerControlPalette(state, queue.getOrNull(state.queueIndex))
-    // 与实际晕染使用同一份色卡：跟手模式按页位置混色，渐变模式读取已补间色卡。
-    val headerCoverColor = if (isSwipeGlow) {
-        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
-        val base = floor(pos).toInt()
-        val t = (pos - base).coerceIn(0f, 1f)
-        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
-        val first = glowFrames[i].colors
-        val second = glowFrames[i + 1].colors
-        val c0 = if (first.isEmpty()) skin.bg else glowTintAt(first, 0.5f)
-        val c1 = if (second.isEmpty()) c0 else glowTintAt(second, 0.5f)
-        lerp(c0, c1, t)
-    } else {
-        glowFrames[0].colors.let { if (it.isEmpty()) skin.bg else glowTintAt(it, 0.5f) }
-    }
-    val headerTintStrength = when (glowMode) {
-        GlowMode.BOTTOM -> 0f
-        GlowMode.IMMERSIVE -> (glowStrength * IMMERSIVE_BOOST).coerceIn(0f, 1f)
-        GlowMode.FULL -> glowStrength * 0.92f
-        GlowMode.AROUND, GlowMode.SIDES -> glowStrength * 0.25f
-    }
-    val headerBackdrop = lerp(skin.bg, headerCoverColor, headerTintStrength)
-    val headerAccent = harmonizedIndicatorColor(headerBackdrop, skin.accent)
-    val headerIdle = ensureReadable(lerp(headerAccent, headerBackdrop, 0.18f), headerBackdrop, 3f,
-        contrastRatio(Color.White, headerBackdrop) >= contrastRatio(Color.Black, headerBackdrop))
+    // 顶栏律动指示器的混色放在叶子组件 [HeaderPlayingIndicator] 里算：
+    // 跟手模式要读 currentPageOffsetFraction（滑动中每帧都变），若在这里读，
+    // 整个 FullPlayer 会跟着每帧重组。移进去之后每帧只重组那一个小组件。
 
     // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
     // 只取前后各一首 —— 队列可能有几千首，不能遍历。
@@ -730,10 +710,14 @@ fun FullPlayer(
                 // 顶部状态：只留律动小图标（用户要求去掉文字），播放中三柱跳动、暂停时压平
                 Box(Modifier.align(Alignment.Center)) {
                     if (!coveredByVinyl) {
-                        PlayingStateIndicator(
+                        HeaderPlayingIndicator(
                             isPlaying = state.isPlaybackActive,
-                            accent = headerAccent,
-                            idle = headerIdle
+                            isSwipeGlow = isSwipeGlow,
+                            pagerState = pagerState,
+                            glowFrames = glowFrames,
+                            skin = skin,
+                            glowMode = glowMode,
+                            glowStrength = glowStrength
                         )
                     }
                 }
@@ -844,7 +828,7 @@ fun FullPlayer(
                             // 非当前页给中性档，免得翻页时看到"随机"亮着
                             PlayMode.REPEAT_ALL
                         },
-                        volume = if (isCurrent) state.volume else 1f,
+                        volume = if (isCurrent) state.userVolume else 1f,
                         onToggleFavorite = { onToggleFavorite(song.id) },
                         onCyclePlayMode = onCyclePlayMode,
                         onPrev = onPrev,
@@ -1286,6 +1270,50 @@ private fun glowTintAt(colors: List<Color>, t: Float): Color {
     val scaled = t.coerceIn(0f, 1f) * (colors.size - 1)
     val i = scaled.toInt().coerceIn(0, colors.size - 2)
     return lerp(colors[i], colors[i + 1], scaled - i)
+}
+
+/**
+ * 顶栏律动指示器 + 它的「按页位置混色」。
+ *
+ * 跟手模式要读 [PagerState.currentPageOffsetFraction]，滑动中每帧都变 ——
+ * 放在这里每帧只重组这一个小组件；若放在 FullPlayer 组合体里读，
+ * 整页（几千行组合逻辑）会被拖进每帧重组，滑动切歌就掉帧。
+ * 混色规则与整页晕染完全一致：同一份色卡、同一套强度映射。
+ */
+@Composable
+private fun HeaderPlayingIndicator(
+    isPlaying: Boolean,
+    isSwipeGlow: Boolean,
+    pagerState: PagerState,
+    glowFrames: List<GlowFrame>,
+    skin: Skin,
+    glowMode: GlowMode,
+    glowStrength: Float
+) {
+    val coverColor = if (isSwipeGlow) {
+        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
+        val base = floor(pos).toInt()
+        val t = (pos - base).coerceIn(0f, 1f)
+        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
+        val first = glowFrames[i].colors
+        val second = glowFrames[i + 1].colors
+        val c0 = if (first.isEmpty()) skin.bg else glowTintAt(first, 0.5f)
+        val c1 = if (second.isEmpty()) c0 else glowTintAt(second, 0.5f)
+        lerp(c0, c1, t)
+    } else {
+        glowFrames[0].colors.let { if (it.isEmpty()) skin.bg else glowTintAt(it, 0.5f) }
+    }
+    val tintStrength = when (glowMode) {
+        GlowMode.BOTTOM -> 0f
+        GlowMode.IMMERSIVE -> (glowStrength * IMMERSIVE_BOOST).coerceIn(0f, 1f)
+        GlowMode.FULL -> glowStrength * 0.92f
+        GlowMode.AROUND, GlowMode.SIDES -> glowStrength * 0.25f
+    }
+    val backdrop = lerp(skin.bg, coverColor, tintStrength)
+    val accent = harmonizedIndicatorColor(backdrop, skin.accent)
+    val idle = ensureReadable(lerp(accent, backdrop, 0.18f), backdrop, 3f,
+        contrastRatio(Color.White, backdrop) >= contrastRatio(Color.Black, backdrop))
+    PlayingStateIndicator(isPlaying = isPlaying, accent = accent, idle = idle)
 }
 
 /**

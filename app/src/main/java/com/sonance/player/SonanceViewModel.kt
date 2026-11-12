@@ -114,6 +114,8 @@ import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
+import com.sonance.player.ui.wall.buildWallAlbums
+import com.sonance.player.ui.wall.pickRandomWallAlbum
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -616,6 +618,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
         applyPersistedPlayMode()
         player.onSongStarted = { id ->
+            // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
+            // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
+            if (prefs.playToastEnabled) {
+                val title = player.state.value.title
+                if (title.isNotBlank()) showToast("正在播放 · $title")
+            }
             // 在线歌不进本地记账。
             //
             // 它们的 id 是负数、冷启动后查不到任何歌，记进「最近播放」会让顶栏的
@@ -1791,6 +1799,50 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changePlayBtnHaptics(value: Boolean) {
         playBtnHaptics = value
         prefs.playBtnHaptics = value
+    }
+
+    // ===== USB 独占 / 无缝播放 / 淡入淡出 / 播放提示 =====
+
+    var usbExclusiveEnabled by mutableStateOf(prefs.usbExclusiveEnabled)
+        private set
+
+    fun changeUsbExclusive(on: Boolean) {
+        val err = com.sonance.player.playback.UsbExclusive.setEnabled(getApplication(), on)
+        usbExclusiveEnabled = prefs.usbExclusiveEnabled
+        if (err != null) showToast(err)
+        else showToast(if (on) "USB 独占已开启 · bit-perfect 直通" else "USB 独占已关闭")
+    }
+
+    var gaplessEnabled by mutableStateOf(prefs.gaplessEnabled)
+        private set
+
+    fun changeGapless(on: Boolean) {
+        gaplessEnabled = on
+        prefs.gaplessEnabled = on
+    }
+
+    var crossfadeEnabled by mutableStateOf(prefs.crossfadeEnabled)
+        private set
+
+    fun changeCrossfade(on: Boolean) {
+        crossfadeEnabled = on
+        prefs.crossfadeEnabled = on
+    }
+
+    var crossfadeSec by mutableStateOf(prefs.crossfadeSec)
+        private set
+
+    fun changeCrossfadeSec(sec: Int) {
+        crossfadeSec = sec.coerceIn(1, 10)
+        prefs.crossfadeSec = crossfadeSec
+    }
+
+    var playToastEnabled by mutableStateOf(prefs.playToastEnabled)
+        private set
+
+    fun changePlayToast(on: Boolean) {
+        playToastEnabled = on
+        prefs.playToastEnabled = on
     }
 
     var playBtnGlow by mutableStateOf(prefs.playBtnGlow)
@@ -4783,7 +4835,19 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 换了播放列表，之前记的原顺序就换成这一份（随机开着时它才是"还原"的基准）
         preShuffleOrder = if (on) list else null
         player.play(ordered, idx)
-        showToast("正在播放 · ${song.title}")
+    }
+
+    /**
+     * 按列表原序播放（不洗牌），供封面墙使用：墙内「上一曲 / 下一曲」要在
+     * 曲目列表里顺序走，自动播完也顺序续播，而不是被随机序打散。
+     * 循环设为 OFF，队列走到末首结束后由封面墙接管「继续随机」。
+     */
+    fun playOrdered(list: List<Song>, song: Song) {
+        if (list.isEmpty()) return
+        val idx = list.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
+        preShuffleOrder = null
+        player.setRepeat(RepeatMode.OFF)
+        player.play(list, idx)
     }
 
     fun playAll(list: List<Song>, shuffled: Boolean = false) {
@@ -4793,12 +4857,43 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val ordered = if (on) ShuffleOrder.build(list, 0, recentWindowFor(list.size)) else list
         preShuffleOrder = if (on) list else null
         player.play(ordered, 0)
-        showToast(if (on) "随机播放 ${list.size} 首" else "播放全部 ${list.size} 首")
+        if (prefs.playToastEnabled) {
+            showToast(if (on) "随机播放 ${list.size} 首" else "播放全部 ${list.size} 首")
+        }
     }
 
     fun playNext(song: Song) {
         player.playNext(song)
-        showToast("已添加到下一首播放")
+        if (prefs.playToastEnabled) showToast("已添加到下一首播放")
+    }
+
+    // ===== 单曲队列的手动切歌 → 直接随机（与封面墙「随便听听」同一套逻辑）=====
+
+    /** 最近随机到的专辑 key，窗口与封面墙一致（20），避免反复撞同一张 */
+    private val randomRecentKeys = ArrayDeque<String>()
+
+    fun nextOrRandom() {
+        if (player.state.value.queueIds.size <= 1) randomListenLikeWall() else player.next()
+    }
+
+    fun previousOrRandom() {
+        if (player.state.value.queueIds.size <= 1) randomListenLikeWall() else player.previous()
+    }
+
+    /**
+     * 与封面墙 randomListen 同源：随机挑一张专辑（排除当前与最近窗口），
+     * 再在其中随机挑一首按原序播放。曲库专辑少于 24 张时墙会展开成单曲卡，
+     * 这里复用 [buildWallAlbums] 保持同样的候选集。
+     */
+    private fun randomListenLikeWall() {
+        val all = buildWallAlbums(albums, songs, favorites)
+        val currentId = player.state.value.mediaId
+        val currentKey = all.firstOrNull { wa -> wa.tracks.any { it.id == currentId } }?.key
+        val target = pickRandomWallAlbum(all, currentKey, randomRecentKeys) ?: return
+        randomRecentKeys.addLast(target.key)
+        if (randomRecentKeys.size > 20) randomRecentKeys.removeFirst()
+        val song = target.tracks.randomOrNull() ?: return
+        playOrdered(target.tracks, song)
     }
 
     override fun onCleared() {
