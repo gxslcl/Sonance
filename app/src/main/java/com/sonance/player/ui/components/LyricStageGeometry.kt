@@ -58,7 +58,7 @@ internal fun lyricStagePose(
                 emphasis = emphasis
             )
         }
-        LyricStyle.CLASSIC -> LyricStagePose(0f, distance, 1f, 1f, 0f, emphasis = emphasis)
+        LyricStyle.CLASSIC, LyricStyle.VERTICAL -> LyricStagePose(0f, distance, 1f, 1f, 0f, emphasis = emphasis)
     }
 }
 
@@ -79,6 +79,32 @@ internal fun lyricStageAnchor(centers: List<Float>, anchor: Float): Float {
     val i = bounded.toInt()
     val fraction = bounded - i
     return centers[i] + ((centers.getOrNull(i + 1) ?: centers[i]) - centers[i]) * fraction
+}
+
+/**
+ * [lyricStageAnchor] 的反函数：给一个纵向位置，返回对应的（小数）行号。
+ *
+ * 手动滚动的核心：手指位移是像素，舞台位置是行号。用这张累计高度表做反查，
+ * 可以让内容**严格跟手** —— 即使每行高度不同（长句折行、带翻译），
+ * 也不会出现"有的行滑得飞快、有的行滑不动"。
+ *
+ * 位置超出首尾时夹到有效范围，保证滚动不会把歌词甩出边界。
+ */
+internal fun lyricIndexAtCenter(centers: List<Float>, y: Float): Float {
+    if (centers.isEmpty()) return 0f
+    if (centers.size == 1) return 0f
+    if (y <= centers.first()) return 0f
+    if (y >= centers.last()) return centers.lastIndex.toFloat()
+
+    var lo = 0
+    var hi = centers.lastIndex
+    while (lo + 1 < hi) {
+        val mid = (lo + hi) ushr 1
+        if (centers[mid] <= y) lo = mid else hi = mid
+    }
+    val span = centers[hi] - centers[lo]
+    if (span <= 0f) return lo.toFloat()
+    return lo + ((y - centers[lo]) / span).coerceIn(0f, 1f)
 }
 
 internal fun lyricLineProgress(startMs: Long, nextMs: Long?, durationMs: Long, positionMs: Long): Float {

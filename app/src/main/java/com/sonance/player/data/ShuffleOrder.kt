@@ -22,7 +22,7 @@ object ShuffleOrder {
      */
     fun build(queue: List<Song>, keepIndex: Int, recent: Set<Long>): List<Song> {
         val n = queue.size
-        if (n <= 2) return queue.shuffled()
+        if (n <= 1) return queue
 
         val keep = keepIndex.coerceIn(0, n - 1)
         val anchor = queue[keep]

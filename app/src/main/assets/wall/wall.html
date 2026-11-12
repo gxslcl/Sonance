@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#050507">
+<title>封面墙 · Sonance</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#050507;color:#f2f2f5;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","MiSans","Microsoft YaHei",system-ui,sans-serif;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+svg{display:block}
+/* 全屏舞台：原生 WebView 里 #app 就是整个视口，安全区由 __wall.setInsets 注入 */
+#app{position:fixed;inset:0;width:100%;height:100%;background:#050507;overflow:hidden;isolation:isolate;--sat:0px;--sab:0px}
+
+/* ---------- 封面墙 ---------- */
+#wallScreen{position:absolute;inset:0;background:#050507;display:none;overflow:hidden;z-index:10}
+#ambient{position:absolute;inset:-10%;color:#33334a;background:radial-gradient(circle at 50% 46%,currentColor 0,transparent 58%);opacity:.32;transition:color .8s}
+#wallWrap{position:absolute;inset:0;transform-origin:50% 45%}
+#stage{position:absolute;inset:0;perspective:900px;perspective-origin:50% 50%}
+#wall{position:absolute;inset:0;transform-style:preserve-3d;transform-origin:50% 50%}
+#vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 85% 75% at 50% 50%,transparent 55%,rgba(0,0,0,.7) 100%)}
+.tile{position:absolute;left:0;top:0;border-radius:6px;transform-origin:50% 50%;will-change:transform;backface-visibility:hidden;-webkit-backface-visibility:hidden;cursor:pointer}
+.tile .art{position:absolute;inset:0;border-radius:inherit;overflow:hidden}
+.tile.s2 .art{box-shadow:0 4px 10px rgba(0,0,0,.45)}
+.tile.s3 .art{box-shadow:0 7px 18px rgba(0,0,0,.5)}
+.tile.s4 .art{box-shadow:0 12px 28px rgba(0,0,0,.55)}
+.tile.s6 .art{box-shadow:0 18px 44px rgba(0,0,0,.6)}
+.tile .art::after{content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),inset 0 -1px 0 rgba(0,0,0,.25);pointer-events:none}
+.gloss{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.gloss i{position:absolute;left:-100%;top:-100%;width:300%;height:300%;background:linear-gradient(118deg,transparent 42%,rgba(255,255,255,.2) 49.5%,rgba(255,255,255,.05) 52%,transparent 57%);transform:translate(calc(var(--gx,0) * 20%),calc(var(--gy,0) * 20%))}
+.tile .shade{position:absolute;inset:0;border-radius:inherit;background:#000;opacity:0;pointer-events:none}
+.tile.playing::before{content:'';position:absolute;inset:-4px;border-radius:9px;box-shadow:0 0 0 2px var(--glow),0 0 22px 3px var(--glow);animation:breathe 2.4s ease-in-out infinite;pointer-events:none}
+@keyframes breathe{0%,100%{opacity:.3}50%{opacity:1}}
+
+/* 程序生成的封面 */
+.cv{position:absolute;inset:0;container-type:size;overflow:hidden}
+.cv-type{position:absolute;left:6%;bottom:-8%;font-size:80cqw;font-weight:900;line-height:1;letter-spacing:-2px}
+.cv-label{position:absolute;left:7%;right:7%;bottom:7%;display:flex;flex-direction:column;gap:1cqw;color:rgba(255,255,255,.94);text-shadow:0 1px 6px rgba(0,0,0,.35);font-size:6.5cqw;line-height:1.15}
+.cv-label b{font-size:10cqw;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cv-label.dark{color:rgba(20,20,24,.88);text-shadow:none}
+
+#topbar{position:absolute;top:calc(var(--sat) + 10px);left:14px;right:14px;display:flex;justify-content:space-between;z-index:5;pointer-events:none}
+#topbar button{pointer-events:auto;width:38px;height:38px;border-radius:50%;background:rgba(22,22,28,.45);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;opacity:.75}
+
+#fab{position:absolute;left:50%;bottom:calc(var(--sab) + 26px);z-index:6;height:54px;padding:0 24px 0 18px;border-radius:27px;display:flex;align-items:center;gap:9px;background:rgba(32,32,40,.55);backdrop-filter:blur(18px) saturate(1.5);-webkit-backdrop-filter:blur(18px) saturate(1.5);border:1px solid rgba(255,255,255,.14);box-shadow:0 10px 30px rgba(0,0,0,.45);color:#fff;font-size:15px;font-weight:600;transform:translateX(-50%);transition:transform .18s cubic-bezier(.3,.7,.3,1.4),padding .3s,gap .3s}
+#fab.pressed{transform:translateX(-50%) scale(.92)}
+#fab .label{max-width:90px;overflow:hidden;white-space:nowrap;transition:max-width .3s,opacity .2s}
+#fab.mini{padding:0 15px;gap:0}
+#fab.mini .label{max-width:0;opacity:0}
+#fab .dice{transition:transform .2s}
+#fab.pressed .dice{transform:rotate(-18deg)}
+#fab.spinning .dice{animation:diceSpin .45s linear infinite}
+@keyframes diceSpin{to{transform:rotate(360deg)}}
+
+/* ---------- 播放页 ---------- */
+#player{position:absolute;inset:0;display:none;z-index:20;touch-action:none}
+#playerBg{position:absolute;inset:0}
+.pbgl{position:absolute;inset:0}
+#pTop{position:absolute;top:calc(var(--sat) + 8px);left:12px;right:12px;height:44px;display:flex;align-items:center;justify-content:space-between;font-size:13px;color:rgba(255,255,255,.75)}
+#pTop button{width:44px;height:44px;display:flex;align-items:center;justify-content:center}
+#pGroup{position:absolute;transform-origin:0 0}
+#pVinylWrap{position:absolute;left:3%;top:3%;width:94%;height:94%}
+#pVinylWrap::after{content:'';position:absolute;inset:0;border-radius:50%;pointer-events:none;background:conic-gradient(from 20deg,rgba(255,255,255,.12),rgba(255,255,255,0) 10%,rgba(255,255,255,.06) 22%,rgba(255,255,255,0) 36%,rgba(255,255,255,.12) 50%,rgba(255,255,255,0) 60%,rgba(255,255,255,.06) 72%,rgba(255,255,255,0) 86%,rgba(255,255,255,.12))}
+#pVinyl{position:absolute;inset:0;border-radius:50%;background:repeating-radial-gradient(circle,#141414 0 .7%,#1f1f1f .7% 1.4%);box-shadow:0 12px 34px rgba(0,0,0,.6)}
+#pVinyl .vl{position:absolute;inset:33%;border-radius:50%;background:var(--lab,#a33);display:flex;align-items:center;justify-content:center;text-align:center;padding:8%;font-size:12px;font-weight:700;color:rgba(255,255,255,.9);line-height:1.2;overflow:hidden}
+#pVinyl .vl::after{content:'';position:absolute;width:9%;height:9%;border-radius:50%;background:#0b0b0b;left:45.5%;top:45.5%}
+#pVinyl.spin{animation:spin 3.6s linear infinite}
+#pVinyl.spin.paused{animation-play-state:paused}
+@keyframes spin{to{transform:rotate(360deg)}}
+#pArt{position:absolute;inset:0;border-radius:10px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.55)}
+#pArt::after{content:'';position:absolute;inset:0;background:linear-gradient(125deg,rgba(255,255,255,.16),rgba(255,255,255,0) 40%);pointer-events:none}
+#pInfo{position:absolute;left:28px;right:28px}
+#pTitle{font-size:23px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#pArtist{font-size:14px;color:rgba(255,255,255,.62);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pProg{margin-top:14px;padding:10px 0;cursor:pointer;touch-action:none}
+.pProg .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.18);overflow:hidden}
+.pProg .bar i{display:block;height:100%;width:0;background:#fff;border-radius:2px}
+.pProg .times{display:flex;justify-content:space-between;font-size:12px;color:rgba(255,255,255,.5);margin-top:7px;font-variant-numeric:tabular-nums}
+.pCtrl{display:flex;align-items:center;justify-content:space-between;padding:0 14px;margin-top:6px}
+.pCtrl button{width:52px;height:52px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:transform .15s}
+.pCtrl button:active{transform:scale(.88)}
+.pCtrl #pPlay{width:72px;height:72px;background:#fff;color:#111;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.pHint{margin-top:22px;text-align:center;font-size:12px;color:rgba(255,255,255,.4)}
+
+/* ---------- 长按翻面 ---------- */
+#flipLayer{position:absolute;inset:0;z-index:30;display:none}
+#flipBackdrop{position:absolute;inset:0;background:rgba(0,0,0,.35)}
+#flipCard{position:absolute;transform-origin:0 0;perspective:1200px}
+#fcInner{position:absolute;inset:0;transform-style:preserve-3d}
+.fc-face{position:absolute;inset:0;border-radius:12px;overflow:hidden;backface-visibility:hidden;-webkit-backface-visibility:hidden;box-shadow:0 30px 70px rgba(0,0,0,.6)}
+.fc-back{transform:rotateY(180deg);padding:16px;display:flex;flex-direction:column;gap:10px}
+.fb-head{display:flex;gap:12px;align-items:center;flex:none}
+.fb-mini{position:relative;width:56px;height:56px;border-radius:8px;overflow:hidden;flex:none}
+.fb-head b{display:block;font-size:17px;font-weight:800;line-height:1.25}
+.fb-head span{font-size:12px;color:rgba(255,255,255,.65)}
+.fb-list{list-style:none;flex:1;min-height:0;display:flex;flex-direction:column;justify-content:flex-start;gap:2px;overflow-y:auto;touch-action:pan-y;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent}
+.fb-list li{display:flex;align-items:center;gap:10px;font-size:13px;color:rgba(255,255,255,.88);padding:7px 4px;border-radius:6px;cursor:pointer;flex:none}
+.fb-list li:active{background:rgba(255,255,255,.08)}
+.fb-list li i{font-style:normal;width:18px;font-size:12px;color:rgba(255,255,255,.45);flex:none;text-align:center}
+.fb-list li .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fb-list li em{margin-left:auto;font-style:normal;font-size:12px;color:rgba(255,255,255,.45);flex:none;font-variant-numeric:tabular-nums}
+.fb-list li.cur{color:#fff}
+.fb-list li.cur i{color:#a3e635}
+.fb-btns{display:flex;gap:10px;flex:none}
+.fb-btns button{flex:1;height:40px;border-radius:20px;font-size:14px;font-weight:700}
+.fb-play{background:#fff;color:#111}
+.fb-queue{background:rgba(255,255,255,.14)}
+
+/* ---------- 调参面板 ---------- */
+#tune{position:absolute;left:0;right:0;bottom:0;max-height:66%;overflow-y:auto;z-index:50;background:rgba(18,18,24,.94);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-radius:22px 22px 0 0;border-top:1px solid rgba(255,255,255,.1);padding:0 18px calc(var(--sab) + 18px);transform:translateY(105%);transition:transform .38s cubic-bezier(.2,.8,.2,1);touch-action:pan-y;scrollbar-width:thin;scrollbar-color:rgba(124,124,240,.4) transparent}
+#tune.open{transform:none}
+.tn-head{position:sticky;top:0;display:flex;align-items:center;gap:10px;padding:16px 0 10px;background:rgba(18,18,24,.98);z-index:1}
+.tn-head b{font-size:16px}
+.tn-head span{font-size:12px;color:#8a8a98}
+.tn-head button{margin-left:auto;font-size:14px;color:#9d9dff;padding:6px 4px}
+.tn-sec{font-size:12px;color:#7c7cf0;margin:14px 0 4px;font-weight:700;letter-spacing:1px}
+.tn-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;font-size:13px;color:#dcdce4}
+.tn-range{flex-direction:column;align-items:stretch;gap:4px}
+.tn-lab{display:flex;justify-content:space-between}
+.tn-lab em{font-style:normal;color:#9a9aab;font-variant-numeric:tabular-nums;font-size:12px}
+input[type=range]{width:100%;accent-color:#8b8bff;height:22px;touch-action:pan-x}
+.tn-bool{cursor:pointer}
+.tn-bool input{display:none}
+.sw{width:40px;height:24px;border-radius:12px;background:#3a3a46;position:relative;transition:background .2s;flex:none}
+.sw::after{content:'';position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .2s}
+.tn-bool input:checked+.sw{background:#7c7cf0}
+.tn-bool input:checked+.sw::after{transform:translateX(16px)}
+.seg{display:flex;background:#2a2a34;border-radius:10px;padding:3px}
+.seg button{padding:5px 14px;border-radius:8px;font-size:12px;color:#aaa}
+.seg button.on{background:#7c7cf0;color:#fff}
+.tn-btns{display:flex;gap:10px;margin-top:16px}
+.tn-btns button{flex:1;height:42px;border-radius:12px;background:#2a2a34;font-size:14px}
+.tn-btns .tn-shuffle{background:#7c7cf0;color:#fff;font-weight:700}
+
+/* 面板自己的滚动条语言：细轨、半透明紫滑块，悬停加亮 */
+.fb-list::-webkit-scrollbar,#tune::-webkit-scrollbar{width:5px}
+.fb-list::-webkit-scrollbar-track,#tune::-webkit-scrollbar-track{background:transparent}
+.fb-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:3px}
+.fb-list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.36)}
+#tune::-webkit-scrollbar-thumb{background:rgba(124,124,240,.42);border-radius:3px}
+#tune::-webkit-scrollbar-thumb:hover{background:rgba(124,124,240,.7)}
+
+/* ---------- 震动可视化 / Toast / 空态 ---------- */
+#hviz{position:absolute;top:calc(var(--sat) + 12px);left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;padding:6px 13px 6px 9px;border-radius:999px;background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.12);font-size:12px;color:#ddd;opacity:0;transition:opacity .35s;pointer-events:none;white-space:nowrap}
+#hviz.on{opacity:1;transition:opacity .08s}
+#hviz .dot{width:10px;height:10px;border-radius:50%;background:var(--c,#fff)}
+#hviz.l1{--c:#7dd3fc}#hviz.l2{--c:#a3e635}#hviz.l3{--c:#fb923c}#hviz.l4{--c:#f472b6}
+#toast{position:absolute;left:50%;bottom:calc(var(--sab) + 100px);transform:translateX(-50%);z-index:55;padding:10px 18px;border-radius:20px;background:rgba(30,30,38,.92);font-size:13px;opacity:0;pointer-events:none;white-space:nowrap}
+#empty{position:absolute;inset:0;z-index:4;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:0 40px}
+#empty svg{opacity:.4;margin-bottom:6px}
+#empty b{font-size:18px;font-weight:800}
+#empty span{font-size:13px;color:#8a8a98;line-height:1.7}
+#empty button{margin-top:14px;height:44px;padding:0 26px;border-radius:22px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);font-size:14px;font-weight:600}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 封面墙 -->
+  <div id="wallScreen">
+    <div id="ambient"></div>
+    <div id="wallWrap"><div id="stage"><div id="wall"></div></div></div>
+    <div id="vignette"></div>
+    <div id="topbar">
+      <button id="btnExit" aria-label="退出"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button id="btnTune" aria-label="调参"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+    </div>
+    <button id="fab">
+      <svg class="dice" width="24" height="24" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="8.2" cy="8.2" r="1.5" fill="#fff"/><circle cx="15.8" cy="8.2" r="1.5" fill="#fff"/><circle cx="12" cy="12" r="1.5" fill="#fff"/><circle cx="8.2" cy="15.8" r="1.5" fill="#fff"/><circle cx="15.8" cy="15.8" r="1.5" fill="#fff"/></svg>
+      <span class="label">随便听听</span>
+    </button>
+  </div>
+
+  <!-- 播放页 -->
+  <div id="player">
+    <div id="playerBg"></div>
+    <div id="pTop" class="stg">
+      <button id="pDown" aria-label="收起"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+      <div id="pMode">正在播放 · 来自封面墙</div>
+      <button id="pMore" aria-label="调参面板"><svg width="20" height="20" viewBox="0 0 24 24" fill="#fff"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+    </div>
+    <div id="pGroup">
+      <div id="pVinylWrap"><div id="pVinyl"><div class="vl" id="pLabel"></div></div></div>
+      <div id="pArt"></div>
+    </div>
+    <div id="pInfo">
+      <div class="stg" id="pTitle"></div>
+      <div class="stg" id="pArtist"></div>
+      <div class="stg pProg" id="pProg"><div class="bar"><i id="pBar"></i></div><div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div></div>
+      <div class="stg pCtrl">
+        <button id="pPrev" aria-label="上一首"><svg width="28" height="28" viewBox="0 0 24 24" fill="#fff"><path d="M7 6h2v12H7zM10 12l9-6v12z"/></svg></button>
+        <button id="pPlay" aria-label="播放/暂停"></button>
+        <button id="pNext" aria-label="下一首"><svg width="28" height="28" viewBox="0 0 24 24" fill="#fff"><path d="M15 6h2v12h-2zM14 12L5 18V6z"/></svg></button>
+      </div>
+      <div class="stg pHint">↓ 向下拖动，把唱片插回墙上</div>
+    </div>
+  </div>
+
+  <!-- 长按翻面 -->
+  <div id="flipLayer">
+    <div id="flipBackdrop"></div>
+    <div id="flipCard"><div id="fcInner"><div class="fc-face fc-front" id="fcFront"></div><div class="fc-face fc-back" id="fcBack"></div></div></div>
+  </div>
+
+  <div id="tune"></div>
+  <div id="hviz"><span class="dot"></span><span class="txt"></span></div>
+  <div id="toast"></div>
+  <div id="empty">
+    <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.4"><rect x="3" y="3" width="11" height="11" rx="2"/><rect x="16" y="3" width="5" height="5" rx="1.2"/><rect x="16" y="10" width="5" height="4" rx="1.2"/><rect x="3" y="16" width="5" height="5" rx="1.2"/><rect x="10" y="16" width="11" height="5" rx="1.2"/></svg>
+    <b>曲库还是空的</b>
+    <span>先回主界面扫描本地音乐，<br>封面墙会把你的专辑铺成一整面墙。</span>
+    <button id="emptyExit">返回主界面</button>
+  </div>
+</div>
+
+<script>
+(()=>{
+'use strict';
+/* ================= 工具 ================= */
+const $=s=>document.querySelector(s);
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const smooth=(e0,e1,x)=>{const t=clamp((x-e0)/(e1-e0),0,1);return t*t*(3-2*t)};
+const easeOutCubic=t=>1-Math.pow(1-t,3);
+const easeInOutCubic=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+const easeOutBack=t=>{const c1=1.5,c3=c1+1;return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2)};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const now=()=>performance.now();
+const mmss=s=>{s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function rubber(x,d){d=d||PH;return (1-1/(x*0.55/d+1))*d}
+function spring(x,v,target,k,z,dt){const c=2*Math.sqrt(k)*z;const a=k*(target-x)-c*v;v+=a*dt;x+=v*dt;return [x,v]}
+function tween(dur,ease,fn,done){wake();const t0=now();const h={stop:false};const step=tn=>{if(h.stop)return;const p=clamp((tn-t0)/dur,0,1);fn(ease(p));if(p<1)requestAnimationFrame(step);else if(done)done();};requestAnimationFrame(step);return h}
+const gT=(x,y,s)=>`translate(${x.toFixed(2)}px,${y.toFixed(2)}px) scale(${s.toFixed(4)})`;
+
+/* ================= 原生桥 ================= */
+// 与黑胶页同一套范式：上抛全部经 window.WallBridge（Kotlin @JavascriptInterface），
+// 调用点包 try/catch —— 浏览器里无桥时静默降级，页面本身仍可完整交互。
+function bridge(method,...args){
+  const b=window.WallBridge;
+  if(b&&typeof b[method]==='function'){try{b[method](...args)}catch(e){}}
+}
+
+/* ================= DOM ================= */
+const app=$('#app'),wallScreen=$('#wallScreen'),wallWrap=$('#wallWrap'),stage=$('#stage'),wall=$('#wall'),ambient=$('#ambient');
+const fab=$('#fab'),player=$('#player'),playerBg=$('#playerBg'),pTop=$('#pTop'),pGroup=$('#pGroup'),pArt=$('#pArt'),pVinylWrap=$('#pVinylWrap'),pVinyl=$('#pVinyl'),pLabel=$('#pLabel'),pInfo=$('#pInfo'),pMode=$('#pMode');
+const pTitle=$('#pTitle'),pArtist=$('#pArtist'),pBar=$('#pBar'),tCur=$('#tCur'),tDur=$('#tDur'),pPlay=$('#pPlay'),pProg=$('#pProg');
+const flipLayer=$('#flipLayer'),flipBackdrop=$('#flipBackdrop'),flipCard=$('#flipCard'),fcInner=$('#fcInner'),fcFront=$('#fcFront'),fcBack=$('#fcBack');
+const tune=$('#tune'),hviz=$('#hviz'),toastEl=$('#toast'),emptyEl=$('#empty');
+const ICON_PLAY='<svg width="30" height="30" viewBox="0 0 24 24" fill="#111"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_PAUSE='<svg width="30" height="30" viewBox="0 0 24 24" fill="#111"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>';
+
+/* ================= 参数（localStorage 持久化） ================= */
+const isCoarse=matchMedia('(pointer:coarse)').matches;
+const DEFAULTS={maxAngle:28,rest:0.22,vmax:4500,radius:650,springK:90,zeta:0.42,friction:2.6,pressTilt:9,pressScale:0.95,rippleAmp:0.05,rippleSpeed:1400,gap:7,gyroDeg:4,parallax:true,drift:true,haptics:'light',hviz:!isCoarse,vinyl:true,autoPlay:true};
+const P=Object.assign({},DEFAULTS);
+let seed=7;
+try{
+  const saved=JSON.parse(localStorage.getItem('sonance-wall-tune')||'null');
+  if(saved&&saved.P)for(const k in DEFAULTS)if(k in saved.P&&typeof saved.P[k]===typeof DEFAULTS[k])P[k]=saved.P[k];
+  if(saved&&Number.isFinite(saved.seed))seed=saved.seed|0;
+}catch(e){}
+function saveTune(){try{localStorage.setItem('sonance-wall-tune',JSON.stringify({P,seed}))}catch(e){}}
+const DEFS=[
+ {sec:'弧面墙'},
+ {k:'maxAngle',name:'最大弯曲角',min:0,max:50,step:1,unit:'°'},
+ {k:'rest',name:'静止弯曲度',min:0,max:1,step:.01},
+ {k:'vmax',name:'达到最大弯曲所需的速度',min:1500,max:9000,step:100,unit:' px/s'},
+ {k:'radius',name:'纵深半径（越小越立体）',min:250,max:1500,step:10},
+ {k:'springK',name:'回弹刚度',min:20,max:300,step:1},
+ {k:'zeta',name:'回弹阻尼（越小越 Q 弹）',min:.15,max:1,step:.01},
+ {k:'friction',name:'滑动摩擦',min:1,max:6,step:.1},
+ {sec:'触摸'},
+ {k:'pressTilt',name:'按压倾斜角',min:0,max:20,step:.5,unit:'°'},
+ {k:'pressScale',name:'按压缩放',min:.85,max:1,step:.005},
+ {k:'rippleAmp',name:'波纹幅度',min:0,max:.12,step:.002},
+ {k:'rippleSpeed',name:'波纹速度',min:400,max:3000,step:50,unit:' px/s'},
+ {sec:'布局与光影'},
+ {k:'gap',name:'封面间距',min:0,max:14,step:1,unit:' px',rebuild:true},
+ {k:'gyroDeg',name:'视差角度',min:0,max:10,step:.5,unit:'°'},
+ {k:'parallax',name:'陀螺仪视差',type:'bool'},
+ {k:'drift',name:'闲置 12 秒后自动漂移',type:'bool'},
+ {sec:'反馈与播放'},
+ {k:'haptics',name:'震动强度',type:'seg',opts:[['off','关'],['light','轻'],['strong','强']]},
+ {k:'hviz',name:'震动可视化胶囊',type:'bool'},
+ {k:'vinyl',name:'黑胶唱片滑出',type:'bool'},
+ {k:'autoPlay',name:'抽出即播放（联动原生）',type:'bool'},
+];
+
+/* ================= 视口 ================= */
+let PW=Math.max(1,innerWidth),PH=Math.max(1,innerHeight),SCALE=1;
+const INSET={top:0,bottom:0};
+function fitPhone(){PW=Math.max(1,innerWidth);PH=Math.max(1,innerHeight);SCALE=1;app.style.width=PW+'px';app.style.height=PH+'px'}
+function toLocal(e){const r=app.getBoundingClientRect();return [(e.clientX-r.left)/SCALE,(e.clientY-r.top)/SCALE]}
+function rectLocal(el){const r=el.getBoundingClientRect(),p=app.getBoundingClientRect();return {x:(r.left-p.left)/SCALE,y:(r.top-p.top)/SCALE,w:r.width/SCALE,h:r.height/SCALE}}
+function onResize(){rebuildKeep();if(G.playerOpen)layoutPlayer();if(G.wallOn&&G.frozen)renderWall(now())}
+// 原生强制视口：WebView 加载早于自身布局完成时 innerHeight 可能冻结为 0（同黑胶页）
+window.__forceViewport=function(w,h){
+  if(!(w>0)||!(h>0))return;
+  PW=Math.round(w);PH=Math.round(h);
+  document.documentElement.style.height=PH+'px';document.body.style.height=PH+'px';
+  app.style.width=PW+'px';app.style.height=PH+'px';
+  onResize();
+};
+
+/* ================= 真实专辑 → 确定性虚拟封面 ================= */
+// 原生推真实专辑/曲目文本元数据；封面由 专辑名+艺术家 的 FNV-1a 哈希种子程序生成，
+// 同一张专辑每次打开都是同一张专属艺术封面（8 种几何渐变 + 容器查询排版）。
+let albums=[];
+function hashStr(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return h>>>0}
+function decorate(a){
+  const r=mulberry32(hashStr(a.name+'|'+a.artist));
+  const h1=Math.floor(r()*360);
+  a.title=a.name;
+  a.h1=h1;a.h2=h1+60+Math.floor(r()*180);a.style=Math.floor(r()*8);
+  a.px=20+Math.floor(r()*60);a.py=20+Math.floor(r()*60);a.ang=Math.floor(r()*180);
+  a.label=r()<.45;
+  a.tracks=Array.isArray(a.tracks)?a.tracks:[];
+  a.dur=a.tracks.length?a.tracks[0].dur:0;
+  return a;
+}
+const hsl=(h,s,l)=>`hsl(${Math.round(h)%360} ${s}% ${l}%)`;
+function coverBG(a){
+  const {h1,h2}=a;
+  switch(a.style){
+    case 0:return `radial-gradient(circle at ${a.px}% ${a.py}%,${hsl(h2,90,66)} 0 21%,transparent 21.6%),linear-gradient(160deg,${hsl(h1,60,40)},${hsl(h1+40,70,12)})`;
+    case 1:return `repeating-radial-gradient(circle at 50% 50%,${hsl(h1,70,55)} 0 5%,${hsl(h2,55,18)} 5% 10%)`;
+    case 2:return `repeating-linear-gradient(${a.ang}deg,${hsl(h1,70,52)} 0 9%,${hsl(h2,65,26)} 9% 18%)`;
+    case 3:return `radial-gradient(${hsl(h2,90,70)} 22%,transparent 24%) 0 0/16.66% 16.66%,${hsl(h1,45,20)}`;
+    case 4:return `conic-gradient(from ${a.ang}deg at ${a.px}% ${a.py}%,${hsl(h1,80,55)},${hsl(h2,80,42)},${hsl(h1+180,60,25)},${hsl(h1,80,55)})`;
+    case 5:return hsl(h1,35,86);
+    case 6:return `radial-gradient(circle at 50% 50%,${hsl(h1+30,90,62)} 0 24%,transparent 24.6%),linear-gradient(to bottom,${hsl(h1,65,58)} 0 50%,${hsl(h2,50,14)} 50%)`;
+    default:return `radial-gradient(circle at 22% 78%,${hsl(h1,90,58)},transparent 55%),radial-gradient(circle at 78% 22%,${hsl(h2,90,55)},transparent 55%),${hsl(h1+200,40,10)}`;
+  }
+}
+function artHTML(a,noLabel){
+  let inner='';
+  if(a.style===5)inner+=`<div class="cv-type" style="color:${hsl(a.h2,70,30)}">${esc([...a.title][0]||'♪')}</div>`;
+  if(a.label&&!noLabel)inner+=`<div class="cv-label${a.style===5?' dark':''}"><b>${esc(a.title)}</b><span>${esc(a.artist)}</span></div>`;
+  return `<div class="cv" style="background:${coverBG(a)}">${inner}</div>`;
+}
+const mainColor=a=>hsl(a.h1,70,50);
+
+/* ================= 布局：单元网格 + 区块模板 ================= */
+const TPL=[
+ {id:'A',w:3,h:4,big:1,s:[[0,0,4],[4,0,2],[4,2,2]]},
+ {id:'B',w:3,h:4,big:1,s:[[2,0,4],[0,0,2],[0,2,2]]},
+ {id:'C',w:3,h:2,big:0,s:[[0,0,2],[2,0,2],[4,0,2]]},
+ {id:'D',w:2.2,h:3,big:0,s:[[0,0,3],[3,0,3]]},
+ {id:'E',w:.35,h:6,big:1,s:[[0,0,6]]},
+ {id:'G',w:1,h:6,big:1,s:[[2,2,4],[0,0,2],[2,0,2],[4,0,2],[0,2,2],[0,4,2]]},
+ {id:'I',w:1,h:6,big:1,s:[[2,0,4],[0,0,2],[0,2,2],[0,4,2],[2,4,2],[4,4,2]]},
+ {id:'J',w:1,h:6,big:1,s:[[0,0,4],[4,0,2],[4,2,2],[4,4,2],[0,4,2],[2,4,2]]},
+];
+let tiles=[],blockEdges=[],contentH=0;
+function buildLayout(){
+  const pad=10,gap=P.gap,top=Math.round(56+INSET.top),bottom=150;
+  const unit=(PW-pad*2+gap)/6;
+  const r=mulberry32(seed);
+  const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=Math.floor(r()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+  const fav=shuffle(albums.filter(a=>a.fav)),nor=shuffle(albums.filter(a=>!a.fav));
+  const take=big=>big?(fav.shift()||nor.shift()):(nor.shift()||fav.shift());
+  tiles=[];blockEdges=[];
+  let y=top,last=null,lastE=-99,bi=0;
+  while(fav.length+nor.length>0){
+    const remain=fav.length+nor.length;
+    let c=TPL.filter(t=>t.s.length<=remain&&(!last||t.id!==last.id));
+    if(last&&last.big)c=c.filter(t=>t.id!=='E');
+    if(bi-lastE<5)c=c.filter(t=>t.id!=='E');
+    if(!c.length)c=TPL.filter(t=>t.s.length<=remain);
+    let tot=c.reduce((s,t)=>s+t.w,0),x=r()*tot,tp=c[0];
+    for(const t of c){x-=t.w;if(x<=0){tp=t;break}}
+    blockEdges.push(y);
+    for(const [sx,sy,s] of tp.s){
+      const a=take(s>=4);if(!a)break;
+      tiles.push({a,x:pad+sx*unit,y:y+sy*unit,size:s*unit-gap,span:s,el:null,shadeEl:null,vis:false,hidden:false,lastT:'',lastShade:-1,introOp:false,ps:1,psv:0,pst:1,rx:0,rxv:0,rxt:0,ry:0,ryv:0,ryt:0});
+    }
+    y+=tp.h*unit;if(tp.id==='E')lastE=bi;last=tp;bi++;
+  }
+  blockEdges.push(y);
+  contentH=y-gap+bottom;
+}
+function buildWallDom(){
+  wall.textContent='';
+  const frag=document.createDocumentFragment();
+  tiles.forEach((t,i)=>{
+    const el=document.createElement('div');
+    el.className='tile s'+t.span;el.dataset.i=i;
+    el.style.width=el.style.height=t.size.toFixed(2)+'px';el.style.display='none';
+    el.innerHTML=`<div class="art">${artHTML(t.a)}<div class="gloss"><i></i></div></div><div class="shade"></div>`;
+    t.el=el;t.shadeEl=el.lastElementChild;frag.appendChild(el);
+  });
+  wall.appendChild(frag);
+  G.maxY=Math.max(0,contentH-PH);G.edgeIdx=-1;
+}
+function rebuildKeep(){
+  wake();
+  const keepId=G.current?G.current.a.id:null;
+  buildLayout();buildWallDom();
+  G.current=null;
+  if(keepId!=null){
+    const nt=tiles.find(t=>t.a.id===keepId);
+    if(nt){setCurrent(nt);S.y=clamp(nt.y+nt.size/2-PH*.45,0,G.maxY);if(G.playerOpen){nt.el.style.visibility='hidden';nt.hidden=true}}
+  }
+  S.y=clamp(S.y,0,G.maxY);S.v=0;
+}
+
+/* ================= 状态 ================= */
+const G={curve:.22,curveV:0,tilt:0,gx:0,gy:0,gxT:0,gyT:0,dim:0,dimT:0,dimExcept:null,current:null,busy:false,playerOpen:false,flipOpen:false,flip:null,frozen:false,
+  lastInput:now(),intro:null,ripples:[],active:new Set(),wfx:{s:1,rot:0,blur:0,br:1},wfxTw:null,wallOn:false,playing:false,driftDir:1,mini:false,lastScrollT:0,
+  edgeIdx:-1,recent:[],maxY:0,forceCurve:0,lockTimer:0,raf:0,hasGyro:false,coverSize:280,coverX:0,coverY:0,pd:null,lastWall:'',gxR:0,gyR:0,lastGlossT:0,dirty:true,
+  // 真实播放状态（原生 500ms 校准，两拍之间 playerTick 插值）
+  progSec:0,durSec:0,songTitle:'',songArtist:'',nativeAlbumId:'',nativeSongId:'',nativeHasItem:false,previewMode:false,seekDrag:null,pendingSwap:null};
+const S={y:0,v:0,drag:false,wheel:false,wheelT:0,wheelTarget:0,anim:null,wasOut:false,userMotion:false};
+const WFX_OFF={s:1,rot:0,blur:0,br:1},WFX_PLAYER={s:.86,rot:8,blur:14,br:.32},WFX_FLIP={s:.94,rot:3,blur:7,br:.45};
+
+/* ================= 震动（上抛原生 L1~L4 + 可视化） ================= */
+const HV={last:0,busyUntil:0,count:0,timer:0,lastLv:0,lastVizT:0,lastLabel:''};
+const LV=['','L1 质感','L2 确认','L3 冲击','L4 蓄力'];
+function haptic(level,label,dur){
+  const tn=now();
+  if(P.haptics==='off')return;
+  if(level===1&&(tn<HV.busyUntil||tn-HV.last<20))return;
+  const strong=P.haptics==='strong';
+  // 与原生 WallBridge 的波形时长一致，用于 L1 节流窗口
+  let total;
+  if(level===1)total=Math.round((dur||9)*(strong?1.6:1));
+  else if(level===2)total=strong?26:16;
+  else if(level===3)total=strong?50:32;
+  else total=strong?148:134;
+  bridge('onHaptic',level,label||'',Math.round(dur||0));
+  HV.last=tn;if(level>=3)HV.busyUntil=tn+total;
+  if(P.hviz)showViz(level,label,tn);
+}
+function showViz(level,label,tn){
+  if(level===1&&HV.lastLv===1&&tn-HV.lastVizT<700&&HV.lastLabel===label)HV.count++;else HV.count=1;
+  HV.lastLv=level;HV.lastVizT=tn;HV.lastLabel=label;
+  hviz.className='on l'+level;
+  hviz.querySelector('.txt').textContent=LV[level]+' · '+label+(HV.count>1?' ×'+HV.count:'');
+  hviz.querySelector('.dot').animate([{transform:`scale(${1.4+level*.35})`,opacity:1},{transform:'scale(1)',opacity:.8}],{duration:120+level*90,easing:'ease-out'});
+  clearTimeout(HV.timer);HV.timer=setTimeout(()=>hviz.classList.remove('on'),900);
+}
+
+/* ================= 播放状态（音频永远在原生，页面只镜像） ================= */
+function setPlaying(on){
+  G.playing=on;
+  pPlay.innerHTML=on?ICON_PAUSE:ICON_PLAY;pVinyl.classList.toggle('paused',!on);
+}
+
+/* ================= 墙的效果层（后退 / 模糊） ================= */
+function applyWfx(){
+  const f=G.wfx;
+  wallWrap.style.transform=(Math.abs(f.s-1)<.0005&&Math.abs(f.rot)<.01)?'':`perspective(1200px) rotateX(${f.rot.toFixed(2)}deg) scale(${f.s.toFixed(4)})`;
+  wallWrap.style.filter=(f.blur<.05&&f.br>.995)?'':`blur(${f.blur.toFixed(2)}px) brightness(${f.br.toFixed(3)})`;
+}
+function tweenWfx(to,dur,ease,done){
+  const from={...G.wfx};if(G.wfxTw)G.wfxTw.stop=true;
+  G.wfxTw=tween(dur,ease||easeOutCubic,p=>{for(const k in to)G.wfx[k]=lerp(from[k],to[k],p);applyWfx()},done);
+}
+function stopWfxTween(){if(G.wfxTw){G.wfxTw.stop=true;G.wfxTw=null}}
+
+/* ================= 物理 & 渲染循环 ================= */
+let lastF=now(),idleFrames=0,watchdog=0;
+let rY=NaN,rGX=NaN,rGY=NaN,rC=NaN,rTilt=NaN,rDim=NaN;
+function driftCond(){return P.drift&&!G.busy&&!G.playerOpen&&!G.flipOpen&&S.v===0&&now()-G.lastInput>12000}
+// 墙面是否仍在运动 / 需要逐帧驱动。静止时返回 false，循环停摆，渲染进程真正空闲
+function wallActive(){
+  const tx=P.parallax?G.gxT:0,ty=P.parallax?G.gyT:0;
+  return S.drag||S.wheel||!!S.anim||S.v!==0||G.busy||!!G.lockTimer||G.active.size>0||G.ripples.length>0||!!G.intro||!!G.wfxTw
+    ||Math.abs(G.curveV)>0.002||Math.abs(G.dim-G.dimT)>0.002||Math.abs(G.tilt)>0.02
+    ||G.gx!==tx||G.gy!==ty||driftCond()||(G.playerOpen&&(G.playing||G.busy));
+}
+// 任何输入 / 状态变化都唤醒循环；watchdog 兜底，确保最坏 200ms 内恢复，永不冻结
+function wake(){if(G.wallOn&&!G.raf){lastF=now();idleFrames=0;G.dirty=true;G.raf=requestAnimationFrame(loop)}}
+function flushGloss(){wall.style.setProperty('--gx',G.gxR.toFixed(2));wall.style.setProperty('--gy',G.gyR.toFixed(2));G.lastGlossT=now()}
+function loop(tn){
+  if(!G.wallOn){G.raf=0;return}
+  const dt=Math.min(.05,Math.max(.001,(tn-lastF)/1000));lastF=tn;
+  physics(tn,dt);curveStep(dt);parallaxStep(dt);animStep(dt);fabStep(tn);ticks();
+  if(!G.frozen){
+    // 仅在确有可见变化时才遍历全墙：量化后的视差 / 亚像素阈值过滤掉传感器噪声与弹簧微抖
+    const need=Math.abs(S.y-rY)>0.05||G.gxR!==rGX||G.gyR!==rGY||Math.abs(G.curve-rC)>0.0005||Math.abs(G.tilt-rTilt)>0.02||Math.abs(G.dim-rDim)>0.002||G.active.size>0||G.ripples.length>0||G.intro||G.dirty;
+    if(need){renderWall(tn);rY=S.y;rGX=G.gxR;rGY=G.gyR;rC=G.curve;rTilt=G.tilt;rDim=G.dim;G.dirty=false}
+  }
+  playerTick(dt);
+  if(!G.busy&&G.pendingSwap){const t=G.pendingSwap;G.pendingSwap=null;if(G.playerOpen&&t!==G.current)swapPlayerArt(t,1)}
+  if(wallActive()){idleFrames=0;G.raf=requestAnimationFrame(loop)}
+  else if(++idleFrames<6){G.raf=requestAnimationFrame(loop)}
+  else{G.raf=0;flushGloss();if(!watchdog)watchdog=setInterval(()=>{if(G.wallOn&&!G.raf&&wallActive())wake()},200)}
+}
+function startLoop(){lastF=now();idleFrames=0;G.dirty=true;if(!G.raf)G.raf=requestAnimationFrame(loop)}
+
+function physics(tn,dt){
+  const minY=0,maxY=G.maxY;
+  if(S.anim){
+    const A=S.anim,p=clamp((tn-A.t0)/A.dur,0,1),e=1-Math.pow(1-p,4),ny=A.from+(A.to-A.from)*e;
+    S.v=(ny-S.y)/dt;S.y=ny;
+    if(p>=1){S.anim=null;S.v=0;A.done()}
+    return;
+  }
+  if(S.drag){if(tn-(ptr.lastMoveT||0)>60)S.v*=Math.exp(-dt*14);return}
+  if(S.wheel){
+    const ny=S.y+(S.wheelTarget-S.y)*(1-Math.exp(-dt*16));S.v=(ny-S.y)/dt;S.y=ny;
+    if(Math.abs(S.wheelTarget-S.y)<.5&&tn-S.wheelT>140){S.y=S.wheelTarget;S.wheel=false;S.v=0}
+    return;
+  }
+  if(S.y<minY-.01||S.y>maxY+.01){
+    const b=S.y<minY?minY:maxY;
+    if((S.y-b)*S.v>0)S.v*=Math.exp(-dt*16);
+    const n=Math.ceil(dt/.004),h=dt/n;
+    for(let i=0;i<n;i++){[S.y,S.v]=spring(S.y,S.v,b,170,1,h)}
+    if(Math.abs(S.y-b)<.4&&Math.abs(S.v)<12){S.y=b;S.v=0}
+  }else{
+    S.y+=S.v*dt;S.v*=Math.exp(-P.friction*dt);
+    if(Math.abs(S.v)<6){S.v=0;S.userMotion=false}
+    if((S.y<minY||S.y>maxY)&&Math.abs(S.v)>200)haptic(3,'撞到边缘');
+  }
+  if(P.drift&&!G.busy&&!G.playerOpen&&!G.flipOpen&&S.v===0&&tn-G.lastInput>12000){
+    S.y+=G.driftDir*9*dt;
+    if(S.y>maxY){S.y=maxY;G.driftDir=-1}if(S.y<minY){S.y=minY;G.driftDir=1}
+  }
+}
+function curveStep(dt){
+  let target=P.rest+(1-P.rest)*smooth(0,P.vmax,Math.abs(S.v));
+  if(G.forceCurve)target=Math.max(target,G.forceCurve);
+  const n=Math.ceil(dt/.004),h=dt/n;
+  for(let i=0;i<n;i++){[G.curve,G.curveV]=spring(G.curve,G.curveV,target,P.springK,P.zeta,h)}
+  G.curve=clamp(G.curve,-.3,1.25);
+  let over=S.y<0?S.y:S.y>G.maxY?S.y-G.maxY:0;
+  const tiltT=clamp(S.v*.0006,-3,3)+clamp(-over*.035,-9,9);
+  G.tilt+=(tiltT-G.tilt)*(1-Math.exp(-dt*12));
+  G.dim+=(G.dimT-G.dim)*(1-Math.exp(-dt*10));
+}
+const ori={base:null,cur:null};
+// 浏览器直开时的兜底（HTTPS + 用户授权）；原生 WebView 里由 __wall.setTilt 驱动
+window.addEventListener('deviceorientation',e=>{if(e.beta==null||e.gamma==null)return;ori.cur={b:e.beta,g:e.gamma};if(!ori.base)ori.base={...ori.cur};G.hasGyro=true});
+function parallaxStep(dt){
+  if(G.hasGyro&&ori.cur){
+    const k=1-Math.exp(-dt/2);ori.base.b+=(ori.cur.b-ori.base.b)*k;ori.base.g+=(ori.cur.g-ori.base.g)*k;
+    G.gxT=clamp((ori.cur.g-ori.base.g)/14,-1,1);G.gyT=clamp((ori.cur.b-ori.base.b)/14,-1,1);
+  }
+  const tx=P.parallax?G.gxT:0,ty=P.parallax?G.gyT:0,k=1-Math.exp(-dt*6);
+  G.gx+=(tx-G.gx)*k;G.gy+=(ty-G.gy)*k;
+  // 收敛即吸附 + 渲染量化（0.01 步长）：陀螺仪噪声低于此幅度时不产生任何样式写入，
+  // 静止墙面不再每帧重写全墙 transform / 级联 gloss，渲染进程得以真正空闲
+  if(Math.abs(G.gx-tx)<0.004)G.gx=tx;
+  if(Math.abs(G.gy-ty)<0.004)G.gy=ty;
+  G.gxR=Math.round(G.gx*100)/100;G.gyR=Math.round(G.gy*100)/100;
+}
+function animStep(dt){
+  const n=Math.ceil(dt/.004),h=dt/n;
+  for(const t of G.active){
+    for(let i=0;i<n;i++){
+      [t.ps,t.psv]=spring(t.ps,t.psv,t.pst,420,.5,h);
+      [t.rx,t.rxv]=spring(t.rx,t.rxv,t.rxt,300,.55,h);
+      [t.ry,t.ryv]=spring(t.ry,t.ryv,t.ryt,300,.55,h);
+    }
+    if(Math.abs(t.ps-t.pst)<.0005&&Math.abs(t.psv)<.002&&Math.abs(t.rx-t.rxt)<.02&&Math.abs(t.ry-t.ryt)<.02&&Math.abs(t.rxv)<.05&&Math.abs(t.ryv)<.05){t.ps=t.pst;t.rx=t.rxt;t.ry=t.ryt;G.active.delete(t)}
+  }
+}
+function fabStep(tn){
+  if(Math.abs(S.v)>180&&!S.anim){G.lastScrollT=tn;if(!G.mini){fab.classList.add('mini');G.mini=true}}
+  else if(G.mini&&tn-G.lastScrollT>900&&!S.anim){fab.classList.remove('mini');G.mini=false}
+}
+function ticks(){
+  const c=S.y+PH/2;let lo=0,hi=blockEdges.length;
+  while(lo<hi){const m=(lo+hi)>>1;if(blockEdges[m]<=c)lo=m+1;else hi=m}
+  if(lo!==G.edgeIdx){
+    const sp=Math.abs(S.v);
+    if(G.edgeIdx>=0&&(S.drag||S.userMotion||S.anim||S.wheel)&&sp>40&&sp<6000&&!G.busy)haptic(1,S.anim?'滚筒':'滚动',Math.round(lerp(15,6,sp/6000)));
+    G.edgeIdx=lo;
+  }
+}
+function addRipple(t,amp){G.ripples.push({x:t.x+t.size/2,y:t.y+t.size/2,t0:now(),amp})}
+
+function renderWall(tn){
+  const C=G.curve,R=P.radius,half=PH/2,maxA=P.maxAngle*Math.PI/180;
+  const gx=G.gxR,gy=G.gyR;
+  const ws=`rotateX(${(G.tilt-gy*P.gyroDeg).toFixed(2)}deg) rotateY(${(gx*P.gyroDeg).toFixed(2)}deg)`;
+  if(ws!==G.lastWall){wall.style.transform=ws;G.lastWall=ws;
+    // --gx/--gy 会级联到每张封面的 gloss 高光：节流到 ~20Hz，避免每帧全墙样式重算
+    if(tn-G.lastGlossT>50){wall.style.setProperty('--gx',gx.toFixed(2));wall.style.setProperty('--gy',gy.toFixed(2));G.lastGlossT=tn}}
+  if(G.ripples.length)G.ripples=G.ripples.filter(r=>tn-r.t0<2600);
+  const intro=G.intro;
+  if(intro&&tn-intro.t0>440+Math.hypot(PW,PH+300)*.38)G.intro=null;
+  for(const t of tiles){
+    const sy=t.y-S.y;
+    if(sy>PH+260||sy+t.size<-260){if(t.vis){t.el.style.display='none';t.vis=false}continue}
+    if(!t.vis){t.el.style.display='';t.vis=true}
+    const cy=sy+t.size/2;
+    const ny=clamp((cy-half)/half,-1.7,1.7);
+    const ang=ny*maxA*C,cosA=Math.cos(ang);
+    let rotX=-ang*57.2958,z=-(1-cosA)*R;
+    let shade=Math.min(.62,(1-cosA)*2.4+Math.max(0,Math.abs(ny)-.8)*.3);
+    let s=t.ps,rz=0;
+    for(const rp of G.ripples){
+      const d=Math.hypot(t.x+t.size/2-rp.x,t.y+t.size/2-rp.y);
+      const tt=(tn-rp.t0)/1000-d/P.rippleSpeed;
+      if(tt>0&&tt<1.5){const f=rp.amp*Math.exp(-d/(PH*.7))*Math.sin(tt*13.5)*Math.exp(-tt*4.2);s-=f;rz-=f*500}
+    }
+    let iop=null;
+    if(intro){
+      const d=Math.hypot(t.x+t.size/2-intro.ox,cy-intro.oy);
+      const p=clamp((tn-intro.t0-d*.38)/440,0,1);
+      if(p<1){const e=easeOutBack(p),ec=easeOutCubic(p);s*=.6+.4*e;z-=(1-ec)*260;rotX+=(1-ec)*24;iop=clamp(p*2.5,0,1)}
+    }
+    if(G.dim>.002&&t!==G.dimExcept)shade=shade+(1-shade)*G.dim;
+    const par=t.span/6*10;
+    const tr=`translate3d(${(t.x+gx*par).toFixed(2)}px,${(sy+gy*par).toFixed(2)}px,${(z+rz).toFixed(1)}px) rotateX(${(rotX+t.rx).toFixed(2)}deg) rotateY(${t.ry.toFixed(2)}deg) scale(${s.toFixed(4)})`;
+    if(tr!==t.lastT){t.el.style.transform=tr;t.lastT=tr}
+    if(Math.abs(shade-t.lastShade)>.006){t.shadeEl.style.opacity=shade.toFixed(3);t.lastShade=shade}
+    if(iop!==null){t.el.style.opacity=iop.toFixed(3);t.introOp=true}else if(t.introOp){t.el.style.opacity='';t.introOp=false}
+  }
+}
+
+/* ================= 墙上的手势 ================= */
+const ptr={id:null,x0:0,y0:0,t0:0,sy0:0,last:[],tile:null,tr:null,moved:false,caught:false,long:false,lpTimer:0,hapTimer:0,lastMoveT:0};
+function pressTile(t,x,y){
+  const r=ptr.tr;const lx=clamp(((x-r.x)/r.w-.5)*2,-1,1),ly=clamp(((y-r.y)/r.h-.5)*2,-1,1);
+  t.rxt=-ly*P.pressTilt;t.ryt=lx*P.pressTilt;t.pst=P.pressScale;
+  t.el.style.setProperty('--gx',(lx*.8).toFixed(3));t.el.style.setProperty('--gy',(ly*.8).toFixed(3));
+  G.active.add(t);
+}
+function releaseTile(t){t.rxt=0;t.ryt=0;t.pst=1;t.el.style.removeProperty('--gx');t.el.style.removeProperty('--gy');G.active.add(t)}
+function resetTilePress(t){t.ps=t.pst=1;t.psv=0;t.rx=t.rxt=t.rxv=0;t.ry=t.ryt=t.ryv=0;t.el.style.removeProperty('--gx');t.el.style.removeProperty('--gy')}
+
+wallScreen.addEventListener('pointerdown',e=>{
+  if(e.target.closest('#fab,#topbar'))return;
+  if(ptr.id!==null||G.busy||G.flipOpen)return;
+  G.lastInput=now();wake();
+  const [x,y]=toLocal(e);
+  ptr.id=e.pointerId;try{wallScreen.setPointerCapture(e.pointerId)}catch(_){}
+  ptr.x0=x;ptr.y0=y;ptr.t0=now();ptr.sy0=S.y;ptr.moved=false;ptr.long=false;ptr.caught=false;ptr.tile=null;ptr.lastMoveT=now();
+  S.wheel=false;S.wasOut=S.y<0||S.y>G.maxY;
+  if(S.anim||G.lockTimer){cancelSpin();ptr.caught=true}
+  else if(Math.abs(S.v)>250){haptic(2,'抓停');ptr.caught=true}
+  S.v=0;S.drag=true;ptr.sy0=S.y;ptr.last=[{t:now(),y:S.y}];
+  if(!ptr.caught){
+    const el=e.target.closest('.tile');
+    if(el){
+      const t=tiles[+el.dataset.i];ptr.tile=t;ptr.tr=rectLocal(el);pressTile(t,x,y);
+      ptr.hapTimer=setTimeout(()=>{if(ptr.tile===t&&!ptr.moved)haptic(1,'按下')},70);
+      ptr.lpTimer=setTimeout(()=>{if(ptr.tile===t&&!ptr.moved&&ptr.id!==null){ptr.long=true;flipOpen(t)}},450);
+    }
+  }
+});
+wallScreen.addEventListener('pointermove',e=>{
+  if(e.pointerId!==ptr.id)return;
+  const [x,y]=toLocal(e),dx=x-ptr.x0,dy=y-ptr.y0;
+  if(ptr.long)return;
+  if(!ptr.moved&&Math.hypot(dx,dy)>8){ptr.moved=true;clearTimeout(ptr.lpTimer);clearTimeout(ptr.hapTimer);if(ptr.tile)releaseTile(ptr.tile)}
+  if(ptr.moved){
+    let want=ptr.sy0-dy;
+    if(want<0)want=-rubber(-want);else if(want>G.maxY)want=G.maxY+rubber(want-G.maxY);
+    const t=now(),L=ptr.last,lastS=L[L.length-1],ddt=Math.max(1,t-lastS.t);
+    S.v=S.v*.5+((want-lastS.y)/ddt*1000)*.5;S.y=want;
+    L.push({t,y:want});if(L.length>14)L.shift();
+    S.userMotion=true;ptr.lastMoveT=t;G.lastInput=t;
+    const out=want<0||want>G.maxY;if(out&&!S.wasOut)haptic(3,'撞到边缘');S.wasOut=out;
+  }else if(ptr.tile)pressTile(ptr.tile,x,y);
+});
+function endPtr(e,cancel){
+  if(e.pointerId!==ptr.id)return;
+  ptr.id=null;clearTimeout(ptr.lpTimer);clearTimeout(ptr.hapTimer);S.drag=false;
+  if(ptr.long)return;
+  if(ptr.moved){
+    const t=now(),L=ptr.last,b=L[L.length-1];let a=L[0];
+    for(const s of L){if(t-s.t<=100){a=s;break}}
+    const dt=(b.t-a.t)/1000;let v=dt>.008?(b.y-a.y)/dt:0;if(t-b.t>80)v=0;
+    S.v=clamp(v,-9000,9000);S.userMotion=true;
+  }else{
+    S.v=0;
+    if(ptr.tile){if(!cancel&&!ptr.caught)openAlbum(ptr.tile);else releaseTile(ptr.tile)}
+  }
+}
+wallScreen.addEventListener('pointerup',e=>endPtr(e,false));
+wallScreen.addEventListener('pointercancel',e=>endPtr(e,true));
+wallScreen.addEventListener('wheel',e=>{
+  e.preventDefault();
+  if(G.busy||G.flipOpen||G.playerOpen)return;
+  G.lastInput=now();wake();
+  if(S.anim||G.lockTimer){cancelSpin();return}
+  const dy=e.deltaY*(e.deltaMode===1?32:1);
+  if(!S.wheel){S.wheel=true;S.wheelTarget=S.y;S.v=0}
+  const before=S.wheelTarget;
+  S.wheelTarget=clamp(S.wheelTarget+dy,0,G.maxY);
+  if((S.wheelTarget===0||S.wheelTarget===G.maxY)&&before!==S.wheelTarget)haptic(3,'撞到边缘');
+  S.wheelT=now();S.userMotion=true;
+},{passive:false});
+app.addEventListener('pointermove',e=>{
+  if(e.pointerType!=='mouse'||e.buttons||G.hasGyro)return;
+  const [x,y]=toLocal(e);G.gxT=clamp((x/PW-.5)*2,-1,1);G.gyT=clamp((y/PH-.5)*2,-1,1);
+});
+app.addEventListener('pointerleave',()=>{if(!G.hasGyro){G.gxT=0;G.gyT=0}});
+
+/* ================= 随便听听：转滚筒 ================= */
+fab.addEventListener('pointerdown',e=>{e.stopPropagation();if(G.busy||S.anim||G.lockTimer)return;fab.classList.add('pressed');haptic(1,'按下');G.lastInput=now()});
+['pointerup','pointerleave','pointercancel'].forEach(ev=>fab.addEventListener(ev,()=>fab.classList.remove('pressed')));
+fab.addEventListener('click',()=>randomListen());
+function randomListen(){
+  if(!G.wallOn||G.busy||G.flipOpen||G.playerOpen||S.anim||G.lockTimer)return;
+  if(!tiles.length)return;
+  wake();
+  G.lastInput=now();S.wheel=false;S.drag=false;
+  const pool=tiles.filter(t=>t!==G.current&&!G.recent.includes(t.a.id));
+  const t=pool[Math.floor(Math.random()*pool.length)]||tiles[0];
+  G.recent.push(t.a.id);if(G.recent.length>20)G.recent.shift();
+  const V=PH,maxY=G.maxY,to=clamp(t.y+t.size/2-PH*.46,0,maxY);
+  let from=S.y;const dist=to-from;
+  if(Math.abs(dist)>3*V){from=to-Math.sign(dist)*2.2*V}
+  else if(Math.abs(dist)<1.4*V){
+    const d0=Math.random()<.5?1:-1;
+    for(const dir of [d0,-d0]){const f=clamp(to-dir*2.2*V,0,maxY);if(Math.abs(to-f)>1.2*V){from=f;break}}
+  }
+  if(from!==S.y){S.y=from;stage.animate([{filter:'blur(7px)'},{filter:'blur(0px)'}],{duration:240,easing:'ease-out'})}
+  S.v=0;G.forceCurve=1;setTimeout(()=>{G.forceCurve=0},220);
+  fab.classList.add('spinning');haptic(4,'启动滚筒');
+  const D=Math.abs(to-from),dur=clamp(700+D*.12,800,1250);
+  S.anim={from,to,t0:now(),dur,done:()=>lockOn(t)};S.userMotion=true;
+}
+function lockOn(t){
+  G.dimExcept=t;G.dimT=.62;t.pst=1.08;G.active.add(t);haptic(3,'锁定');
+  // 随便听听：锁定专辑里随机一首，直接出声
+  const idx=t.a.tracks.length?Math.floor(Math.random()*t.a.tracks.length):0;
+  G.lockTimer=setTimeout(()=>{G.lockTimer=0;fab.classList.remove('spinning');openAlbum(t,{fromSpin:true,trackIndex:idx})},320);
+}
+function cancelSpin(){
+  S.anim=null;S.v=0;G.forceCurve=0;
+  if(G.lockTimer){clearTimeout(G.lockTimer);G.lockTimer=0}
+  G.dimT=0;if(G.dimExcept){G.dimExcept.pst=1;G.active.add(G.dimExcept);G.dimExcept=null}
+  fab.classList.remove('spinning');haptic(2,'打断');
+}
+
+/* ================= 当前播放 ================= */
+function setCurrent(t){
+  if(G.current&&G.current.el)G.current.el.classList.remove('playing');
+  G.current=t;if(!t)return;
+  t.el.classList.add('playing');t.el.style.setProperty('--glow',mainColor(t.a));
+  ambient.style.color=mainColor(t.a);
+}
+function ensureTileVisible(t){
+  const sy=t.y-S.y;
+  if(sy<70||sy+t.size>PH-150){S.y=clamp(t.y+t.size/2-PH*.45,0,G.maxY)}
+  S.v=0;S.anim=null;
+}
+function measureTileFinal(t){
+  const saved={...G.wfx};stopWfxTween();Object.assign(G.wfx,WFX_OFF);applyWfx();
+  const sd=G.dim;G.dim=0;t.lastT='';renderWall(now());
+  const r=rectLocal(t.el);
+  Object.assign(G.wfx,saved);applyWfx();G.dim=sd;
+  return r;
+}
+
+/* ================= 播放页 ================= */
+function layoutPlayer(){
+  const S0=Math.round(Math.min(PW*.74,PH*.42));G.coverSize=S0;
+  G.coverY=Math.round(Math.max(PH*.14,96+INSET.top*.5));G.coverX=Math.round(P.vinyl?PW*.07:(PW-S0)/2);
+  pGroup.style.left=G.coverX+'px';pGroup.style.top=G.coverY+'px';pGroup.style.width=S0+'px';pGroup.style.height=S0+'px';
+  pInfo.style.top=(G.coverY+S0+30)+'px';
+  pVinylWrap.style.display=P.vinyl?'':'none';
+}
+const playerBgCss=a=>`radial-gradient(120% 80% at 50% 18%,${hsl(a.h1,55,34)},${hsl(a.h1,45,12)} 62%,${hsl(a.h1,40,5)})`;
+function setPlayerBg(a,fade){
+  const d=document.createElement('div');d.className='pbgl';d.style.background=playerBgCss(a);playerBg.appendChild(d);
+  const clean=()=>{while(playerBg.firstChild&&playerBg.firstChild!==d)playerBg.firstChild.remove()};
+  if(fade)d.animate([{opacity:0},{opacity:1}],{duration:450}).finished.then(clean).catch(clean);else clean();
+}
+// 专辑上下文（封面 / 黑胶标签 / 背景）
+function fillPlayer(a){
+  pArt.innerHTML=artHTML(a);pLabel.textContent=a.title;pVinyl.style.setProperty('--lab',hsl(a.h2,60,45));
+  setPlayerBg(a,false);
+}
+// 真实曲目信息（歌名 / 歌手 / 时长来自原生播放状态）
+function fillSongInfo(title,artist,durSec){
+  pTitle.textContent=title;pArtist.textContent=artist;tDur.textContent=mmss(durSec);
+}
+function playerTick(dt){
+  if(G.playing&&!G.seekDrag&&G.durSec>0)G.progSec=Math.min(G.durSec,G.progSec+dt);
+  if(player.style.display==='block'){
+    const r=G.durSec>0?clamp(G.progSec/G.durSec,0,1):0;
+    pBar.style.width=(r*100).toFixed(2)+'%';tCur.textContent=mmss(G.progSec);
+  }
+}
+function openAlbum(t,opts){
+  wake();
+  opts=opts||{};
+  if(G.busy&&!opts.force)return;
+  if(!t.a.tracks.length&&opts.trackIndex==null)opts.trackIndex=0;
+  G.busy=true;
+  const a=t.a,from=opts.fromRect||rectLocal(t.el);
+  t.el.style.visibility='hidden';t.hidden=true;resetTilePress(t);
+  if(!opts.fromRect)addRipple(t,P.rippleAmp);
+  G.dimT=0;setCurrent(t);
+  layoutPlayer();fillPlayer(a);
+  // ===== 出声策略 =====
+  // 1) 翻面点播放 / 随便听听：明确意图，必播（forcePlay）
+  // 2) 点的是正在播放的专辑：只把播放页抽出来看，不打断、不重播
+  // 3) 其余：按「抽出即播放」开关；关掉时进入预览，点 ▶ 才联动原生
+  const idx=clamp(opts.trackIndex!=null?opts.trackIndex:(opts.fromSpin&&a.tracks.length?Math.floor(Math.random()*a.tracks.length):0),0,Math.max(0,a.tracks.length-1));
+  const explicit=!!(opts.forcePlay||opts.fromSpin);
+  const resume=!explicit&&G.nativeHasItem&&a.id===G.nativeAlbumId;
+  const tr=a.tracks[idx];
+  G.previewMode=false;
+  if(resume){
+    fillSongInfo(G.songTitle||(tr?tr.title:a.title),G.songArtist||a.artist,G.durSec||(tr?tr.dur:0));
+    setPlaying(G.playing);pMode.textContent='正在播放 · 来自封面墙';
+  }else if(P.autoPlay||explicit){
+    bridge('onPlayAlbum',a.id,idx);
+    setPlaying(true);G.progSec=0;G.durSec=tr?tr.dur:0;
+    fillSongInfo(tr?tr.title:a.title,a.artist+(a.fav?' · 收藏':''),G.durSec);
+    pMode.textContent='正在播放 · 来自封面墙';
+  }else{
+    G.previewMode=true;setPlaying(false);G.progSec=0;G.durSec=tr?tr.dur:0;
+    fillSongInfo(tr?tr.title:a.title,a.artist+(a.fav?' · 收藏':''),G.durSec);
+    pMode.textContent='专辑预览 · 点 ▶ 播放';
+  }
+  player.style.display='block';
+  [pGroup,pArt,pVinylWrap,playerBg,pTop,pInfo].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+  pVinyl.classList.remove('spin');pVinylWrap.style.transform='';pGroup.style.transform='';
+  pTop.style.opacity='';pInfo.style.opacity='';playerBg.style.opacity='';
+  const S0=G.coverSize,s0=from.w/S0,dx=from.x-G.coverX,dy=from.y-G.coverY;
+  const s1=s0*1.1,dx1=dx-(s1-s0)*S0/2,dy1=dy-(s1-s0)*S0/2,lift=opts.fromRect?.12:.24;
+  const an=pGroup.animate([
+    {transform:gT(dx,dy,s0),easing:'cubic-bezier(.3,0,.3,1)'},
+    {transform:gT(dx1,dy1,s1),offset:lift,easing:'cubic-bezier(.22,.75,.25,1.1)'},
+    {transform:gT(0,0,1)}],{duration:660,fill:'both'});
+  pArt.animate([{transform:'perspective(900px) rotateY(0deg)',boxShadow:'0 4px 10px rgba(0,0,0,.4)'},{transform:'perspective(900px) rotateY(-14deg)',offset:.55},{transform:'perspective(900px) rotateY(0deg)',boxShadow:'0 24px 60px rgba(0,0,0,.55)'}],{duration:660,easing:'ease-in-out'});
+  haptic(4,'起飞');
+  tweenWfx(WFX_PLAYER,560);
+  const cx=from.x+from.w/2,cy=from.y+from.h/2,R=Math.hypot(PW,PH)*1.1;
+  playerBg.animate([{clipPath:`circle(0px at ${cx}px ${cy}px)`},{clipPath:`circle(${R}px at ${cx}px ${cy}px)`}],{duration:560,delay:140,easing:'cubic-bezier(.4,0,.6,1)',fill:'both'});
+  player.querySelectorAll('.stg').forEach((el,i)=>{
+    const x=el.animate([{opacity:0,transform:'translateY(24px)'},{opacity:1,transform:'none'}],{duration:420,delay:470+i*40,easing:'cubic-bezier(.2,.8,.2,1)',fill:'both'});
+    x.finished.then(()=>x.cancel()).catch(()=>{});
+  });
+  setTimeout(()=>haptic(3,'落位'),600);
+  an.finished.then(()=>{
+    an.cancel();pGroup.style.transform='';
+    if(P.vinyl){pVinylWrap.animate([{transform:'translateX(0)'},{transform:`translateX(${Math.round(S0*.36)}px)`}],{duration:560,easing:'cubic-bezier(.2,.8,.2,1)',fill:'forwards'});pVinyl.classList.add('spin');pVinyl.classList.toggle('paused',!G.playing)}
+    G.busy=false;G.playerOpen=true;G.frozen=true;
+  }).catch(()=>{});
+}
+const dragP=dy=>clamp(dy/(PH*.55),0,1);
+function applyPlayerDrag(dy){
+  const p=dragP(Math.max(0,dy)),s=1-.32*p,S0=G.coverSize;
+  pGroup.style.transform=gT(S0*(1-s)/2,dy*.85+S0*(1-s)/2,s);
+  const ui=clamp(1-p*1.8,0,1);pTop.style.opacity=ui;pInfo.style.opacity=ui;playerBg.style.opacity=(1-p*.9).toFixed(3);
+  for(const k in WFX_OFF)G.wfx[k]=lerp(WFX_PLAYER[k],WFX_OFF[k],p*.85);applyWfx();
+}
+player.addEventListener('pointerdown',e=>{
+  if(!G.playerOpen||G.busy||e.target.closest('button,#pProg'))return;
+  stopWfxTween();G.frozen=false;
+  G.pd={id:e.pointerId,y0:toLocal(e)[1],last:[{t:now(),dy:0}],dy:0};
+  try{player.setPointerCapture(e.pointerId)}catch(_){}
+});
+player.addEventListener('pointermove',e=>{
+  const d=G.pd;if(!d||e.pointerId!==d.id)return;
+  let dy=toLocal(e)[1]-d.y0;if(dy<0)dy=-rubber(-dy,300)*.4;
+  d.dy=dy;d.last.push({t:now(),dy});if(d.last.length>10)d.last.shift();
+  applyPlayerDrag(dy);
+});
+function endPlayerDrag(e){
+  const d=G.pd;if(!d||e.pointerId!==d.id)return;G.pd=null;
+  const t=now(),b=d.last[d.last.length-1];let a=d.last[0];for(const s of d.last){if(t-s.t<=100){a=s;break}}
+  const vy=b.t>a.t?(b.dy-a.dy)/((b.t-a.t)/1000):0;
+  if(dragP(d.dy)>.2||(vy>800&&d.dy>20))closeToWall(d.dy);
+  else{const y0=d.dy;tween(300,easeOutBack,p=>applyPlayerDrag(lerp(y0,0,p)),()=>{pGroup.style.transform='';pTop.style.opacity='';pInfo.style.opacity='';playerBg.style.opacity='';G.frozen=true})}
+}
+player.addEventListener('pointerup',endPlayerDrag);
+player.addEventListener('pointercancel',endPlayerDrag);
+function closeToWall(dy){
+  dy=dy||0;
+  if(G.busy||!G.playerOpen)return;
+  wake();
+  G.busy=true;G.playerOpen=false;G.frozen=false;G.previewMode=false;
+  const t=G.current;ensureTileVisible(t);
+  const r=measureTileFinal(t);
+  const S0=G.coverSize,p=dragP(Math.max(0,dy)),s=1-.32*p;
+  const start=gT(S0*(1-s)/2,dy*.85+S0*(1-s)/2,s);
+  const sx=r.w/S0,dx=r.x-G.coverX,dyT=r.y-G.coverY,so=sx*.95,ox=dx+(sx-so)*S0/2,oy=dyT+(sx-so)*S0/2;
+  pGroup.style.transform='';
+  const vinylOut=pVinyl.classList.contains('spin');
+  pVinylWrap.getAnimations().forEach(x=>x.cancel());
+  if(P.vinyl&&vinylOut)pVinylWrap.animate([{transform:`translateX(${Math.round(S0*.36)}px)`},{transform:'translateX(0)'}],{duration:220,easing:'ease-in',fill:'forwards'});
+  const an=pGroup.animate([{transform:start},{transform:gT(ox,oy,so),offset:.8},{transform:gT(dx,dyT,sx)}],{duration:480,easing:'cubic-bezier(.4,.1,.2,1)',fill:'both'});
+  [pTop,pInfo].forEach(el=>el.animate([{opacity:getComputedStyle(el).opacity},{opacity:0}],{duration:160,fill:'forwards'}));
+  playerBg.animate([{opacity:getComputedStyle(playerBg).opacity},{opacity:0}],{duration:400,fill:'forwards'});
+  tweenWfx(WFX_OFF,480,easeInOutCubic);
+  an.finished.then(()=>{
+    t.el.style.visibility='';t.hidden=false;t.ps=.93;t.psv=0;t.pst=1;G.active.add(t);
+    addRipple(t,P.rippleAmp*.5);haptic(3,'插回');
+    player.style.display='none';
+    [pGroup,pArt,pVinylWrap,playerBg,pTop,pInfo].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+    pGroup.style.transform='';pTop.style.opacity='';pInfo.style.opacity='';playerBg.style.opacity='';pVinyl.classList.remove('spin');
+    G.dimExcept=null;G.busy=false;
+  }).catch(()=>{});
+}
+// 播放页内换专辑（原生切歌越过专辑边界 / 预览模式左右浏览共用）：
+// 旧专辑封面放回墙上，新专辑封面滑入，黑胶标签与背景一起换
+function swapPlayerArt(t,dir){
+  const old=G.current;
+  if(old===t)return;
+  if(old&&old.el){old.el.style.visibility='';old.hidden=false;old.ps=1;old.psv=0;old.pst=1}
+  setCurrent(t);ensureTileVisible(t);
+  t.el.style.visibility='hidden';t.hidden=true;
+  const oldArt=pArt.firstElementChild,box=document.createElement('div');box.innerHTML=artHTML(t.a);const el=box.firstElementChild;pArt.appendChild(el);
+  el.animate([{opacity:0,transform:`translateX(${(dir||1)*34}px) scale(.96)`},{opacity:1,transform:'none'}],{duration:340,easing:'cubic-bezier(.2,.8,.2,1)'}).finished.then(()=>{if(oldArt)oldArt.remove()}).catch(()=>{});
+  pLabel.textContent=t.a.title;pVinyl.style.setProperty('--lab',hsl(t.a.h2,60,45));
+  setPlayerBg(t.a,true);renderWall(now());
+}
+function switchTrack(dir){
+  if(!G.playerOpen||G.busy)return;
+  if(!G.previewMode){bridge(dir>0?'onNext':'onPrev');haptic(2,'切歌');return}
+  const i=tiles.indexOf(G.current),n=tiles[(i+dir+tiles.length)%tiles.length];
+  if(!n)return;
+  swapPlayerArt(n,dir);
+  const tr=n.a.tracks[0];
+  fillSongInfo(tr?tr.title:n.a.title,n.a.artist+(n.a.fav?' · 收藏':''),tr?tr.dur:0);
+  G.progSec=0;G.durSec=tr?tr.dur:0;setPlaying(false);
+  pMode.textContent='专辑预览 · 点 ▶ 播放';haptic(2,'切歌');
+}
+$('#pDown').addEventListener('click',()=>closeToWall(0));
+$('#pPrev').addEventListener('click',()=>switchTrack(-1));
+$('#pNext').addEventListener('click',()=>switchTrack(1));
+$('#pMore').addEventListener('click',()=>{tune.classList.add('open');haptic(1,'面板')});
+pPlay.addEventListener('click',()=>{
+  if(G.previewMode){
+    const a=G.current?G.current.a:null;
+    if(a){
+      G.previewMode=false;bridge('onPlayAlbum',a.id,0);
+      const tr=a.tracks[0];setPlaying(true);G.progSec=0;G.durSec=tr?tr.dur:0;
+      fillSongInfo(tr?tr.title:a.title,a.artist+(a.fav?' · 收藏':''),G.durSec);
+      pMode.textContent='正在播放 · 来自封面墙';
+    }
+    haptic(2,'播放');return;
+  }
+  bridge('onTogglePlay');setPlaying(!G.playing);
+  haptic(2,G.playing?'播放':'暂停');
+});
+
+/* ===== 进度条：点击 / 拖动 seek（上抛原生，两拍之间本地插值） ===== */
+function seekRatioFromEvent(e){
+  const r=pProg.querySelector('.bar').getBoundingClientRect();
+  return clamp((e.clientX-r.left)/Math.max(1,r.width),0,1);
+}
+function seekPreview(ratio){
+  G.progSec=ratio*G.durSec;
+  pBar.style.width=(ratio*100).toFixed(2)+'%';tCur.textContent=mmss(G.progSec);
+}
+pProg.addEventListener('pointerdown',e=>{
+  if(!G.playerOpen||G.busy||G.durSec<=0)return;
+  e.stopPropagation();
+  G.seekDrag={id:e.pointerId};
+  try{pProg.setPointerCapture(e.pointerId)}catch(_){}
+  seekPreview(seekRatioFromEvent(e));haptic(1,'定位');
+});
+pProg.addEventListener('pointermove',e=>{
+  const d=G.seekDrag;if(!d||e.pointerId!==d.id)return;
+  seekPreview(seekRatioFromEvent(e));
+});
+function endSeek(e){
+  const d=G.seekDrag;if(!d||e.pointerId!==d.id)return;
+  G.seekDrag=null;
+  bridge('onSeek',G.progSec);
+}
+pProg.addEventListener('pointerup',endSeek);
+pProg.addEventListener('pointercancel',endSeek);
+
+/* ================= 长按翻面（真实曲目列表） ================= */
+function backHTML(a){
+  const cur=String(G.nativeSongId);
+  return `<div class="fb-head"><div class="fb-mini">${artHTML(a,true)}</div><div><b>${esc(a.title)}</b><span>${esc(a.artist)} · ${a.tracks.length} 首</span></div></div>
+  <ol class="fb-list">${a.tracks.map((x,i)=>{const on=String(x.id)===cur;return `<li data-i="${i}"${on?' class="cur"':''}><i>${on?'▶':i+1}</i><span class="t">${esc(x.title)}</span><em>${mmss(x.dur)}</em></li>`}).join('')}</ol>
+  <div class="fb-btns"><button class="fb-play">▶ 播放</button><button class="fb-queue">下一首播放</button></div>`;
+}
+function markFlipCurrent(){
+  if(!G.flipOpen||!G.flip)return;
+  const cur=String(G.nativeSongId),tracks=G.flip.t.a.tracks;
+  fcBack.querySelectorAll('.fb-list li').forEach(li=>{
+    const i=+li.dataset.i,tr=tracks[i],on=!!tr&&String(tr.id)===cur;
+    li.classList.toggle('cur',on);li.querySelector('i').textContent=on?'▶':i+1;
+  });
+}
+function flipOpen(t){
+  if(G.busy)return;G.busy=true;wake();
+  const r=rectLocal(t.el);t.el.style.visibility='hidden';t.hidden=true;resetTilePress(t);G.active.delete(t);
+  haptic(3,'浮起');
+  const size=Math.round(Math.min(PW*.8,330)),fx=Math.round((PW-size)/2),fy=Math.round(PH*.2);
+  flipLayer.style.display='block';
+  flipCard.style.left=fx+'px';flipCard.style.top=fy+'px';flipCard.style.width=size+'px';flipCard.style.height=size+'px';
+  fcFront.innerHTML=artHTML(t.a);fcBack.innerHTML=backHTML(t.a);fcBack.style.background=`linear-gradient(160deg,${hsl(t.a.h1,40,22)},${hsl(t.a.h1,35,9)})`;
+  G.flip={t,size,fx,fy};
+  [flipCard,fcInner,flipBackdrop].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+  flipCard.animate([{transform:gT(r.x-fx,r.y-fy,r.w/size)},{transform:gT(0,0,1)}],{duration:520,easing:'cubic-bezier(.2,.85,.25,1.08)',fill:'both'});
+  fcInner.animate([{transform:'rotateY(0deg)'},{transform:'rotateY(180deg)'}],{duration:580,delay:60,easing:'cubic-bezier(.45,0,.2,1)',fill:'both'});
+  flipBackdrop.animate([{opacity:0},{opacity:1}],{duration:300,fill:'both'});
+  setTimeout(()=>haptic(1,'翻面'),340);
+  tweenWfx(WFX_FLIP,420);
+  setTimeout(()=>{G.busy=false;G.flipOpen=true},600);
+}
+function flipClose(){
+  if(!G.flipOpen||G.busy)return;G.flipOpen=false;G.busy=true;wake();
+  const {t,size,fx,fy}=G.flip;const r=measureTileFinal(t);
+  [flipCard,fcInner,flipBackdrop].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+  fcInner.animate([{transform:'rotateY(180deg)'},{transform:'rotateY(0deg)'}],{duration:420,easing:'cubic-bezier(.45,0,.2,1)',fill:'both'});
+  const an=flipCard.animate([{transform:gT(0,0,1)},{transform:gT(r.x-fx,r.y-fy,r.w/size)}],{duration:460,delay:80,easing:'cubic-bezier(.4,.1,.2,1)',fill:'both'});
+  flipBackdrop.animate([{opacity:1},{opacity:0}],{duration:400,fill:'both'});
+  tweenWfx(WFX_OFF,480,easeInOutCubic);
+  an.finished.then(()=>{
+    t.el.style.visibility='';t.hidden=false;t.ps=.95;t.psv=0;t.pst=1;G.active.add(t);haptic(1,'落回');
+    flipLayer.style.display='none';[flipCard,fcInner,flipBackdrop].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));G.busy=false;
+  }).catch(()=>{});
+}
+function flipPlay(trackIndex){
+  if(!G.flipOpen||G.busy)return;G.flipOpen=false;G.busy=true;
+  const {t,size,fx,fy}=G.flip;
+  fcInner.getAnimations().forEach(x=>x.cancel());
+  fcInner.animate([{transform:'rotateY(180deg)'},{transform:'rotateY(360deg)'}],{duration:240,easing:'cubic-bezier(.4,0,.2,1)',fill:'both'}).finished.then(()=>{
+    flipBackdrop.getAnimations().forEach(x=>x.cancel());
+    openAlbum(t,{fromRect:{x:fx,y:fy,w:size,h:size},force:true,forcePlay:true,trackIndex:trackIndex||0});
+    flipLayer.style.display='none';[flipCard,fcInner].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+  }).catch(()=>{});
+  haptic(2,'播放');
+}
+function flipQueue(){
+  if(!G.flipOpen||G.busy)return;G.flipOpen=false;G.busy=true;
+  const {t}=G.flip;
+  bridge('onQueueAlbum',t.a.id);
+  toast(`已加入「下一首播放」 · ${t.a.tracks.length} 首`);haptic(2,'加入队列');
+  [flipCard,flipBackdrop].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));
+  const an=flipCard.animate([{transform:gT(0,0,1),opacity:1},{transform:gT(G.flip.size*.3,-PH*.35,.4),opacity:0}],{duration:380,easing:'cubic-bezier(.5,0,.75,0)',fill:'both'});
+  flipBackdrop.animate([{opacity:1},{opacity:0}],{duration:380,fill:'both'});
+  tweenWfx(WFX_OFF,420,easeInOutCubic);
+  an.finished.then(()=>{
+    t.el.style.visibility='';t.hidden=false;t.ps=.6;t.psv=0;t.pst=1;G.active.add(t);addRipple(t,P.rippleAmp*.4);
+    flipLayer.style.display='none';[flipCard,fcInner,flipBackdrop].forEach(el=>el.getAnimations().forEach(x=>x.cancel()));G.busy=false;
+  }).catch(()=>{});
+}
+flipLayer.addEventListener('pointerdown',e=>{if(e.target===flipBackdrop)flipClose()});
+flipLayer.addEventListener('click',e=>{
+  if(e.target.closest('.fb-play')){flipPlay(0);return}
+  if(e.target.closest('.fb-queue')){flipQueue();return}
+  const li=e.target.closest('.fb-list li');
+  if(li)flipPlay(+li.dataset.i);
+});
+// 翻面里的曲目列表自己滚动，不把事件冒给墙
+['pointerdown','pointermove','pointerup','wheel'].forEach(ev=>fcBack.addEventListener(ev,e=>{if(e.target.closest('.fb-list'))e.stopPropagation()},{passive:true}));
+
+/* ================= 进入 / 退出封面墙 ================= */
+function enterWall(ox,oy){
+  if(G.wallOn)return;
+  wallScreen.style.display='block';wallScreen.style.opacity='';G.wallOn=true;G.frozen=false;
+  if(G.current)S.y=clamp(G.current.y+G.current.size/2-PH*.45,0,G.maxY);
+  S.v=0;S.anim=null;G.curve=1;G.curveV=0;G.lastInput=now();
+  G.intro={t0:now()+60,ox,oy};
+  wallScreen.getAnimations().forEach(x=>x.cancel());
+  wallScreen.animate([{clipPath:`circle(0px at ${ox}px ${oy}px)`},{clipPath:`circle(${Math.hypot(PW,PH)*1.05}px at ${ox}px ${oy}px)`}],{duration:440,easing:'cubic-bezier(.4,0,.2,1)'});
+  haptic(2,'进入');[150,260,370,480].forEach(d=>setTimeout(()=>haptic(1,'铺开'),d));
+  startLoop();
+}
+function exitWall(){
+  if(!G.wallOn||G.busy||G.playerOpen||G.flipOpen)return;
+  if(S.anim||G.lockTimer)cancelSpin();
+  tune.classList.remove('open');haptic(1,'退出');
+  const done=()=>{wallScreen.style.display='none';G.wallOn=false;bridge('onClose')};
+  wallScreen.animate([{opacity:1,transform:'none'},{opacity:0,transform:'scale(.94)'}],{duration:300,easing:'ease-in'}).finished.then(done).catch(done);
+}
+$('#btnExit').addEventListener('click',exitWall);
+$('#btnTune').addEventListener('click',()=>{tune.classList.toggle('open');haptic(1,'面板')});
+$('#emptyExit').addEventListener('click',()=>bridge('onClose'));
+
+/* ================= 调参面板 ================= */
+const fmt=(d,v)=>(d.step<1?v.toFixed(d.step<.01?3:2):Math.round(v))+(d.unit||'');
+function buildTune(){
+  let h='<div class="tn-head"><b>调参面板</b><span>所有参数实时生效</span><button class="tn-x">完成</button></div>';
+  for(const d of DEFS){
+    if(d.sec){h+=`<div class="tn-sec">${d.sec}</div>`;continue}
+    if(d.type==='bool')h+=`<label class="tn-row tn-bool"><span>${d.name}</span><input type="checkbox" data-k="${d.k}" ${P[d.k]?'checked':''}><i class="sw"></i></label>`;
+    else if(d.type==='seg')h+=`<div class="tn-row"><span>${d.name}</span><div class="seg" data-k="${d.k}">${d.opts.map(([v,l])=>`<button data-v="${v}" class="${P[d.k]===v?'on':''}">${l}</button>`).join('')}</div></div>`;
+    else h+=`<div class="tn-row tn-range"><div class="tn-lab"><span>${d.name}</span><em data-out="${d.k}">${fmt(d,P[d.k])}</em></div><input type="range" min="${d.min}" max="${d.max}" step="${d.step}" value="${P[d.k]}" data-k="${d.k}"></div>`;
+  }
+  h+='<div class="tn-btns"><button class="tn-shuffle">洗牌 · 新布局</button><button class="tn-reset">恢复默认</button></div>';
+  tune.innerHTML=h;
+}
+tune.addEventListener('input',e=>{
+  const k=e.target.dataset.k;if(!k)return;const d=DEFS.find(x=>x.k===k);
+  if(e.target.type==='checkbox')P[k]=e.target.checked;
+  else{P[k]=parseFloat(e.target.value);tune.querySelector(`[data-out="${k}"]`).textContent=fmt(d,P[k])}
+  if(d.rebuild)rebuildKeep();
+  saveTune();
+});
+tune.addEventListener('click',e=>{
+  const sb=e.target.closest('.seg button');
+  if(sb){
+    const k=sb.parentElement.dataset.k;P[k]=sb.dataset.v;
+    sb.parentElement.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===sb));
+    if(k==='haptics')bridge('onHapticLevel',P.haptics);
+    saveTune();haptic(2,'震动测试');return;
+  }
+  if(e.target.closest('.tn-x')){tune.classList.remove('open');return}
+  if(e.target.closest('.tn-shuffle')){seed=Math.floor(Math.random()*1e9);rebuildKeep();G.intro={t0:now(),ox:PW/2,oy:PH/2};saveTune();haptic(2,'洗牌');return}
+  if(e.target.closest('.tn-reset')){const g=P.gap;Object.assign(P,DEFAULTS);buildTune();if(g!==P.gap)rebuildKeep();bridge('onHapticLevel',P.haptics);saveTune();haptic(1,'重置')}
+});
+['pointerdown','pointermove','pointerup','wheel'].forEach(ev=>tune.addEventListener(ev,e=>e.stopPropagation(),{passive:true}));
+
+/* ================= Toast / 全局 ================= */
+function toast(msg){toastEl.textContent=msg;toastEl.animate([{opacity:0,transform:'translate(-50%,10px)'},{opacity:1,transform:'translate(-50%,0)',offset:.15},{opacity:1,transform:'translate(-50%,0)',offset:.85},{opacity:0,transform:'translate(-50%,-6px)'}],{duration:1800})}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape')window.__wall.handleBack();
+  else if(e.key===' '){e.preventDefault();if(G.wallOn&&!G.playerOpen&&!G.flipOpen)randomListen();else if(G.playerOpen)pPlay.click()}
+  else if(e.key==='ArrowRight'&&G.playerOpen)switchTrack(1);
+  else if(e.key==='ArrowLeft'&&G.playerOpen)switchTrack(-1);
+});
+let lastW=0,lastH=0;
+window.addEventListener('resize',()=>{
+  fitPhone();
+  if(PW!==lastW||PH!==lastH){lastW=PW;lastH=PH;onResize()}
+});
+
+/* ================= 原生注入接口 ================= */
+window.__wall={
+  // 真实专辑列表（JSON 文本）：[{id,name,artist,fav,tracks:[{id,title,dur(秒)}]}]
+  // 首次收到即铺开入场；曲库刷新重推时保留滚动位置与当前专辑
+  setAlbums(list,curAlbumId,curSongId,isPlaying,posSec,durSec){
+    let data;
+    try{data=typeof list==='string'?JSON.parse(list):list}catch(e){data=[]}
+    if(!Array.isArray(data))data=[];
+    albums=data.map(decorate);
+    const first=!G.wallOn;
+    rebuildKeep();
+    emptyEl.style.display=albums.length?'none':'flex';
+    if(first&&albums.length)enterWall(PW/2,PH*.42);
+    let title='',artist='';
+    if(curSongId){
+      const sid=String(curSongId);
+      outer:for(const a of albums)for(const tr of a.tracks)if(String(tr.id)===sid){title=tr.title;artist=a.artist;break outer}
+    }
+    window.__wall.syncPlayback(curAlbumId||'',curSongId||'',title,artist,!!isPlaying,posSec||0,durSec||0);
+  },
+  // 500ms 校准：真实歌名 / 歌手 / 进度 / 播放态；专辑越界时播放页封面跟着换
+  syncPlayback(albumId,songId,title,artist,isPlaying,posSec,durSec){
+    albumId=albumId==null?'':String(albumId);songId=songId==null?'':String(songId);
+    const songChanged=songId!==G.nativeSongId;
+    const albumChanged=albumId!==G.nativeAlbumId;
+    G.nativeHasItem=!!songId;G.nativeSongId=songId;
+    G.songTitle=title||'';G.songArtist=artist||'';
+    if(G.previewMode){
+      // 预览中：只有原生真的播起了这张专辑才接管显示，否则保持预览不被覆盖
+      if(albumId&&G.current&&albumId===G.current.a.id){
+        G.previewMode=false;applyNativePlayback(isPlaying,posSec,durSec);
+      }
+    }else{
+      applyNativePlayback(isPlaying,posSec,durSec);
+    }
+    const t=albumId?tiles.find(x=>x.a.id===albumId):null;
+    if(albumChanged){
+      G.nativeAlbumId=albumId;
+      if(G.playerOpen&&t&&t!==G.current){
+        if(G.busy)G.pendingSwap=t;else swapPlayerArt(t,1);
+      }else if(!G.playerOpen){
+        setCurrent(t);
+      }
+    }else if(!G.playerOpen&&t!==G.current){
+      setCurrent(t);
+    }
+    if(songChanged)markFlipCurrent();
+  },
+  // 系统安全区（CSS px）：状态栏/挖孔 → --sat，手势条 → --sab
+  setInsets(topPx,bottomPx){
+    const t=Math.max(0,+topPx||0),b=Math.max(0,+bottomPx||0);
+    app.style.setProperty('--sat',t+'px');app.style.setProperty('--sab',b+'px');
+    if(Math.abs(t-INSET.top)>1||Math.abs(b-INSET.bottom)>1){
+      INSET.top=t;INSET.bottom=b;
+      if(G.wallOn){rebuildKeep();if(G.playerOpen)layoutPlayer();if(G.frozen)renderWall(now())}
+    }
+  },
+  // 原生陀螺仪/重力倾角（归一化 [-1,1]）：免 HTTPS 驱动高光流动与 3D 视差。
+  // 页面内 ori.base 慢速跟随静息姿态，拿起来的角度自动校准为零点
+  setTilt(gx,gy){
+    const x=clamp(+gx||0,-1.5,1.5)*14,y=clamp(+gy||0,-1.5,1.5)*14;
+    // 相对静息零点的有效倾角才唤醒循环；传感器噪声（<0.07）不触发，墙面得以停摆
+    const moved=!ori.base||Math.abs(x-ori.base.g)>0.07||Math.abs(y-ori.base.b)>0.07;
+    ori.cur={b:y,g:x};if(!ori.base)ori.base={...ori.cur};G.hasGyro=true;
+    if(moved)wake();
+  },
+  // 退后台停 rAF，回前台恢复（配合 WebView.onPause 双保险）
+  setRenderActive(active){
+    if(active){if(G.wallOn)startLoop()}
+    else if(G.raf){cancelAnimationFrame(G.raf);G.raf=0}
+  },
+  // 原生返回键：翻面 → 播放页（唱片插回）→ 调参面板 → 退出封面墙
+  handleBack(){
+    if(G.flipOpen){flipClose();return true}
+    if(G.playerOpen){closeToWall(0);return true}
+    if(tune.classList.contains('open')){tune.classList.remove('open');return true}
+    if(G.wallOn){exitWall();return true}
+    return false;
+  }
+};
+function applyNativePlayback(isPlaying,posSec,durSec){
+  if(isPlaying)wake();
+  setPlaying(!!isPlaying);
+  G.durSec=Math.max(0,+durSec||0);
+  if(!G.seekDrag)G.progSec=clamp(+posSec||0,0,G.durSec>0?G.durSec:Math.max(0,+posSec||0));
+  if(player.style.display==='block'&&!G.previewMode){
+    const fav=G.current&&G.current.a.fav;
+    fillSongInfo(G.songTitle,G.songArtist+(fav?' · 收藏':''),G.durSec);
+    pMode.textContent='正在播放 · 来自封面墙';
+  }
+}
+
+/* ================= 启动 ================= */
+fitPhone();lastW=PW;lastH=PH;
+buildTune();
+pPlay.innerHTML=ICON_PLAY;
+bridge('onHapticLevel',P.haptics);
+bridge('onReady');
+})();
+</script>
+</body>
+</html>

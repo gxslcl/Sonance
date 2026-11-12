@@ -37,6 +37,12 @@
 -keep class com.sonance.player.ui.icon.SonanceIcons$* { *; }
 
 # 别再 -keep 整个项目，让 R8 真正起作用。
+# WebView 桥：JS 按方法名反射调用 @JavascriptInterface 方法（黑胶 VinylBridge /
+# 封面墙 WallBridge）。R8 默认会改名/裁剪，桥就断了 —— 按注解显式保住方法名。
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
 # Shizuku：newProcess 在 13.x 里是 private，我们靠反射按名字调它。
 # R8 会把没被直接引用的 private 方法改名，反射就找不到了 —— 整个类保住。
 -keep class rikka.shizuku.Shizuku { *; }

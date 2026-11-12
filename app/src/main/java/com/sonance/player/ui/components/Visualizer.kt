@@ -131,8 +131,9 @@ fun VisualizerOverlay(
     durationMs: Long,
     prefs: Prefs,
     modifier: Modifier = Modifier,
-    /** 播放页「隐藏状态栏」开关：开启后顶栏图标 5 秒淡出到 alpha 0.15（仍可点） */
-    hideStatusBar: Boolean = false
+    /** 律动柱页自己的「隐藏状态栏」开关（**只作用于本页**） */
+    hideStatusBar: Boolean = false,
+    onHideStatusBarChange: (Boolean) -> Unit = {}
 ) {
     val skin = LocalSkin.current
 
@@ -414,6 +415,8 @@ fun VisualizerOverlay(
                 colorIndex = colorIndex,
                 barWidth = barWidth,
                 accentPreview = barColor,
+                hideStatusBar = hideStatusBar,
+                onHideStatusBar = onHideStatusBarChange,
                 onStyle = {
                     style = it
                     prefs.vizStyle = it.ordinal
@@ -1027,6 +1030,9 @@ private fun VizSettingsPanel(
     onGlassStyle: (GlassStyle) -> Unit,
     onGlassBlur: (Int) -> Unit,
     onGlassVisibility: (Int) -> Unit,
+    // ---- 本页的沉浸偏好（和全屏歌词页各存一份）----
+    hideStatusBar: Boolean,
+    onHideStatusBar: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
@@ -1058,6 +1064,40 @@ Column(
                 color = skin.text
             )
 
+            // ---- 隐藏状态栏：只作用于律动柱这一页 ----
+            // 和歌词页的开关各存一份，封面主界面两个开关都不认。
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(skin.surface3)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "隐藏状态栏",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = skin.text
+                    )
+                    Text(
+                        "仅对律动柱页生效；下拉可临时呼出",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = hideStatusBar,
+                    onCheckedChange = onHideStatusBar,
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = skin.onAccent,
+                        checkedTrackColor = skin.accent,
+                        uncheckedThumbColor = skin.textMuted,
+                        uncheckedTrackColor = skin.surface3
+                    )
+                )
+            }
+
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("样式", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1078,16 +1118,17 @@ Column(
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("灵敏度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                    Text("律动幅度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
                     Text(
-                        "%.1fx".format(sensitivity),
+                        "${(sensitivity * 100f).roundToInt()}%",
                         style = MaterialTheme.typography.labelMedium,
                         color = skin.accent
                     )
                 }
+                // 0.5 ~ 1.0：作用在整套映射之后，是真正的等比高度系数（旧「灵敏度」会被 AGC 约掉）
                 SonanceSlider(
-                    value = ((sensitivity - 0.4f) / 2.6f).coerceIn(0f, 1f),
-                    onValueChange = { onSensitivity(0.4f + it * 2.6f) },
+                    value = ((sensitivity - 0.5f) / 0.5f).coerceIn(0f, 1f),
+                    onValueChange = { onSensitivity(0.5f + it * 0.5f) },
                     modifier = Modifier.fillMaxWidth(),
                     trackHeight = 3.dp,
                     thumbSize = 11.dp,

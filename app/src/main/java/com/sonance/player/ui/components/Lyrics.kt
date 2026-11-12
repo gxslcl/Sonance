@@ -46,7 +46,9 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,6 +94,7 @@ import com.sonance.player.ui.theme.solidSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -118,10 +121,15 @@ fun LyricsOverlay(
     onNext: () -> Unit,
     /** 与列表页点击卡片打开播放器一致：从歌词层返回播放主界面。 */
     onOpenPlayer: () -> Unit,
-    /** 是否隐藏系统状态栏（外观面板里的开关，状态由 SonanceRoot 落地） */
+    /** 是否隐藏系统状态栏（**只作用于歌词页**；状态由 SonanceRoot 统一落地） */
     hideStatusBar: Boolean = false,
     /** 改「隐藏状态栏」开关 */
     onHideStatusBarChange: (Boolean) -> Unit = {},
+    /**
+     * 竖屏歌词手势锁：手指按在歌词舞台上时置 true，让播放页暂时别横向翻页。
+     * 竖排歌词的横滑翻列和三层轮播共用一条水平手势，不锁就会「翻歌词变成切页」。
+     */
+    onLyricDragLockChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -195,6 +203,17 @@ fun LyricsOverlay(
         offsetMs = (offsetMs + dir * Prefs.LYRICS_OFFSET_STEP_MS)
             .coerceIn(-Prefs.MAX_LYRICS_OFFSET_MS, Prefs.MAX_LYRICS_OFFSET_MS)
         prefs.setLyricsOffsetMs(song.title, song.artist, offsetMs)
+    }
+
+    /**
+     * 点击某句歌词：跳到那一句；如果当前没有播放意图（暂停 / 播完 / 出错），顺手开始播放。
+     *
+     * 只给「点歌词」用。拖动进度条仍然只 seek —— 否则拖一下就会开始播放。
+     * `isPlaybackActive` 把缓冲也算作"在播"，所以切歌缓冲期间点歌词不会反而暂停。
+     */
+    val seekFromLyric: (Long) -> Unit = { lineMs ->
+        onSeek((lineMs + offsetMs).coerceAtLeast(0L))
+        if (!state.isPlaybackActive) onPlayPause()
     }
 
     // 开关进 key：用户在设置里打开「网易云补全」后回到歌词页要能立刻生效
@@ -361,14 +380,47 @@ fun LyricsOverlay(
                         modifier = Modifier.align(Alignment.Center)
                     )
 
-                    lyrics == null -> EmptyLyrics(
-                        song = song,
-                        onlineEnabled = onlineEnabled,
-                        onManualSearch = { showSearch = true }
-                    )
+                    lyrics == null -> if (style == LyricStyle.VERTICAL) {
+                        VerticalEmptyLyrics(
+                            song = song,
+                            onlineEnabled = onlineEnabled,
+                            fontSizeSp = fontSize,
+                            onManualSearch = { showSearch = true }
+                        )
+                    } else {
+                        EmptyLyrics(
+                            song = song,
+                            onlineEnabled = onlineEnabled,
+                            onManualSearch = { showSearch = true }
+                        )
+                    }
 
-                    lyrics is Lyrics.Synced -> if (style != LyricStyle.CLASSIC) {
-                        FullscreenThemedLyrics(
+                    lyrics is Lyrics.Synced -> when (style) {
+                        LyricStyle.CLASSIC -> SyncedLyrics(
+                            lines = lyrics.lines,
+                            positionMs = positionMs - offsetMs,
+                            isPlaying = isPlaying,
+                            fontSizeSp = fontSize,
+                            onSeek = seekFromLyric,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode,
+                            timelineOffsetMs = offsetMs
+                        )
+                        LyricStyle.VERTICAL -> VerticalSyncedLyrics(
+                            lines = lyrics.lines,
+                            song = song,
+                            positionMs = positionMs - offsetMs,
+                            durationMs = (song.durationMs - offsetMs).coerceAtLeast(0L),
+                            timelineOffsetMs = offsetMs,
+                            isPlaying = isPlaying,
+                            fontSizeSp = fontSize,
+                            onSeek = seekFromLyric,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode,
+                            skin = skin,
+                            onDragLockChange = onLyricDragLockChange
+                        )
+                        else -> FullscreenThemedLyrics(
                             style = style,
                             lines = lyrics.lines,
                             positionMs = positionMs - offsetMs,
@@ -376,30 +428,28 @@ fun LyricsOverlay(
                             timelineOffsetMs = offsetMs,
                             isPlaying = isPlaying,
                             fontSizeSp = fontSize,
-                            onSeek = { onSeek((it + offsetMs).coerceAtLeast(0L)) },
+                            onSeek = seekFromLyric,
                             bgProfile = bgProfile,
                             adaptMode = adaptMode,
                             skin = skin
                         )
-                    } else {
-                        SyncedLyrics(
-                            lines = lyrics.lines,
-                            positionMs = positionMs - offsetMs,
-                            isPlaying = isPlaying,
-                            fontSizeSp = fontSize,
-                            onSeek = { onSeek((it + offsetMs).coerceAtLeast(0L)) },
-                            bgProfile = bgProfile,
-                            adaptMode = adaptMode,
-                            timelineOffsetMs = offsetMs
-                        )
                     }
 
-                    else -> PlainLyrics(
-                        lines = (lyrics as Lyrics.Plain).lines,
-                        fontSizeSp = fontSize,
-                        bgProfile = bgProfile,
-                        adaptMode = adaptMode
-                    )
+                    else -> if (style == LyricStyle.VERTICAL) {
+                        VerticalPlainLyrics(
+                            lines = (lyrics as Lyrics.Plain).lines,
+                            fontSizeSp = fontSize,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode
+                        )
+                    } else {
+                        PlainLyrics(
+                            lines = (lyrics as Lyrics.Plain).lines,
+                            fontSizeSp = fontSize,
+                            bgProfile = bgProfile,
+                            adaptMode = adaptMode
+                        )
+                    }
                 }
             }
 
@@ -586,7 +636,11 @@ fun LyricsOverlay(
                         artist = artist,
                         album = song.album,
                         apiBase = apiBase,
-                        convertToSimplified = convertT2S
+                        convertToSimplified = convertT2S,
+                        // 同时按原始元数据 / songId 落一份，重启后 load 才能命中
+                        originTitle = song.title,
+                        originArtist = song.artist,
+                        originSongId = song.id
                     )
                     result = r
                     searching = false
@@ -858,6 +912,7 @@ private fun StyleRow(
         Text(
             when (style) {
                 LyricStyle.CLASSIC -> "逐行列表，当前句高亮滚动，偏「跟唱」"
+                LyricStyle.VERTICAL -> "古风右起竖排诗卷，支持中英混排自适应与横向滑动浏览"
                 LyricStyle.FLUID -> "左对齐景深，当前句放大，流光细条跟随本句播放进度"
                 LyricStyle.VINYL -> "半露黑胶与唱针，歌词沿扇形声轨轮转"
                 LyricStyle.SPATIAL -> "未唱从上方迎来，已唱向下方深空沉降，当前句居中悬浮"
@@ -899,7 +954,7 @@ private fun StatusBarRow(
                 color = skin.text
             )
             Text(
-                "歌词顶到屏幕上沿；下拉可临时呼出",
+                "仅对全屏歌词页生效；下拉可临时呼出",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textMuted,
                 fontSize = 10.sp
@@ -1278,6 +1333,12 @@ fun InlineLyrics(
  */
 private const val LYRIC_ANCHOR_FRACTION = 0.34f
 
+/** 触摸后多久恢复自动跟随（毫秒）。与 FLUID / VINYL / SPATIAL 三种主题保持一致，都是 5 秒。 */
+private const val LYRIC_SCROLL_HOLD_MS = 5_000L
+
+/** 手动滚动的触觉窗口：触摸后这段时间内认为"是用户在滚"，跨行才给震动 */
+private const val SCROLL_HAPTIC_WINDOW_MS = 1_500L
+
 @Composable
 internal fun SyncedLyrics(
     lines: List<LyricLine>,
@@ -1310,6 +1371,7 @@ internal fun SyncedLyrics(
 ) {
     val skin = LocalSkin.current
     val density = LocalDensity.current
+    val context = LocalContext.current
     val listState = rememberLazyListState()
     val current = remember(positionMs, lines) { lines.indexAt(positionMs) }
     val smoothPos = rememberSmoothPosition(
@@ -1323,17 +1385,49 @@ internal fun SyncedLyrics(
     //
     // 为什么需要它：`positionMs` 每 500ms 变一次，当前行一变就 animateScrollToItem，
     // 用户根本没法手动翻到别处 —— 刚滑走就被拽回来。
-    // 这里记录触摸时刻，触摸后 6 秒内不自动跟随；之后就自然恢复（当前行还在继续变）。
+    // 这里记录触摸时刻，触摸后 5 秒内不自动跟随；之后就自然恢复（当前行还在继续变）。
     //
     // 用数组而不是 Compose state：它每帧都可能被写，但没有任何 composable 读它，
     // 走快照系统纯属浪费。
     val lastTouch = remember { longArrayOf(0L) }
 
+    // 触摸后需要「到点自动回位」：用户可能停在翻到的那一屏不再动（暂停时分外明显）。
+    // 用普通数组而不是 state —— 只有下面的定时循环读它，重绘没有意义。
+    val needsReturn = remember { booleanArrayOf(false) }
+    val latestCurrent by rememberUpdatedState(current)
+
     // 当前行变化时滚到中间（contentPadding 让首尾也能居中），但用户正在浏览时不打扰
     LaunchedEffect(current) {
         if (current < 0) return@LaunchedEffect
-        if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < 6_000L) return@LaunchedEffect
+        if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < LYRIC_SCROLL_HOLD_MS) return@LaunchedEffect
         runCatching { listState.animateScrollToItem(current) }
+    }
+
+    // 5 秒到点自动回位。只靠 LaunchedEffect(current) 的话，暂停或当前句很长时
+    // 用户会一直停在翻到的地方；这里每 200ms 检查一次，满 5 秒且列表已停稳就回去。
+    LaunchedEffect(listState) {
+        while (true) {
+            delay(200)
+            if (!needsReturn[0] || listState.isScrollInProgress) continue
+            if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < LYRIC_SCROLL_HOLD_MS) continue
+            needsReturn[0] = false
+            if (latestCurrent >= 0) runCatching { listState.animateScrollToItem(latestCurrent) }
+        }
+    }
+
+    // 手动滚动时每跨过一行轻震一次；自动跟随不震，否则播放时会一直嗡嗡响。
+    // firstVisibleItemIndex 每变一次 ≈ 一行滚过顶部，节拍和看到的内容一致。
+    LaunchedEffect(listState, userScrollEnabled) {
+        if (!userScrollEnabled) return@LaunchedEffect
+        var previous = listState.firstVisibleItemIndex
+        snapshotFlow { listState.firstVisibleItemIndex }.collect { index ->
+            if (index != previous) {
+                previous = index
+                if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < SCROLL_HAPTIC_WINDOW_MS) {
+                    hapticTick(context)
+                }
+            }
+        }
     }
 
     BoxWithConstraints(
@@ -1350,6 +1444,7 @@ internal fun SyncedLyrics(
                                 val e = awaitPointerEvent(PointerEventPass.Initial)
                                 if (e.changes.any { it.pressed }) {
                                     lastTouch[0] = android.os.SystemClock.uptimeMillis()
+                                    needsReturn[0] = true
                                 }
                             }
                         }

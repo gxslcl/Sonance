@@ -100,18 +100,30 @@ object LyricsRepository {
 
             // ---- 2) 本地在线缓存 ----
             if (source == null) {
-                when (val hit = LyricsCache.lookup(context, cacheKey)) {
-                    is LyricsCache.Lookup.Hit -> {
-                        text = hit.text
+                val primary = LyricsCache.lookup(context, cacheKey)
+                // 元数据键没命中时再试 songId 别名：用户手动搜索歌词时可能填了
+                // 另一个写法（改了错别字 / 补了后缀），那份缓存挂在别名下。
+                // 没有这一步，重启后内存 LRU 一清，歌名对不上就"歌词又没了"。
+                val aliasKey = "id:$songId"
+                val alias = if (cacheKey != aliasKey) LyricsCache.lookup(context, aliasKey) else null
+                when {
+                    primary is LyricsCache.Lookup.Hit -> {
+                        text = primary.text
                         source = LyricsSource.ONLINE
                     }
+                    alias is LyricsCache.Lookup.Hit -> {
+                        text = alias.text
+                        source = LyricsSource.ONLINE
+                        // 顺手把结果挪到主键下，下次直接命中
+                        LyricsCache.store(context, cacheKey, alias.text)
+                    }
                     // 之前查过、确认没有：直接返回"没有"，不再打接口
-                    LyricsCache.Lookup.KnownMiss -> {
+                    primary is LyricsCache.Lookup.KnownMiss -> {
                         val r = LyricsResult(null, null)
                         cache.put(cacheKey, r)
                         return@withContext r
                     }
-                    LyricsCache.Lookup.Unknown -> Unit
+                    else -> Unit
                 }
             }
 
@@ -147,6 +159,11 @@ object LyricsRepository {
                 // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）。
                 // ⚠️ 必须**两个源都试完**才写哨兵 —— 提前写会把网易云那条路也短路掉。
                 LyricsCache.store(context, cacheKey, text)
+                // 有歌词时再按 songId 存一份别名：歌名/歌手之后被编辑过，
+                // 也能靠 id 把这来之不易的网络结果找回来。
+                if (!text.isNullOrBlank() && cacheKey != "id:$songId") {
+                    LyricsCache.store(context, "id:$songId", text)
+                }
             }
 
             // 繁转简只作用于**展示**：缓存里存的仍是原始文本，
@@ -178,7 +195,14 @@ object LyricsRepository {
         artist: String,
         album: String,
         apiBase: String,
-        convertToSimplified: Boolean = true
+        convertToSimplified: Boolean = true,
+        /**
+         * 歌曲**原始**元数据（不是用户手填的内容）。成功后按它再落一份缓存，
+         * 下次进入歌词页用原始元数据算 key 才能命中。
+         */
+        originTitle: String = "",
+        originArtist: String = "",
+        originSongId: Long = 0L
     ): LyricsResult = withContext(Dispatchers.IO) {
         val key = LyricsCache.keyOf(title, artist, apiBase)
             ?: "manual:${title.lowercase()}|${artist.lowercase()}"
@@ -192,10 +216,22 @@ object LyricsRepository {
         }
 
         LyricsCache.store(context, key, online)
+        // 用户手填的歌名/歌手常常和媒体标签不一样（改错别字、去掉「(Live)」后缀）。
+        // 只按手填内容存，下次 load 用原始元数据算 key 永远命中不了 —— 表现就是
+        // 「这次搜到了，关掉 App 再进来又没了」。这里按原始元数据和 songId 各补一份。
+        val originKey = LyricsCache.keyOf(originTitle, originArtist, apiBase)
+        if (originKey != null && originKey != key) {
+            LyricsCache.store(context, originKey, online)
+        }
+        if (originSongId != 0L) {
+            LyricsCache.store(context, "id:$originSongId", online)
+        }
         val shown = if (convertToSimplified) ChineseConverter.toSimplified(context, online) else online
         val parsed = shown.takeIf { it.isNotBlank() }?.let { parse(it) }
         val result = LyricsResult(parsed, if (parsed != null) LyricsSource.ONLINE else null)
         cache.put(key, result)
+        if (originKey != null && originKey != key) cache.put(originKey, result)
+        if (originSongId != 0L) cache.put("id:$originSongId", result)
         result
     }
 

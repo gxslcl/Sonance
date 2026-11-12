@@ -5,20 +5,20 @@
 
     <!-- ===== 桌面小组件 ===== -->
     <!-- 样式名（会显示在系统的小组件选择列表里，所以名字要短且能一眼区分） -->
-    <string name="widget_label_bar">山水有清音 · 紧凑横条</string>
-    <string name="widget_label_card">山水有清音 · 封面卡片</string>
-    <string name="widget_label_wide">山水有清音 · 信息宽条</string>
-    <string name="widget_label_minimal">山水有清音 · 极简文字</string>
-    <string name="widget_label_large">山水有清音 · 大幅卡片</string>
+    <string name="widget_label_bar">山水有清音 · 横向控制条 5×1</string>
+    <string name="widget_label_card">山水有清音 · 封面卡片 3×2</string>
+    <string name="widget_label_wide">山水有清音 · 信息宽卡 5×2</string>
+    <string name="widget_label_minimal">山水有清音 · 极简横条 3×1</string>
+    <string name="widget_label_large">山水有清音 · 大幅卡片 5×4</string>
 
     <!-- 系统选择器里的描述文案（Android 12+ 显示） -->
-    <string name="widget_desc_bar">小封面 + 歌名，只有一个播放键，最省空间</string>
-    <string name="widget_desc_card">大封面 + 上一首/播放/下一首，桌面上的迷你播放器</string>
-    <string name="widget_desc_wide">横排铺开，信息最多：封面、歌名、三键控制与打开应用</string>
-    <string name="widget_desc_minimal">不显示封面，只有歌名和播放键，最省内存</string>
-    <string name="widget_desc_large">5x2 大尺寸：左边大封面，右边歌名与全套控制</string>
+    <string name="widget_desc_bar">取色渐变卡片 + 圆形唱片，歌名、切歌与歌词键一排铺开</string>
+    <string name="widget_desc_card">大圆形唱片居中，歌名与播控键，可切换成三行歌词</string>
+    <string name="widget_desc_wide">左唱片右信息，带真实进度条、上下曲与歌词切换</string>
+    <string name="widget_desc_minimal">不显示封面，只留歌名与四个控制键，最省资源</string>
+    <string name="widget_desc_large">大尺寸圆形唱片 + 三行歌词 + 进度条，桌面上的完整播放器</string>
 
-    <!-- 空态与无障碍 -->
+    <!-- 空态、歌词与无障碍 -->
     <string name="widget_idle_title">未在播放</string>
     <string name="widget_idle_subtitle">打开山水有清音开始听</string>
     <string name="widget_paused_subtitle">已暂停</string>
@@ -26,5 +26,16 @@
     <string name="widget_play_desc">播放或暂停</string>
     <string name="widget_prev_desc">上一首</string>
     <string name="widget_next_desc">下一首</string>
+    <string name="widget_fav_desc">收藏或取消收藏</string>
+    <string name="widget_mode_desc">切换播放模式</string>
     <string name="widget_open_desc">打开应用</string>
+    <string name="widget_brand">山水有清音</string>
+    <string name="widget_lyric_desc">显示或隐藏歌词</string>
+    <string name="widget_lyric_on_desc">歌词已显示，点击隐藏</string>
+    <string name="widget_lyric_off_desc">歌词已隐藏，点击显示</string>
+    <string name="widget_no_lyrics">这首歌暂无同步歌词</string>
+    <string name="widget_time_zero">0:00</string>
+
+    <!-- 播放通知 / 锁屏 / 超级岛 / 背屏 -->
+    <string name="playback_channel_name">正在播放</string>
 </resources>

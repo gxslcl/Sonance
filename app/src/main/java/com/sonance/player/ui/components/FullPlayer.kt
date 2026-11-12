@@ -51,8 +51,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -236,10 +234,16 @@ fun FullPlayer(
     playbackSpeed: Float = 1f,
     /** 设置播放速度 */
     onSetSpeed: (Float) -> Unit = {},
-    /** 播放页是否隐藏状态栏（三层通用；封面页顶部按钮不做淡出） */
+    /** 全屏歌词页是否隐藏系统状态栏（**只作用于歌词层**） */
     lyricsHideStatusBar: Boolean = false,
     /** 全屏歌词页：改「隐藏状态栏」开关 */
     onLyricsHideStatusBarChange: (Boolean) -> Unit = {},
+    /** 律动柱页是否隐藏系统状态栏（**只作用于律动柱层**） */
+    visualizerHideStatusBar: Boolean = false,
+    /** 律动柱页：改「隐藏状态栏」开关 */
+    onVisualizerHideStatusBarChange: (Boolean) -> Unit = {},
+    /** 把「当前层要不要隐藏状态栏」上报给 Shell 统一落地 */
+    onImmersiveChange: (Boolean) -> Unit = {},
     /** 播放页封面的颜色往哪边晕开 */
     glowMode: GlowMode = GlowMode.AROUND,
     /** 晕染浓度 */
@@ -397,6 +401,27 @@ fun FullPlayer(
     val layerPager = rememberPagerState(initialPage = LAYER_RING_START) { Int.MAX_VALUE }
     val layer = PlayerLayer.entries[layerPager.currentPage % PlayerLayer.entries.size]
 
+    // 竖屏歌词要把「横滑翻列」留给自己，手指按在歌词舞台上时临时锁住轮播。
+    // 不锁的话同一条水平手势会被两层同时解释：想翻歌词，结果切到了律动柱/封面。
+    var lyricDragLocked by remember { mutableStateOf(false) }
+
+    // 状态栏隐藏**按层各自生效**：歌词层只认歌词开关、律动柱层只认律动柱开关，
+    // 封面主界面两个开关都不认（只保留手机横屏那条自动沉浸）。
+    //
+    // WindowInsetsController 是 Activity 级的，三层里各 hide/show 一次会互相打架
+    // （相邻层还会被预组合），所以这里只算结果、上报给 Shell 一处落地。
+    val immersiveConfig = LocalConfiguration.current
+    // 手机横屏那条自动沉浸是独立的适配（不是设置开关），三层都保留，
+    // 免得横屏切层时状态栏一闪一闪。竖屏下封面主界面不认任何开关。
+    val compactLandscape = isCompactLandscapePhone(immersiveConfig)
+    val immersive = compactLandscape || when (layer) {
+        PlayerLayer.COVER -> false
+        PlayerLayer.LYRICS -> lyricsHideStatusBar
+        PlayerLayer.VISUALIZER -> visualizerHideStatusBar
+    }
+    LaunchedEffect(immersive) { onImmersiveChange(immersive) }
+    DisposableEffect(Unit) { onDispose { onImmersiveChange(false) } }
+
     /**
      * 跳到指定层。
      *
@@ -418,22 +443,43 @@ fun FullPlayer(
         goToLayer(PlayerLayer.COVER)
     }
 
-    // 分页器 → 播放器：只在页面「落定」后切歌，避免滑动过程中反复触发。
-    // 用 rememberUpdatedState 读取最新 queueIndex，否则快照流里会捕获到旧值。
+    // 分页器 → 播放器：只在用户主动划动页面「落定」到另一首歌后切歌。
+    // 用 rememberUpdatedState 读取最新 queueIndex / queue，避免快照流捕获旧值，
+    // 并校验 settledPage 对应的歌曲确实不是当前正在播的那首 —— 防止切换随机/列表循环
+    // 重排队列（同一首歌换了下标）时，分页器还没跳过去就反向误触发 onPlayAt。
     val latestState by rememberUpdatedState(state)
+    val latestQueue by rememberUpdatedState(queue)
     val latestCoveredByVinyl by rememberUpdatedState(coveredByVinyl)
+    var userDraggedPager by remember { mutableStateOf(false) }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) userDraggedPager = true
+        }
+    }
     LaunchedEffect(pagerState, queue.size) {
         if (queue.isEmpty()) return@LaunchedEffect
         snapshotFlow { pagerState.settledPage }.collect { page ->
-            if (!latestCoveredByVinyl && page != latestState.queueIndex) onPlayAt(page)
+            val pageSongId = latestQueue.getOrNull(page)?.id
+            if (userDraggedPager &&
+                !latestCoveredByVinyl &&
+                page != latestState.queueIndex &&
+                pageSongId != null &&
+                pageSongId != latestState.mediaId
+            ) {
+                userDraggedPager = false
+                onPlayAt(page)
+            } else if (!pagerState.isScrollInProgress) {
+                userDraggedPager = false
+            }
         }
     }
 
-    // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列时把页面跟过去。
-    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl) {
+    // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列 / 随机重排队列时把页面跟过去。
+    LaunchedEffect(state.queueIndex, state.mediaId, queue, coveredByVinyl) {
         if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
         val target = state.queueIndex.coerceIn(0, queue.lastIndex)
         if (pagerState.settledPage != target && !pagerState.isScrollInProgress) {
+            userDraggedPager = false
             //
             // 开/关随机会**重排队列**，同一首歌因此换了个下标（例如从第 12 页挪到第 0 页）。
             // 这时候必须直接跳过去，不能 animate —— 一路滚过去会把中间十几页全扫一遍，
@@ -609,6 +655,8 @@ fun FullPlayer(
         HorizontalPager(
             state = layerPager,
             beyondViewportPageCount = 0,
+            // 竖屏歌词手势期间冻结轮播，避免"翻歌词"与"切页"抢同一次横滑
+            userScrollEnabled = !lyricDragLocked,
             modifier = Modifier.fillMaxSize()
         ) { page ->
         // 每层裁到自己的页面矩形。这层裁剪不是保险，是必须的：
@@ -867,6 +915,7 @@ fun FullPlayer(
                 onOpenPlayer = { goToLayer(PlayerLayer.COVER) },
                 hideStatusBar = lyricsHideStatusBar,
                 onHideStatusBarChange = onLyricsHideStatusBarChange,
+                onLyricDragLockChange = { lyricDragLocked = it },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -884,7 +933,8 @@ fun FullPlayer(
                 },
                 prefs = prefs,
                 modifier = Modifier.fillMaxSize(),
-                hideStatusBar = lyricsHideStatusBar
+                hideStatusBar = visualizerHideStatusBar,
+                onHideStatusBarChange = onVisualizerHideStatusBarChange
             )
         }
         }
@@ -2180,6 +2230,7 @@ private fun ProgressBlock(
     onSetSpeed: (Float) -> Unit
 ) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
     Column(Modifier.fillMaxWidth()) {
         SonanceSlider(
             value = frac,
@@ -2200,37 +2251,22 @@ private fun ProgressBlock(
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                 color = skin.textMuted
             )
-            // 播放速度胶囊：夹在两个时间中间，点开选速菜单。
-            // 非 1.0x 时亮主题色，一眼能看出"正在快进/慢放"。
-            Box {
-                var speedOpen by remember { mutableStateOf(false) }
-                Text(
-                    text = formatSpeed(playbackSpeed),
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                    fontWeight = FontWeight.Medium,
-                    color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { speedOpen = true }
-                        .padding(horizontal = 10.dp, vertical = 2.dp)
-                )
-                DropdownMenu(expanded = speedOpen, onDismissRequest = { speedOpen = false }) {
-                    SPEED_STEPS.forEach { v ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    formatSpeed(v),
-                                    color = if (v == playbackSpeed) skin.accent else skin.text
-                                )
-                            },
-                            onClick = {
-                                speedOpen = false
-                                onSetSpeed(v)
-                            }
-                        )
+            // 播放速度胶囊：**点一下切到下一档**（0.5× → 0.75× → 1× → … 循环），不弹菜单。
+            // 非 1.0× 时亮主题色，一眼能看出"正在快进/慢放"。
+            // 每次切换给一次短震动，闭着眼睛点也能确认"档位变了"。
+            Text(
+                text = formatSpeed(playbackSpeed),
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                fontWeight = FontWeight.Medium,
+                color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        hapticTick(context)
+                        onSetSpeed(nextSpeed(playbackSpeed))
                     }
-                }
-            }
+                    .padding(horizontal = 10.dp, vertical = 2.dp)
+            )
             Text(
                 formatDuration(durationMs),
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
@@ -2242,6 +2278,17 @@ private fun ProgressBlock(
 
 /** 倍速档位：0.5×–2.0×。超过 2 倍对音乐播放意义不大，就不给更大的档了 */
 private val SPEED_STEPS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+
+/**
+ * 点一下的下一档，到 2× 后回到 0.5×。
+ *
+ * 当前值不在档位里（旧版本可能存过 1.1× 之类的任意值）时回到 1×，
+ * 而不是从"最近的一档"接着往后跳，避免用户点一下就莫名变成 1.5×。
+ */
+private fun nextSpeed(current: Float): Float {
+    val i = SPEED_STEPS.indexOfFirst { abs(it - current) < 0.005f }
+    return if (i < 0) 1f else SPEED_STEPS[(i + 1) % SPEED_STEPS.size]
+}
 
 /** "1.0×" / "0.75×" 这种统一两位小数位的写法，菜单与胶囊都用它 */
 private fun formatSpeed(v: Float): String =

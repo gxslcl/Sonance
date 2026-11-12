@@ -4,7 +4,10 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -96,12 +99,14 @@ class PluginRuntime(private val app: Context) {
                     val code = conn.responseCode
                     if (code !in 200..299) {
                         conn.disconnect()
+                        Log.w(TAG, "HTTP $code ${conn.requestMethod} $url")
                         return@runCatching "" to "HTTP $code"
                     }
                     val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
                     conn.disconnect()
                     text to ""
                 }.getOrElse { "" to (it.message ?: "请求失败") }
+                if (err.isNotEmpty()) Log.w(TAG, "请求失败 $url → $err")
                 main.post {
                     val b64 = encodeBase64(body)
                     val eJs = quoteJs(err)
@@ -134,6 +139,13 @@ class PluginRuntime(private val app: Context) {
                 override fun shouldOverrideUrlLoading(v: WebView?, url: String?): Boolean = true
                 override fun onPageFinished(v: WebView?, url: String?) {
                     if (!pageReady.isCompleted) pageReady.complete(Unit)
+                }
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                    // 插件里 console.log / 未捕获的异常都会走到这里，logcat 过滤 PluginRuntime 即可
+                    Log.d(TAG, "[js] ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})")
+                    return true
                 }
             }
             addJavascriptInterface(bridge, "SonanceBridge")
@@ -169,6 +181,7 @@ class PluginRuntime(private val app: Context) {
             )
             loadedFile = file
             currentMeta = meta
+            Log.i(TAG, "插件已加载 platform=${meta.platform} version=${meta.version} methods=${meta.methods}")
             meta
         }
     }
@@ -184,13 +197,22 @@ class PluginRuntime(private val app: Context) {
                 val id = ++seq
                 val deferred = CompletableDeferred<CallResult>()
                 pending[id] = deferred
+                val started = android.os.SystemClock.elapsedRealtime()
                 try {
                     main.post {
                         wv.evaluateJavascript("__call($id, ${quoteJs(method)}, ${quoteJs(argsJson)})", null)
                     }
                     val r = withTimeout(timeoutMs) { deferred.await() }
                     if (r.error.isNotEmpty()) error("${r.error}")
+                    Log.d(TAG, "$method 用时 ${android.os.SystemClock.elapsedRealtime() - started}ms")
                     r.json
+                } catch (t: Throwable) {
+                    Log.w(
+                        TAG,
+                        "$method 失败（${android.os.SystemClock.elapsedRealtime() - started}ms）: " +
+                            "${t.javaClass.simpleName}: ${t.message} args=${argsJson.take(300)}"
+                    )
+                    throw t
                 } finally {
                     pending.remove(id)
                 }
@@ -225,6 +247,8 @@ class PluginRuntime(private val app: Context) {
         android.util.Base64.encodeToString(s.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
 
     companion object {
+        private const val TAG = "PluginRuntime"
+
         /**
          * 胶水页。脚本通过 `SonanceBridge.script()` 取 base64 后在 JS 里 UTF-8 解码再 eval，
          * 避免把整段插件代码拼进 `evaluateJavascript` 的字符串（引号、换行、`</script>`

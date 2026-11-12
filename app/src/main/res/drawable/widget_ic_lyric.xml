@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  小组件「歌词」切换键：复刻酷狗概念版的「A- + 双底线」图标。
+  上半部左侧是字母 A、右侧是短横线，下半部是两条对齐的歌词底线。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 左上字母 A（外轮廓 + 中横梁） -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6.8,4.0 L8.8,4.0 L12.2,12.2 L10.2,12.2 L9.4,10.2 L6.2,10.2 L5.4,12.2 L3.4,12.2 L6.8,4.0 Z M6.8,8.6 L8.8,8.6 L7.8,6.0 L6.8,8.6 Z" />
+    <!-- 右上短横线 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13.6,8.0 L20.2,8.0 L20.2,9.9 L13.6,9.9 Z" />
+    <!-- 中部横线 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3.5,14.3 L20.5,14.3 L20.5,16.2 L3.5,16.2 Z" />
+    <!-- 底部横线 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3.5,18.2 L20.5,18.2 L20.5,20.1 L3.5,20.1 Z" />
+</vector>

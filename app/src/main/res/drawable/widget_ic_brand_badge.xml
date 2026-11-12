@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 圆角外框 -->
+    <path
+        android:fillColor="#40FFFFFF"
+        android:pathData="M5,2 L19,2 C20.7,2 22,3.3 22,5 L22,19 C22,20.7 20.7,22 19,22 L5,22 C3.3,22 2,20.7 2,19 L2,5 C2,3.3 3.3,2 5,2 Z" />
+    <!-- 内部律动音波标识 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.5,9.5 L9.3,9.5 L9.3,14.5 L7.5,14.5 Z M11.1,6.5 L12.9,6.5 L12.9,17.5 L11.1,17.5 Z M14.7,8.5 L16.5,8.5 L16.5,15.5 L14.7,15.5 Z" />
+</vector>

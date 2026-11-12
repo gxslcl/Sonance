@@ -66,6 +66,8 @@ import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.MediaRepository
 import com.sonance.player.data.MusicFolder
 import com.sonance.player.data.Prefs
+import com.sonance.player.data.IndexKey
+import com.sonance.player.data.IndexKeys
 import com.sonance.player.data.PinyinIndex
 import com.sonance.player.data.ScanFilters
 import com.sonance.player.data.decodeSongsFromJson
@@ -96,6 +98,10 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqBus
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.playback.SoundFxBus
+import com.sonance.player.playback.SoundFxParams
+import com.sonance.player.playback.SoundPreset
+import com.sonance.player.playback.SoundPresets
 import com.sonance.player.playback.KaraokeBus
 import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerController
@@ -599,6 +605,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         pushSkinToWidget()
+        com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = { id ->
+            toggleFavorite(id)
+        }
+        com.sonance.player.widget.WidgetCommandReceiver.onCyclePlayMode = {
+            cyclePlayMode(quiet = false)
+        }
         // 播放模式（随机 / 列表循环 / 单曲循环）持久化恢复。
         // 必须在恢复播放现场之前设好：队列是按上次的模式排的（随机时就是洗牌序），
         // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
@@ -664,6 +676,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 ensureCover(it)
                 // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
                 maybeDownload(it)
+                // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
+                resolveStreamIfMissing(it)
                 // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
                 publishLockScreenLyrics(it)
             }
@@ -1966,6 +1980,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.scrollHapticEnabled = enabled
     }
 
+    /** 「全部歌曲」右侧轨道：true = A–Z 字母索引，false = 原来的比例滑块 */
+    var rightRailLetters by mutableStateOf(prefs.rightRailLetters)
+        private set
+
+    fun changeRightRailLetters(letters: Boolean) {
+        if (rightRailLetters == letters) return
+        rightRailLetters = letters
+        prefs.rightRailLetters = letters
+    }
+
     var topBarLogoId by mutableStateOf(prefs.topBarLogoId)
         private set
 
@@ -2887,6 +2911,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         val liked = prefs.toggleFavorite(id)
         favorites = prefs.favorites
+        com.sonance.player.widget.SonanceWidgets.onFavoriteOrModeChanged(getApplication())
         showToast(if (liked) "已添加到收藏" else "已取消收藏")
         return liked
     }
@@ -3554,17 +3579,92 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             player.play(onlineSongs.map { localCopyOf(it) ?: it }, at)
             return
         }
-        // 插件源的 getMediaSource 是异步 Promise：先在协程里预热，再用解析到的
-        // 地址覆盖 Song.uri。已存本地的歌仍走本地文件，不联网。
+        // 插件源的 getMediaSource 是异步 Promise。这里**只解析点中的这一首**：
+        // 以前是先把整页 20 首串行预热完再播，点击到出声要好几秒；
+        // 更糟的是任何一首取流失败都会留下空 uri，被播放器报成「找不到文件」。
+        viewModelScope.launch { playPluginQueue(src, onlineSongs, at, track.title) }
+    }
+
+    /**
+     * 插件源的「点了就播」：解析 [at] 这一首 → 立刻入队播放 → 后台补其余曲目地址。
+     *
+     * @return false 表示当前这首确实拿不到地址（已提示用户），调用方不要再调 [player.play]。
+     */
+    private suspend fun playPluginQueue(
+        src: PluginOnlineSource,
+        onlineSongs: List<Song>,
+        at: Int,
+        title: String,
+    ): Boolean {
+        val target = onlineSongs.getOrNull(at) ?: return false
+
+        // 已经存到本地的歌走本地文件，不联网
+        if (localCopyOf(target) == null) {
+            val url = src.resolveStream(target.remoteId.orEmpty())
+            if (url == null) {
+                showToast("「$title」获取播放地址失败，换一首或稍后再试")
+                return false
+            }
+        }
+
+        val songs = onlineSongs.map { s ->
+            val url = src.streamUrl(s.remoteId.orEmpty())
+            if (url.isNotBlank() && localCopyOf(s) == null) {
+                s.copy(uri = android.net.Uri.parse(url))
+            } else s
+        }.map { localCopyOf(it) ?: it }
+        player.play(songs, at)
+
+        // 队列里剩下的歌此刻还没有地址。后台按顺序补齐并**原地替换**队列项，
+        // 正常听到下一首（几分钟后）时地址早就就位了，点播却不用等。
+        prefetchQueueStreams(src, onlineSongs, skipRemoteId = target.remoteId)
+        return true
+    }
+
+    /**
+     * 后台逐首取流并把地址补进播放队列。
+     *
+     * 只处理还没地址、也没存到本地的曲目；解析失败的静默跳过（真正轮到它时
+     * [resolveStreamIfMissing] 还会再试一次）。同一时刻只保留一轮 —— 用户连续点歌时
+     * 旧队列的预取已经没有意义，留着只会和新的播放抢带宽。
+     */
+    private var prefetchStreamsJob: Job? = null
+
+    private fun prefetchQueueStreams(
+        src: PluginOnlineSource,
+        queue: List<Song>,
+        skipRemoteId: String?,
+    ) {
+        prefetchStreamsJob?.cancel()
+        prefetchStreamsJob = viewModelScope.launch {
+            for (s in queue) {
+                if (!isActive) break
+                val rid = s.remoteId ?: continue
+                if (rid == skipRemoteId) continue
+                if (src.streamUrl(rid).isNotBlank()) continue
+                if (localCopyOf(s) != null) continue
+                val url = src.resolveStream(rid)
+                if (url != null) player.patchQueueUri(s.id, android.net.Uri.parse(url))
+            }
+        }
+    }
+
+    /**
+     * 真正轮到某一首在线歌时，如果它入队时还没解析到地址，这里补一次。
+     *
+     * 典型场景：用户点了第一首后立刻连按「下一首」，后台预取还没来得及跑到这一首。
+     * 取到地址后替换当前 MediaItem 会让 ExoPlayer 用新地址重新准备，
+     * 所以「多等一下」就能出声，而不是弹「找不到文件」。
+     */
+    private fun resolveStreamIfMissing(song: Song) {
+        if (song.isLocal) return
+        val src = OnlineSources.byId(song.source) as? PluginOnlineSource ?: return
+        val rid = song.remoteId ?: return
+        if (src.streamUrl(rid).isNotBlank()) return
+        if (localCopyOf(song) != null) return
         viewModelScope.launch {
-            src.prepareStreams(playable.map { it.remoteId })
-            val songs = onlineSongs.map { s ->
-                val url = src.streamUrl(s.remoteId.orEmpty())
-                if (url.isNotBlank() && localCopyOf(s) == null) {
-                    s.copy(uri = android.net.Uri.parse(url))
-                } else s
-            }.map { localCopyOf(it) ?: it }
-            player.play(songs, at)
+            val url = src.resolveStream(rid) ?: return@launch
+            player.patchQueueUri(song.id, android.net.Uri.parse(url))
         }
     }
 
@@ -3855,6 +3955,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
         val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
         if (at < 0) return
+        // 插件源的流地址是异步取的，走和搜索结果同一条「点了就播」路径
+        if (src is PluginOnlineSource) {
+            viewModelScope.launch { playPluginQueue(src, onlineSongs, at, track.title) }
+            return
+        }
         val songs = onlineSongs.map { localCopyOf(it) ?: it }
         player.play(songs, at)
     }
@@ -4011,20 +4116,34 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var pinyinIndex by mutableStateOf<Map<Long, String>>(emptyMap())
 
+    /**
+     * 四个文本字段的归一化排序键：songId → [IndexKeys]。
+     *
+     * 列表排序和右侧字母分组**都读它**，两边必然同源。索引没就绪时为空：
+     * 排序退回原来的码点序，右侧退回滑块，不会出现「字母表说在 Z、列表却不是」。
+     */
+    var sortKeys by mutableStateOf<Map<Long, IndexKeys>>(emptyMap())
+        private set
+
     private fun rebuildPinyinIndex(list: List<Song>) {
         viewModelScope.launch {
-            val index = withContext(Dispatchers.Default) {
-                list.associate {
+            // 搜索用的拼音索引和排序 / 分组用的归一化键一次扫描同时产出，
+            // 都跑在后台线程：搜索输入时只是查 Map，不再做 ICU 转写。
+            val (pinyin, keys) = withContext(Dispatchers.Default) {
+                val p = list.associate {
                     it.id to PinyinIndex.build("${it.title} ${it.artist} ${it.album}")
                 }
+                val k = list.associate { it.id to IndexKey.keysOf(it) }
+                p to k
             }
-            pinyinIndex = index
+            pinyinIndex = pinyin
+            sortKeys = keys
         }
     }
 
     fun visibleSongs(): List<Song> {
         val searched = MediaRepository.search(songs, searchQuery, pinyinIndex)
-        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
+        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats(), sortKeys)
     }
 
     /**
@@ -4037,7 +4156,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * `songs` 本身已经是"扫描时 + 读缓存时"过滤过隐藏项的列表，这里不用再过滤。
      */
     fun librarySongs(): List<Song> =
-        MediaRepository.sortSongs(songs, sortField, sortAscending, songStats())
+        MediaRepository.sortSongs(songs, sortField, sortAscending, songStats(), sortKeys)
 
     fun recentSongs(): List<Song> {
         // 本地歌按 id 反查曲库；在线歌用存档重建（播放地址当场重新取）。
@@ -4056,7 +4175,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             searchQuery,
             pinyinIndex
         )
-        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats())
+        return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats(), sortKeys)
     }
 
     fun songById(id: Long): Song? = songs.firstOrNull { it.id == id } ?: onlineSongMap[id]
@@ -4088,6 +4207,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var eqCustom by mutableStateOf(false)
         private set
 
+    /** 当前 EQ 曲线是否来自音效预设，而不是下方的独立曲风预设。 */
+    var eqFromSoundPreset by mutableStateOf(false)
+        private set
+
     val eqCenterFreqs: IntArray get() = EQ_CENTER_FREQS
     val eqMinDb: Float get() = EQ_MIN_DB
     val eqMaxDb: Float get() = EQ_MAX_DB
@@ -4096,13 +4219,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // Kotlin 的初始化按源码顺序执行，写进前面那个 init 块会被这里的
     // `by mutableStateOf(...)` 初值覆盖掉。
     init {
-        val preset = EqPreset.fromName(prefs.eqPreset)
+        val storedEq = prefs.eqPreset
+        val preset = EqPreset.fromName(storedEq)
         val custom = parseEqBands(prefs.eqCustomBands)
+        var soundEq = SoundPresets.eqPresetFromStore(storedEq)
+        // 旧版本选音效时没有保存 EQ 的来源。只迁移没有独立曲风和手调曲线的
+        // 明确场景；有歧义时保留用户原有的 EQ，不覆盖已有成果。
+        if (soundEq == null && storedEq == EqPreset.OFF.name && custom == null &&
+            prefs.eqEnabled && prefs.soundFxEnabled
+        ) {
+            val oldSound = SoundPresets.fromId(prefs.soundPresetId)
+            if (oldSound.id != SoundPresets.OFF.id) {
+                soundEq = oldSound
+                prefs.eqPreset = SoundPresets.eqStoreName(oldSound)
+            }
+        }
         eqPreset = preset
         eqCustom = custom != null
-        eqBands = custom ?: EqPreset.curveOf(preset)
-        // 自定义值一旦存在就以它为准（用户拖过的成果不能被预设抹掉）
-        eqEnabled = if (custom != null) prefs.eqEnabled else prefs.eqEnabled && preset != EqPreset.OFF
+        eqFromSoundPreset = soundEq != null
+        eqBands = custom ?: soundEq?.eqDb?.copyOf() ?: EqPreset.curveOf(preset)
+        // 自定义值优先；独立的 EQ 开关也要按用户上次选择恢复。
+        eqEnabled = prefs.eqEnabled
         pushEq()
         // 卡拉OK 与播放速度：进程重建后同样要和播放器/音频链路重新对齐
         KaraokeBus.enabled = prefs.karaokeEnabled
@@ -4117,9 +4254,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun openEqualizer() {
         pushEq()
+        pushSoundFx()
     }
 
     fun toggleEq(on: Boolean) {
+        resumeSoundAfterComparison()
         eqEnabled = on
         prefs.eqEnabled = on
         pushEq()
@@ -4127,15 +4266,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun chooseEqPreset(preset: EqPreset) {
+        resumeSoundAfterComparison()
         eqPreset = preset
         eqCustom = false
+        eqFromSoundPreset = false
         eqBands = EqPreset.curveOf(preset)
         eqEnabled = preset != EqPreset.OFF
         prefs.eqPreset = preset.name
         prefs.eqCustomBands = ""
         prefs.eqEnabled = eqEnabled
         pushEq()
-        showToast("音效 · ${preset.label}")
+        showToast("均衡器 · ${preset.label}")
     }
 
     /**
@@ -4147,6 +4288,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setEqBand(index: Int, db: Float) {
         if (index !in eqBands.indices) return
+        resumeSoundAfterComparison()
         val next = eqBands.copyOf()
         next[index] = db.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
         eqBands = next
@@ -4159,8 +4301,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 复位成平直（自定义状态下的"归零"） */
     fun resetEqBands() {
+        resumeSoundAfterComparison()
         eqBands = FloatArray(EQ_BAND_COUNT)
+        eqPreset = EqPreset.OFF
         eqCustom = false
+        eqFromSoundPreset = false
+        prefs.eqPreset = EqPreset.OFF.name
         prefs.eqCustomBands = ""
         pushEq()
         showToast("已复位为平直")
@@ -4168,6 +4314,113 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun pushEq() {
         EqBus.update(eqEnabled, eqBands)
+    }
+
+    // ===== 音效预设 =====
+    //
+    // 一套音效 = 一条 EQ 曲线 + 一组效果参数。选预设时两者一起写；
+    // 预设曲线就是下方的 10 段 EQ，用户可继续微调或替换成独立曲风；
+    // 额外效果与当前 EQ 一起生效，不会重复叠加两条 EQ 曲线。
+
+    var soundPreset by mutableStateOf(SoundPresets.OFF)
+        private set
+
+    var soundFxParams by mutableStateOf(SoundFxParams.NEUTRAL)
+        private set
+
+    var soundFxEnabled by mutableStateOf(false)
+        private set
+
+    /** 用户手动改过效果强度：UI 显示「已微调」 */
+    var soundFxCustom by mutableStateOf(false)
+        private set
+
+    /** 临时 A/B 比较，不落盘，关闭面板时恢复。 */
+    var soundFxBypassed by mutableStateOf(false)
+        private set
+
+    // 又一个独立 init：必须放在上面几个属性之后，否则会被初值覆盖（和 EQ 那段同理）。
+    init {
+        soundPreset = SoundPresets.fromId(prefs.soundPresetId)
+        val restored = SoundPresets.restoreFx(soundPreset, prefs.soundFxParams)
+        soundFxParams = restored.params
+        soundFxCustom = restored.custom
+        soundFxEnabled = prefs.soundFxEnabled
+        if (!restored.custom) prefs.soundFxParams = SoundFxParams.toStore(restored.params)
+        pushSoundFx()
+    }
+
+    /** 选中一套音效：同时写入 EQ 曲线与效果参数 */
+    fun chooseSoundPreset(preset: SoundPreset) {
+        resumeSoundAfterComparison()
+        soundPreset = preset
+        soundFxParams = preset.fx.clamp()
+        soundFxEnabled = preset.id != SoundPresets.OFF.id
+        soundFxCustom = false
+
+        eqBands = preset.eqDb.copyOf()
+        eqPreset = EqPreset.OFF
+        eqCustom = false
+        eqFromSoundPreset = true
+        eqEnabled = soundFxEnabled
+
+        prefs.eqEnabled = eqEnabled
+        prefs.eqPreset = SoundPresets.eqStoreName(preset)
+        prefs.eqCustomBands = ""
+        prefs.soundPresetId = preset.id
+        prefs.soundFxParams = SoundFxParams.toStore(soundFxParams)
+        prefs.soundFxEnabled = soundFxEnabled
+        pushEq()
+        pushSoundFx()
+        showToast(if (soundFxEnabled) "音效 · ${preset.name}" else "已切回原声")
+    }
+
+    fun toggleSoundFx(on: Boolean) {
+        resumeSoundAfterComparison()
+        if (on && soundPreset.id == SoundPresets.OFF.id && soundFxParams.isNeutral) {
+            chooseSoundPreset(SoundPresets.CLEAR)
+            return
+        }
+        soundFxEnabled = on
+        prefs.soundFxEnabled = on
+        // 只联动预设自己的 EQ；用户另选的曲风或自定义 EQ 不受此开关影响。
+        if (eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
+            eqEnabled = on
+            prefs.eqEnabled = on
+            pushEq()
+        }
+        pushSoundFx()
+    }
+
+    /** 微调某个效果强度；改过之后自动打开音效并标记「已微调」 */
+    fun updateSoundFx(next: SoundFxParams) {
+        resumeSoundAfterComparison()
+        val wasEnabled = soundFxEnabled
+        soundFxParams = next.clamp()
+        soundFxEnabled = true
+        soundFxCustom = soundFxParams != soundPreset.fx
+        prefs.soundFxParams = SoundFxParams.toStore(soundFxParams)
+        prefs.soundFxEnabled = true
+        if (!wasEnabled && eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
+            eqEnabled = true
+            prefs.eqEnabled = true
+            pushEq()
+        }
+        pushSoundFx()
+    }
+
+    /** A/B 试听同时旁通 EQ 与音效；伴奏模式不变。 */
+    fun setSoundFxBypass(value: Boolean) {
+        soundFxBypassed = value
+        SoundFxBus.setBypass(value)
+    }
+
+    private fun resumeSoundAfterComparison() {
+        if (soundFxBypassed) setSoundFxBypass(false)
+    }
+
+    private fun pushSoundFx() {
+        SoundFxBus.update(soundFxEnabled, soundFxParams)
     }
 
     // ===== 人声/伴奏（卡拉OK）=====
@@ -4199,13 +4452,22 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 全屏歌词页 =====
 
-    /** 全屏歌词页是否隐藏系统状态栏 */
+    /** 全屏歌词页是否隐藏系统状态栏（只作用于歌词页） */
     var lyricsHideStatusBar by mutableStateOf(prefs.lyricsHideStatusBar)
         private set
 
     fun changeLyricsHideStatusBar(value: Boolean) {
         lyricsHideStatusBar = value
         prefs.lyricsHideStatusBar = value
+    }
+
+    /** 律动柱页是否隐藏系统状态栏（只作用于律动柱页，与歌词页互不影响） */
+    var visualizerHideStatusBar by mutableStateOf(prefs.visualizerHideStatusBar)
+        private set
+
+    fun changeVisualizerHideStatusBar(value: Boolean) {
+        visualizerHideStatusBar = value
+        prefs.visualizerHideStatusBar = value
     }
 
     /** 解析持久化的自定义曲线；长度不对或含脏数据都返回 null（回落到预设） */
@@ -4216,7 +4478,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val out = FloatArray(EQ_BAND_COUNT)
         var i = 0
         while (i < EQ_BAND_COUNT) {
-            val v = parts[i].trim().toFloatOrNull() ?: return null
+            val v = parts[i].trim().toFloatOrNull()?.takeIf { it.isFinite() } ?: return null
             out[i] = v.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
             i++
         }
@@ -4378,14 +4640,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 // 随机开着却一直重复当前首。
                 player.setRepeat(RepeatMode.ALL)
                 persistPlayMode(PlayMode.SHUFFLE)
-                // 保住进度：重排队列不等于重头播。
-                // notifyStart = false —— 还是同一首歌，不该再记一次「播放次数」。
-                player.play(
-                    shuffled, idx,
-                    autoplay = st.isPlaying,
-                    startPositionMs = st.positionMs,
-                    notifyStart = false
-                )
+                // 无缝重排队列：不重建当前 MediaPeriod，不触发音频停顿或重缓冲。
+                player.reorderQueueKeepingCurrent(shuffled, idx)
                 if (!quiet) showToast("随机播放已开启")
                 return
             }
@@ -4395,12 +4651,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 val idx = orig.indexOfFirst { it.id == st.mediaId }.coerceAtLeast(0)
                 player.setShuffle(false)
                 persistPlayMode(PlayMode.of(shuffle = false, repeat = st.repeat))
-                player.play(
-                    orig, idx,
-                    autoplay = st.isPlaying,
-                    startPositionMs = st.positionMs,
-                    notifyStart = false
-                )
+                player.reorderQueueKeepingCurrent(orig, idx)
                 preShuffleOrder = null
                 if (!quiet) showToast("随机播放已关闭")
                 return
@@ -4419,6 +4670,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun persistPlayMode(mode: PlayMode) {
         prefs.playMode = mode.name
+        com.sonance.player.widget.SonanceWidgets.onFavoriteOrModeChanged(getApplication())
     }
 
     /**
@@ -4550,6 +4802,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = null
+        com.sonance.player.widget.WidgetCommandReceiver.onCyclePlayMode = null
         player.release()
         super.onCleared()
     }

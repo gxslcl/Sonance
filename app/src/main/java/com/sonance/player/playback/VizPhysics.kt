@@ -252,8 +252,8 @@ class VizPhysics(
         /** 重力 6.5/s²：从满高落到底约 0.8 秒，且是**加速**的 */
         const val DEFAULT_GRAVITY = 6.5f
 
-        /** 峰值悬停 22 帧（60fps 基准）≈ 367ms */
-        const val DEFAULT_PEAK_HOLD_TICKS = 22
+        /** 峰值悬停 10 帧（60fps 基准）≈ 167ms：太久会像顶部又叠了一层"顶" */
+        const val DEFAULT_PEAK_HOLD_TICKS = 10
 
         /**
          * 峰值条自己的下落加速度。
@@ -261,6 +261,6 @@ class VizPhysics(
          * **不暴露成设置**：它的观感主要取决于悬停时长，加速度给个固定值就够了，
          * 再开一个参数只会让设置面板更难懂。
          */
-        private const val PEAK_FALL_GRAVITY = 1.9f
+        private const val PEAK_FALL_GRAVITY = 3.0f
     }
 }

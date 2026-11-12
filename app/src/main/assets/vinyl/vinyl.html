@@ -168,6 +168,26 @@
       user-select: none;
       -webkit-user-select: none;
       -webkit-touch-callout: none;
+      /* Android WebView 默认会给可点元素盖一层青蓝色 tap highlight 矩形。
+         圆形播放键按下时那块「方块」就是它 —— 必须显式关掉，且不能只写在
+         `*` 上（部分 WebView 对 button 有 UA 默认样式，会盖掉通配规则）。 */
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    button, [role="button"], .icon-btn, .sec-btn, .primary-play-btn, .more-item {
+      /* 真正的元凶：appearance:auto 时部分 Android WebView 会用系统原生按钮
+         drawable 作底层背景，那一层不受 border-radius:50% 裁剪 —— 圆形播放键
+         按下时背后就露出一块直角青蓝方块。tap-highlight 只管上层高光，关不掉它。 */
+      -webkit-appearance: none;
+      appearance: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+      outline: none;
+    }
+
+    button:active, button:focus, button:focus-visible, [role="button"]:active {
+      -webkit-tap-highlight-color: transparent;
+      outline: none;
     }
 
     html, body {
@@ -1133,11 +1153,16 @@
             </svg>
           </button>
 
-          <button class="primary-play-btn" id="btn-play" title="播放 / 暂停 / 落片">
+          <!-- 用 div 而不是 button：部分 Android WebView 会给 <button> 套一层系统原生
+               drawable 背景，border-radius:50% 裁不到它，按下 scale(0.92) 时四角就
+               露出直角青蓝方块。换成 div 后 UA 按钮外观根本不适用。JS 只用
+               getElementById + classList，不依赖 button 的 disabled/focus 语义。 -->
+          <div class="primary-play-btn" id="btn-play" role="button" tabindex="-1"
+               title="播放 / 暂停 / 落片">
             <svg id="icon-play-svg" viewBox="0 0 24 24" fill="currentColor">
               <path d="M8 5v14l11-7z"></path>
             </svg>
-          </button>
+          </div>
 
           <button class="sec-btn" id="btn-next" title="下一张唱片">
             <svg viewBox="0 0 24 24" fill="currentColor">

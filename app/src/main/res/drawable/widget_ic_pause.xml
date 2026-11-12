@@ -5,9 +5,9 @@
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="@color/widget_btn_icon"
+        android:fillColor="#FFFFFFFF"
         android:pathData="M7.5,4.5h3.2v15h-3.2z" />
     <path
-        android:fillColor="@color/widget_btn_icon"
+        android:fillColor="#FFFFFFFF"
         android:pathData="M13.3,4.5h3.2v15h-3.2z" />
 </vector>

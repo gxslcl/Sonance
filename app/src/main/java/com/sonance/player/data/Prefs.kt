@@ -247,9 +247,15 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_VIZ_BARS, 48)
         set(v) = sp.edit().putInt(KEY_VIZ_BARS, v).apply()
 
+    /**
+     * 律动幅度 0.5~1.0。
+     *
+     * 它作用在**整套映射之后**（软顶之后等比缩放），所以往下拖是真的等比降高。
+     * 旧语义是 FFT 之前的增益，会被 AGC 的 `v / peak` 约掉 —— 那时拖动几乎没效果。
+     */
     var vizSensitivity: Float
-        get() = sp.getFloat(KEY_VIZ_SENS, 1.0f)
-        set(v) = sp.edit().putFloat(KEY_VIZ_SENS, v).apply()
+        get() = sp.getFloat(KEY_VIZ_SENS, 1.0f).coerceIn(0.5f, 1f)
+        set(v) = sp.edit().putFloat(KEY_VIZ_SENS, v.coerceIn(0.5f, 1f)).apply()
 
     var vizMirror: Boolean
         get() = sp.getBoolean(KEY_VIZ_MIRROR, true)
@@ -289,7 +295,7 @@ class Prefs(context: Context) {
 
     /** 峰值悬停时长，单位是 **60fps 基准的帧数**（内部换算成秒，保证帧率无关） */
     var vizPeakHoldTicks: Int
-        get() = sp.getInt(KEY_VIZ_PEAK_HOLD, 22).coerceIn(0, 90)
+        get() = sp.getInt(KEY_VIZ_PEAK_HOLD, 10).coerceIn(0, 90)
         set(v) = sp.edit().putInt(KEY_VIZ_PEAK_HOLD, v.coerceIn(0, 90)).apply()
 
     /** 是否画峰值条 */
@@ -633,6 +639,17 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_SCROLL_HAPTIC, true)
         set(v) = sp.edit().putBoolean(KEY_SCROLL_HAPTIC, v).apply()
 
+    /**
+     * 「全部歌曲」右侧轨道用哪一种：true = A–Z 字母索引，false = 原来的比例滑块。
+     *
+     * 两者**共用同一个右侧位置**、同一时刻只渲染一个。并列摆放会抢同一条竖直
+     * 手势区，还会压住行尾的收藏按钮，所以做成一个二选一的开关而不是两套组件叠加。
+     * 字母索引只在「列表按文本字段有序」时生效，其余场景自动回落到滑块。
+     */
+    var rightRailLetters: Boolean
+        get() = sp.getBoolean(KEY_RIGHT_RAIL_LETTERS, true)
+        set(v) = sp.edit().putBoolean(KEY_RIGHT_RAIL_LETTERS, v).apply()
+
     // ===== B 站缓存 =====
 
     /**
@@ -916,6 +933,23 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_EQ_BANDS, null) ?: ""
         set(v) = sp.edit().putString(KEY_EQ_BANDS, v).apply()
 
+    // ===== 音效预设（叠加在 10 段 EQ 之上）=====
+
+    /** 音效总开关。默认关闭：不动用户的原始音色 */
+    var soundFxEnabled: Boolean
+        get() = sp.getBoolean(KEY_SOUND_FX_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_SOUND_FX_ENABLED, v).apply()
+
+    /** 当前音效预设 id，脏数据回落到「原声」 */
+    var soundPresetId: String
+        get() = sp.getString(KEY_SOUND_PRESET, null) ?: "off"
+        set(v) = sp.edit().putString(KEY_SOUND_PRESET, v).apply()
+
+    /** 效果参数，逗号分隔（见 SoundFxParams.toStore）；空串 = 中性 */
+    var soundFxParams: String
+        get() = sp.getString(KEY_SOUND_FX_PARAMS, null) ?: ""
+        set(v) = sp.edit().putString(KEY_SOUND_FX_PARAMS, v).apply()
+
     // ===== 播放速度 =====
 
     /** 播放速度（0.5–2.5 倍）。音调保持不变（time-stretch） */
@@ -932,10 +966,20 @@ class Prefs(context: Context) {
 
     // ===== 全屏歌词页 =====
 
-    /** 全屏歌词页是否隐藏系统状态栏（沉浸浏览，下拉可临时呼出） */
+    /** 全屏歌词页是否隐藏系统状态栏（**只作用于歌词页**，下拉可临时呼出） */
     var lyricsHideStatusBar: Boolean
         get() = sp.getBoolean(KEY_LYRICS_HIDE_STATUS_BAR, false)
         set(v) = sp.edit().putBoolean(KEY_LYRICS_HIDE_STATUS_BAR, v).apply()
+
+    // ===== 全屏律动柱页 =====
+
+    /**
+     * 律动柱页是否隐藏系统状态栏（**只作用于律动柱页**）。
+     * 和歌词页各存一份：两个页面的沉浸偏好互不牵连，封面主界面两者都不认。
+     */
+    var visualizerHideStatusBar: Boolean
+        get() = sp.getBoolean(KEY_VISUALIZER_HIDE_STATUS_BAR, false)
+        set(v) = sp.edit().putBoolean(KEY_VISUALIZER_HIDE_STATUS_BAR, v).apply()
 
     // ===== 曲库隐藏（清理重复 / 同名歌曲只从列表隐藏，不动文件）=====
 
@@ -1330,6 +1374,7 @@ class Prefs(context: Context) {
         private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
         private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"
         private const val KEY_SCROLL_HAPTIC = "scroll_haptic_enabled"
+        private const val KEY_RIGHT_RAIL_LETTERS = "right_rail_letters"
 
         /** B 站缓存视频的播放模式，存 [com.sonance.player.playback.PlayMode.ordinal] */
         private const val KEY_BILI_PLAY_MODE = "bili_play_mode"
@@ -1351,6 +1396,9 @@ class Prefs(context: Context) {
         private const val KEY_EQ_ENABLED = "eq_enabled"
         private const val KEY_EQ_PRESET = "eq_preset"
         private const val KEY_EQ_BANDS = "eq_custom_bands"
+        private const val KEY_SOUND_FX_ENABLED = "sound_fx_enabled"
+        private const val KEY_SOUND_PRESET = "sound_preset_id"
+        private const val KEY_SOUND_FX_PARAMS = "sound_fx_params"
 
         /** 歌词字号默认值 20sp（旧版是 18sp，反馈偏小，见 [migrateOnce]） */
         const val DEFAULT_LYRICS_FONT = 20
@@ -1360,6 +1408,7 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_SPEED = "play_speed"
         private const val KEY_KARAOKE_ENABLED = "karaoke_enabled"
         private const val KEY_LYRICS_HIDE_STATUS_BAR = "lyrics_hide_status_bar"
+        private const val KEY_VISUALIZER_HIDE_STATUS_BAR = "visualizer_hide_status_bar"
         private const val KEY_EXCLUDED_DIRS = "excluded_dirs"
         private const val KEY_SONGS_CACHE = "songs_cache_json"
         private const val KEY_SCAN_AT = "last_scan_at"

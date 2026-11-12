@@ -226,6 +226,22 @@ fun VinylWebScreen(
                             view.post { view.evaluateJavascript(sfxJs, null) }
                             // 补推真实视口：页面加载可能早于 WebView 首次布局，100vh 被冻结为 0
                             pushViewport(view)
+                            // 运行时再压一层：部分 ROM 的 WebView 给 <button> 套系统原生
+                            // drawable（appearance:auto），那层不受 border-radius:50% 裁剪，
+                            // 按下时圆形播放键背后会露出直角青蓝方块。页面 CSS 之外注入
+                            // !important 兜底，连 UA 样式和旧缓存页面一起压掉。
+                            view.evaluateJavascript(
+                                "(function(){var id='sonance-native-button-off';" +
+                                    "if(document.getElementById(id))return;" +
+                                    "var s=document.createElement('style');s.id=id;" +
+                                    "s.textContent='button,button:active,button:focus," +
+                                    "button:focus-visible,[role=button]{" +
+                                    "-webkit-appearance:none!important;appearance:none!important;" +
+                                    "-webkit-tap-highlight-color:transparent!important;" +
+                                    "outline:none!important}';" +
+                                    "document.head.appendChild(s);})()",
+                                null
+                            )
                             pageReady.value = true
                         }
 

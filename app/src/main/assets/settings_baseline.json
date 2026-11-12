@@ -62,6 +62,14 @@
       "type": "BOOLEAN",
       "value": true
     },
+    "right_rail_letters": {
+      "type": "BOOLEAN",
+      "value": true
+    },
+    "visualizer_hide_status_bar": {
+      "type": "BOOLEAN",
+      "value": false
+    },
     "play_mode": {
       "type": "STRING",
       "value": "SHUFFLE"
@@ -103,6 +111,18 @@
       "value": "VOCAL"
     },
     "eq_custom_bands": {
+      "type": "STRING",
+      "value": ""
+    },
+    "sound_fx_enabled": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "sound_preset_id": {
+      "type": "STRING",
+      "value": "off"
+    },
+    "sound_fx_params": {
       "type": "STRING",
       "value": ""
     },

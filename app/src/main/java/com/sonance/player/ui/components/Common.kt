@@ -531,14 +531,17 @@ fun PlayPauseButton(
                     }
             ) {
                 val r = this.size.minDimension / 2f
+                val glowMain = palette?.main ?: Color(0xFF6366F1)
+                val glowDeep = palette?.deep ?: Color(0xFFEC4899)
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            (palette?.main ?: Color(0xFF6366F1)).copy(alpha = 0.65f),
-                            (palette?.deep ?: Color(0xFFEC4899)).copy(alpha = 0.30f),
+                            glowMain.copy(alpha = 0.65f),
+                            glowDeep.copy(alpha = 0.30f),
                             Color.Transparent
                         ),
-                        center = center, radius = r
+                        center = center,
+                        radius = r
                     ),
                     radius = r
                 )
@@ -833,6 +836,8 @@ fun SonanceSlider(
     gradientEnd: Color? = null,
     /** 拇指外圈加一层柔光（参考样机 0 0 0 3px accent-soft），进度条用 */
     thumbHalo: Boolean = false,
+    /** 双向滑杆的中性点；不传时沿用从左端填充的普通进度条。 */
+    neutralPoint: Float? = null,
     /**
      * 手势结束（松手 / 精确点击落地）后回调一次。
      *
@@ -845,7 +850,8 @@ fun SonanceSlider(
     var pressed by remember { mutableStateOf(false) }
     val safe = value.coerceIn(0f, 1f)
 
-    // pointerInput(enabled) 的 key 不含这个回调，直接捕获会拿到旧 lambda
+    // pointerInput(enabled) 的 key 不含回调，持续读取最新 lambda。
+    val latestValueChange by rememberUpdatedState(onValueChange)
     val latestFinished by rememberUpdatedState(onValueChangeFinished)
 
     Box(
@@ -875,13 +881,13 @@ fun SonanceSlider(
                             if (hx > slop && hx >= hy) {
                                 scrubbing = true
                                 pressed = true
-                                onValueChange((change.position.x / size.width).coerceIn(0f, 1f))
+                                latestValueChange((change.position.x / size.width).coerceIn(0f, 1f))
                                 change.consume()
                             } else if (hy > slop) {
                                 abandoned = true
                             }
                         } else if (scrubbing) {
-                            onValueChange((change.position.x / size.width).coerceIn(0f, 1f))
+                            latestValueChange((change.position.x / size.width).coerceIn(0f, 1f))
                             change.consume()
                         }
                     }
@@ -890,7 +896,7 @@ fun SonanceSlider(
                         pressed = false
                         latestFinished?.invoke()
                     } else if (!abandoned) {
-                        onValueChange((down.position.x / size.width).coerceIn(0f, 1f))
+                        latestValueChange((down.position.x / size.width).coerceIn(0f, 1f))
                         latestFinished?.invoke()
                     }
                 }
@@ -907,8 +913,11 @@ fun SonanceSlider(
                 size = Size(size.width, h),
                 cornerRadius = radius
             )
-            val w = size.width * safe
-            if (w > 0.5f) {
+            val thumbX = size.width * safe
+            val origin = size.width * (neutralPoint?.coerceIn(0f, 1f) ?: 0f)
+            val fillStart = minOf(origin, thumbX)
+            val fillWidth = kotlin.math.abs(thumbX - origin)
+            if (fillWidth > 0.5f) {
                 val end = gradientEnd
                 if (end != null) {
                     // 横向渐变：起点暗、终点亮，和样机一致
@@ -918,24 +927,32 @@ fun SonanceSlider(
                             start = Offset(0f, cy),
                             end = Offset(size.width, cy)
                         ),
-                        topLeft = Offset(0f, cy - h / 2f),
-                        size = Size(w, h),
+                            topLeft = Offset(fillStart, cy - h / 2f),
+                            size = Size(fillWidth, h),
                         cornerRadius = radius
                     )
                 } else {
                     drawRoundRect(
                         color = activeColor,
-                        topLeft = Offset(0f, cy - h / 2f),
-                        size = Size(w, h),
+                        topLeft = Offset(fillStart, cy - h / 2f),
+                        size = Size(fillWidth, h),
                         cornerRadius = radius
                     )
                 }
+            }
+            if (neutralPoint != null) {
+                drawLine(
+                    color = activeColor.copy(alpha = 0.55f),
+                    start = Offset(origin, cy - 4.dp.toPx()),
+                    end = Offset(origin, cy + 4.dp.toPx()),
+                    strokeWidth = 1.dp.toPx()
+                )
             }
             if (alwaysShowThumb || pressed) {
                 // 样机：按住时拇指放大到 1.3 倍
                 val r = thumbSize.toPx() / 2f * (if (pressed) 1.3f else 1f)
                 val thumbColor = gradientEnd ?: activeColor
-                val cx = w.coerceIn(r, size.width - r)
+                val cx = thumbX.coerceIn(r, size.width - r)
                 if (thumbHalo) {
                     drawCircle(
                         color = thumbColor.copy(alpha = 0.25f),

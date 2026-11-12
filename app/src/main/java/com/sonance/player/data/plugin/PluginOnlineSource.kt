@@ -5,6 +5,9 @@ import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.RemotePlaylistPage
 import com.sonance.player.data.RemoteSearchPage
 import com.sonance.player.data.RemoteTrack
+import android.util.Log
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -40,6 +43,16 @@ class PluginOnlineSource(
 
     private val urlCache = ConcurrentHashMap<String, String>()
     private val itemCache = ConcurrentHashMap<String, JSONObject>()
+
+    /**
+     * 取流串行化。
+     *
+     * [PluginRuntime] 本身也是串行的，这里再加一把锁是为了**去重**：
+     * 点播时会先解析当前这首，队列后台预取又会遍历到同一批 id，
+     * 没有这把锁的话同一首歌会被解析两次（两次 HTTP + 两次 WebView 往返）。
+     * 锁内先查缓存，后到的那个直接命中。
+     */
+    private val resolveLock = Mutex()
 
     /** 供 getMediaSource 回填 musicItem 用：插件返回的原始媒体项 */
     private fun remember(item: JSONObject) {
@@ -185,25 +198,90 @@ class PluginOnlineSource(
         }.getOrNull()
     }
 
-    /** 播放/下载前批量预热取流地址 */
-    override suspend fun prepareStreams(ids: List<String>) {
-        ensureLoaded().getOrNull() ?: return
-        ids.filter { !urlCache.containsKey(it) }.forEach { id ->
+    /**
+     * 解析**单首**的取流地址（带缓存）。
+     *
+     * 返回 null 表示插件确实拿不到可播放地址（会员歌 / 接口报错 / 超时），
+     * 调用方必须据此提示用户，**不能**再拿着空 uri 去播 —— 那会被
+     * ExoPlayer 报成 `ERROR_CODE_IO_FILE_NOT_FOUND`，界面上显示成
+     * 「找不到文件，可能已被移动或删除」，完全误导。
+     */
+    suspend fun resolveStream(remoteId: String, timeoutMs: Long = DEFAULT_STREAM_TIMEOUT_MS): String? =
+        resolveLock.withLock {
+            val id = remoteId.trim()
+            if (id.isEmpty()) return@withLock null
+            urlCache[id]?.takeIf { it.isNotBlank() }?.let { return@withLock it }
+
+            ensureLoaded().getOrElse {
+                Log.w(TAG, "插件未加载，取流中止：${it.message}")
+                return@withLock null
+            }
+
             val item = itemCache[id] ?: JSONObject().put("id", id)
-            val raw = runtime.call("getMediaSource", JSONArray().apply {
-                put(item); put("standard")
-            }.toString()).getOrNull() ?: return@forEach
-            val url = runCatching {
-                val o = JSONObject(raw)
-                o.optString("url").ifBlank { o.optString("src") }
-            }.getOrElse { raw.trim('"') }
-            // 插件可以返回网络地址，也可以返回自己的本地/内容提供者地址
-            // （本地演示源、用户自建曲库都走这条），别只认 http。
-            if (url.startsWith("http") ||
-                url.startsWith("file://") ||
-                url.startsWith("content://")
-            ) urlCache[id] = url
+            val started = android.os.SystemClock.elapsedRealtime()
+            val raw = runtime.call(
+                "getMediaSource",
+                JSONArray().apply {
+                    put(item)
+                    put(QUALITY)
+                }.toString(),
+                timeoutMs
+            ).getOrElse {
+                Log.w(TAG, "getMediaSource($id) 失败：${it.message}")
+                return@withLock null
+            }
+
+            val url = extractUrl(raw)
+            if (url == null) {
+                Log.w(TAG, "getMediaSource($id) 没有可播放地址：${raw.take(300)}")
+                return@withLock null
+            }
+            Log.i(
+                TAG,
+                "取流成功 $id（${android.os.SystemClock.elapsedRealtime() - started}ms）"
+            )
+            urlCache[id] = url
+            url
         }
+
+    /**
+     * 从插件返回值里找播放地址。
+     *
+     * MusicFree 插件协议里 getMediaSource 一般直接返回 `{ url }`，
+     * 但也有返回 `{ data: { url } }` 或裸字符串的写法，这里一并兼容。
+     * 只认真实可播的 scheme：插件返回 `null` / 空串 / 错误对象时一律当失败。
+     */
+    private fun extractUrl(raw: String): String? {
+        val text = raw.trim()
+        if (text.isEmpty() || text == "null") return null
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        if (obj != null) {
+            val candidates = listOf(
+                obj.optString("url"),
+                obj.optString("src"),
+                obj.optJSONObject("data")?.optString("url").orEmpty(),
+                obj.optJSONObject("data")?.optString("src").orEmpty(),
+                (obj.opt("data") as? String).orEmpty(),
+            )
+            candidates.firstOrNull(::isPlayableUri)?.let { return it }
+            return null
+        }
+        return text.trim('"').takeIf(::isPlayableUri)
+    }
+
+    private fun isPlayableUri(s: String): Boolean =
+        s.startsWith("http") || s.startsWith("file://") || s.startsWith("content://")
+
+    /** 播放/下载前批量预热取流地址（后台补地址时用，单曲点播不再走这里） */
+    override suspend fun prepareStreams(ids: List<String>) {
+        val missing = ids.filter { urlCache[it].isNullOrBlank() }
+        if (missing.isEmpty()) return
+        val started = android.os.SystemClock.elapsedRealtime()
+        val ok = missing.count { resolveStream(it) != null }
+        Log.i(
+            TAG,
+            "批量预热取流 $ok/${missing.size}（${android.os.SystemClock.elapsedRealtime() - started}ms）"
+        )
     }
 
     override fun streamUrl(remoteId: String): String = urlCache[remoteId].orEmpty()
@@ -246,4 +324,25 @@ class PluginOnlineSource(
         trackCount = -1,
         creatorName = "",
     )
+
+    private companion object {
+        const val TAG = "PluginSource"
+
+        /**
+         * 取流音质档位。
+         *
+         * 目前固定请求标准音质：插件协议里 quality 是可选参数，
+         * 而 kg.js 把 flac/320 当作「有会员才给」的档位，无会员时会直接报错。
+         * 标准音质在无登录态下最稳，也是 [maybeDownload] 存下来的那一档。
+         */
+        const val QUALITY = "standard"
+
+        /**
+         * 单曲取流的等待上限。
+         *
+         * 必须**小于** [PluginRuntime.call] 的默认超时，也要明显小于用户耐心：
+         * 点播是同步等待这一步的，15 秒已经是「这歌可能放不了」的量级。
+         */
+        const val DEFAULT_STREAM_TIMEOUT_MS = 15_000L
+    }
 }

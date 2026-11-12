@@ -6,8 +6,10 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tanh
 
 /**
  * 真实音频可视化数据源。
@@ -157,9 +159,11 @@ class AudioVisualizer(barCount: Int) {
     /**
      * 拉取一帧并更新 [levels]。**必须在后台线程调用。**
      *
+     * @param level 律动幅度 0.5..1.0（在整套映射之后相乘，等比缩放柱高）
+     * @param active 播放中才输出能量；暂停时目标值归零
      * @return true 表示当前有有效数据（柱高可用），false 表示应走 [decayToZero]
      */
-    fun poll(sensitivity: Float, active: Boolean): Boolean {
+    fun poll(level: Float, active: Boolean): Boolean {
         if (!PcmBus.ready) return false
 
         val seen = PcmBus.buffersSeen
@@ -182,7 +186,7 @@ class AudioVisualizer(barCount: Int) {
             i++
         }
         fft(re, im)
-        computeBands(sensitivity, active)
+        computeBands(level, active)
         fftCount++
 
         // 每 ~3 秒打一条，便于确认门控与灵敏度是否正常
@@ -223,10 +227,9 @@ class AudioVisualizer(barCount: Int) {
      * 60~120Hz，如果在这里平滑，两次 FFT 之间画面就是完全静止的、看起来一格一格跳。
      * 交给绘制侧按帧插值，才能把 30Hz 的数据画成连续运动。
      */
-    private fun computeBands(sensitivity: Float, active: Boolean) {
+    private fun computeBands(level: Float, active: Boolean) {
         val bins = fftN / 2
         val n = levels.size
-        val gain = 2.4f * sensitivity
 
         var b = 0
         while (b < n) {
@@ -243,8 +246,9 @@ class AudioVisualizer(barCount: Int) {
                 k++
             }
             val avg = if (count > 0) sqrt(sumSq / count) * FFT_SCALE else 0f
-            var v = ln(1f + avg) / maxLog * gain
-            if (v > 1f) v = 1f
+            // 这里**不再截断**到 1：真实幅度要留给 AGC 区分"刚好到顶"和"远超满格"。
+            // 之前在 AGC 前裁剪，任何超过 1 的频段都变成同一个 1.0 → 顶部整片平头。
+            var v = ln(1f + avg) / maxLog * BAND_GAIN
             if (!active) v = 0f
 
             // ★ EMA 平滑：消掉 FFT 逐帧的抖动噪点。
@@ -256,32 +260,74 @@ class AudioVisualizer(barCount: Int) {
             rawBands[b] = emaBands[b]
             b++
         }
-        applyAutoGain(rawBands, bandPeak, levels)
+        applyAutoGain(rawBands, bandPeak, levels, level)
     }
 
     /**
-     * 逐频段自动增益：用每根柱子自己的历史峰值做归一化，抵消"低频天然能量大"。
+     * 逐频段自动增益 + 顶部余量。
      *
-     * - 峰值**快起慢落**（`0.992` 每帧，约 3 秒半衰），所以一段安静之后峰值会降下来，
-     *   该频段又能重新"顶满"，不会一直趴着
-     * - 输出是「归一化值」和「原始值」的加权混合 —— 纯归一化会让所有柱子都顶满、
-     *   看起来很平；留 28% 原始动态才有层次
+     * 旧实现是 `0.88 × (v / 本柱峰值) + 0.12 × v` —— 每根柱子都拿自己的近期峰值当 100%，
+     * 于是**每根柱子都会顶到接近 1.0**：随便一首歌就是一片冲顶的平墙。
+     *
+     * 现在分三件事：
+     *
+     * 1. **混合参考**：`0.65 × 本柱峰值 + 0.35 × 全频段峰值`。顶端重新变成"事件"：
+     *    只有真正最响的频段能到满格，其余按自己相对全频段的能量落到中段。
+     * 2. **幂次 1.30**：只压中段、不动峰值，把"接近自己的峰值"从 0.9 压到 0.6 附近。
+     * 3. **软顶**：低于 0.52 线性，高于它按 tanh 压向 0.82。满格不再贴着顶栏，
+     *    同时 0.82 附近仍有区分度，不会出现一排等高的平头柱。
+     *
+     * - 峰值**快起慢落**（`0.992` 每帧，约 3 秒半衰），安静之后该频段能重新顶满
      * - 峰值太小时（刚起播 / 该频段一直没声）直接用原始值，避免除零放大噪声
      *
      * 抽成独立函数是为了能单测：它只依赖输入数组，不需要真的跑一遍 FFT。
+     *
+     * @param level 律动幅度 0.5..1.0，在整套映射之后等比缩放
      */
     @androidx.annotation.VisibleForTesting
-    internal fun applyAutoGain(raw: FloatArray, peaks: FloatArray, out: FloatArray) {
-        var b = 0
-        while (b < raw.size) {
-            val v = raw[b]
-            val p = peaks[b]
+    internal fun applyAutoGain(raw: FloatArray, peaks: FloatArray, out: FloatArray, level: Float = 1f) {
+        val n = minOf(raw.size, peaks.size, out.size)
+        if (n == 0) return
+
+        // 第一遍：推进峰值，同时拿到全频段参考（本轮最大的那个峰值）
+        var globalPeak = 0f
+        var i = 0
+        while (i < n) {
+            val v = raw[i]
+            val p = peaks[i]
             val peak = if (v > p) v else p * PEAK_DECAY
-            peaks[b] = peak
-            val norm = if (peak > MIN_PEAK) (v / peak).coerceIn(0f, 1f) else v
-            out[b] = norm * NORM_WEIGHT + v * (1f - NORM_WEIGHT)
-            b++
+            peaks[i] = peak
+            if (peak > globalPeak) globalPeak = peak
+            i++
         }
+        val globalValid = globalPeak > MIN_PEAK
+        val gain = level.coerceIn(0f, MAX_LEVEL)
+
+        // 第二遍：归一化 → 混合参考 → 压中段 → 软顶
+        i = 0
+        while (i < n) {
+            val v = raw[i].coerceAtLeast(0f)
+            val peak = peaks[i]
+            val normLocal = if (peak > MIN_PEAK) (v / peak).coerceIn(0f, 1f) else v.coerceAtMost(1f)
+            val normGlobal = if (globalValid) (v / globalPeak).coerceIn(0f, 1f) else v.coerceAtMost(1f)
+            val norm = LOCAL_PEAK_WEIGHT * normLocal + (1f - LOCAL_PEAK_WEIGHT) * normGlobal
+            val shaped = norm.pow(NORM_GAMMA)
+            val mixed = NORM_WEIGHT * shaped + (1f - NORM_WEIGHT) * v.coerceAtMost(1f)
+            out[i] = displayHeight(mixed) * gain
+            i++
+        }
+    }
+
+    /** 软顶：低于拐点线性，高于拐点用 tanh 收敛到 [CEILING]，保留区分度而不是硬切平。 */
+    private fun displayHeight(value: Float): Float {
+        val v = value.coerceIn(0f, 1f)
+        val soft = if (v <= SOFT_KNEE) {
+            v
+        } else {
+            val t = (v - SOFT_KNEE) / (1f - SOFT_KNEE)
+            SOFT_KNEE + (1f - SOFT_KNEE) * tanh(t * KNEE_CURVE) / tanh(KNEE_CURVE)
+        }
+        return (CEILING * soft).coerceIn(0f, CEILING)
     }
 
     /** 第 i 根柱子在频率 bin 上的对数起点（只在构造时调用） */
@@ -359,13 +405,39 @@ class AudioVisualizer(barCount: Int) {
         private const val MIN_PEAK = 0.06f
 
         /**
-         * 归一化值在输出里的权重，其余留给原始动态。
+         * 频段能量 → 对数高度的固定增益。
          *
-         * 0.88 是实测调出来的：0.72 时"都在自己峰值上"的低频与高频仍差 0.21
-         * （低频 0.97 / 高频 0.76），肉眼还是能看出左重右轻；0.88 时差距降到 0.09。
-         * 对比**没做归一化**时的 0.75（低频 0.90 / 高频 0.15），已经基本拉平。
-         * 留 12% 原始动态是为了保留"这段整体很轻"的层次感，纯归一化会显得很平。
+         * 2.4 时 `ln(1+avg)/ln(385)×2.4 = 1` 只对应 avg ≈ 10.9（约 -21 dBFS），
+         * 普通音乐的中低频段全都在这条线之上 → 整片柱子直接饱和。
+         * 1.6 把饱和点推到 avg ≈ 40（约 -11 dBFS），只有真正的强拍才会接近顶部。
          */
-        private const val NORM_WEIGHT = 0.88f
+        private const val BAND_GAIN = 1.6f
+
+        /**
+         * 归一化里「本柱峰值」的权重，剩下 0.35 交给「全频段峰值」。
+         *
+         * 纯本柱峰值会让每根柱子都在自己的巅峰时顶到 100%，也就是"一片满"；
+         * 纯全频段峰值又会回到左重右轻。这个比例让顶端重新变得稀缺，
+         * 同时保留大部分跨频段的平衡。
+         */
+        private const val LOCAL_PEAK_WEIGHT = 0.65f
+
+        /** 归一化项在最终混合里的权重；其余留给原始幅度，保留"这段整体很轻"的层次感 */
+        private const val NORM_WEIGHT = 0.70f
+
+        /** 归一化项的幂次：压中段、不动峰值（1.0 = 原样，越大中段越低） */
+        private const val NORM_GAMMA = 1.30f
+
+        /** 软拐点：低于它保持线性，高于它按 tanh 收敛，避免顶部出现一排平头柱 */
+        private const val SOFT_KNEE = 0.52f
+
+        /** 满格映射到的最终高度。0.82 让柱顶与顶栏之间留出一条可见的余量 */
+        private const val CEILING = 0.82f
+
+        /** 软顶的弯曲程度；越大越快贴到 ceiling */
+        private const val KNEE_CURVE = 2f
+
+        /** 律动幅度上限（Prefs 里限制在 0.5..1.0，这里只是兜底） */
+        private const val MAX_LEVEL = 1.5f
     }
 }

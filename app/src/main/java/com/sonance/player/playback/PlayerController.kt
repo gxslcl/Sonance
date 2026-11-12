@@ -338,6 +338,33 @@ class PlayerController(private val context: Context) {
     }
 
     /**
+     * 给队列里某个 mediaId 的曲目补上取流地址。
+     *
+     * 插件源的地址是异步取的：点播时只解析当前这首，其余曲目先以空 uri 入队，
+     * 后台预取拿到地址后用它原地替换队列项。替换当前项会让 ExoPlayer 用新地址
+     * 重新准备 —— 这正是「轮到这首时还没地址」想要的补救，所以只有**正在出声**
+     * 的当前项会跳过，避免把播放中的流打断。
+     */
+    fun patchQueueUri(mediaId: Long, uri: Uri) {
+        val c = controller ?: return
+        val count = runCatching { c.mediaItemCount }.getOrDefault(0)
+        for (i in 0 until count) {
+            val item = runCatching { c.getMediaItemAt(i) }.getOrNull() ?: continue
+            if (item.mediaId != mediaId.toString()) continue
+            if (item.localConfiguration?.uri == uri) return
+            if (i == c.currentMediaItemIndex && c.isPlaying) return
+            val extras = android.os.Bundle(item.mediaMetadata.extras ?: android.os.Bundle()).apply {
+                putString(EXTRA_URI, uri.toString())
+            }
+            val metadata = item.mediaMetadata.buildUpon().setExtras(extras).build()
+            runCatching {
+                c.replaceMediaItem(i, item.buildUpon().setUri(uri).setMediaMetadata(metadata).build())
+            }.onFailure { android.util.Log.w("Sonance", "补流地址失败: ${it.message}") }
+            return
+        }
+    }
+
+    /**
      * 把**锁屏歌词**写进当前 MediaItem 的 metadata。
      *
      * ColorOS / OPlus 的锁屏歌词读的是 `MediaMetadata["lyricInfo"]`（一段 JSON），
@@ -384,6 +411,14 @@ class PlayerController(private val context: Context) {
     /** 把 ExoPlayer 的错误码翻译成用户能看懂的一句话 */
     private fun describeError(error: PlaybackException, title: String): String {
         val prefix = if (title.isNotBlank()) "「$title」" else "这首歌"
+
+        // 空 uri 是**取流环节**没拿到地址，不是本地文件丢了。
+        // 不单独判的话会落到下面的 FILE_NOT_FOUND 分支，报成
+        // 「找不到文件，可能已被移动或删除」—— 用户会去找文件，其实根本没有文件。
+        val currentUri = controller?.currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
+        if (currentUri.isBlank()) {
+            return "${prefix}还没拿到播放地址，取流失败，换一首或稍后再试"
+        }
 
         // 在线流要单独解释。
         //
@@ -509,14 +544,54 @@ class PlayerController(private val context: Context) {
         sync(c, null)
     }
 
+    /**
+     * 在**不打断当前播放、不重新 prepare 解码器**的前提下重排播放队列。
+     *
+     * 切换随机 / 列表循环时，当前正在唱的那首歌还是同一首（只是它在队列里的下标从 curIdx
+     * 变成了 	argetIndex）。旧做法走 play(shuffled, idx, ...) 会调 setMediaItems + prepare()，
+     * 把正在解码的 MediaPeriod 拆掉重建，造成停顿。
+     *
+     * 这里利用 ExoPlayer 的队列局部替换：
+     *  1. 先把 curIdx **之后**的所有项替换成 songs.subList(target + 1, songs.size)；
+     *  2. 再把 curIdx **之前**的所有项替换成 songs.subList(0, target)。
+     * 全程不触碰 curIdx 本身的 MediaItem，ExoPlayer 自动把当前项平移到 	arget，
+     * 音频解码与缓冲毫发无损、零停顿！
+     */
+    fun reorderQueueKeepingCurrent(songs: List<Song>, targetIndex: Int) {
+        if (songs.isEmpty()) return
+        val target = targetIndex.coerceIn(0, songs.lastIndex)
+        val c = controller
+        if (c == null) {
+            pendingRequest = PlayRequest(
+                songs = songs,
+                index = target,
+                autoplay = _state.value.isPlaying,
+                startPositionMs = _state.value.positionMs,
+                notifyStart = false
+            )
+            return
+        }
+        val curIdx = c.currentMediaItemIndex
+        val curMediaId = c.currentMediaItem?.mediaId
+        val targetSong = songs[target]
+        if (curIdx in 0 until c.mediaItemCount && curMediaId == targetSong.id.toString()) {
+            val afterItems = songs.subList(target + 1, songs.size).map { it.toMediaItem(context) }
+            val beforeItems = songs.subList(0, target).map { it.toMediaItem(context) }
+            c.replaceMediaItems(curIdx + 1, c.mediaItemCount, afterItems)
+            c.replaceMediaItems(0, curIdx, beforeItems)
+            refreshQueue(c)
+            sync(c, null)
+        } else {
+            val pos = c.currentPosition.coerceAtLeast(0L)
+            val autoplay = activePlaybackIntent(c.playWhenReady, c.playbackState, c.playerError != null)
+            applyPlay(PlayRequest(songs, target, autoplay, pos, notifyStart = false))
+        }
+    }
+
     fun togglePlay() {
         val c = controller ?: return
-        if (c.mediaItemCount == 0) return
-        if (activePlaybackIntent(c.playWhenReady, c.playbackState, c.playerError != null)) c.pause() else {
-            if (c.playbackState == Player.STATE_IDLE) c.prepare()
-            if (c.playbackState == Player.STATE_ENDED) c.seekToDefaultPosition()
-            c.play()
-        }
+        // 与桌面小组件共用同一套判定（见 PlaybackCommands）
+        PlaybackCommands.execute(c, PlaybackCommands.PLAY_PAUSE)
     }
 
     /** 切歌音量淡出协程：新调用先取消旧的，避免被打断的旧协程停在半途音量上 */
@@ -581,35 +656,14 @@ class PlayerController(private val context: Context) {
     fun next() {
         val c = controller ?: return
         lastNotifiedId = -1L
-        val count = c.mediaItemCount
-        if (count <= 0) return
-        val nextIndex = if (c.currentMediaItemIndex >= count - 1) 0 else c.currentMediaItemIndex + 1
-        c.seekToDefaultPosition(nextIndex)
-        if (!c.isPlaying) c.play()
+        // 规则只写在 PlaybackCommands 一处：桌面小组件点「下一首」走的是同一段代码
+        PlaybackCommands.execute(c, PlaybackCommands.NEXT)
     }
 
     fun previous() {
         val c = controller ?: return
-        val count = c.mediaItemCount
-        if (count <= 0) return
-        // 队首再往前 → 绕到队尾。这一条优先于"回到本首开头"，
-        // 否则第一首放过 4 秒之后，用户按上一首永远到不了最后一首。
-        if (c.currentMediaItemIndex <= 0) {
-            lastNotifiedId = -1L
-            c.seekToDefaultPosition(count - 1)
-            if (!c.isPlaying) c.play()
-            return
-        }
-        if (c.currentPosition > 4000L) {
-            // 唱了几秒再按上一首：按主流播放器的惯例先回到本首开头
-            c.seekTo(0)
-            return
-        }
         lastNotifiedId = -1L
-        // 其余位置：往上一首走
-        val prevIndex = c.currentMediaItemIndex - 1
-        c.seekToDefaultPosition(prevIndex)
-        if (!c.isPlaying) c.play()
+        PlaybackCommands.execute(c, PlaybackCommands.PREVIOUS)
     }
 
     /**
@@ -752,6 +806,11 @@ class PlayerController(private val context: Context) {
                         .setExtras(extras)
                         .setIsBrowsable(false)
                         .setIsPlayable(true)
+                        // 时长要写进元数据：超级岛 / 原子岛 / 车机的进度条读的是
+                        // `MediaMetadata.durationMs`，只靠 PlaybackState 的 position
+                        // 有些系统拿不到总长，就会画成一条永远不动的空槽。
+                        // 在线歌偶尔拿不到时长，0 就别写，让它保持「未知」而不是「长度 0」。
+                        .apply { if (durationMs > 0) setDurationMs(durationMs) }
                         .build()
                 )
                 .build()

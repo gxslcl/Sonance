@@ -356,31 +356,53 @@ class MediaRepository(private val context: Context) {
                 else -> 0L
             }
 
+        /**
+         * 文本字段比较：优先用后台预构建的归一化键（汉字转拼音、小写、去符号），
+         * 这样「列表顺序」和「字母条分组」严格同源。
+         *
+         * [keys] 为空（冷启动索引还没建好）时退回原来的码点序，行为零回归 ——
+         * 那一小段时间右侧本来也会降级显示滑块，不会露出不一致的字母表。
+         */
+        private fun compareText(
+            a: Song,
+            b: Song,
+            keys: Map<Long, IndexKeys>,
+            raw: (Song) -> String,
+            pick: (IndexKeys) -> String
+        ): Int {
+            val ka = keys[a.id]?.let(pick)
+            val kb = keys[b.id]?.let(pick)
+            return if (ka != null && kb != null) ka.compareTo(kb)
+            else raw(a).compareTo(raw(b), ignoreCase = true)
+        }
+
         fun sortSongs(
             songs: List<Song>,
             field: SortField,
             ascending: Boolean,
-            stats: SongStats = SongStats()
+            stats: SongStats = SongStats(),
+            /** songId → 四个文本字段的归一化排序键；为空则退回码点序 */
+            keys: Map<Long, IndexKeys> = emptyMap()
         ): List<Song> {
             val cmp: Comparator<Song> = when (field) {
                 SortField.TITLE -> Comparator { a, b ->
-                    a.title.compareTo(b.title, ignoreCase = true)
+                    compareText(a, b, keys, { it.title }) { it.title }
                 }
 
                 SortField.ARTIST -> Comparator { a, b ->
-                    val r = a.artist.compareTo(b.artist, ignoreCase = true)
+                    val r = compareText(a, b, keys, { it.artist }) { it.artist }
                     if (r != 0) r else a.album.compareTo(b.album, ignoreCase = true)
                 }
 
                 SortField.ALBUM -> Comparator { a, b ->
-                    val r = a.album.compareTo(b.album, ignoreCase = true)
+                    val r = compareText(a, b, keys, { it.album }) { it.album }
                     if (r != 0) r else a.track.compareTo(b.track)
                 }
 
                 SortField.DURATION -> Comparator { a, b -> a.durationMs.compareTo(b.durationMs) }
                 SortField.DATE_ADDED -> Comparator { a, b -> a.dateAddedSec.compareTo(b.dateAddedSec) }
                 SortField.FILE_NAME -> Comparator { a, b ->
-                    a.displayName.compareTo(b.displayName, ignoreCase = true)
+                    compareText(a, b, keys, { it.displayName }) { it.fileName }
                 }
 
                 SortField.PLAY_COUNT -> Comparator { a, b ->

@@ -8,6 +8,8 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.log10
+import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sin
 
@@ -43,9 +45,44 @@ fun eqBandLabel(hz: Int): String = if (hz >= 1000) "${hz / 1000}k" else "$hz"
 /** 单段 Q 值。10 段按倍频程排布，Q≈1.3 时相邻段重叠适中，不会叠出一片隆起 */
 internal const val EQ_Q = 1.3f
 
+/**
+ * 每段的 Q 值。
+ *
+ * 10 段 graphic EQ 最容易犯的错是全场一个 Q：31 Hz 和 16 kHz 用 1.3 会在两端
+ * 叠出一个又窄又尖的鼓包（低端听起来"轰"，高端听起来"齿音刺"）。
+ * 两端放宽到 0.75~0.85，形状上接近模拟母带均衡器的宽搁架曲线，听感温润自然；
+ * 中频保持 1.25~1.35 以便精确雕刻 250 Hz 的浑浊与 2 kHz 的人声质感，同时相邻段衔接顺滑。
+ */
+internal val EQ_BAND_Q: FloatArray =
+    floatArrayOf(0.80f, 1.00f, 1.20f, 1.35f, 1.30f, 1.30f, 1.35f, 1.20f, 1.00f, 0.78f)
+
+internal fun eqBandQ(index: Int): Float = EQ_BAND_Q.getOrElse(index) { EQ_Q }
+
+/**
+ * 自动前置增益（dB，≤0）。
+ *
+ * 旧实现按「最高单点提升量 × 35%」起步扣减，导致日常预设刚把 62 Hz 或 4 kHz 抬起 3~4 dB，
+ * 整首歌的基准响度就被压低 1.4~2 dB —— 人声和中频反而变小了，切换时感觉"效果不明显甚至变闷"。
+ *
+ * 现在的母带级等响度策略：
+ * - 5.2 dB 以内的日常调音曲线只预留 18% 的轻量净空（提升量 82% 直接呈现给耳朵，切换一耳朵明显），
+ *   偶发瞬态峰值由链路末端 -0.1 dBFS 的透明软限幅器无感兜底；
+ * - 超过 5.2 dB 的手拖大增益曲线平滑过渡到全额补偿，确保用户拉满 +12 dB 时 16 位 PCM 依然零削波。
+ */
+internal fun eqAutoPreampDb(maxBoostDb: Float): Float {
+    if (!maxBoostDb.isFinite() || maxBoostDb <= 0.05f) return 0f
+    val t = ((maxBoostDb - 5.2f) / 5.2f).coerceIn(0f, 1f)
+    val smooth = t * t * (3f - 2f * t)
+    return -(maxBoostDb * (0.18f + 0.82f * smooth))
+}
+
 /** 增益上下限（dB），滑杆范围和预设曲线都受它约束 */
 const val EQ_MIN_DB = -12f
 const val EQ_MAX_DB = 12f
+
+/** SonanceSlider 输出的是 0..1，EQ 实际使用的是以 dB 为单位的双向范围。 */
+internal fun eqDbFromSlider(fraction: Float, minDb: Float = EQ_MIN_DB, maxDb: Float = EQ_MAX_DB): Float =
+    minDb + fraction.coerceIn(0f, 1f) * (maxDb - minDb)
 
 /**
  * 音频线程 ↔ UI 线程之间的均衡器设置总线。
@@ -71,7 +108,10 @@ object EqBus {
 
     fun update(enabled: Boolean, gainsDb: FloatArray) {
         this.enabled = enabled
-        this.gainsDb = FloatArray(EQ_BAND_COUNT) { gainsDb.getOrElse(it) { 0f } }
+        this.gainsDb = FloatArray(EQ_BAND_COUNT) {
+            val value = gainsDb.getOrElse(it) { 0f }
+            if (value.isFinite()) value.coerceIn(EQ_MIN_DB, EQ_MAX_DB) else 0f
+        }
         revision++
     }
 
@@ -114,7 +154,8 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
             val c = designPeakingCoeffs(
                 f0 = freqs.getOrElse(b) { 0 }.toFloat(),
                 gainDb = gainsDb.getOrElse(b) { 0f },
-                sampleRate = sampleRate
+                sampleRate = sampleRate,
+                q = eqBandQ(b)
             )
             b0[b] = c[0]; b1[b] = c[1]; b2[b] = c[2]; a1[b] = c[3]; a2[b] = c[4]
             b++
@@ -129,6 +170,22 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
             z2[ch].fill(0f)
             ch++
         }
+    }
+
+    /** 单帧处理供平滑切换曲线使用；每个声道仍保有独立状态。 */
+    fun processSample(input: Float, channel: Int): Float {
+        val s1 = z1[channel]
+        val s2 = z2[channel]
+        var x = input
+        var b = 0
+        while (b < bandCount) {
+            val y = b0[b] * x + s1[b]
+            s1[b] = b1[b] * x - a1[b] * y + s2[b]
+            s2[b] = b2[b] * x - a2[b] * y
+            x = y
+            b++
+        }
+        return x
     }
 
     /**
@@ -351,6 +408,85 @@ internal fun designPeakingCoeffs(
     )
 }
 
+/** 与实际 biquad 使用同一组系数，用于自动留余量和均衡器的频响示意图。 */
+internal class EqResponse(gainsDb: FloatArray, private val sampleRate: Int) {
+    private val coefficients = Array(EQ_BAND_COUNT) { i ->
+        val gain = gainsDb.getOrElse(i) { 0f }.let { if (it.isFinite()) it else 0f }
+        designPeakingCoeffs(EQ_CENTER_FREQS[i].toFloat(), gain, sampleRate, eqBandQ(i))
+    }
+
+    fun dbAt(frequencyHz: Double): Float {
+        if (sampleRate <= 0) return 0f
+        val frequency = frequencyHz.coerceIn(1.0, sampleRate * 0.499)
+        val w = 2.0 * PI * frequency / sampleRate
+        val c1 = cos(w)
+        val s1 = sin(w)
+        val c2 = cos(2.0 * w)
+        val s2 = sin(2.0 * w)
+        var db = 0.0
+        for (c in coefficients) {
+            val nr = c[0] + c[1] * c1 + c[2] * c2
+            val ni = -c[1] * s1 - c[2] * s2
+            val dr = 1.0 + c[3] * c1 + c[4] * c2
+            val di = -c[3] * s1 - c[4] * s2
+            val numerator = nr * nr + ni * ni
+            val denominator = dr * dr + di * di
+            if (numerator > 1e-20 && denominator > 1e-20) {
+                db += 10.0 * log10(numerator / denominator)
+            }
+        }
+        return db.toFloat()
+    }
+
+    /** 对数频率扫描，计入相邻频段相互叠加，不能只取单根滑杆的最大值。 */
+    fun maxBoostDb(): Float {
+        if (sampleRate <= 0) return 0f
+        val top = minOf(20_000.0, sampleRate * 0.49)
+        if (top <= 20.0) return 0f
+        var peak = 0f
+        for (i in 0..128) {
+            val frequency = 20.0 * (top / 20.0).pow(i / 128.0)
+            peak = max(peak, dbAt(frequency))
+        }
+        return peak
+    }
+}
+
+/**
+ * 一次算好整条曲线给 UI 画图用：31 Hz–16 kHz 对数扫 [points] 个点。
+ *
+ * 曲线必须画"实际听到的"：只画 [SoundPreset.eqDb] 会漏掉自动前置增益带来的整体
+ * 电平变化，看起来"低频抬了 4 dB"，实际听到的只有 3 dB。
+ */
+fun presetNetCurve(preset: SoundPreset, points: Int, sampleRate: Int = 48_000): FloatArray {
+    val response = EqResponse(preset.eqDb, sampleRate)
+    val trim = eqAutoPreampDb(response.maxBoostDb())
+    val safePoints = points.coerceAtLeast(2)
+    return FloatArray(safePoints) { i ->
+        val hz = 31.0 * (16_000.0 / 31.0).pow(i.toDouble() / (safePoints - 1))
+        response.dbAt(hz) + trim
+    }
+}
+
+/**
+ * 低频 / 中频 / 高频的整体倾向（dB，已计入自动余量），给用户看的"这套预设改了什么"。
+ * 三段的取值区间按听感划分，不是技术上的倍频程。
+ */
+fun presetToneBands(preset: SoundPreset, sampleRate: Int = 48_000): FloatArray {
+    val response = EqResponse(preset.eqDb, sampleRate)
+    val trim = eqAutoPreampDb(response.maxBoostDb())
+    fun avg(vararg hz: Double): Float {
+        var sum = 0.0
+        for (frequency in hz) sum += response.dbAt(frequency)
+        return (sum / hz.size).toFloat() + trim
+    }
+    return floatArrayOf(
+        avg(62.0, 125.0),
+        avg(250.0, 500.0, 1000.0, 2000.0),
+        avg(4000.0, 8000.0, 16000.0)
+    )
+}
+
 /**
  * 均衡器预设。
  *
@@ -359,8 +495,7 @@ internal fun designPeakingCoeffs(
  * 所有设备完全一致。
  *
  * 增益普遍压在 ±8dB 以内：峰值再高，16bit 输出一削顶就是失真，得不偿失。
- */
-enum class EqPreset(val label: String, val curve: FloatArray) {
+ */enum class EqPreset(val label: String, val curve: FloatArray) {
 
     /** 关闭：整条滤波链旁路 */
     OFF("关闭", floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)),

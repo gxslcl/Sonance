@@ -30,7 +30,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -40,6 +43,7 @@ import com.sonance.player.data.SortField
 import com.sonance.player.data.ViewMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.Skin
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -47,13 +51,46 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.input.pointer.pointerInput
 
+/**
+ * 列表头部的圆角：16dp 对 40dp 高是「圆润矩形」而不是两端半圆。
+ * 之前用 999dp 全胶囊，比下方 30dp 高的分类标签还抢戏；这里收一档，
+ * 但仍和 TagChip 的 20dp 属于同一族圆润语言。
+ */
+private val HeaderFieldShape = RoundedCornerShape(16.dp)
+
+/**
+ * 搜索框 / 排序按钮共用的「有厚度的玻璃」。
+ *
+ * 只靠一层 8% 暖白提亮不够：列表背景是封面模糊 + 遮罩的动态渐变，
+ * 亮部会把这点提亮直接吞掉，看起来和外面融成一片。所以先用 20% 黑
+ * 压住底下忽明忽暗的封面斑纹，得到一块稳定底色，再叠一层上亮下暗的
+ * 暖白渐变（13% → 6%）做出玻璃厚度 —— 既和背景拉开层次，又不会退回
+ * 80% 不透明 surface 那种死黑板。两个控件共用一个函数，保证完全一致。
+ */
+private fun Modifier.headerGlass(skin: Skin, shape: Shape): Modifier {
+    // 亮色皮肤不能沿用「文字色提亮」：那套渐变本质是把深色文字色叠在 20% 黑上，
+    // 深色主题里是提亮，亮色主题里就成了一块脏灰 —— 跟米白页面完全不搭。
+    // 浅色改用白色系玻璃（58% 底 + 82%→46% 竖向渐变），压住背后封面斑纹的同时
+    // 保持通透，边界交给外面那条 border。
+    val baseAlpha = if (skin.isLight) Color.White.copy(alpha = 0.58f)
+    else Color.Black.copy(alpha = 0.20f)
+    val top = if (skin.isLight) Color.White.copy(alpha = 0.82f)
+    else skin.text.copy(alpha = 0.13f)
+    val bottom = if (skin.isLight) Color.White.copy(alpha = 0.46f)
+    else skin.text.copy(alpha = 0.06f)
+    return this
+        .clip(shape)
+        .background(baseAlpha)
+        .background(Brush.verticalGradient(listOf(top, bottom)))
+}
+
 @Composable
 fun SearchField(
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String = "搜索歌曲、专辑或艺术家",
-    height: Dp = 44.dp,
+    height: Dp = 40.dp,
     /**
      * 键盘右下角键的动作。传了它才会把软键盘的回车换成「搜索」。
      *
@@ -63,13 +100,18 @@ fun SearchField(
     onSearch: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
+    var focused by remember { mutableStateOf(false) }
     Row(
         modifier = modifier
             .height(height)
-            .clip(RoundedCornerShape(9.dp))
-            .background(skin.surface)
-            .border(1.dp, skin.border, RoundedCornerShape(9.dp))
-            .padding(horizontal = 12.dp),
+            .headerGlass(skin, HeaderFieldShape)
+            // 平时克制、聚焦时明确：给一条 accent 细边，也进一步拉开层次
+            .border(
+                1.dp,
+                if (focused) skin.accent.copy(alpha = 0.55f) else skin.border,
+                HeaderFieldShape
+            )
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(9.dp)
     ) {
@@ -105,7 +147,9 @@ fun SearchField(
                 } else {
                     KeyboardActions.Default
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { focused = it.isFocused }
             )
         }
         if (value.isNotEmpty()) {
@@ -126,21 +170,23 @@ fun SortButton(
     field: SortField,
     ascending: Boolean,
     onSelect: (SortField) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 与搜索框等高，圆角轮廓才接得上 */
+    height: Dp = 40.dp
 ) {
     val skin = LocalSkin.current
     var open by remember { mutableStateOf(false) }
     Box(modifier) {
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(9.dp))
-                .background(skin.surface)
-                .border(1.dp, skin.border, RoundedCornerShape(9.dp))
+                .height(height)
+                .headerGlass(skin, HeaderFieldShape)
+                .border(1.dp, skin.border, HeaderFieldShape)
                 .clickable { open = true }
                 // 瘦身成 图标+小箭头（≈52dp）：原来带着「添加时间」全称
                 // 要占掉搜索框近 1/3 宽度。当前是哪种排序收进下拉菜单里看 ——
                 // 排序是低频确认项，不值得常驻一个文字标签。
-                .padding(horizontal = 10.dp, vertical = 11.dp),
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
@@ -309,6 +355,7 @@ fun ListHeader(
         verticalArrangement = Arrangement.spacedBy(if (dense) 8.dp else 12.dp)
     ) {
         // ---- 行 1：搜索 + 排序 ----
+        val fieldHeight = if (dense) 36.dp else 40.dp
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -318,9 +365,14 @@ fun ListHeader(
                 value = query,
                 onValueChange = onQueryChange,
                 modifier = Modifier.weight(1f),
-                height = if (dense) 38.dp else 44.dp
+                height = fieldHeight
             )
-            SortButton(field = sortField, ascending = sortAscending, onSelect = onSort)
+            SortButton(
+                field = sortField,
+                ascending = sortAscending,
+                onSelect = onSort,
+                height = fieldHeight
+            )
         }
 
         // ---- 行 2：上下文槽位 + ⁝ + 播放操作 ----

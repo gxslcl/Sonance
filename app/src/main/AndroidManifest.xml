@@ -145,11 +145,20 @@
         </receiver>
 
         <!--
-          ===== 桌面小组件：四种样式，各自是一个独立的 receiver =====
+          桌面小组件的播控 / 歌词命令入口。
+          只接收本应用自己发出的显式 intent，所以不导出、也不声明 intent-filter。
+          小组件不走 MediaButtonReceiver：media3 在 API 26+ 会丢掉非播放类按键。
+        -->
+        <receiver
+            android:name=".widget.WidgetCommandReceiver"
+            android:exported="false" />
 
-          之所以拆成四个而不是一个带参数的 provider：系统的小组件选择器是按
-          `<receiver>` + `<meta-data>` 一条条列出来的，用户看到的就是四条
-          「山水有清音 · 紧凑横条 / 封面卡片 / 信息宽条 / 极简文字」，
+        <!--
+          ===== 桌面小组件：五种样式，各自是一个独立的 receiver =====
+
+          之所以拆成五个而不是一个带参数的 provider：系统的小组件选择器是按
+          `<receiver>` + `<meta-data>` 一条条列出来的，用户看到的就是五条
+          「横向控制条 / 封面卡片 / 信息宽卡 / 极简横条 / 大幅卡片」，
           可以按桌面空间和喜好各挑一个。渲染逻辑全部共用基类。
         -->
         <receiver

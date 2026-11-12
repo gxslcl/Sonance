@@ -26,15 +26,7 @@ object PinyinIndex {
 
     fun build(text: String): String {
         if (text.isBlank()) return ""
-        val latin = runCatching {
-            val t = transliterator ?: return@runCatching text
-            synchronized(t) { t.transliterate(text) }
-        }.getOrDefault(text)
-
-        val plain = Normalizer.normalize(latin, Normalizer.Form.NFD)
-            .replace(toneMarks, "")
-            .lowercase(Locale.ROOT)
-            .filter { it in 'a'..'z' || it in '0'..'9' || it == ' ' }
+        val plain = normalized(text)
 
         // 全拼去掉空格；首字母取每个音节的首字符。
         val full = plain.replace(" ", "")
@@ -43,5 +35,27 @@ object PinyinIndex {
             .mapNotNull { it.firstOrNull() }
             .joinToString("")
         return "$full $initials"
+    }
+
+    /**
+     * 排序 / 字母分组用的**归一化键**：只保留小写字母与数字，空格也去掉。
+     *
+     * 和 [build] 共用同一套转换，所以「列表按什么排」和「字母条按什么分组」
+     * 必然同源 —— 中文歌转拼音后首字母就是它该落的那个字母。
+     * 例：`周杰伦` → `zhoujielun`，`The Beatles` → `thebeatles`。
+     */
+    fun latinKey(text: String): String =
+        if (text.isBlank()) "" else normalized(text).replace(" ", "")
+
+    private fun normalized(text: String): String {
+        val latin = runCatching {
+            val t = transliterator ?: return@runCatching text
+            synchronized(t) { t.transliterate(text) }
+        }.getOrDefault(text)
+
+        return Normalizer.normalize(latin, Normalizer.Form.NFD)
+            .replace(toneMarks, "")
+            .lowercase(Locale.ROOT)
+            .filter { it in 'a'..'z' || it in '0'..'9' || it == ' ' }
     }
 }

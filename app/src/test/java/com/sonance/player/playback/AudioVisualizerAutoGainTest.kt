@@ -5,50 +5,83 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 律动柱「逐频段自动增益」。
+ * 律动柱「逐频段自动增益 + 顶部余量」。
  *
- * 用户反馈：音乐里低频能量天然占优，所以左边几根柱子总是跳得最凶、右边几乎不动，
- * 看起来"重心偏左、不平衡"。这里的归一化就是为了把它拉平。
+ * 用户反馈：随便一首歌，很多柱子一起冲到顶部，整页显满。
  *
- * 关键性质：**在各自峰值附近，不同频段应该输出接近的高度** —— 这正是"平衡"的定义。
+ * 根因有两层：
+ * - 映射增益过大（2.4 时约 -21 dBFS 就饱和），饱和后又被硬截断成同一个 1.0；
+ * - 每根柱子都拿**自己的**近期峰值归一化，于是每根柱子都会顶到自己的 100%。
+ *
+ * 现在改成「0.65 本柱 + 0.35 全频段」混合参考、压中段、82% 软顶。
+ * 新的验收标准因此不是"低频高频一样高"，而是：
+ * **顶端重新变成事件 —— 少数柱子到顶，其余按相对能量分层，且任何柱子都不超过 0.82。**
  */
 class AudioVisualizerAutoGainTest {
 
     private fun viz(bars: Int = 8) = AudioVisualizer(bars)
 
     @Test
-    fun `低频高能量与高频低能量归一化后输出接近`() {
+    fun `不再出现整片冲顶，峰值最多到 82`() {
         val v = viz()
         val n = 8
-        val raw = FloatArray(n)
-        val peaks = FloatArray(n)
+        val raw = FloatArray(n) { 5f }
+        val peaks = FloatArray(n) { 5f }
         val out = FloatArray(n)
 
-        // 模拟真实音乐：低频 0.9，高频 0.15，各频段都"顶到自己的满格"
-        for (i in 0 until n) {
-            val full = if (i < n / 2) 0.9f else 0.15f
-            raw[i] = full
-            peaks[i] = full // 预置峰值 = 当前值，代表"该频段正在自己的最大值"
+        v.applyAutoGain(raw, peaks, out)
+
+        for (x in out) {
+            assertTrue("输出 $x 超过了软顶 0.82", x <= 0.8201f)
+            assertTrue("顶部余量被吃掉，输出只剩 $x", x >= 0.80f)
         }
+    }
+
+    @Test
+    fun `顶端变得稀缺，而不是所有频段一起满格`() {
+        val v = viz()
+        val n = 8
+        val raw = FloatArray(n) { if (it < n / 2) 0.9f else 0.15f }
+        val peaks = raw.copyOf()
+        val out = FloatArray(n)
+
         v.applyAutoGain(raw, peaks, out)
 
         val low = out[0]
         val high = out[n - 1]
-        // 没做归一化时这两个值就是原始输入：0.90 与 0.15，差 0.75 —— 那正是"左重右轻"的来源。
-        assertTrue(
-            "低频 $low 与高频 $high 差距过大（未归一化时是 0.90/0.15，差 0.75）",
-            kotlin.math.abs(low - high) < 0.12f
-        )
+        // 完全不平权（未归一化）时差距是 0.75；纯本柱归一化时差距是 0（一片平墙）。
+        // 现在要的是"看得出层次，但不回到左重右轻"。
+        val gap = kotlin.math.abs(low - high)
+        assertTrue("层次被压平了（$low vs $high），又变成一片满", gap > 0.25f)
+        assertTrue("差距过大，回到左重右轻（$low vs $high，差 $gap）", gap < 0.55f)
+        assertTrue("低频应该接近顶部：$low", low > 0.75f)
+        assertTrue("高频应该明显低于顶部：$high", high < 0.55f)
     }
 
     @Test
-    fun `输出不会超过 1`() {
+    fun `律动幅度在映射之后等比缩放`() {
+        val v = viz()
+        val raw = floatArrayOf(0.9f, 0.6f, 0.4f, 0.2f)
+        val peaks = raw.copyOf()
+        val full = FloatArray(raw.size)
+        val half = FloatArray(raw.size)
+
+        v.applyAutoGain(raw, peaks.copyOf(), full)
+        v.applyAutoGain(raw, peaks.copyOf(), half, level = 0.5f)
+
+        for (i in raw.indices) {
+            assertEquals("第 $i 根柱子的幅度缩放不是线性", full[i] * 0.5f, half[i], 0.0001f)
+        }
+    }
+
+    @Test
+    fun `输出不会超过 1 且不会是负数`() {
         val v = viz()
         val raw = FloatArray(8) { 0.5f }
         val peaks = FloatArray(8) { 0.05f } // 峰值极小，触发"不归一化"分支
         val out = FloatArray(8)
         v.applyAutoGain(raw, peaks, out)
-        for (x in out) assertTrue("输出 $x 越界", x in 0f..1f)
+        for (x in out) assertTrue("输出 $x 越界", x in 0f..0.8201f)
     }
 
     @Test
@@ -58,7 +91,6 @@ class AudioVisualizerAutoGainTest {
         val peaks = FloatArray(4) { 0.01f } // 低于 MIN_PEAK
         val out = FloatArray(4)
         v.applyAutoGain(raw, peaks, out)
-        // 不做归一化 → 输出应贴近原始值（留了 28% 原始动态，所以不会超过原值）
         for (x in out) assertTrue("安静频段被放大了：$x > 0.02", x <= 0.021f)
     }
 
@@ -86,6 +118,17 @@ class AudioVisualizerAutoGainTest {
         // 连续 1000 帧静音（约 30 秒）
         repeat(1000) { v.applyAutoGain(floatArrayOf(0f), peaks, out) }
         assertTrue("峰值没有衰减，该频段会一直趴着：${peaks[0]}", peaks[0] < 0.01f)
+    }
+
+    @Test
+    fun `静音输出为 0 且没有 NaN`() {
+        val v = viz()
+        val out = FloatArray(6)
+        v.applyAutoGain(FloatArray(6), FloatArray(6) { 0.7f }, out)
+        for (x in out) {
+            assertEquals(0f, x, 0f)
+            assertTrue(x.isFinite())
+        }
     }
 
     @Test

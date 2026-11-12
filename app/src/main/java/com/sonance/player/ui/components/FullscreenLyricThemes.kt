@@ -4,11 +4,13 @@ import android.os.Build
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,7 +34,10 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +56,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.AnnotatedString
@@ -71,6 +79,9 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.round
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Three native lyric stages; the full-screen host still owns background and controls. */
 @Composable
@@ -93,15 +104,73 @@ internal fun FullscreenThemedLyrics(
         val smoothPos = rememberSmoothPosition(positionMs, isPlaying, alignmentKey = timelineOffsetMs)
         val nextTimes = remember(lines) { lyricNextTimes(lines.map { it.timeMs }) }
         val current by remember(smoothPos) { derivedStateOf { lines.indexAt(smoothPos.longValue) } }
-        val anchor = remember { Animatable(current.coerceAtLeast(0).toFloat()) }
-        LaunchedEffect(current) {
+
+        /**
+         * 舞台中心（行号，可为小数）。
+         *
+         * 自动跟随时由播放进度驱动；用户上下拖动时直接由手指驱动 —— 两者是同一个值，
+         * 所以不存在"滚动偏移 + 自动位置"两套坐标互相打架的问题。
+         */
+        val stage = remember { mutableFloatStateOf(current.coerceAtLeast(0).toFloat()) }
+        val maxStage = remember(lines) { lines.lastIndex.toFloat() }
+        /** 用户最近一次触摸的时刻：触摸后 5 秒内不自动跟随（与经典歌词一致） */
+        val lastTouch = remember { longArrayOf(0L) }
+        var dragging by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+        val context = LocalContext.current
+        val settleJob = remember { arrayOfNulls<Job>(1) }
+        val returnJob = remember { arrayOfNulls<Job>(1) }
+
+        /**
+         * 用 [Animatable] 驱动 stage。这里不用 Compose 的顶层 `animate`：
+         * 该名字在同包里被 AnimationState 的内部扩展占用了，外部调不到。
+         */
+        suspend fun animateStage(target: Float, spec: AnimationSpec<Float>) {
+            val anim = Animatable(stage.floatValue)
+            anim.animateTo(target.coerceIn(0f, maxStage), spec) { stage.floatValue = value }
+        }
+
+        /**
+         * 松手 5 秒后自动回到当前播放句。
+         *
+         * 只靠上面的「换句时回位」有个盲区：暂停、或当前句特别长时，
+         * 用户可能一直停在翻到的那一屏。这里用一次性定时器兜底 ——
+         * 到点一定回，且手指还按着时先不回（松手后会重新计时）。
+         */
+        fun scheduleReturn() {
+            returnJob[0]?.cancel()
+            returnJob[0] = scope.launch {
+                delay(SCROLL_HOLD_MS)
+                if (dragging) return@launch
+                val target = current.coerceAtLeast(0).toFloat()
+                if (abs(target - stage.floatValue) < 0.001f) return@launch
+                settleJob[0]?.cancel()
+                animateStage(target, tween(320, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
+            }
+        }
+
+        /** 点击某句 / 松手惯性：把舞台平滑停到目标行号 */
+        fun settleTo(target: Float) {
+            lastTouch[0] = android.os.SystemClock.uptimeMillis()
+            returnJob[0]?.cancel()
+            settleJob[0]?.cancel()
+            settleJob[0] = scope.launch {
+                animateStage(target, tween(320, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
+            }
+        }
+
+        LaunchedEffect(current, dragging) {
+            if (dragging) return@LaunchedEffect   // 手指在屏幕上时让位给拖动
+            // 刚摸过屏幕的 5 秒内不跟随：否则用户刚滑走就会被拽回当前句
+            if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < SCROLL_HOLD_MS) return@LaunchedEffect
             val target = current.coerceAtLeast(0).toFloat()
-            if (abs(target - anchor.value) > 3f) {
-                anchor.snapTo(target) // Seeking must not fly through hundreds of old lines.
+            if (abs(target - stage.floatValue) < 0.001f) return@LaunchedEffect
+            if (abs(target - stage.floatValue) > 3f) {
+                stage.floatValue = target // Seeking must not fly through hundreds of old lines.
             } else if (style == LyricStyle.SPATIAL) {
-                anchor.animateTo(target, tween(900, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
+                animateStage(target, tween(900, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
             } else {
-                anchor.animateTo(target, spring(dampingRatio = 0.85f, stiffness = 140f))
+                animateStage(target, spring(dampingRatio = 0.85f, stiffness = 140f))
             }
         }
         val motion = rememberStageMotion(isPlaying && style != LyricStyle.FLUID)
@@ -140,6 +209,8 @@ internal fun FullscreenThemedLyrics(
             }
             val mainStyle = TextStyle(fontSize = font.sp, lineHeight = (font * 1.38f).sp, fontWeight = FontWeight.ExtraBold)
             val translationStyle = TextStyle(fontSize = (fontSizeSp * 0.72f).sp, lineHeight = (fontSizeSp * 1.01f).sp)
+            // 时间戳的样式必须和「测量」用同一份，否则行内宽度对不上（黑胶模式的缩进就靠它）
+            val timeStyle = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             val reflectionStyle = TextStyle(fontSize = (font * 0.92f).sp, lineHeight = (font * 1.27f).sp,
                 fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
             val reflectionHeights = remember(lines, textWidth, fontSizeSp, density, style) {
@@ -148,16 +219,40 @@ internal fun FullscreenThemedLyrics(
                         constraints = Constraints(maxWidth = textWidth.toInt().coerceAtLeast(1))).size.height.toFloat()
                 } else List(lines.size) { 0f }
             }
-            val heights = remember(lines, textWidth, fontSizeSp, density, style) {
+            /**
+             * 黑胶模式把时间戳内联在原文左侧，所以原文和翻译都必须让开同一段宽度。
+             *
+             * 这里**实测**最宽的时间戳，而不是写死 46dp：字号、字体、超过 99 分钟的
+             * `100:00` 都不会让中英左边缘再次错开。其他模式不需要缩进，值为 0。
+             */
+            val vinylGutterPx = remember(style, lines, density) {
+                if (style != LyricStyle.VINYL) {
+                    0f
+                } else {
+                    val gap = with(density) { 8.dp.toPx() }
+                    val widest = lines.asSequence()
+                        .map { stageTime(it.timeMs) }
+                        .distinct()
+                        .maxOfOrNull { measurer.measure(AnnotatedString(it), timeStyle).size.width }
+                        ?: 0
+                    widest + gap
+                }
+            }
+            // 原文与翻译共用同一个可用宽度：翻译也必须按这个宽度折行，否则测量行高会偏少
+            val lyricTextWidth = (textWidth - vinylGutterPx).coerceAtLeast(1f)
+            // 时间戳列也按「最宽时间戳」定宽，否则短时间戳（如 0:05）会让原文提前左移，
+            // 与翻译的缩进对不上。定宽 + 右对齐后，所有句子的原文都从同一条竖线开始。
+            val vinylTimeWidthDp = with(density) {
+                (vinylGutterPx - 8.dp.toPx()).coerceAtLeast(0f).toDp()
+            }
+
+            val heights = remember(lines, textWidth, lyricTextWidth, fontSizeSp, density, style) {
                 lines.mapIndexed { index, line ->
-                    val mainWidth = if (style == LyricStyle.VINYL) {
-                        textWidth - with(density) { 46.dp.toPx() }
-                    } else textWidth
                     val main = measurer.measure(AnnotatedString(line.text), mainStyle,
-                        constraints = Constraints(maxWidth = mainWidth.toInt().coerceAtLeast(1))).size.height
+                        constraints = Constraints(maxWidth = lyricTextWidth.toInt().coerceAtLeast(1))).size.height
                     val translation = line.translation?.let {
                         measurer.measure(AnnotatedString(it), translationStyle,
-                            constraints = Constraints(maxWidth = textWidth.toInt().coerceAtLeast(1))).size.height
+                            constraints = Constraints(maxWidth = lyricTextWidth.toInt().coerceAtLeast(1))).size.height
                     } ?: 0
                     with(density) {
                         main + translation + when (style) {
@@ -171,7 +266,7 @@ internal fun FullscreenThemedLyrics(
             val centers = remember(heights, unit, style) {
                 lyricStageCenters(heights, (if (style == LyricStyle.FLUID) 76f else 56f) * unit, 18f * unit)
             }
-            val a = anchor.value
+            val a = stage.floatValue
             val anchorCenter = lyricStageAnchor(centers, a)
             val from = maxOf(0, floor(a).toInt() - 4)
             val to = minOf(lines.lastIndex, ceil(a).toInt() + 4)
@@ -181,7 +276,61 @@ internal fun FullscreenThemedLyrics(
                 LyricStyle.SPATIAL -> SpatialStageDecoration(skin, motion, unit)
                 else -> Unit
             }
-            for (index in from..to) {
+            Box(
+                Modifier.fillMaxSize().pointerInput(centers, style) {
+                    if (centers.size < 2) return@pointerInput
+                    val tracker = VelocityTracker()
+                    detectVerticalDragGestures(
+                        onDragStart = {
+                            settleJob[0]?.cancel()
+                            returnJob[0]?.cancel()
+                            tracker.resetTracking()
+                            dragging = true
+                            lastTouch[0] = android.os.SystemClock.uptimeMillis()
+                        },
+                        onDragCancel = {
+                            dragging = false
+                            scheduleReturn()
+                        },
+                        onDragEnd = {
+                            dragging = false
+                            lastTouch[0] = android.os.SystemClock.uptimeMillis()
+                            val velocity = tracker.calculateVelocity().y
+                            // 松手惯性：按速度多走一小段，再交给 settleTo 平滑停住。
+                            // SPATIAL 的方向和另外两种相反（见 onDrag 里的说明），这里同样取反。
+                            if (abs(velocity) > FLING_MIN_VELOCITY) {
+                                val travel = if (style == LyricStyle.SPATIAL) {
+                                    velocity * FLING_SECONDS
+                                } else {
+                                    -velocity * FLING_SECONDS
+                                }
+                                val base = lyricStageAnchor(centers, stage.floatValue)
+                                settleTo(lyricIndexAtCenter(centers, base + travel))
+                            }
+                            // 无论有没有惯性，松手 5 秒后都回到当前播放句
+                            scheduleReturn()
+                        }
+                    ) { change, dragAmount ->
+                        // 手指位移 → 行号：内容严格跟手，不均匀行高也不会忽快忽慢。
+                        change.consume()
+                        val base = lyricStageAnchor(centers, stage.floatValue)
+                        // FLUID / VINYL：行号越大越靠下，内容随浏览进度向上走；
+                        // SPATIAL 的「未来句」画在**上方**，行号增大时内容反而往下走，
+                        // 所以同一个手指位移在这里要取反，否则上下滚动是相反的。
+                        val delta = if (style == LyricStyle.SPATIAL) dragAmount else -dragAmount
+                        val next = (base + delta).coerceIn(centers.first(), centers.last())
+                        val snapped = lyricIndexAtCenter(centers, next)
+                        val lineBefore = round(stage.floatValue).toInt()
+                        stage.floatValue = snapped
+                        // 每跨过一行给一次轻震：滚动时像经过一格一格的齿槽。
+                        // 拖动中途才震，自动跟随 / 点击跳转不震，避免播放时一直嗡嗡响。
+                        if (round(snapped).toInt() != lineBefore) hapticTick(context)
+                        tracker.addPosition(change.uptimeMillis, change.position)
+                        lastTouch[0] = android.os.SystemClock.uptimeMillis()
+                    }
+                }
+            ) {
+                for (index in from..to) {
                 key(index) {
                     val line = lines[index]
                     val pose = lyricStagePose(style, index - a, centers[index] - anchorCenter, unit, index)
@@ -218,7 +367,12 @@ internal fun FullscreenThemedLyrics(
                             .zIndex(emphasis + 2f)
                             .then(if (pose.opacity > 0.05f) Modifier.clickable(
                                 interactionSource = remember { MutableInteractionSource() }, indication = null
-                            ) { onSeek(line.timeMs) } else Modifier)
+                            ) {
+                                onSeek(line.timeMs)
+                                // 点击后让这一句回到舞台中心；同时进入 5 秒"不自动跟随"窗口，
+                                // 避免跳转触发的换句和手指位置互相拉扯
+                                settleTo(index.toFloat())
+                            } else Modifier)
                             .padding(vertical = 4.dp)
                     ) {
                         if (style != LyricStyle.VINYL) {
@@ -231,8 +385,10 @@ internal fun FullscreenThemedLyrics(
                         }
                         if (style == LyricStyle.VINYL) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-                                Text(stageTime(line.timeMs), fontSize = 10.sp,
-                                    color = skin.accent, modifier = Modifier.padding(top = 5.dp))
+                                Text(stageTime(line.timeMs), style = timeStyle,
+                                    color = skin.accent, textAlign = TextAlign.End,
+                                    modifier = Modifier.padding(top = 5.dp).then(
+                                        if (vinylTimeWidthDp > 0.dp) Modifier.width(vinylTimeWidthDp) else Modifier))
                                 StageWords(line, isCurrent, smoothPos, color, font, emphasis, false,
                                     Modifier.weight(1f))
                             }
@@ -240,8 +396,13 @@ internal fun FullscreenThemedLyrics(
                             StageWords(line, isCurrent, smoothPos, color, font, emphasis, centered)
                         }
                         line.translation?.let {
+                            // 黑胶模式：缩进量 = 时间戳 + 间距，和原文左边缘严格重合；
+                            // 其余模式从 0 起排，本来就与原文对齐。
                             Text(it, style = translationStyle, color = color.copy(alpha = 0.55f + 0.3f * emphasis),
-                                textAlign = if (centered) TextAlign.Center else TextAlign.Start)
+                                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
+                                modifier = if (vinylGutterPx > 0f) {
+                                    Modifier.padding(start = with(density) { vinylGutterPx.toDp() })
+                                } else Modifier)
                         }
                         when (style) {
                             LyricStyle.FLUID -> {
@@ -274,6 +435,7 @@ internal fun FullscreenThemedLyrics(
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -384,3 +546,16 @@ private fun SpatialStageDecoration(skin: Skin, motion: FloatState, unit: Float) 
             size = Size(radius * 2f, 50f * unit))
     }
 }
+
+/* ============================================================
+ * 手动滚动参数
+ * ============================================================ */
+
+/** 触摸后多久恢复自动跟随（毫秒）。5 秒内不打扰正在翻看的用户。 */
+private const val SCROLL_HOLD_MS = 5_000L
+
+/** 松手惯性：把速度换算成"再多走多少秒的距离" */
+private const val FLING_SECONDS = 0.10f
+
+/** 低于这个速度不做惯性，避免轻点一下也滑出去 */
+private const val FLING_MIN_VELOCITY = 120f

@@ -69,18 +69,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.Album
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.CoverRequest
+import com.sonance.player.data.INDEXABLE_SORT_FIELDS
+import com.sonance.player.data.LetterSections
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.MediaRepository
+import com.sonance.player.data.RAIL_LETTERS
 import com.sonance.player.data.MusicFolder
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
@@ -95,12 +100,14 @@ import com.sonance.player.ui.components.ChipsRow
 import com.sonance.player.ui.components.CoverArt
 import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.FolderRow
+import com.sonance.player.ui.components.hapticTick
 import com.sonance.player.ui.components.ListHeader
 import com.sonance.player.ui.components.LoadingState
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SongRow
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.isCompactLandscapePhone
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.flow.debounce
@@ -170,8 +177,10 @@ fun SongList(
     val context = LocalContext.current
     val dense = LocalDenseLayout.current
     val padding = contentPadding ?: PaddingValues(
-        horizontal = 16.dp,
-        vertical = if (dense) 2.dp else 4.dp
+        start = 16.dp,
+        end = 16.dp,
+        top = if (dense) 2.dp else 4.dp,
+        bottom = if (dense) 2.dp else 4.dp
     )
     // 把 item 里真正要用的原始值提到 lambda 外：否则每一项都闭包住整个 playerState，
     // 播放进度每次跳动都会让可见的每一行跟着重组
@@ -617,7 +626,9 @@ fun SongsScreen(
     val dense = LocalDenseLayout.current
     val skin = LocalSkin.current
 
-    val list = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, mode) {
+    // sortKeys 就绪后排序键会变（码点序 → 拼音序），必须让它触发重排，
+    // 否则列表停在旧顺序、字母条却按新键分组，两边对不上。
+    val list = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, mode, vm.sortKeys) {
         if (mode == 1) vm.recentSongs() else vm.visibleSongs()
     }
 
@@ -739,7 +750,12 @@ fun SongsScreen(
                         state = gridState,
                         columns = GridCells.Adaptive(280.dp),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            top = 8.dp,
+                            bottom = 8.dp
+                        ),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -771,6 +787,8 @@ fun SongsScreen(
                 // 平板布局没有 pager，这个位置以前没有任何滚动条，长曲库里只能手滚
                 val listState = rememberLazyListState()
                 val scope = rememberCoroutineScope()
+                val useLetters = letterRailEnabled(vm, isAllSongs = mode == 0)
+                val sections = rememberLetterSections(list, vm)
                 Box(Modifier.fillMaxSize()) {
                     SongList(
                         songs = list,
@@ -778,21 +796,43 @@ fun SongsScreen(
                         playerState = playerState,
                         scrollToCurrentSignal = vm.scrollToCurrentSignal,
                         queueSongs = playQueue,
+                        // 字母条 28dp 贴在右缘，把列表右内边距让开，
+                        // 免得行尾收藏心形被压在轨道底下（滑块模式保持原样）
+                        contentPadding = if (useLetters) PaddingValues(
+                            start = 16.dp,
+                            end = 30.dp,
+                            top = if (dense) 2.dp else 4.dp,
+                            bottom = if (dense) 2.dp else 4.dp
+                        ) else null,
                         // 「全部歌曲」是曲库本身，"从列表移除"在这一页才说得清
                         onRemoveFromLibrary = removeSong,
                         listState = listState,
                         reportCurrentVisibility = reportCurrentVisibility
                     )
-                    FastScrollBar(
-                        itemCount = { list.size },
-                        visibleCount = { listState.layoutInfo.visibleItemsInfo.size },
-                        firstIndex = { listState.firstVisibleItemIndex },
-                        hapticEnabled = vm.scrollHaptic,
-                        onSeek = { index -> scope.launch { listState.scrollToItem(index) } },
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .padding(end = 2.dp)
-                    )
+                    // 同一插槽二选一：字母条和滑块绝不同时出现。
+                    // 并列会抢右侧那条竖直手势区，两套跳转语义也会互相打架。
+                    if (useLetters) {
+                        LetterIndexBar(
+                            sections = sections,
+                            firstIndex = { listState.firstVisibleItemIndex },
+                            hapticEnabled = vm.scrollHaptic,
+                            onSeek = { index -> scope.launch { listState.scrollToItem(index) } },
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = 2.dp)
+                        )
+                    } else {
+                        FastScrollBar(
+                            itemCount = { list.size },
+                            visibleCount = { listState.layoutInfo.visibleItemsInfo.size },
+                            firstIndex = { listState.firstVisibleItemIndex },
+                            hapticEnabled = vm.scrollHaptic,
+                            onSeek = { index -> scope.launch { listState.scrollToItem(index) } },
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = 2.dp)
+                        )
+                    }
                 }
             }
         }
@@ -821,7 +861,12 @@ fun AlbumGrid(
         state = gridState,
         columns = GridCells.Adaptive(158.dp),
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 10.dp,
+            bottom = 10.dp
+        ),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
@@ -931,7 +976,12 @@ fun ArtistsScreen(
                 state = gridState,
                 columns = GridCells.Adaptive(300.dp),
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 4.dp,
+                    bottom = 4.dp
+                ),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -1040,7 +1090,12 @@ fun FoldersScreen(
                 state = gridState,
                 columns = GridCells.Adaptive(320.dp),
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 4.dp,
+                    bottom = 4.dp
+                ),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -1363,7 +1418,6 @@ fun SongCollectionScreen(
                     .padding(end = 2.dp)
             )
         }
-        Spacer(Modifier.height(8.dp))
     }
 }
 
@@ -1556,11 +1610,15 @@ fun LibraryPagerScreen(
             .collect { swiping -> ArtworkLoader.paused = swiping }
     }
 
-    val all = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery) { vm.visibleSongs() }
-    val recent = remember(vm.songs, vm.recentEntries, vm.sortField, vm.sortAscending, vm.searchQuery) {
+    // sortKeys 就绪后排序键会变（码点序 → 拼音序），三个列表都得跟着重排，
+    // 否则列表停在旧顺序、字母条却按新键分组，两边对不上。
+    val all = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, vm.sortKeys) {
+        vm.visibleSongs()
+    }
+    val recent = remember(vm.songs, vm.recentEntries, vm.sortField, vm.sortAscending, vm.searchQuery, vm.sortKeys) {
         vm.recentSongs()
     }
-    val favorites = remember(vm.songs, vm.favorites, vm.sortField, vm.sortAscending, vm.searchQuery) {
+    val favorites = remember(vm.songs, vm.favorites, vm.sortField, vm.sortAscending, vm.searchQuery, vm.sortKeys) {
         vm.favoriteSongs()
     }
 
@@ -1569,6 +1627,11 @@ fun LibraryPagerScreen(
         LibraryTab.FAVORITES -> favorites
         else -> all
     }
+
+    // 右侧轨道只服务「全部歌曲」这一页：both 列表内容用的都是 all，
+    // 分页器的其它两页虽然也会经过这里，useLetters 会是 false。
+    val useLetters = letterRailEnabled(vm, isAllSongs = liveIndex == 0)
+    val letterSections = rememberLetterSections(all, vm)
 
     // 「全部歌曲」搜索时的队列要传完整曲库：搜索是找入口，不是只听这几首
     // （规则本体在 MediaRepository.playQueue，和 SongsScreen 保持一致）
@@ -1790,16 +1853,24 @@ fun LibraryPagerScreen(
                                 gridState = gridState,
                                 onOpenAlbum = onOpenAlbum
                             )
-                            else -> SongList(
-                                songs = all,
-                                vm = vm,
-                                playerState = playerState,
-                                scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                listState = pageState,
-                                queueSongs = playQueue,
-                                onRemoveFromLibrary = removeSong,
-                                reportCurrentVisibility = realIndex(page) == liveIndex
-                            )
+                            else -> {
+                                SongList(
+                                    songs = all,
+                                    vm = vm,
+                                    playerState = playerState,
+                                    scrollToCurrentSignal = vm.scrollToCurrentSignal,
+                                    listState = pageState,
+                                    queueSongs = playQueue,
+                                    contentPadding = if (useLetters && realIndex(page) == 0) PaddingValues(
+                                        start = 16.dp,
+                                        end = 30.dp,
+                                        top = if (dense) 2.dp else 4.dp,
+                                        bottom = if (dense) 2.dp else 4.dp
+                                    ) else null,
+                                    onRemoveFromLibrary = removeSong,
+                                    reportCurrentVisibility = realIndex(page) == liveIndex
+                                )
+                            }
                         }
                     }
 
@@ -1873,27 +1944,38 @@ fun LibraryPagerScreen(
             // 同样是**独立组件**：它每帧读滚动位置，放在主函数体里会让整页每帧重组。
             val barOnGrid = vm.viewMode == ViewMode.GRID && liveIndex == 0
             val barState = slotStatesNow[slotFor(pagerState.currentPage)]
-            FastScrollBar(
-                itemCount = { if (barOnGrid) vm.albums.size else currentList.size },
-                visibleCount = {
-                    if (barOnGrid) gridStateNow.layoutInfo.visibleItemsInfo.size
-                    else barState.layoutInfo.visibleItemsInfo.size
-                },
-                firstIndex = {
-                    if (barOnGrid) gridStateNow.firstVisibleItemIndex
-                    else barState.firstVisibleItemIndex
-                },
-                hapticEnabled = vm.scrollHaptic,
-                onSeek = { index ->
-                    scope.launch {
-                        if (barOnGrid) gridStateNow.scrollToItem(index)
-                        else barState.scrollToItem(index)
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 2.dp)
-            )
+            val railModifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 2.dp)
+            if (useLetters) {
+                LetterIndexBar(
+                    sections = letterSections,
+                    firstIndex = { barState.firstVisibleItemIndex },
+                    hapticEnabled = vm.scrollHaptic,
+                    onSeek = { index -> scope.launch { barState.scrollToItem(index) } },
+                    modifier = railModifier
+                )
+            } else {
+                FastScrollBar(
+                    itemCount = { if (barOnGrid) vm.albums.size else currentList.size },
+                    visibleCount = {
+                        if (barOnGrid) gridStateNow.layoutInfo.visibleItemsInfo.size
+                        else barState.layoutInfo.visibleItemsInfo.size
+                    },
+                    firstIndex = {
+                        if (barOnGrid) gridStateNow.firstVisibleItemIndex
+                        else barState.firstVisibleItemIndex
+                    },
+                    hapticEnabled = vm.scrollHaptic,
+                    onSeek = { index ->
+                        scope.launch {
+                            if (barOnGrid) gridStateNow.scrollToItem(index)
+                            else barState.scrollToItem(index)
+                        }
+                    },
+                    modifier = railModifier
+                )
+            }
             }
         }
     }
@@ -2032,6 +2114,240 @@ private fun FastScrollBar(
                     else skin.text.copy(alpha = 0.42f)
                 )
         )
+    }
+}
+
+/**
+ * 右侧轨道该显示字母条还是滑块 —— **同一插槽、同一时刻只可能有一个**。
+ *
+ * 并列摆放会让两条组件抢同一块右侧竖直手势区，还会压住行尾收藏按钮；
+ * 而且滑块表达「在列表的百分之几」、字母条表达「在哪一组」，同屏出现
+ * 两套跳转语义会互相解释不了。所以这里只做条件判断，调用点用 if/else 二选一。
+ *
+ * 字母条只在「列表确实按某个文本字段有序」时成立；搜索态、行为类排序、
+ * 网格视图、手机横屏矮列表、索引还没建好，一律回落到原来的比例滑块。
+ */
+@Composable
+private fun letterRailEnabled(vm: SonanceViewModel, isAllSongs: Boolean): Boolean {
+    val config = LocalConfiguration.current
+    return vm.rightRailLetters &&
+        isAllSongs &&
+        vm.sortKeys.isNotEmpty() &&
+        vm.searchQuery.isBlank() &&
+        vm.viewMode == ViewMode.LIST &&
+        vm.sortField in INDEXABLE_SORT_FIELDS &&
+        !isCompactLandscapePhone(config)
+}
+
+/** 按**当前列表顺序**算分组表：只查预构建好的 Map，不做 ICU 转写，主线程也跑得动。 */
+@Composable
+private fun rememberLetterSections(songs: List<Song>, vm: SonanceViewModel): LetterSections {
+    val field = vm.sortField
+    val keys = vm.sortKeys
+    return remember(songs, field, keys) {
+        if (keys.isEmpty() || field !in INDEXABLE_SORT_FIELDS) LetterSections.EMPTY
+        else LetterSections.build(songs.map { keys[it.id]?.forField(field) ?: "" })
+    }
+}
+
+/**
+ * 「全部歌曲」右侧 A–Z 字母索引。
+ *
+ * - 固定 `#` + A–Z 共 27 格：位置恒定、滑动映射线性。只显示有歌的字母
+ *   会让字母随曲库变化来回跳，手指记不住位置。
+ * - 空字母置灰，点击或滑到时吸附到最近的有歌字母，绝不「点了没反应」。
+ * - 点击与滑动共用 [seekAt]；跳转用 `scrollToItem`，拖动时连续 animate 会互相打断。
+ * - 跨字母直接驱动振动马达一次短脉冲，节流单位从行换成字母。
+ * - 手指按住时左侧浮一个**跟着手指 y 走**的当前字母指示器；
+ *   停止操作 5 秒后整条轨道缓慢淡到半透明。
+ */
+
+@Composable
+private fun LetterIndexBar(
+    sections: LetterSections,
+    firstIndex: () -> Int,
+    onSeek: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    hapticEnabled: Boolean = true
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    var trackPx by remember { mutableIntStateOf(1) }
+    var pressed by remember { mutableStateOf(false) }
+    var picked by remember { mutableStateOf<Char?>(null) }
+    /** 手指在轨道上的 y（px）—— 指示器跟着它走，而不是钉在轨道中间 */
+    var pointerY by remember { mutableStateOf(0f) }
+    var pickedSlot by remember { mutableIntStateOf(0) }
+    var showIndicator by remember { mutableStateOf(false) }
+    var idleDimmed by remember { mutableStateOf(false) }
+    var interactionTick by remember { mutableIntStateOf(0) }
+    var lastPicked by remember { mutableStateOf<Char?>(null) }
+    var lastTickAt by remember { mutableStateOf(0L) }
+
+    val indicatorAlpha by animateFloatAsState(
+        targetValue = if (showIndicator) 1f else 0f,
+        animationSpec = tween(160),
+        label = "letterIndicator"
+    )
+    // 空闲 5 秒后「慢慢」淡到半透明，不是一下子消失；一碰手指立刻回到不透明
+    val railAlpha by animateFloatAsState(
+        targetValue = if (idleDimmed) 0.38f else 1f,
+        animationSpec = tween(1000),
+        label = "railIdle"
+    )
+
+    // 一次交互管两段时间：600ms 收起指示器，5s（从最后一次操作算起）整条淡下去。
+    // interactionTick 初始为 0 也会跑，所以刚进页面不动手，5 秒后同样会淡。
+    LaunchedEffect(interactionTick) {
+        kotlinx.coroutines.delay(600)
+        showIndicator = false
+        kotlinx.coroutines.delay(4_400)
+        idleDimmed = true
+    }
+
+    // 列表自己滚动时反查当前字母。重组范围只有这条 28dp 的轨道 ——
+    // 和滑块一样用 lambda 闭包读状态，不波及列表本身。
+    val active: Char? by remember(sections) {
+        derivedStateOf { sections.letterOfItem.getOrNull(firstIndex()) }
+    }
+
+    fun seekAt(y: Float) {
+        if (trackPx <= 1) return
+        val slot = (y / trackPx * RAIL_LETTERS.size).toInt()
+            .coerceIn(0, RAIL_LETTERS.lastIndex)
+        val ch = RAIL_LETTERS[slot]
+        val target = sections.nearest(ch) ?: return
+        onSeek(target)
+        pointerY = y
+        pickedSlot = slot
+        picked = ch
+        showIndicator = true
+        idleDimmed = false
+        interactionTick++
+        if (ch != lastPicked) {
+            lastPicked = ch
+            if (hapticEnabled) {
+                // 快速划过好几个字母时别把马达震成一片嗡嗡声：最短间隔 35ms
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastTickAt >= 35L) {
+                    lastTickAt = now
+                    hapticTick(context)
+                }
+            }
+        }
+    }
+
+    // ⚠️ 外层不能 clip：指示器要向左溢出来盖在列表上，父级一裁就没了。
+    // 圆角底只画在内层那个 Box 上；整条的空闲半透明加在外层，一处生效。
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .width(28.dp)
+            .graphicsLayer { alpha = railAlpha }
+            .onSizeChanged { trackPx = it.height.coerceAtLeast(1) }
+            .pointerInput(sections, trackPx) {
+                detectVerticalDragGestures(
+                    onDragStart = { o ->
+                        pressed = true
+                        lastPicked = null
+                        seekAt(o.y)
+                    },
+                    onDragEnd = { pressed = false },
+                    onDragCancel = { pressed = false }
+                ) { change, _ -> seekAt(change.position.y) }
+            }
+            .pointerInput(sections, trackPx) {
+                detectTapGestures { o -> seekAt(o.y) }
+            }
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(14.dp))
+                .background(
+                    if (pressed) skin.accent.copy(alpha = 0.12f)
+                    else skin.surface3.copy(alpha = 0.30f)
+                )
+        ) {
+            // 跟随手指的高亮格：滑动时能看到「当前在哪一格」贴着手指走
+            if (indicatorAlpha > 0f) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .fillMaxHeight(1f / RAIL_LETTERS.size)
+                        .width(28.dp)
+                        .offset { IntOffset(0, pickedSlot * trackPx / RAIL_LETTERS.size) }
+                        .graphicsLayer { alpha = indicatorAlpha * 0.85f }
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(skin.accent.copy(alpha = 0.35f))
+                )
+            }
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                RAIL_LETTERS.forEach { ch ->
+                    val has = sections.firstIndex.containsKey(ch)
+                    val lit = ch == active || (showIndicator && ch == picked)
+                    Box(
+                        Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = ch.toString(),
+                            fontSize = 10.sp,
+                            fontWeight = if (lit) FontWeight.SemiBold else FontWeight.Normal,
+                            color = when {
+                                lit -> skin.accent
+                                has -> skin.text.copy(alpha = 0.72f)
+                                else -> skin.text.copy(alpha = 0.25f)
+                            },
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+
+        // 跟手的当前字母指示器：垂直位置直接取手指 y，不再是钉在轨道中间的空圆块。
+        // 放在外层（未被 clip），所以能完整浮到轨道左侧的列表上方。
+        if (indicatorAlpha > 0f) {
+            val ch = picked
+            if (ch != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .offset {
+                            IntOffset(
+                                x = (-72).dp.roundToPx(),
+                                y = (pointerY - 30.dp.toPx()).roundToInt()
+                            )
+                        }
+                        .size(60.dp)
+                        .graphicsLayer { alpha = indicatorAlpha }
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(skin.accent.copy(alpha = 0.95f))
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = ch.toString(),
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = skin.onAccent,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "${sections.counts[ch] ?: 0} 首",
+                            fontSize = 9.sp,
+                            color = skin.onAccent.copy(alpha = 0.85f),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

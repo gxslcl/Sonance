@@ -72,6 +72,7 @@ object SettingsBaseline {
         Spec("list_row_style", Type.INT),
         Spec("list_cover_scale", Type.INT),
         Spec("scroll_haptic_enabled", Type.BOOLEAN),
+        Spec("right_rail_letters", Type.BOOLEAN),
 
         // ---- 播放与音效 ----
         Spec("play_mode", Type.STRING),
@@ -88,6 +89,9 @@ object SettingsBaseline {
         Spec("eq_enabled", Type.BOOLEAN),
         Spec("eq_preset", Type.STRING),
         Spec("eq_custom_bands", Type.STRING),
+        Spec("sound_fx_enabled", Type.BOOLEAN),
+        Spec("sound_preset_id", Type.STRING),
+        Spec("sound_fx_params", Type.STRING),
 
         // ---- 歌词 ----
         Spec("lyrics_t2s", Type.BOOLEAN),
@@ -97,6 +101,7 @@ object SettingsBaseline {
         Spec("lyrics_playbar", Type.BOOLEAN),
         Spec("lyrics_playbar_style", Type.STRING),
         Spec("lyrics_hide_status_bar", Type.BOOLEAN),
+        Spec("visualizer_hide_status_bar", Type.BOOLEAN),
         Spec("lock_screen_lyrics", Type.BOOLEAN),
 
         // ---- 封面与背景（玻璃）----

@@ -6,8 +6,8 @@ import org.junit.Test
 
 class LyricStageGeometryTest {
     @Test
-    fun `four styles round trip and removed disc falls back to classic`() {
-        assertEquals(4, LyricStyle.entries.size)
+    fun `five styles round trip and removed disc falls back to classic`() {
+        assertEquals(5, LyricStyle.entries.size)
         LyricStyle.entries.forEach { assertEquals(it, LyricStyle.fromId(it.id)) }
         listOf(null, "", "tilted", "unknown").forEach {
             assertEquals(LyricStyle.CLASSIC, LyricStyle.fromId(it))
@@ -51,7 +51,7 @@ class LyricStageGeometryTest {
                 assertTrue(p.scale > 0f && p.scale.isFinite())
                 assertTrue(p.x.isFinite() && p.y.isFinite())
                 assertTrue(p.blur >= 0f && p.blur.isFinite())
-                if (kotlin.math.abs(diff) >= 4f && style != LyricStyle.CLASSIC) {
+                if (kotlin.math.abs(diff) >= 4f && style != LyricStyle.CLASSIC && style != LyricStyle.VERTICAL) {
                     assertEquals(0f, p.opacity, 0f)
                 }
             }
@@ -84,6 +84,51 @@ class LyricStageGeometryTest {
         assertEquals(centers.last(), lyricStageAnchor(centers, 100f), 0f)
         assertEquals(0f, lyricStageAnchor(emptyList(), 0f), 0f)
         assertTrue(lyricStageCenters(emptyList(), 76f, 18f).isEmpty())
+    }
+
+    @Test
+    fun `center lookup is the exact inverse of the anchor`() {
+        // 行高不等（长句折行 + 带翻译）才最能暴露"跟手忽快忽慢"的问题
+        val centers = lyricStageCenters(listOf(40f, 150f, 280f, 60f, 96f), 76f, 18f)
+        var step = 0
+        while (step <= 400) {
+            val index = step / 100f
+            val y = lyricStageAnchor(centers, index)
+            if (index in 0f..centers.lastIndex.toFloat()) {
+                assertEquals("行号 $index 往返不一致", index, lyricIndexAtCenter(centers, y), 0.001f)
+            }
+            step++
+        }
+    }
+
+    @Test
+    fun `center lookup clamps to the first and last line`() {
+        val centers = lyricStageCenters(listOf(40f, 80f, 60f), 76f, 18f)
+        assertEquals(0f, lyricIndexAtCenter(centers, -1000f), 0f)
+        assertEquals(0f, lyricIndexAtCenter(centers, centers.first()), 0f)
+        assertEquals(2f, lyricIndexAtCenter(centers, centers.last() + 1000f), 0f)
+        assertEquals(2f, lyricIndexAtCenter(centers, centers.last()), 0f)
+    }
+
+    @Test
+    fun `center lookup is monotonic for uneven rows`() {
+        val centers = lyricStageCenters(listOf(40f, 150f, 280f, 60f), 76f, 18f)
+        var previous = -1f
+        var y = -50f
+        while (y <= centers.last() + 50f) {
+            val index = lyricIndexAtCenter(centers, y)
+            assertTrue("位置 $y 处行号回退了（$previous → $index）", index >= previous)
+            assertTrue(index in 0f..centers.lastIndex.toFloat())
+            previous = index
+            y += 7f
+        }
+    }
+
+    @Test
+    fun `center lookup handles empty and single row tables`() {
+        assertEquals(0f, lyricIndexAtCenter(emptyList(), 0f), 0f)
+        assertEquals(0f, lyricIndexAtCenter(emptyList(), 500f), 0f)
+        assertEquals(0f, lyricIndexAtCenter(listOf(120f), 500f), 0f)
     }
 
     @Test

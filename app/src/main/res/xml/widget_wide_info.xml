@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  信息宽条 · 4x1
+  信息宽卡 · 5x2
   minWidth/minHeight 是老系统（API < 31）唯一的尺寸声明方式，按 70dp/格 换算；
   targetCellWidth/Height 是 Android 12+ 的精确格数，新系统优先用它。
 -->
@@ -8,13 +8,13 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:description="@string/widget_desc_wide"
     android:initialLayout="@layout/widget_wide"
-    android:minHeight="70dp"
+    android:minHeight="140dp"
     android:minWidth="320dp"
     android:previewImage="@mipmap/ic_launcher"
     android:previewLayout="@layout/widget_wide"
     android:resizeMode="horizontal|vertical"
-    android:targetCellHeight="1"
-    android:targetCellWidth="4"
+    android:targetCellHeight="2"
+    android:targetCellWidth="5"
     android:updatePeriodMillis="0"
     android:widgetCategory="home_screen"
     tools:targetApi="31" />

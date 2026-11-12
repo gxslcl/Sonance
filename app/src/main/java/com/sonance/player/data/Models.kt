@@ -131,6 +131,7 @@ enum class LyricAdaptMode(val id: String, val label: String, val hint: String) {
  */
 enum class LyricStyle(val id: String, val label: String) {
     CLASSIC("classic", "经典"),
+    VERTICAL("vertical", "竖屏歌词"),
     FLUID("fluid", "流体声波景深"),
     VINYL("vinyl", "黑胶环形声轨"),
     SPATIAL("spatial", "3D 双向深空星廊");

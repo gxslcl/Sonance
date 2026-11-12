@@ -1,62 +1,245 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  样式 1 · 紧凑横条（2x1）
-  最省空间的一套：只有封面、歌名/歌手和一个播放键。适合放在桌面第一屏。
+  样式 1 · 横向控制条 5x1（酷狗概念版复刻）
+
+  左侧：发光彩胶唱片；
+  右侧：上下双层结构 ——
+    上层：歌名-歌手（或全宽完整歌词，最多 2 行）+ 右上角红心收藏键；
+    下层：5 枚纯白播控键均匀铺开（播放模式、上一首、播放/暂停、下一首、歌词开关）。
+  歌名/歌词不再和 4 个按钮挤在同一行，彻底解决「只能看到几个字」的问题。
 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/widget_bg"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:padding="10dp">
+    android:background="@android:color/transparent">
 
     <ImageView
-        android:id="@+id/widget_cover"
-        android:layout_width="46dp"
-        android:layout_height="46dp"
-        android:contentDescription="@string/widget_cover_desc"
-        android:scaleType="fitCenter"
-        android:src="@drawable/widget_placeholder" />
+        android:id="@+id/widget_bg_img"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:scaleType="fitXY"
+        android:src="@drawable/widget_bg" />
 
     <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
-        android:layout_weight="1"
-        android:orientation="vertical">
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="6dp">
 
-        <TextView
-            android:id="@+id/widget_title"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="@string/widget_idle_title"
-            android:textColor="@color/widget_text"
-            android:textSize="14sp"
-            android:textStyle="bold" />
+        <ImageView
+            android:id="@+id/widget_cover"
+            android:layout_width="54dp"
+            android:layout_height="54dp"
+            android:contentDescription="@string/widget_cover_desc"
+            android:scaleType="fitCenter"
+            android:src="@drawable/widget_placeholder" />
 
-        <TextView
-            android:id="@+id/widget_artist"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="1dp"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="@string/widget_idle_subtitle"
-            android:textColor="@color/widget_text_dim"
-            android:textSize="11sp" />
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:orientation="vertical">
+
+            <!-- 上层：全宽歌名/歌词 + 右上角收藏心形 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1">
+
+                    <LinearLayout
+                        android:id="@+id/widget_info_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/widget_title"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="end"
+                            android:fontFamily="sans-serif-medium"
+                            android:includeFontPadding="false"
+                            android:maxLines="1"
+                            android:shadowColor="#26000000"
+                            android:shadowDy="1"
+                            android:shadowRadius="2"
+                            android:text="@string/widget_idle_title"
+                            android:textColor="#FFFFFFFF"
+                            android:textSize="13.5sp" />
+
+                        <TextView
+                            android:id="@+id/widget_artist"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/widget_lyric_group"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/widget_lyric_prev"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/widget_lyric_cur"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="end"
+                            android:fontFamily="sans-serif-medium"
+                            android:includeFontPadding="false"
+                            android:maxLines="1"
+                            android:shadowColor="#26000000"
+                            android:shadowDy="1"
+                            android:shadowRadius="2"
+                            android:textColor="#FFFFFFFF"
+                            android:textSize="13.5sp" />
+
+                        <TextView
+                            android:id="@+id/widget_lyric_next"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </FrameLayout>
+
+                <ImageView
+                    android:id="@+id/widget_fav"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_fav_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_heart_outline" />
+            </LinearLayout>
+
+            <!-- 下层：5 个控制图标均匀分布 -->
+            <LinearLayout
+                android:id="@+id/widget_controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/widget_mode"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_mode_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_mode_shuffle" />
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageView
+                    android:id="@+id/widget_prev"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_prev_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_prev" />
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageView
+                    android:id="@+id/widget_play"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_play_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_play" />
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageView
+                    android:id="@+id/widget_next"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_next_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_next" />
+
+                <FrameLayout
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageView
+                    android:id="@+id/widget_lyric_toggle"
+                    android:layout_width="23dp"
+                    android:layout_height="23dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_lyric_desc"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_lyric" />
+            </LinearLayout>
+        </LinearLayout>
     </LinearLayout>
 
-    <ImageView
-        android:id="@+id/widget_play"
-        android:layout_width="38dp"
-        android:layout_height="38dp"
-        android:layout_marginStart="6dp"
-        android:background="@drawable/widget_btn_accent"
-        android:contentDescription="@string/widget_play_desc"
-        android:padding="9dp"
-        android:src="@drawable/widget_ic_play" />
-</LinearLayout>
+    <!-- 本样式不放品牌行和进度条，但 id 必须存在（渲染代码统一寻址） -->
+    <TextView
+        android:id="@+id/widget_brand"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/widget_progress_row"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/widget_time_cur"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <ImageView
+            android:id="@+id/widget_progress"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:importantForAccessibility="no" />
+
+        <TextView
+            android:id="@+id/widget_time_total"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+</FrameLayout>
