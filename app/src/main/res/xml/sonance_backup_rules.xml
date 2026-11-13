@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下的备份规则（对应 manifest 的 fullBackupContent）。
+
+  唯一要排除的是网易云账号凭证：里面存的是加密后的 Cookie，但 MUSIC_U 等同账号密码，
+  一旦被云备份带走、再恢复到另一台设备上，等于把登录态泄露到备份服务里。
+  其余偏好（皮肤、设置、最近播放）本来就是用户希望跟着备份走的，不排除。
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="sonance_netease_account.xml" />
+</full-backup-content>

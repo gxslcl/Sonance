@@ -1,5 +1,6 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.Animatable
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
@@ -65,6 +66,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -87,8 +90,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.foundation.Canvas
 import android.graphics.Bitmap
+import android.util.LruCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
@@ -135,8 +140,11 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.solidSurface
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
@@ -265,6 +273,13 @@ fun FullPlayer(
     vinylMode: Boolean = false,
     /** 双击封面那个面板切黑碟模式 */
     onVinylModeChange: (Boolean) -> Unit = {},
+    /**
+     * 当前这首在线歌**实际**拿到的音质（如 `320k` / `无损`）。本地歌为 null。
+     *
+     * 显示在歌手那一行的专辑后面，不占新的行 —— 信息区是固定三行高的，
+     * 多一行会让相邻页高度不一致，滑动时封面会"跳一下"。
+     */
+    streamQuality: String? = null,
     /** 被沉浸式黑胶完全遮住时暂停仅供本页面使用的动画与预取。 */
     coveredByVinyl: Boolean = false,
     modifier: Modifier = Modifier
@@ -338,40 +353,85 @@ fun FullPlayer(
      * SWIPE 下是 `[上一页, 当前页, 下一页]` 三份（按滚动位置取其中相邻的两份混合）；
      * FADE 下只有当前这一首。
      */
-    val glowFrames: List<GlowFrame> = if (isSwipeGlow) {
-        // currentPage 只在翻页那一刻变（一次滑动最多变一次），不会每帧重组
-        val page = pagerState.currentPage
-        val prev = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page - 1), skin), glowMode, glowBakeStrength)
-        val cur = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page), skin), glowMode, glowBakeStrength)
-        val next = rememberGlowFrame(rememberGlowColors(queue.getOrNull(page + 1), skin), glowMode, glowBakeStrength)
-        remember(prev, cur, next) { listOf(prev, cur, next) }
-    } else {
-        listOf(
-            rememberGlowFrame(
-                colors = rememberFadeGlowColors(queue, state.queueIndex, skin, glowFadeMs),
-                mode = glowMode,
-                strength = glowBakeStrength
-            )
-        )
+    var userDraggedPager by remember { mutableStateOf(false) }
+    var programmaticScroll by remember { mutableStateOf(false) }
+
+    val latestState by rememberUpdatedState(state)
+    val latestQueue by rememberUpdatedState(queue)
+    val latestCoveredByVinyl by rememberUpdatedState(coveredByVinyl)
+
+    val curGlowColors = rememberGlowColors(queue.getOrNull(state.queueIndex), skin)
+    val smoothGlow = remember(skin.id) {
+        val initial = curGlowColors.ifEmpty {
+            resolveGlowColors(queue.getOrNull(pagerState.currentPage), skin)
+        }
+        SmoothGlowController(initial, skin.bg)
+    }
+    val useSmoothGlow = !isSwipeGlow || smoothGlow.fadeActive
+
+    LaunchedEffect(curGlowColors, useSmoothGlow, state.queueIndex, glowFadeMs, skin.id) {
+        if (!useSmoothGlow || curGlowColors.isEmpty()) return@LaunchedEffect
+        snapshotFlow { pagerState.currentPage == latestState.queueIndex }.first { it }
+        if (!smoothGlow.hasColors) {
+            smoothGlow.snapTo(curGlowColors, skin.bg)
+        } else {
+            val c0 = curGlowColors.getOrElse(0) { skin.bg }
+            val c1 = curGlowColors.getOrElse(1) { c0 }
+            val c2 = curGlowColors.getOrElse(2) { c1 }
+            val spec: AnimationSpec<Color> = tween(glowFadeMs.coerceIn(GLOW_FADE_RANGE))
+            coroutineScope {
+                launch { smoothGlow.anim0.animateTo(c0, spec) }
+                launch { smoothGlow.anim1.animateTo(c1, spec) }
+                launch { smoothGlow.anim2.animateTo(c2, spec) }
+            }
+        }
+        smoothGlow.fadeActive = false
     }
 
-    val buttonPalette = rememberPlayerControlPalette(state, queue.getOrNull(state.queueIndex))
-    // 顶栏律动指示器的混色放在叶子组件 [HeaderPlayingIndicator] 里算：
-    // 跟手模式要读 currentPageOffsetFraction（滑动中每帧都变），若在这里读，
-    // 整个 FullPlayer 会跟着每帧重组。移进去之后每帧只重组那一个小组件。
+    val smoothGlowColors = if (useSmoothGlow && smoothGlow.hasColors) {
+        remember(smoothGlow.anim0.value, smoothGlow.anim1.value, smoothGlow.anim2.value) {
+            listOf(smoothGlow.anim0.value, smoothGlow.anim1.value, smoothGlow.anim2.value)
+        }
+    } else {
+        emptyList()
+    }
+    val smoothGlowFrame: GlowFrame = rememberGlowFrame(
+        colors = smoothGlowColors,
+        mode = glowMode,
+        strength = glowBakeStrength
+    )
 
-    // 预取相邻两首的色卡，让换歌时的颜色过渡"一上来就到位"。
+    val buttonPaletteProvider = rememberPlayerControlPaletteProvider(state, queue.getOrNull(state.queueIndex))
+    // 顶栏律动指示器的混色放在叶子组件 [HeaderPlayingIndicator] 的 Canvas 绘制阶段里算：
+    // 滑动中每帧只触发该小 Canvas 重绘，不触发任何组合与测量，FullPlayer 零重组。
+
+    // 预取相邻两首的色卡并提前烘入 LRU 位图缓存，让滑动跨过中点时零位图分配、零卡顿。
     // 只取前后各一首 —— 队列可能有几千首，不能遍历。
-    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl) {
+    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl, glowMode, glowBakeStrength, skin.id) {
         if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
         val idx = state.queueIndex
-        listOfNotNull(queue.getOrNull(idx + 1), queue.getOrNull(idx - 1)).forEach { s ->
+        val candidates = listOfNotNull(
+            queue.getOrNull(idx + 1),
+            queue.getOrNull(idx - 1),
+            queue.getOrNull(idx)
+        )
+        candidates.forEach { s ->
             ArtworkLoader.prefetchTint(
                 context = context,
                 albumId = s.albumId,
                 sourceUri = s.uri,
                 coverKey = OnlineCover.keyOf(s.title, s.artist)
             )
+        }
+        snapshotFlow {
+            candidates.map { s -> resolveGlowColors(s, skin) }
+        }.first { colorLists ->
+            colorLists.forEach { colors ->
+                if (colors.isNotEmpty()) {
+                    cachedGlowFrame(colors, glowMode, glowBakeStrength)
+                }
+            }
+            colorLists.all { it.isNotEmpty() }
         }
     }
 
@@ -380,10 +440,6 @@ fun FullPlayer(
     // 到边自然绕回另一端。起始页取 3 的倍数，保证初始停在封面层。
     val layerPager = rememberPagerState(initialPage = LAYER_RING_START) { Int.MAX_VALUE }
     val layer = PlayerLayer.entries[layerPager.currentPage % PlayerLayer.entries.size]
-
-    // 竖屏歌词要把「横滑翻列」留给自己，手指按在歌词舞台上时临时锁住轮播。
-    // 不锁的话同一条水平手势会被两层同时解释：想翻歌词，结果切到了律动柱/封面。
-    var lyricDragLocked by remember { mutableStateOf(false) }
 
     // 状态栏隐藏**按层各自生效**：歌词层只认歌词开关、律动柱层只认律动柱开关，
     // 封面主界面两个开关都不认（只保留手机横屏那条自动沉浸）。
@@ -423,54 +479,76 @@ fun FullPlayer(
         goToLayer(PlayerLayer.COVER)
     }
 
-    // 分页器 → 播放器：只在用户主动划动页面「落定」到另一首歌后切歌。
-    // 用 rememberUpdatedState 读取最新 queueIndex / queue，避免快照流捕获旧值，
-    // 并校验 settledPage 对应的歌曲确实不是当前正在播的那首 —— 防止切换随机/列表循环
-    // 重排队列（同一首歌换了下标）时，分页器还没跳过去就反向误触发 onPlayAt。
-    val latestState by rememberUpdatedState(state)
-    val latestQueue by rememberUpdatedState(queue)
-    val latestCoveredByVinyl by rememberUpdatedState(coveredByVinyl)
-    var userDraggedPager by remember { mutableStateOf(false) }
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
-            if (scrolling) userDraggedPager = true
-        }
-    }
+    var pendingSwipeTarget by remember { mutableIntStateOf(-1) }
+    var pendingSwipeUntilMs by remember { mutableLongStateOf(0L) }
+
+    // 分页器 → 播放器：用户主动划动并在目标页静止后切歌。
+    // 1) userDraggedPager 只能在 `!scrolling` 时清零：若在 `scrolling == true` 同一轮提前清掉，
+    //    连续快速甩屏时 snapshotFlow 状态对未变化就会丢失拖拽标记，导致页停了却不切歌；
+    // 2) 把 programmaticScroll 放进 snapshotFlow 依赖，避免刚完成程序跳页立刻拖走时漏判；
+    // 3) 若仍在同队列内切页且确实由用户拖过，则允许按索引对齐（包括队列中存在同曲目副本）。
     LaunchedEffect(pagerState, queue.size) {
-        if (queue.isEmpty()) return@LaunchedEffect
-        snapshotFlow { pagerState.settledPage }.collect { page ->
-            val pageSongId = latestQueue.getOrNull(page)?.id
-            if (userDraggedPager &&
-                !latestCoveredByVinyl &&
-                page != latestState.queueIndex &&
-                pageSongId != null &&
-                pageSongId != latestState.mediaId
-            ) {
-                userDraggedPager = false
-                onPlayAt(page)
-            } else if (!pagerState.isScrollInProgress) {
+        snapshotFlow {
+            Triple(pagerState.isScrollInProgress, pagerState.settledPage, programmaticScroll)
+        }.collect { (scrolling, settledPage, progScroll) ->
+            if (scrolling && !progScroll) {
+                userDraggedPager = true
+                smoothGlow.fadeActive = false
+            }
+            if (!scrolling) {
+                if (queue.isNotEmpty() &&
+                    userDraggedPager &&
+                    !latestCoveredByVinyl &&
+                    settledPage != latestState.queueIndex
+                ) {
+                    val pageSong = latestQueue.getOrNull(settledPage)
+                    if (pageSong != null) {
+                        pendingSwipeTarget = settledPage
+                        pendingSwipeUntilMs = android.os.SystemClock.uptimeMillis() + 600L
+                        onPlayAt(settledPage)
+                    }
+                }
                 userDraggedPager = false
             }
         }
     }
 
     // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列 / 随机重排队列时把页面跟过去。
-    LaunchedEffect(state.queueIndex, state.mediaId, queue, coveredByVinyl) {
+    // 若刚刚由滑屏触发了 pendingSwipeTarget，则 600ms 窗口内忽略尚未追上的中间态 queueIndex，
+    // 防止快速连滑时旧 IPC 结果把分页器倒拽回上一首；窗口期结束后若仍不一致则自愈对齐真实曲目。
+    LaunchedEffect(state.queueIndex, state.mediaId, queue, coveredByVinyl, pendingSwipeTarget) {
         if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
         val target = state.queueIndex.coerceIn(0, queue.lastIndex)
-        if (pagerState.settledPage != target && !pagerState.isScrollInProgress) {
+        if (pendingSwipeTarget >= 0) {
+            if (target == pendingSwipeTarget) {
+                pendingSwipeTarget = -1
+                return@LaunchedEffect
+            }
+            val remaining = pendingSwipeUntilMs - android.os.SystemClock.uptimeMillis()
+            if (remaining > 0L) {
+                delay(remaining)
+            }
+            pendingSwipeTarget = -1
+        }
+        val latestIdx = latestState.queueIndex
+        if (latestQueue.isEmpty() || latestIdx !in latestQueue.indices) return@LaunchedEffect
+        if (pagerState.settledPage != latestIdx && (!pagerState.isScrollInProgress || !userDraggedPager)) {
             userDraggedPager = false
-            //
-            // 开/关随机会**重排队列**，同一首歌因此换了个下标（例如从第 12 页挪到第 0 页）。
-            // 这时候必须直接跳过去，不能 animate —— 一路滚过去会把中间十几页全扫一遍，
-            // 就是用户说的"切随机时闪一下"。
-            //
-            // 直接跳之所以看不见：目标页摆的还是**同一首歌**，封面、标题、进度全一样，
-            // 分页器瞬间换页在屏幕上看不出任何变化（变化的只有视口外的相邻页）。
-            if (queue.getOrNull(target)?.id == state.mediaId) {
-                pagerState.scrollToPage(target)
-            } else {
-                pagerState.animateScrollToPage(target)
+            // 跟手模式下发生直接切页（无滑动动画）时，先锁定当前正在显示的颜色作为起点，
+            // 再切到目标页并平滑渐变到新歌颜色，避免瞬切色卡闪烁。
+            if (isSwipeGlow && !smoothGlow.fadeActive) {
+                val fromColors = resolveGlowColors(latestQueue.getOrNull(pagerState.currentPage), skin)
+                    .ifEmpty { resolveGlowColors(latestQueue.getOrNull(latestIdx), skin) }
+                if (fromColors.isNotEmpty()) {
+                    smoothGlow.snapTo(fromColors, skin.bg)
+                }
+            }
+            smoothGlow.fadeActive = true
+            programmaticScroll = true
+            try {
+                pagerState.scrollToPage(latestIdx)
+            } finally {
+                programmaticScroll = false
             }
         }
     }
@@ -486,64 +564,67 @@ fun FullPlayer(
     // 「页面可见」= 停在封面层。切到歌词 / 律动柱层后不再推进；
     // 暂停后仍然继续跑 600ms 把包络收回去，收干净立即 break，不留空转。
     val breathActive = state.isPlaybackActive && layer == PlayerLayer.COVER && !coveredByVinyl
-    val coverFrozen = coveredByVinyl || coverTouched || pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
-        state.isBuffering || (queue.isNotEmpty() && pagerState.settledPage != state.queueIndex)
 
-    LaunchedEffect(breathActive, coverFrozen, layer, state.mediaId) {
-        if (coverFrozen || layer != PlayerLayer.COVER) {
-            coverMotion.advance(0f, state.isPlaybackActive, frozen = true, trackId = state.mediaId)
-            return@LaunchedEffect
-        }
-        var last = withFrameNanos { it }
-        // 绘制发布节流：高刷屏（120Hz）下每两帧发布一次，稳定在 ~60Hz，
-        // 呼吸是秒级的慢动作，没必要追 120Hz 的功耗
-        var sincePublish = 0f
-        while (true) {
-            val now = withFrameNanos { it }
-            val dt = ((now - last) / 1_000_000f).coerceIn(0f, 50f)
-            last = now
-            coverScaleState.floatValue = coverMotion.advance(
-                dt, state.isPlaybackActive, frozen = false, trackId = state.mediaId,
-                audioEnergy = if (state.isPlaying && PcmBus.ready) rmsToEnergy(PcmBus.rms) else 0f
-            )
-            val e = breathEngine
-
-            // 统一包络：450ms 渐入 / 600ms 归零（线性，乘以周期项后已经足够柔和）
-            if (breathActive) {
-                e.envelope = (e.envelope + dt / BREATH_IN_MS).coerceAtMost(1f)
-                e.phaseMs += dt
-            } else {
-                e.envelope = (e.envelope - dt / BREATH_OUT_MS).coerceAtLeast(0f)
-                if (e.envelope > 0f) e.phaseMs += dt
+    LaunchedEffect(breathActive, layer, state.mediaId, state.isPlaybackActive) {
+        snapshotFlow {
+            coveredByVinyl || coverTouched || pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
+                latestState.isBuffering || (latestQueue.isNotEmpty() && pagerState.settledPage != latestState.queueIndex)
+        }.collectLatest { frozen ->
+            if (frozen || layer != PlayerLayer.COVER) {
+                coverMotion.advance(0f, latestState.isPlaybackActive, frozen = true, trackId = latestState.mediaId)
+                return@collectLatest
             }
-
-            // 音频能量：复用 PcmTap 在同一轮采样里算出的 RMS（无 FFT、无二次遍历）
-            val target = if (breathActive && PcmBus.ready) rmsToEnergy(PcmBus.rms) else 0f
-            val k = (if (target > e.energy) {
-                dt / BREATH_AUDIO_ATTACK_MS
-            } else {
-                dt / BREATH_AUDIO_RELEASE_MS
-            }).coerceIn(0f, 1f)
-            e.energy += (target - e.energy) * k
-
-            if (e.envelope <= 0f) {
-                // 归零：缩放精确 1.000、晕染精确 1.00，不留任何残余
-                e.envelope = 0f
-                e.energy = 0f
-                glowBreath.floatValue = 1f
-                if (!breathActive && coverMotion.settled) break   // 暂停缩放和光晕都收干净后停帧
-            } else {
-                val env = e.envelope
-                sincePublish += dt
-                if (sincePublish < 15f) continue
-                sincePublish = 0f
-                // 0 → 1 → 0 的余弦呼吸：起点就在基线，不会有「先弹一下再开始」的观感
-                val glowPeriodic = 0.5f - 0.5f * cos(
-                    2f * PI.toFloat() * (e.phaseMs - BREATH_GLOW_OFFSET_MS) / BREATH_GLOW_PERIOD_MS
+            var last = withFrameNanos { it }
+            // 绘制发布节流：高刷屏（120Hz）下每两帧发布一次，稳定在 ~60Hz，
+            // 呼吸是秒级的慢动作，没必要追 120Hz 的功耗
+            var sincePublish = 0f
+            while (true) {
+                val now = withFrameNanos { it }
+                val dt = ((now - last) / 1_000_000f).coerceIn(0f, 50f)
+                last = now
+                coverScaleState.floatValue = coverMotion.advance(
+                    dt, latestState.isPlaybackActive, frozen = false, trackId = latestState.mediaId,
+                    audioEnergy = if (latestState.isPlaying && PcmBus.ready) rmsToEnergy(PcmBus.rms) else 0f
                 )
-                glowBreath.floatValue =
-                    1f + (BREATH_GLOW_MAX - 1f) * env * glowPeriodic +
-                        BREATH_AUDIO_GLOW * env * e.energy
+                val e = breathEngine
+
+                // 统一包络：450ms 渐入 / 600ms 归零（线性，乘以周期项后已经足够柔和）
+                if (breathActive) {
+                    e.envelope = (e.envelope + dt / BREATH_IN_MS).coerceAtMost(1f)
+                    e.phaseMs += dt
+                } else {
+                    e.envelope = (e.envelope - dt / BREATH_OUT_MS).coerceAtLeast(0f)
+                    if (e.envelope > 0f) e.phaseMs += dt
+                }
+
+                // 音频能量：复用 PcmTap 在同一轮采样里算出的 RMS（无 FFT、无二次遍历）
+                val target = if (breathActive && PcmBus.ready) rmsToEnergy(PcmBus.rms) else 0f
+                val k = (if (target > e.energy) {
+                    dt / BREATH_AUDIO_ATTACK_MS
+                } else {
+                    dt / BREATH_AUDIO_RELEASE_MS
+                }).coerceIn(0f, 1f)
+                e.energy += (target - e.energy) * k
+
+                if (e.envelope <= 0f) {
+                    // 归零：缩放精确 1.000、晕染精确 1.00，不留任何残余
+                    e.envelope = 0f
+                    e.energy = 0f
+                    glowBreath.floatValue = 1f
+                    if (!breathActive && coverMotion.settled) break   // 暂停缩放和光晕都收干净后停帧
+                } else {
+                    val env = e.envelope
+                    sincePublish += dt
+                    if (sincePublish < 15f) continue
+                    sincePublish = 0f
+                    // 0 → 1 → 0 的余弦呼吸：起点就在基线，不会有「先弹一下再开始」的观感
+                    val glowPeriodic = 0.5f - 0.5f * cos(
+                        2f * PI.toFloat() * (e.phaseMs - BREATH_GLOW_OFFSET_MS) / BREATH_GLOW_PERIOD_MS
+                    )
+                    glowBreath.floatValue =
+                        1f + (BREATH_GLOW_MAX - 1f) * env * glowPeriodic +
+                            BREATH_AUDIO_GLOW * env * e.energy
+                }
             }
         }
     }
@@ -589,11 +670,10 @@ fun FullPlayer(
                         0f
                     }
 
-                    if (!isSwipeGlow) {
-                        // 渐变模式：只有一层，颜色已经在组合期补间过了
-                        drawGlow(glowFrames[0], cover, glowMode, strengthArg, alpha = alphaScale)
+                    if (useSmoothGlow) {
+                        drawGlow(smoothGlowFrame, cover, glowMode, strengthArg, alpha = alphaScale)
                     } else {
-                        // 跟手模式：按分页器的滚动位置在相邻两页之间混合。
+                        // 跟手模式滑动中：按分页器的滚动位置在相邻两页之间混合。
                         //
                         // pos 是连续的「第几页」（例如 3.4）。基准页必须用 floor 取，
                         // **不能**用 offsetFraction 的符号判方向 —— 那个值在 currentPage
@@ -602,20 +682,33 @@ fun FullPlayer(
                         val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
                         val base = floor(pos).toInt()
                         val t = (pos - base).coerceIn(0f, 1f)
-                        // glowFrames = [currentPage-1, currentPage, currentPage+1]
-                        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
-                        drawGlow(
-                            glowFrames[i], cover, glowMode, strengthArg,
-                            alpha = (1f - t) * alphaScale
+                        val curQueue = latestQueue
+                        val first = cachedGlowFrame(
+                            resolveGlowColors(curQueue.getOrNull(base), skin),
+                            glowMode,
+                            glowBakeStrength
                         )
-                        if (t > 0f) {
-                            // 相邻页色卡还没算出来时 drawGlow 会直接返回，
-                            // 于是画面变成「一层淡到 (1-t)」—— 平滑地淡下去，
-                            // 比"先按住不动、等色卡到了再跳一下"好。预取会把这个窗口压到很小。
-                            drawGlow(
-                                glowFrames[i + 1], cover, glowMode, strengthArg,
-                                alpha = t * alphaScale
+                        val second = if (t > 0f) {
+                            cachedGlowFrame(
+                                resolveGlowColors(curQueue.getOrNull(base + 1), skin),
+                                glowMode,
+                                glowBakeStrength
                             )
+                        } else {
+                            GlowFrame(emptyList(), null)
+                        }
+                        val firstReady = first.colors.isNotEmpty()
+                        val secondReady = second.colors.isNotEmpty()
+                        when {
+                            !firstReady && !secondReady -> Unit
+                            firstReady && !secondReady -> drawGlow(first, cover, glowMode, strengthArg, alpha = alphaScale)
+                            !firstReady && secondReady -> drawGlow(second, cover, glowMode, strengthArg, alpha = alphaScale)
+                            else -> {
+                                drawGlow(first, cover, glowMode, strengthArg, alpha = (1f - t) * alphaScale)
+                                if (t > 0f) {
+                                    drawGlow(second, cover, glowMode, strengthArg, alpha = t * alphaScale)
+                                }
+                            }
                         }
                     }
                 }
@@ -635,8 +728,6 @@ fun FullPlayer(
         HorizontalPager(
             state = layerPager,
             beyondViewportPageCount = 0,
-            // 竖屏歌词手势期间冻结轮播，避免"翻歌词"与"切页"抢同一次横滑
-            userScrollEnabled = !lyricDragLocked,
             modifier = Modifier.fillMaxSize()
         ) { page ->
         // 每层裁到自己的页面矩形。这层裁剪不是保险，是必须的：
@@ -655,55 +746,89 @@ fun FullPlayer(
         // ===== 第 0 层：封面 + 顶栏 =====
         0 -> Column(Modifier.fillMaxSize()) {
 
-            // ===== 顶栏（固定，不随页滚动）=====
+            // ===== 顶栏（方案 A：与下方封面 26dp 齐平 + 对称微磨砂胶囊 + 统一亮度）=====
             //
             // 用 Box 叠一层，而不是把标题塞进 Row 的中间格：
-            // 左侧只有 1 个图标、右侧有 2 个，塞进 Row 的话标题是在**剩余空间**里居中，
-            // 结果明显偏左。这里让标题独立居中于整条栏。
+            // 左侧只有 1 个图标、右侧胶囊有 2 个，塞进 Row 的话指示器会在**剩余空间**里居中，
+            // 结果偏左。这里让律动指示器独立居中于整条栏。
+            val pillBg = skin.text.copy(alpha = 0.08f)
+            val pillBorder = skin.text.copy(alpha = 0.11f)
+            val iconTint = skin.text.copy(alpha = 0.88f)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
                     .height(56.dp)
-                    .padding(horizontal = 8.dp)
+                    .padding(horizontal = 26.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconAction(
-                        icon = SonanceIcons.ChevronDown,
-                        // 在歌词 / 律动柱层上先"退一层"回封面，而不是直接收起整个播放页。
-                        //
-                        // 这两个页面自己的关闭按钮已经去掉了（用户要求精简顶栏），
-                        // 只剩系统返回键的话可发现性太差 —— 用户会以为"进得去出不来"。
-                        // 向下箭头本来就表示"退一层"，语义正好。
-                        contentDescription = if (layer == PlayerLayer.COVER) "收起" else "返回封面",
-                        onClick = {
-                            if (layer == PlayerLayer.COVER) onClose() else goToLayer(PlayerLayer.COVER)
-                        },
-                        iconSize = 22.dp
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(pillBg)
+                            .border(1.dp, pillBorder, CircleShape)
+                            .clickable {
+                                if (layer == PlayerLayer.COVER) onClose() else goToLayer(PlayerLayer.COVER)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = SonanceIcons.ChevronDown,
+                            contentDescription = if (layer == PlayerLayer.COVER) "收起" else "返回封面",
+                            tint = iconTint,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                     Spacer(Modifier.weight(1f))
-                    // 沉浸式黑胶模式入口：压暗半透明，不与标题/内容抢焦点（用户要求）
-                    IconAction(
-                        icon = SonanceIcons.Maximize,
-                        contentDescription = "黑胶模式",
-                        onClick = onOpenVinyl,
-                        iconSize = 20.dp,
-                        tint = skin.textMuted.copy(alpha = 0.65f)
-                    )
-                     // 定时器直接占据原三点菜单的位置；歌词与律动柱仍可左右滑动进入。
-                     IconAction(
-                         icon = SonanceIcons.Timer,
-                         contentDescription = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
-                         onClick = onOpenSleepTimer,
-                         iconSize = 20.dp,
-                         tint = if (sleepTimerActive) skin.accent else skin.textDim
-                     )
-                    // 顶栏这里原来还有一个「播放队列」图标，已去掉（用户要求）——
-                    // 队列入口在下面的控制行上（原来"循环模式"按钮那个位置），
-                    // 同一屏出现两个一模一样的按钮没有意义。
+                    // 右侧合并微磨砂胶囊：黑胶模式（唱片图标）+ 睡眠定时器，统一亮度与字重
+                    Row(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(pillBg)
+                            .border(1.dp, pillBorder, RoundedCornerShape(50))
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 30.dp, height = 28.dp)
+                                .clip(CircleShape)
+                                .clickable(onClick = onOpenVinyl),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.material3.Icon(
+                                imageVector = SonanceIcons.VinylDisc,
+                                contentDescription = "黑胶模式",
+                                tint = iconTint,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .width(1.dp)
+                                .height(13.dp)
+                                .background(skin.text.copy(alpha = 0.14f))
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(width = 30.dp, height = 28.dp)
+                                .clip(CircleShape)
+                                .clickable(onClick = onOpenSleepTimer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.material3.Icon(
+                                imageVector = SonanceIcons.Timer,
+                                contentDescription = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
+                                tint = if (sleepTimerActive) skin.accent else iconTint,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
                 }
 
                 // 标题独立居中于整条栏，不受左右图标数量影响
@@ -712,9 +837,10 @@ fun FullPlayer(
                     if (!coveredByVinyl) {
                         HeaderPlayingIndicator(
                             isPlaying = state.isPlaybackActive,
-                            isSwipeGlow = isSwipeGlow,
+                            isSwipeGlow = !useSmoothGlow,
                             pagerState = pagerState,
-                            glowFrames = glowFrames,
+                            queueProvider = { latestQueue },
+                            smoothGlowColors = smoothGlowColors,
                             skin = skin,
                             glowMode = glowMode,
                             glowStrength = glowStrength
@@ -722,17 +848,12 @@ fun FullPlayer(
                     }
                 }
 
-                // 收起热区：顶栏左侧 2/3 整片都能触发「收起播放页」，
-                // 覆盖左上角箭头与中间的律动指示器；右侧图标（黑胶 / 定时器）所在的
-                // 1/3 不铺热区，保留各自点击。热区高度只等于这条 56dp 顶栏，
-                // 不会拦到下面封面区的上下滑手势。
-                //
-                // 透明层压在 IconAction 之上，点击只会走这一条路径（onClose），
-                // 不与箭头自身的 onClick 叠加，避免收起两次。
+                // 收起热区：顶栏左侧 ~60% 整片都能触发「收起播放页」，
+                // 覆盖左上角箭头与中间的律动指示器；右侧胶囊所在的右侧区域不铺热区，保留各自点击。
                 Box(
                     Modifier
                         .align(Alignment.CenterStart)
-                        .fillMaxWidth(2f / 3f)
+                        .fillMaxWidth(0.60f)
                         .fillMaxHeight()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
@@ -821,7 +942,7 @@ fun FullPlayer(
                         // 暂停/播放缩放与呼吸已合并为三页共享的最终尺寸。
                         // 相邻页也读同一个值 —— 尺寸永远一致，滑动时不会一大一小。
                         coverScale = coverScaleState,
-                        playButtonPalette = buttonPalette,
+                        playButtonPaletteProvider = buttonPaletteProvider,
                         playMode = if (isCurrent) {
                             PlayMode.of(state.shuffle, state.repeat)
                         } else {
@@ -831,9 +952,15 @@ fun FullPlayer(
                         volume = if (isCurrent) state.userVolume else 1f,
                         onToggleFavorite = { onToggleFavorite(song.id) },
                         onCyclePlayMode = onCyclePlayMode,
-                        onPrev = onPrev,
+                        onPrev = {
+                            pendingSwipeTarget = -1
+                            onPrev()
+                        },
                         onPlayPause = onPlayPause,
-                        onNext = onNext,
+                        onNext = {
+                            pendingSwipeTarget = -1
+                            onNext()
+                        },
                         onSeek = onSeek,
                         onVolume = onVolume,
                         onOpenQueue = onOpenQueue,
@@ -843,12 +970,16 @@ fun FullPlayer(
                         playbackSpeed = playbackSpeed,
                         onSetSpeed = onSetSpeed,
                         prefs = prefs,
-                        // 内嵌歌词自动调色的素材：SWIPE 下三帧按页对号入座（[上一页,当前页,下一页]），
-                        // FADE 下只有当前页有；非当前页传 null，歌词维持皮肤配色
-                        glowImage = if (isSwipeGlow) {
-                            glowFrames.getOrNull(page - pagerState.currentPage + 1)?.image
+                        swipePager = pagerState,
+                        swipePage = page,
+                        streamQuality = if (isCurrent) streamQuality else null,
+                        // 内嵌歌词自动调色的素材：仅歌词展开时才读取，避免封面滑动期间触发重组与位图读取。
+                        glowImage = if (!lyricsExpanded) {
+                            null
+                        } else if (!useSmoothGlow) {
+                            cachedGlowFrame(resolveGlowColors(song, skin), glowMode, glowBakeStrength).image
                         } else if (isCurrent) {
-                            glowFrames[0].image
+                            smoothGlowFrame.image
                         } else {
                             null
                         },
@@ -863,17 +994,21 @@ fun FullPlayer(
                         // 它们的封面位置一旦参与上报，晕染就会被拽到屏幕外去 ——
                         // 表现是颜色突然消失、或者闪到别的位置。
                         onCoverBounds = { rect ->
-                            // 三个条件缺一不可：
+                            // 四个条件缺一不可：
                             // - isCurrent：只有当前页的上报算数（相邻页停在屏幕外，
                             //   它们的位置一旦参与上报，晕染会被拽到屏幕外去）；
-                            // - !isScrollInProgress：**滚动过程中不要更新**。
-                            //   那时上报的是"旧页正在滑走的位置"，晕染会跟着往上滑一整屏
-                            //   （≈2780px）再在落定时跳回来 —— 那个回跳比颜色跳变更显眼。
-                            //   而每一页的布局是同一套，静止时的矩形几乎相同
-                            //   （差别只来自歌名 1 行/2 行、有没有专辑名，几十像素量级），
-                            //   保持静止值反而没有跳变。晕染是跨度超过两个屏高的柔和渐变，
-                            //   这点偏差看不出来。
-                            if (isCurrent && !pagerState.isScrollInProgress) {
+                            // - page == currentPage && settledPage == page && !isScrollInProgress：
+                            //   按钮切歌时 state.queueIndex 会先于 scrollToPage 变化一帧，
+                            //   此时新页还停在视口外（被 clipToBounds 裁成 Rect.Zero），
+                            //   绝不能把 0×0 或视口外坐标写进 coverBounds，否则晕染会整屏黑掉几十毫秒；
+                            // - rect.width > 1f && rect.height > 1f：拒绝退化空矩形。
+                            if (isCurrent &&
+                                page == pagerState.currentPage &&
+                                pagerState.settledPage == page &&
+                                !pagerState.isScrollInProgress &&
+                                rect.width > 1f &&
+                                rect.height > 1f
+                            ) {
                                 coverBounds = rect.translate(-rootTopLeft.x, -rootTopLeft.y)
                             }
                         }
@@ -899,7 +1034,6 @@ fun FullPlayer(
                 onOpenPlayer = { goToLayer(PlayerLayer.COVER) },
                 hideStatusBar = lyricsHideStatusBar,
                 onHideStatusBarChange = onLyricsHideStatusBarChange,
-                onLyricDragLockChange = { lyricDragLocked = it },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -960,17 +1094,14 @@ enum class PlayerLayer { COVER, LYRICS, VISUALIZER }
 @Composable
 private fun PlayingStateIndicator(
     isPlaying: Boolean,
-    accent: Color,
-    idle: Color
+    colorProvider: (playingFraction: Float) -> Color
 ) {
-    val renderedColor by animateColorAsState(if (isPlaying) accent else idle,
-        tween(450, easing = LinearEasing), label = "stateEqColor")
     val level = animateFloatAsState(if (isPlaying) 1f else 0f, tween(350), label = "stateEqLevel")
     val transition = rememberInfiniteTransition(label = "stateEq")
     val barWidth = when (com.sonance.player.ui.icon.IconSetState.style) {
-        com.sonance.player.ui.icon.IconSetState.MINIMAL -> 1.4.dp
-        com.sonance.player.ui.icon.IconSetState.SOLID -> 4.dp
-        else -> 3.dp
+        com.sonance.player.ui.icon.IconSetState.MINIMAL -> 1.5.dp
+        com.sonance.player.ui.icon.IconSetState.SOLID -> 3.dp
+        else -> 2.6.dp
     }
     // 三根柱错拍：StartOffset 把相位错开（对应样机 0 / 0.2s / 0.35s 的 delay）
     val bars = listOf(0, 150, 260).map { offset ->
@@ -986,12 +1117,12 @@ private fun PlayingStateIndicator(
         )
     }
 
-    Canvas(Modifier.size(width = 22.dp, height = 12.dp)) {
+    Canvas(Modifier.size(width = 20.dp, height = 13.dp)) {
         val barW = barWidth.toPx()
         val gap = (size.width - barW * 3f) / 2f
         val maxH = size.height
         val minH = size.height * 0.22f
-        val color = renderedColor
+        val color = colorProvider(level.value)
         bars.forEachIndexed { i, wave ->
             val p = if (level.value > 0f) wave.value * level.value else 0f
             val h = minH + (maxH - minH) * p
@@ -1181,6 +1312,52 @@ private fun buildGlowImage(
  * 晕染素材的取色与烘焙
  * ============================================================ */
 
+private data class GlowFrameKey(
+    val c0: Int,
+    val c1: Int,
+    val c2: Int,
+    val count: Int,
+    val mode: GlowMode,
+    val strengthBits: Int
+)
+
+private val glowFrameCache = LruCache<GlowFrameKey, GlowFrame>(24)
+
+/**
+ * 非组合期直接读取色卡（用于绘制阶段与 LRU 预烘焙），读取 [ArtworkLoader.tintOf] 的快照状态
+ * 以便色卡就绪时只触发绘制层失效，不拖拽 FullPlayer 重组。
+ */
+private fun resolveGlowColors(song: Song?, skin: Skin): List<Color> {
+    if (song == null) return emptyList()
+    val coverKey = OnlineCover.keyOf(song.title, song.artist)
+    val tint = ArtworkLoader.tintOf(song.albumId, song.uri, coverKey)
+    ArtworkLoader.artworkGoneVersion
+    return when {
+        tint != null -> listOf(Color(tint.left), Color(tint.center), Color(tint.right))
+        ArtworkLoader.isArtworkGone(song.albumId, song.uri, coverKey) -> {
+            val c = skin.gradientFor(song.title + song.artist)
+            listOf(c.first(), c[c.size / 2], c.last())
+        }
+        else -> emptyList()
+    }
+}
+
+private fun cachedGlowFrame(colors: List<Color>, mode: GlowMode, strength: Float): GlowFrame {
+    if (colors.isEmpty()) return GlowFrame(emptyList(), null)
+    val key = GlowFrameKey(
+        c0 = colors.getOrElse(0) { Color.Transparent }.toArgb(),
+        c1 = colors.getOrElse(1) { Color.Transparent }.toArgb(),
+        c2 = colors.getOrElse(2) { Color.Transparent }.toArgb(),
+        count = colors.size,
+        mode = mode,
+        strengthBits = strength.toBits()
+    )
+    glowFrameCache.get(key)?.let { return it }
+    val frame = GlowFrame(colors, buildGlowImage(colors, mode, strength))
+    glowFrameCache.put(key, frame)
+    return frame
+}
+
 /**
  * 取某首歌的晕染色卡。
  *
@@ -1231,37 +1408,31 @@ private fun rememberGlowFrame(colors: List<Color>, mode: GlowMode, strength: Flo
     }
 
 /**
- * 「渐变」模式要显示的色卡：在当前这一首的色卡上做补间。
- *
- * 色卡没算出来时**沿用上一份**（只在非空时更新，所以它永远是一份真实颜色）。
- * 这一条是「换歌时颜色不会先消失再突然出现」的关键 ——
- * 早先的实现要么直接跳变，要么整层消失，两种都闪。
+ * 非跟手滑动时的统一平滑晕染色卡：
+ * - 色卡尚在异步取色（目标为空）时保持当前正在显示的颜色，绝不退回黑底；
+ * - 目标色卡就绪后用 [Animatable] 从当前正在渲染的颜色平滑补间过去，不发生跳变；
+ * - 手势滑动落定后直接对齐到已落定页的当前色，保证滑动切歌回交时零接缝。
  */
-@Composable
-private fun rememberFadeGlowColors(
-    queue: List<Song>,
-    index: Int,
-    skin: Skin,
-    fadeMs: Int
-): List<Color> {
-    val target = rememberGlowColors(queue.getOrNull(index), skin)
-    var lastColors by remember { mutableStateOf<List<Color>>(emptyList()) }
-    LaunchedEffect(target) {
-        if (target.isNotEmpty()) lastColors = target
-    }
-    val shown = target.ifEmpty { lastColors }
+private class SmoothGlowController(
+    initial: List<Color>,
+    fallback: Color
+) {
+    val anim0 = Animatable(initial.getOrElse(0) { fallback })
+    val anim1 = Animatable(initial.getOrElse(1) { initial.getOrElse(0) { fallback } })
+    val anim2 = Animatable(initial.getOrElse(2) { initial.getOrElse(1) { initial.getOrElse(0) { fallback } } })
+    var hasColors by mutableStateOf(initial.isNotEmpty())
+    var fadeActive by mutableStateOf(false)
 
-    // 用 animateColorAsState 而不是自己拿 Animatable：它内部从**当前值**开始补间，
-    // 换歌那一帧不会先按新色满不透明度画一次（snapTo(0f) 要等当前帧提交后才生效）。
-    //
-    // 色卡还没算出来时 shown 是空的，落到 skin.bg —— 等于「画了但看不见」，
-    // 不会先给一版和封面无关的假色。
-    val fallback = skin.bg
-    val spec: AnimationSpec<Color> = tween(fadeMs.coerceIn(GLOW_FADE_RANGE), easing = LinearEasing)
-    val c0 by animateColorAsState(shown.getOrElse(0) { fallback }, spec, label = "glow0")
-    val c1 by animateColorAsState(shown.getOrElse(1) { fallback }, spec, label = "glow1")
-    val c2 by animateColorAsState(shown.getOrElse(2) { fallback }, spec, label = "glow2")
-    return remember(c0, c1, c2) { listOf(c0, c1, c2) }
+    suspend fun snapTo(colors: List<Color>, fallback: Color) {
+        if (colors.isEmpty()) return
+        val c0 = colors.getOrElse(0) { fallback }
+        val c1 = colors.getOrElse(1) { c0 }
+        val c2 = colors.getOrElse(2) { c1 }
+        hasColors = true
+        anim0.snapTo(c0)
+        anim1.snapTo(c1)
+        anim2.snapTo(c2)
+    }
 }
 
 /** 在封面的几个取样色之间按 [t]（0~1）插值 */
@@ -1275,45 +1446,53 @@ private fun glowTintAt(colors: List<Color>, t: Float): Color {
 /**
  * 顶栏律动指示器 + 它的「按页位置混色」。
  *
- * 跟手模式要读 [PagerState.currentPageOffsetFraction]，滑动中每帧都变 ——
- * 放在这里每帧只重组这一个小组件；若放在 FullPlayer 组合体里读，
- * 整页（几千行组合逻辑）会被拖进每帧重组，滑动切歌就掉帧。
- * 混色规则与整页晕染完全一致：同一份色卡、同一套强度映射。
+ * 混色完全延后到 [PlayingStateIndicator] 的 Canvas 绘制阶段读取 [PagerState.currentPageOffsetFraction]
+ * 与 [PagerState.currentPage]，滑动过程中零重组、零颜色动画重启，只重绘 22x12dp 的小画布。
  */
 @Composable
 private fun HeaderPlayingIndicator(
     isPlaying: Boolean,
     isSwipeGlow: Boolean,
     pagerState: PagerState,
-    glowFrames: List<GlowFrame>,
+    queueProvider: () -> List<Song>,
+    smoothGlowColors: List<Color>,
     skin: Skin,
     glowMode: GlowMode,
     glowStrength: Float
 ) {
-    val coverColor = if (isSwipeGlow) {
-        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
-        val base = floor(pos).toInt()
-        val t = (pos - base).coerceIn(0f, 1f)
-        val i = (base - (pagerState.currentPage - 1)).coerceIn(0, 1)
-        val first = glowFrames[i].colors
-        val second = glowFrames[i + 1].colors
-        val c0 = if (first.isEmpty()) skin.bg else glowTintAt(first, 0.5f)
-        val c1 = if (second.isEmpty()) c0 else glowTintAt(second, 0.5f)
-        lerp(c0, c1, t)
-    } else {
-        glowFrames[0].colors.let { if (it.isEmpty()) skin.bg else glowTintAt(it, 0.5f) }
-    }
-    val tintStrength = when (glowMode) {
-        GlowMode.BOTTOM -> 0f
-        GlowMode.IMMERSIVE -> (glowStrength * IMMERSIVE_BOOST).coerceIn(0f, 1f)
-        GlowMode.FULL -> glowStrength * 0.92f
-        GlowMode.AROUND, GlowMode.SIDES -> glowStrength * 0.25f
-    }
-    val backdrop = lerp(skin.bg, coverColor, tintStrength)
-    val accent = harmonizedIndicatorColor(backdrop, skin.accent)
-    val idle = ensureReadable(lerp(accent, backdrop, 0.18f), backdrop, 3f,
-        contrastRatio(Color.White, backdrop) >= contrastRatio(Color.Black, backdrop))
-    PlayingStateIndicator(isPlaying = isPlaying, accent = accent, idle = idle)
+    PlayingStateIndicator(
+        isPlaying = isPlaying,
+        colorProvider = { playingFraction ->
+            val coverColor = if (isSwipeGlow) {
+                val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
+                val base = floor(pos).toInt()
+                val t = (pos - base).coerceIn(0f, 1f)
+                val q = queueProvider()
+                val first = resolveGlowColors(q.getOrNull(base), skin)
+                val second = if (t > 0f) resolveGlowColors(q.getOrNull(base + 1), skin) else emptyList()
+                val c0 = if (first.isEmpty()) skin.bg else glowTintAt(first, 0.5f)
+                val c1 = if (second.isEmpty()) c0 else glowTintAt(second, 0.5f)
+                lerp(c0, c1, t)
+            } else {
+                smoothGlowColors.let { if (it.isEmpty()) skin.bg else glowTintAt(it, 0.5f) }
+            }
+            val tintStrength = when (glowMode) {
+                GlowMode.BOTTOM -> 0f
+                GlowMode.IMMERSIVE -> (glowStrength * IMMERSIVE_BOOST).coerceIn(0f, 1f)
+                GlowMode.FULL -> glowStrength * 0.92f
+                GlowMode.AROUND, GlowMode.SIDES -> glowStrength * 0.25f
+            }
+            val backdrop = lerp(skin.bg, coverColor, tintStrength)
+            val accent = harmonizedIndicatorColor(backdrop, skin.accent)
+            val idle = ensureReadable(
+                lerp(accent, backdrop, 0.18f),
+                backdrop,
+                3f,
+                contrastRatio(Color.White, backdrop) >= contrastRatio(Color.Black, backdrop)
+            )
+            lerp(idle, accent, playingFraction)
+        }
+    )
 }
 
 /**
@@ -1752,6 +1931,50 @@ private fun CoverLift(content: @Composable () -> Unit) {
  * 单页播放器（自包含）：背景晕染、封面、文本、进度与控制。
  * 只接收派生值，不直接读 [PlayerUiState]，因此非当前页可被跳过重组。
  */
+/* ============================================================
+ * 上下切歌的退场过渡
+ * ============================================================ */
+
+/** 离开多少屏高后，底部功能区完全退场 */
+private const val SWIPE_EXIT_SPAN = 0.40f
+
+/** 退场后保留的透明度：不归零，避免与入页之间出现"真空帧" */
+private const val SWIPE_EXIT_MIN_ALPHA = 0.05f
+
+/** 退场时向下沉的量：控件像被页面"往下压走"，而不是凭空消失 */
+private val SWIPE_EXIT_SINK = 28.dp
+
+/**
+ * 上下切歌时，让「进度行 + 控制行 + 音量行」这一组随页面离开而退场。
+ *
+ * 为什么需要：分页器是**整页刚性平移**，页内所有元素都跟着页走。旧页向上滑出时，
+ * 它最底下的音量条会一路升到屏幕顶端再被硬裁掉 —— 一条高对比白线横穿全屏、
+ * 停在顶栏下沿、然后瞬间消失，读起来就是"卡了一下"。
+ *
+ * 为什么只处理 `offset < 0`（向上离开）：
+ * - 向上离开的页，底部控件会经过屏幕顶部 → 必须提前退场；
+ * - 新页从下方进入时，底部控件本来就在屏幕外 → 不用管；
+ * - 向下滑回上一首时，旧页向下移动，底部控件从屏幕底部退出 → 也不会横穿。
+ * 非对称处理就够，**入页完全不受影响，跟手感不变**。
+ *
+ * 性能：偏移量在 `graphicsLayer` 的 block 里读 —— 那是**绘制阶段**，
+ * 只让这一层的属性过期，不触发重组、不重新测量、不重绘内容。
+ * 静止时 offset 为 0 走不进分支；alpha 保持 1 时 Compose 不做离屏合成，
+ * 等于零开销。
+ */
+private fun Modifier.swipeExitFade(pager: PagerState, page: Int): Modifier =
+    graphicsLayer {
+        compositingStrategy = CompositingStrategy.ModulateAlpha
+        // 视口中心对应的连续页位置；本页与它的差就是"离中心多远"（负 = 已向上离开）
+        val offset = page - (pager.currentPage + pager.currentPageOffsetFraction)
+        if (offset < 0f) {
+            val t = (-offset / SWIPE_EXIT_SPAN).coerceIn(0f, 1f)
+            val eased = t * t * (3f - 2f * t)          // smoothstep：起步轻、收尾快
+            alpha = 1f - eased * (1f - SWIPE_EXIT_MIN_ALPHA)
+            translationY = eased * SWIPE_EXIT_SINK.toPx()
+        }
+    }
+
 @Composable
 private fun PlayerPage(
     song: Song,
@@ -1764,7 +1987,7 @@ private fun PlayerPage(
      * 三页共享的最终缩放（基础大小 + 呼吸），拖动、落定同步及缓冲期间完全冻结。
      */
     coverScale: State<Float>,
-    playButtonPalette: PlayButtonPalette,
+    playButtonPaletteProvider: () -> PlayButtonPalette,
     /** 三态播放模式。非当前页传列表循环（中性档），避免"翻到下一页看到随机亮着" */
     playMode: PlayMode,
     volume: Float,
@@ -1786,6 +2009,12 @@ private fun PlayerPage(
     /** 设置播放速度 */
     onSetSpeed: (Float) -> Unit,
     prefs: Prefs,
+    /** 上下切歌的分页器 —— 只用来在绘制层读「本页离视口中心多远」，做退场过渡 */
+    swipePager: PagerState,
+    /** 本页在分页器里的页号（配合 [swipePager] 算偏移） */
+    swipePage: Int,
+    /** 当前这首在线歌实际拿到的音质，附在专辑后面显示 */
+    streamQuality: String?,
     /** 当前页的晕染烘焙位图：内嵌歌词据此折算背景色带（跟随全屏歌词的调色设置）；非当前页传 null */
     glowImage: ImageBitmap?,
     /** 封面是否用「黑碟播放器」样式 */
@@ -1957,12 +2186,16 @@ private fun PlayerPage(
                         title = song.title,
                         artist = song.artist,
                         album = song.album,
+                        quality = streamQuality,
                         isFavorite = isFavorite,
                         lyricsExpanded = lyricsExpanded,
                         onToggleFavorite = onToggleFavorite,
                         onToggleLyrics = onToggleLyrics
                     )
                     Spacer(Modifier.height(14.dp))
+                    // 上下切歌时这一组「进度 / 控制 / 音量」随页面离开而退场，
+                    // 避免旧页的音量条一路升到屏幕顶端再被硬裁掉（见 [swipeExitFade]）。
+                    Column(Modifier.fillMaxWidth().swipeExitFade(swipePager, swipePage)) {
                     ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
                     Spacer(Modifier.height(16.dp))
                     TransportControls(
@@ -1979,7 +2212,7 @@ private fun PlayerPage(
                         ctrlIcon = 20.dp,
                         playSize = 60.dp,
                         playIcon = 26.dp,
-                        playButtonPalette = playButtonPalette,
+                        playButtonPaletteProvider = playButtonPaletteProvider,
                         gap = 12.dp,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1988,6 +2221,7 @@ private fun PlayerPage(
                         volume, onVolume,
                         onOpenEqualizer
                     )
+                    }
                 }
             }
         } else {
@@ -2084,12 +2318,15 @@ private fun PlayerPage(
                     title = song.title,
                     artist = song.artist,
                     album = song.album,
+                    quality = streamQuality,
                     isFavorite = isFavorite,
                     lyricsExpanded = lyricsExpanded,
                     onToggleFavorite = onToggleFavorite,
                     onToggleLyrics = onToggleLyrics
                 )
                 Spacer(Modifier.height(12.dp))
+                // 同横屏：这一组随页面离开而退场（见 [swipeExitFade]）
+                Column(Modifier.fillMaxWidth().swipeExitFade(swipePager, swipePage)) {
                 ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
                 Spacer(Modifier.height(14.dp))
                 TransportControls(
@@ -2105,14 +2342,18 @@ private fun PlayerPage(
                     ctrlIcon = 22.dp,
                     playSize = 64.dp,
                     playIcon = 28.dp,
-                    playButtonPalette = playButtonPalette,
-                    gap = 14.dp
+                    playButtonPaletteProvider = playButtonPaletteProvider,
+                    gap = 14.dp,
+                    // 内层 Column 默认左对齐：不撑满宽度的话整行控制键会贴左，
+                    // 撑满后 spacedBy 的 CenterHorizontally 才生效（与横屏一致）
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
                 BottomRow(
                     volume, onVolume,
                     onOpenEqualizer
                 )
+                }
                 // 距底部 20dp（再叠加系统导航栏安全区）
                 Spacer(Modifier.height(BottomGap))
                 Spacer(Modifier.navigationBarsPadding())
@@ -2134,6 +2375,7 @@ private fun TrackMetaBar(
     title: String,
     artist: String,
     album: String,
+    quality: String? = null,
     isFavorite: Boolean,
     lyricsExpanded: Boolean,
     onToggleFavorite: () -> Unit,
@@ -2188,7 +2430,14 @@ private fun TrackMetaBar(
             )
             Spacer(Modifier.height(1.dp))
             Text(
-                text = album.ifBlank { " " },
+                // 音质附在专辑后面：占同一行，不破坏"固定三行"的高度约定
+                text = buildString {
+                    if (album.isNotBlank()) append(album)
+                    if (!quality.isNullOrBlank()) {
+                        if (isNotEmpty()) append(" · ")
+                        append(quality)
+                    }
+                }.ifBlank { " " },
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
                 color = skin.textMuted,
                 maxLines = 1,

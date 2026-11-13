@@ -131,10 +131,19 @@ internal class WallCardPainter(private val density: Float) {
         paint.shader = null; paint.style = Paint.Style.FILL
         canvas.restore()
         if (glow > 0f) {
-            paint.color = spec.mainColor; paint.style = Paint.Style.STROKE
+            // 「正在播放」高亮：专辑主色向白提亮 40% —— 深色封面在暗墙上
+            // 原色几乎看不见；内环加宽到 3dp 且按满强度画，外圈光晕透明度
+            // 从 9% 提到 22%，选中状态一眼可辨。
+            val mc = spec.mainColor
+            paint.color = Color.rgb(
+                (Color.red(mc) + (255 - Color.red(mc)) * 0.4f).toInt(),
+                (Color.green(mc) + (255 - Color.green(mc)) * 0.4f).toInt(),
+                (Color.blue(mc) + (255 - Color.blue(mc)) * 0.4f).toInt()
+            )
+            paint.style = Paint.Style.STROKE
             for (i in 3 downTo 1) {
-                paint.alpha = (a * glow * (if (i == 1) 0.75f else 0.09f)).toInt().coerceIn(0, 255)
-                paint.strokeWidth = density * i * 2f
+                paint.alpha = (a * glow * (if (i == 1) 1f else 0.22f)).toInt().coerceIn(0, 255)
+                paint.strokeWidth = density * (i * 2f + 1f)
                 canvas.drawRoundRect(rect, corner, corner, paint)
             }
             paint.style = Paint.Style.FILL

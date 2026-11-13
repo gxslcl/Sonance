@@ -1,5 +1,6 @@
 package com.sonance.player.ui.components
 
+import androidx.compose.animation.Animatable
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -16,6 +17,8 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
@@ -48,6 +51,30 @@ internal fun originalPlayButtonPalette(icon: Color): PlayButtonPalette =
 /** Shared by main player, library mini player, lyric floating player and wide-screen controls. */
 @Composable
 internal fun rememberPlayerControlPalette(state: PlayerUiState, song: Song? = null): PlayButtonPalette {
+    val (mode, colors, themeColor, originalIcon) = rememberControlTargetInputs(state, song)
+    return rememberPlayButtonPalette(mode, colors, themeColor, originalIcon)
+}
+
+/**
+ * 供全屏播放页等高频滑动场景使用的取色回调版本：
+ * 颜色渐变在 [LaunchedEffect] 内用 [Animatable] 驱动，调用方把 provider 传进叶子 `Canvas`
+ * 在绘制阶段读取 `.value`，700ms 过渡期间零重组。
+ */
+@Composable
+internal fun rememberPlayerControlPaletteProvider(state: PlayerUiState, song: Song? = null): () -> PlayButtonPalette {
+    val (mode, colors, themeColor, originalIcon) = rememberControlTargetInputs(state, song)
+    return rememberPlayButtonPaletteProvider(mode, colors, themeColor, originalIcon)
+}
+
+private data class ControlTargetInputs(
+    val mode: PlayButtonColorMode,
+    val coverColors: List<Color>,
+    val themeColor: Color,
+    val originalIcon: Color
+)
+
+@Composable
+private fun rememberControlTargetInputs(state: PlayerUiState, song: Song?): ControlTargetInputs {
     val context = LocalContext.current
     val skin = LocalSkin.current
     val prefs = remember(context) { Prefs(context) }
@@ -66,7 +93,7 @@ internal fun rememberPlayerControlPalette(state: PlayerUiState, song: Song? = nu
     LaunchedEffect(albumId, uri, key) {
         if (state.hasItem || song != null) ArtworkLoader.prefetchTint(context, albumId, uri, key)
     }
-    return rememberPlayButtonPalette(prefs.playBtnColorMode, colors, skin.accent, skin.onAccent)
+    return ControlTargetInputs(prefs.playBtnColorMode, colors, skin.accent, skin.onAccent)
 }
 
 internal fun coverPaletteSeed(colors: List<Color>, fallback: Color): Color {
@@ -79,7 +106,7 @@ internal fun coverPaletteSeed(colors: List<Color>, fallback: Color): Color {
 }
 
 @Composable
-internal fun rememberPlayButtonPalette(
+private fun rememberTargetPlayButtonPalette(
     mode: PlayButtonColorMode, coverColors: List<Color>, themeColor: Color, originalIcon: Color
 ): PlayButtonPalette {
     var lastCover by remember { mutableStateOf<Color?>(null) }
@@ -87,17 +114,47 @@ internal fun rememberPlayButtonPalette(
     LaunchedEffect(newCover) { if (newCover != null) lastCover = newCover }
     // Async artwork loading must not flash back to the theme between two covers.
     val seed = if (mode == PlayButtonColorMode.COVER) newCover ?: lastCover ?: themeColor else themeColor
-    val target = remember(seed, mode, originalIcon) {
+    return remember(seed, mode, originalIcon) {
         if (mode == PlayButtonColorMode.ORIGINAL) {
             originalPlayButtonPalette(originalIcon)
         } else playButtonPalette(seed)
     }
+}
+
+@Composable
+internal fun rememberPlayButtonPalette(
+    mode: PlayButtonColorMode, coverColors: List<Color>, themeColor: Color, originalIcon: Color
+): PlayButtonPalette {
+    val target = rememberTargetPlayButtonPalette(mode, coverColors, themeColor, originalIcon)
     val spec = tween<Color>(700, easing = FastOutSlowInEasing)
     val light by animateColorAsState(target.light, spec, label = "playPaletteLight")
     val main by animateColorAsState(target.main, spec, label = "playPaletteMain")
     val deep by animateColorAsState(target.deep, spec, label = "playPaletteDeep")
     val icon by animateColorAsState(target.icon, spec, label = "playPaletteIcon")
     return PlayButtonPalette(light, main, deep, icon)
+}
+
+@Composable
+internal fun rememberPlayButtonPaletteProvider(
+    mode: PlayButtonColorMode, coverColors: List<Color>, themeColor: Color, originalIcon: Color
+): () -> PlayButtonPalette {
+    val target = rememberTargetPlayButtonPalette(mode, coverColors, themeColor, originalIcon)
+    val lightAnim = remember { Animatable(target.light) }
+    val mainAnim = remember { Animatable(target.main) }
+    val deepAnim = remember { Animatable(target.deep) }
+    val iconAnim = remember { Animatable(target.icon) }
+    LaunchedEffect(target) {
+        val spec = tween<Color>(700, easing = FastOutSlowInEasing)
+        coroutineScope {
+            if (lightAnim.targetValue != target.light) launch { lightAnim.animateTo(target.light, spec) }
+            if (mainAnim.targetValue != target.main) launch { mainAnim.animateTo(target.main, spec) }
+            if (deepAnim.targetValue != target.deep) launch { deepAnim.animateTo(target.deep, spec) }
+            if (iconAnim.targetValue != target.icon) launch { iconAnim.animateTo(target.icon, spec) }
+        }
+    }
+    return remember {
+        { PlayButtonPalette(lightAnim.value, mainAnim.value, deepAnim.value, iconAnim.value) }
+    }
 }
 
 /** Pause freezes the gradient orientation instead of snapping back to 135 degrees. */

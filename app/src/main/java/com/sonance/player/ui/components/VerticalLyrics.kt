@@ -6,10 +6,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,9 +32,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,8 +47,6 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -76,9 +68,6 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.round
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * 全屏「竖屏歌词」模式（竖排卷轴）。
@@ -109,15 +98,7 @@ internal fun VerticalSyncedLyrics(
     onSeek: (Long) -> Unit,
     bgProfile: BgProfile?,
     adaptMode: LyricAdaptMode,
-    skin: Skin,
-    /**
-     * 手指落在这个舞台上时通知外层播放页锁住横向翻页。
-     *
-     * 竖屏歌词的「横滑翻列」和外层三层轮播抢同一条水平手势：外层先吃掉
-     * 一次滑动，用户就会觉得「想翻歌词结果切了页」。按下即上锁、抬手解锁，
-     * 保证一次手势只做一件事。
-     */
-    onDragLockChange: (Boolean) -> Unit = {}
+    skin: Skin
 ) {
     // 兜底 1：过滤掉完全空白的无效时间轴行；若整首歌没有有效歌词文本，转入竖排诗笺兜底
     val validLines = remember(lines) {
@@ -142,12 +123,8 @@ internal fun VerticalSyncedLyrics(
 
         val stage = remember { mutableFloatStateOf(current.coerceAtLeast(0).toFloat()) }
         val maxStage = remember(validLines) { validLines.lastIndex.toFloat().coerceAtLeast(0f) }
-        val lastTouch = remember { longArrayOf(0L) }
-        var dragging by remember { mutableStateOf(false) }
-        val scope = rememberCoroutineScope()
-        val context = LocalContext.current
-        val settleJob = remember { arrayOfNulls<Job>(1) }
-        val returnJob = remember { arrayOfNulls<Job>(1) }
+        // 竖屏歌词不再接管横向手势（横滑交给外层轮播切页），
+        // 因此不需要"拖动中的临时状态 / 回弹任务"这一套。
 
         suspend fun animateStage(target: Float) {
             val anim = Animatable(stage.floatValue)
@@ -159,30 +136,7 @@ internal fun VerticalSyncedLyrics(
             }
         }
 
-        fun scheduleReturn() {
-            returnJob[0]?.cancel()
-            returnJob[0] = scope.launch {
-                delay(5_000L)
-                if (dragging) return@launch
-                val target = current.coerceAtLeast(0).toFloat()
-                if (abs(target - stage.floatValue) < 0.001f) return@launch
-                settleJob[0]?.cancel()
-                animateStage(target)
-            }
-        }
-
-        fun settleTo(target: Float) {
-            lastTouch[0] = android.os.SystemClock.uptimeMillis()
-            returnJob[0]?.cancel()
-            settleJob[0]?.cancel()
-            settleJob[0] = scope.launch {
-                animateStage(target)
-            }
-        }
-
-        LaunchedEffect(current, dragging) {
-            if (dragging) return@LaunchedEffect
-            if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < 5_000L) return@LaunchedEffect
+        LaunchedEffect(current) {
             val target = current.coerceAtLeast(0).toFloat()
             if (abs(target - stage.floatValue) < 0.001f) return@LaunchedEffect
             if (abs(target - stage.floatValue) > 4f) {
@@ -261,70 +215,12 @@ internal fun VerticalSyncedLyrics(
             // 竖排暗纹装饰线（古典宣纸/竹简细栏线意境，极低透明度不抢戏）
             VerticalStageGridDecoration(skin = skin, anchorX = anchorX)
 
-            // 离开这一层（切页 / 收起播放页）时一定要解锁，否则外层 pager 会永久卡住
-            androidx.compose.runtime.DisposableEffect(Unit) {
-                onDispose { onDragLockChange(false) }
-            }
-
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    // 独立的手势观察层：只负责「按下 → 通知外层别再横滑」，不消费任何事件
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            onDragLockChange(true)
-                            try {
-                                waitForUpOrCancellation()
-                            } finally {
-                                onDragLockChange(false)
-                            }
-                        }
-                    }
-                    .pointerInput(centers) {
-                        if (centers.size < 2) return@pointerInput
-                        val tracker = VelocityTracker()
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                settleJob[0]?.cancel()
-                                returnJob[0]?.cancel()
-                                tracker.resetTracking()
-                                dragging = true
-                                onDragLockChange(true)
-                                lastTouch[0] = android.os.SystemClock.uptimeMillis()
-                            },
-                            onDragCancel = {
-                                dragging = false
-                                onDragLockChange(false)
-                                scheduleReturn()
-                            },
-                            onDragEnd = {
-                                dragging = false
-                                onDragLockChange(false)
-                                lastTouch[0] = android.os.SystemClock.uptimeMillis()
-                                val velocity = tracker.calculateVelocity().x
-                                if (abs(velocity) > 120f) {
-                                    // 列从右向左排：手指往右拖（dragAmount > 0）是看左边未来的列（行号增大）
-                                    val travel = velocity * 0.11f
-                                    val base = lyricStageAnchor(centers, stage.floatValue)
-                                    settleTo(lyricIndexAtCenter(centers, base + travel))
-                                }
-                                scheduleReturn()
-                            }
-                        ) { change, dragAmount ->
-                            change.consume()
-                            val base = lyricStageAnchor(centers, stage.floatValue)
-                            // 列从右往左排：未来句在左侧（x 更小），往右拉（dragAmount > 0）把左侧的未来句拉向中心
-                            val next = (base + dragAmount).coerceIn(centers.first(), centers.last())
-                            val snapped = lyricIndexAtCenter(centers, next)
-                            val lineBefore = round(stage.floatValue).toInt()
-                            stage.floatValue = snapped
-                            if (round(snapped).toInt() != lineBefore) hapticTick(context)
-                            tracker.addPosition(change.uptimeMillis, change.position)
-                            lastTouch[0] = android.os.SystemClock.uptimeMillis()
-                        }
-                    }
-            ) {
+            // 这里刻意**不挂任何横向手势**：
+            // 竖屏歌词曾经把横滑解释成"翻歌词列 / 拖时间轴"，为此还要在手指按下时
+            // 锁住外层的三层轮播，结果就是横滑再也切不了页（播放主界面 ↔ 律动柱）。
+            // 现在横滑原样交给外层轮播；歌词列只跟随播放进度自动走位，
+            // 想跳到某一句直接点那一句（clickable 仍在，不被外层抢事件）。
+            Box(Modifier.fillMaxSize()) {
                 for (index in from..to) {
                     key(index) {
                         val item = tokenizedLines[index]
@@ -381,8 +277,8 @@ internal fun VerticalSyncedLyrics(
                                             interactionSource = remember { MutableInteractionSource() },
                                             indication = null
                                         ) {
+                                            // 只 seek，歌词列的走位交给上面的 LaunchedEffect(current) 平滑跟上
                                             onSeek(line.timeMs)
-                                            settleTo(index.toFloat())
                                         }
                                     } else Modifier
                                 )

@@ -843,7 +843,7 @@ fun NativeCoverWallScreen(
                 if (current != null)
                     drawRect(
                         Brush.radialGradient(
-                            listOf(Color(current.spec.mainColor).copy(alpha = 0.32f), Color.Transparent),
+                            listOf(Color(current.spec.mainColor).copy(alpha = 0.42f), Color.Transparent),
                             Offset(size.width / 2, size.height * 0.46f),
                             max(size.width, size.height) * 0.6f
                         )
@@ -888,7 +888,7 @@ fun NativeCoverWallScreen(
                         painter.project(p)
                         if (focus?.album?.key == t.album.key) continue
                         val glow = if (t.album.key == current?.album?.key)
-                            0.3f + 0.7f * (0.5f + 0.5f * sin((now % 2400L) / 2400f * 6.283185f))
+                            0.55f + 0.45f * (0.5f + 0.5f * sin((now % 2400L) / 2400f * 6.283185f))
                         else 0f
                         painter.draw(
                             canvas.nativeCanvas,

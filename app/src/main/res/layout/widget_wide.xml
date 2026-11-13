@@ -159,7 +159,7 @@
                 android:id="@+id/widget_progress_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
+                android:layout_marginTop="6dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -174,7 +174,7 @@
                 <ImageView
                     android:id="@+id/widget_progress"
                     android:layout_width="0dp"
-                    android:layout_height="8dp"
+                    android:layout_height="7dp"
                     android:layout_marginStart="8dp"
                     android:layout_marginEnd="8dp"
                     android:layout_weight="1"
@@ -195,7 +195,7 @@
                 android:id="@+id/widget_controls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="6dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 

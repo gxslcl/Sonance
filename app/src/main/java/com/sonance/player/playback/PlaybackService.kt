@@ -34,6 +34,7 @@ import com.sonance.player.widget.SonanceWidgets
 import com.sonance.player.widget.WidgetCommandReceiver
 import com.sonance.player.widget.WidgetState
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 进程内播放服务句柄：小组件和播放服务同一个进程，命令可以直接、同步地送到 Player。
@@ -191,73 +192,87 @@ class PlaybackService : MediaSessionService() {
      * 进度每 500ms 会触发一次 `onEvents`，但 [SonanceWidgets.onPlaybackChanged]
      * 内部先比快照，内容没变直接返回，实际开销接近零。
      */
+    private data class WidgetSyncSnapshot(
+        val mediaId: Long,
+        val title: String,
+        val artist: String,
+        val isPlaying: Boolean,
+        val albumId: Long,
+        val sourceUri: String?,
+        val coverKey: String?,
+        val positionMs: Long,
+        val durationMs: Long
+    )
+
+    private val pendingWidgetSync = AtomicReference<WidgetSyncSnapshot?>(null)
+
+    private val widgetExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "sonance-widget-sync").apply { isDaemon = true }
+    }
+
     private val widgetSync = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
+            // 主线程只读内存中的轻量字段，Pref 读写 / 歌词读取 / RemoteViews 构建全部转到后台串行执行，
+            // 快速连滑切歌时原子合并待处理状态，避免主线程卡顿。
             val meta = player.currentMediaItem?.mediaMetadata
             val title = meta?.title?.toString().orEmpty()
             val artist = meta?.artist?.toString().orEmpty()
             val mediaId = player.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
-            SonanceWidgets.onPlaybackChanged(
-                context = applicationContext,
+            val snapshot = WidgetSyncSnapshot(
                 mediaId = mediaId,
                 title = title,
                 artist = artist,
                 isPlaying = player.isPlaying,
                 albumId = meta?.extras?.getLong(PlayerController.EXTRA_ALBUM_ID, -1L) ?: -1L,
                 sourceUri = meta?.extras?.getString(PlayerController.EXTRA_URI),
-                coverKey = OnlineCover.keyOf(title, artist)
+                coverKey = OnlineCover.keyOf(title, artist),
+                positionMs = player.currentPosition.coerceAtLeast(0L),
+                durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
             )
-
-            // 歌词只在换歌时读一次本地文件；后台绝不联网。
-            val uriStr = meta?.extras?.getString(PlayerController.EXTRA_URI)
-            val lyricKey = "$title|$artist|${player.currentMediaItem?.mediaId}"
-            if (lyricKey != widgetLyricKey) {
-                widgetLyricKey = lyricKey
-                widgetLyricLines = emptyList()
-                loadWidgetLyrics(lyricKey, title, artist, uriStr)
+            if (pendingWidgetSync.getAndSet(snapshot) == null) {
+                widgetExecutor.execute { drainWidgetSync() }
             }
+        }
+    }
 
-            val position = player.currentPosition.coerceAtLeast(0L)
-            val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
-            SonanceWidgets.onTick(applicationContext, position, duration, lyricTripletAt(position))
+    private fun drainWidgetSync() {
+        while (true) {
+            val s = pendingWidgetSync.getAndSet(null) ?: break
+            runCatching {
+                SonanceWidgets.onPlaybackChanged(
+                    context = applicationContext,
+                    mediaId = s.mediaId,
+                    title = s.title,
+                    artist = s.artist,
+                    isPlaying = s.isPlaying,
+                    albumId = s.albumId,
+                    sourceUri = s.sourceUri,
+                    coverKey = s.coverKey
+                )
+
+                val lyricKey = "${s.title}|${s.artist}|${s.mediaId}"
+                if (lyricKey != widgetLyricKey) {
+                    widgetLyricKey = lyricKey
+                    widgetLyricLines = runCatching {
+                        readLocalLyrics(applicationContext, s.title, s.artist, s.sourceUri)
+                    }.getOrDefault(emptyList())
+                }
+
+                SonanceWidgets.onTick(
+                    applicationContext,
+                    s.positionMs,
+                    s.durationMs,
+                    lyricTripletAt(s.positionMs)
+                )
+            }
         }
     }
 
     // ===== 给桌面小组件的歌词 =====
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val lyricLoader = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "sonance-widget-lyrics").apply { isDaemon = true }
-    }
-
-    @Volatile
     private var widgetLyricKey: String? = null
 
-    @Volatile
     private var widgetLyricLines: List<LyricLine> = emptyList()
-
-    /**
-     * 读这首歌的时间轴歌词。
-     *
-     * 只用两个本地来源（都不联网）：
-     * 1. 在线歌词在歌词页落盘的缓存（按「歌名+歌手+服务地址」查，也试一次空 salt）；
-     * 2. 本地音频文件的内嵌歌词标签。
-     *
-     * 在线歌的 `sourceUri` 是取流地址，**绝不能**拿去给 MediaMetadataRetriever
-     * 读内嵌标签 —— 那会把整首歌的音频流拉下来。纯文本歌词没有时间轴，
-     * 小组件会显示「暂无同步歌词」而不是假装在滚动。
-     */
-    private fun loadWidgetLyrics(key: String, title: String, artist: String, uriStr: String?) {
-        val app = applicationContext
-        lyricLoader.execute {
-            val lines = runCatching { readLocalLyrics(app, title, artist, uriStr) }
-                .getOrDefault(emptyList())
-            mainHandler.post {
-                // 换歌比读文件快时，迟到的旧结果直接丢弃
-                if (widgetLyricKey == key) widgetLyricLines = lines
-            }
-        }
-    }
 
     private fun readLocalLyrics(
         context: Context,
@@ -333,6 +348,7 @@ class PlaybackService : MediaSessionService() {
         }
         transitions = null
         mediaSession = null
+        widgetExecutor.shutdown()
         if (liveService == this) liveService = null
         super.onDestroy()
     }

@@ -20,9 +20,6 @@ import android.util.Size
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.isRemoteUrl
 
-/** 圆形唱片位图 + 从它身上取出来的主色（用于整张卡片的渐变）。 */
-internal data class CoverArt(val bitmap: Bitmap, val seedColor: Int)
-
 /**
  * 给桌面小组件准备封面位图。
  *
@@ -35,31 +32,31 @@ internal data class CoverArt(val bitmap: Bitmap, val seedColor: Int)
  *
  * ⚠️ 结果是**圆形裁切 + 外侧发光圆环**的位图：`RemoteViews` 用不了
  * `clipToOutline`，圆形和光晕都只能在位图层面画掉。透明边角由位图自己负责。
+ * 圆环颜色用调用方传入的**样式固定色**（与卡片渐变同色系），不从封面取色。
  */
 internal object WidgetCover {
 
     private const val TAG = "SonanceWidget"
 
     /** 位图缓存：跨进程传的是副本，本地留一份避免每次刷新都重新解码 */
-    private val cache = LruCache<String, CoverArt>(8)
+    private val cache = LruCache<String, Bitmap>(8)
 
     private val ALBUM_ART_BASE: Uri = Uri.parse("content://media/external/audio/albumart")
 
     /**
      * @param targetPx 目标边长（像素），包含发光圆环。务必别太大 ——
      *                 `RemoteViews` 走 Binder，单个位图超过 1MB 会抛异常。
+     * @param seed 样式固定种子色，决定圆环与光晕的色相。
      */
-    fun load(context: Context, snap: WidgetState.Snapshot, targetPx: Int): CoverArt? {
-        val key = "${snap.coverKey}|${snap.albumId}|${snap.sourceUri}|$targetPx"
+    fun load(context: Context, snap: WidgetState.Snapshot, targetPx: Int, seed: Int): Bitmap? {
+        val key = "${snap.coverKey}|${snap.albumId}|${snap.sourceUri}|$targetPx|$seed"
         cache.get(key)?.let { return it }
 
         val raw = decodeRaw(context, snap, targetPx) ?: return null
-        val seed = dominantColor(raw)
         val out = circularWithGlow(raw, targetPx, seed)
         if (out !== raw) raw.recycle()
-        val art = CoverArt(out, seed)
-        cache.put(key, art)
-        return art
+        cache.put(key, out)
+        return out
     }
 
     fun clear() = cache.evictAll()
@@ -140,50 +137,6 @@ internal object WidgetCover {
             sample *= 2
         }
         return sample
-    }
-
-    /**
-     * 从封面取一个「酷狗概念版风格卡片渐变」用的高饱和明快种子色。
-     *
-     * 缩到 16×16 采样，给色彩鲜明（高饱和度、适中偏亮明度）的像素更高权重，
-     * 跳过黑边与过曝白字，避免算术平均把鲜艳封面拉成灰暗泥色。
-     * 最终将饱和度锁定在 0.55..0.88、明度锁定在 0.65..0.90，呈现清透鲜亮的年轻感。
-     */
-    private fun dominantColor(src: Bitmap): Int {
-        val small = Bitmap.createScaledBitmap(src, 16, 16, true)
-        var rSum = 0.0
-        var gSum = 0.0
-        var bSum = 0.0
-        var wSum = 0.0
-        val hsv = FloatArray(3)
-        for (y in 0 until 16) {
-            for (x in 0 until 16) {
-                val c = small.getPixel(x, y)
-                val r = Color.red(c)
-                val g = Color.green(c)
-                val b = Color.blue(c)
-                val lum = r * 0.299f + g * 0.587f + b * 0.114f
-                if (lum < 22f || lum > 240f) continue
-                Color.RGBToHSV(r, g, b, hsv)
-                // 越鲜艳、明度越居中的像素权重越高
-                val weight = (0.25f + hsv[1] * 1.6f) * (0.4f + (1f - kotlin.math.abs(hsv[2] - 0.68f)))
-                rSum += r * weight
-                gSum += g * weight
-                bSum += b * weight
-                wSum += weight
-            }
-        }
-        if (small !== src) small.recycle()
-        if (wSum <= 0.001) return 0xFF1BB8D8.toInt()
-        val avg = Color.rgb(
-            (rSum / wSum).toInt().coerceIn(0, 255),
-            (gSum / wSum).toInt().coerceIn(0, 255),
-            (bSum / wSum).toInt().coerceIn(0, 255)
-        )
-        Color.colorToHSV(avg, hsv)
-        hsv[1] = hsv[1].coerceIn(0.55f, 0.88f)
-        hsv[2] = hsv[2].coerceIn(0.66f, 0.90f)
-        return Color.HSVToColor(hsv)
     }
 
     /**

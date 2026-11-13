@@ -81,6 +81,11 @@ import com.sonance.player.data.DUPLICATE_DURATION_TOLERANCE_MS
 import com.sonance.player.data.RestoreEngine
 import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.netease.NcConvertSummary
+import com.sonance.player.data.netease.NeteaseAccount
+import com.sonance.player.data.netease.NeteaseAuth
+import com.sonance.player.data.netease.NeteaseLevel
+import com.sonance.player.data.netease.NeteaseQuality
+import com.sonance.player.data.netease.NeteaseStream
 import com.sonance.player.data.netease.NeteaseCacheRepository
 import com.sonance.player.data.netease.NeteaseScanResult
 import com.sonance.player.data.netease.SniffApp
@@ -112,6 +117,7 @@ import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
+import com.sonance.player.ui.theme.MiniSwipeStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import com.sonance.player.ui.wall.buildWallAlbums
@@ -601,6 +607,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var pendingStartupScroll = false
 
+    private var songStartedJob: Job? = null
+
     private fun armStartupScroll() {
         pendingStartupScroll = prefs.libraryScroll.isBlank()
     }
@@ -617,77 +625,72 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 必须在恢复播放现场之前设好：队列是按上次的模式排的（随机时就是洗牌序），
         // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
         applyPersistedPlayMode()
+        // 网易云音质：把持久化的档位灌进数据层（账号在属性声明处直接读盘，见 neteaseAccount）
+        NeteaseQuality.current = NeteaseLevel.fromId(prefs.onlineQuality)
+        // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
+        // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
+        player.onPlaybackEnded = {
+            if (player.state.value.queueIds.size <= 1) randomListenLikeWall()
+        }
         player.onSongStarted = { id ->
-            // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
-            // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
-            if (prefs.playToastEnabled) {
-                val title = player.state.value.title
-                if (title.isNotBlank()) showToast("正在播放 · $title")
-            }
-            // 在线歌不进本地记账。
-            //
-            // 它们的 id 是负数、冷启动后查不到任何歌，记进「最近播放」会让顶栏的
-            // 「最近听过 N 首」虚高，而且那些条目**用户永远看不到也清不掉**
-            // （「清空最近播放」按钮是给本地歌用的，没人会想到它被在线歌撑大了）。
-            // 播放次数同理：只在「播放最多」排序里被读，在线歌根本不参与排序。
-            if (!isRemoteSongId(id)) {
-                prefs.pushRecentLocal(id)
-                prefs.bumpPlayCount(id)
-                recentIds = prefs.recentIds()
-                prefs.lastSongId = id
-                prefs.lastPlayedOnline = false
-                // 现在播的是本地歌，在线那套存档就用不上了 ——
-                // 不清的话恢复时会读到一份过期的在线现场，走错分支
-                prefs.lastOnlineSongJson = null
-                prefs.onlineQueueJson = null
-            } else {
-                // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
-                //
-                // lastOnlineSongJson / lastPlayedOnline 是「恢复上次播放现场」用的，
-                // 和「最近播放」是两回事 —— 删了的话，切几次后台进程被回收后，
-                // 正在播的在线歌就找不回来了（那才是真正的"数据丢失"）。
-                //Prefs.recentEntries() 那边也会把历史遗留的在线条目过滤掉。
-                songById(id)?.toStoredOrNull()?.let { stored ->
-                    prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
-                    prefs.lastPlayedOnline = true
-                    // 切歌瞬间把进度归零：playPositionMs 是本地/在线**共用**的一个键，
-                    // 不归零的话「切歌后还没走到 onStop 就被杀」会把上一首的
-                    // 进度摆到这一首上，恢复出来直接跳到歌中间。
-                    prefs.playPositionMs = 0L
+            // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
+            // 通知栏封面替换与锁屏歌词读取；中间划过的曲目 360ms 内即被取消，避免连串 SP/IPC 抢占主线程。
+            songStartedJob?.cancel()
+            songStartedJob = viewModelScope.launch {
+                delay(360)
+                // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
+                // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
+                if (prefs.playToastEnabled) {
+                    val title = player.state.value.title
+                    if (title.isNotBlank()) showToast("正在播放 · $title")
                 }
-            }
-            recentEntries = prefs.recentEntries()
-            // 顺手把队列和序号存下来 —— 冷启动恢复要用，而 onStop 不一定每次都会走到
-            // （进程被系统直接回收时就不会）。此刻 refreshQueue 已经跑过，queueIds 是新的。
-            //
-            // 在线队列**不能**只存负数 id：恢复时 PlaybackRestore 按「在不在本地曲库里」
-            // 过滤，那些 id 会被整条滤掉（那是给本地歌设计的规则，在线歌本来就不在曲库里）。
-            // 所以在线队列每首都存成"能重新找回来"的形态，恢复时重新取播放地址。
-            val st = player.state.value
-            if (st.queueIds.isNotEmpty()) {
-                if (isRemoteSongId(st.mediaId)) {
-                    val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
-                    if (stored.isNotEmpty()) {
-                        prefs.onlineQueueJson = storedOnlineSongsToJson(stored)
-                        prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
-                    }
+                if (!isRemoteSongId(id)) {
+                    prefs.pushRecentLocal(id)
+                    prefs.bumpPlayCount(id)
+                    recentIds = prefs.recentIds()
+                    prefs.lastSongId = id
+                    prefs.lastPlayedOnline = false
+                    // 现在播的是本地歌，在线那套存档就用不上了 ——
+                    // 不清的话恢复时会读到一份过期的在线现场，走错分支
+                    prefs.lastOnlineSongJson = null
+                    prefs.onlineQueueJson = null
                 } else {
-                    prefs.playQueueIds = st.queueIds.joinToString(",")
-                    prefs.playQueueIndex = st.queueIndex
+                    // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
+                    songById(id)?.toStoredOrNull()?.let { stored ->
+                        prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
+                        prefs.lastPlayedOnline = true
+                        prefs.playPositionMs = 0L
+                    }
                 }
-            }
-            prefs.playPositionMs = 0L
-            // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
-            // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
-            songById(id)?.let {
-                player.refreshCurrentArtwork(it)
-                ensureCover(it)
-                // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
-                maybeDownload(it)
-                // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
-                resolveStreamIfMissing(it)
-                // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
-                publishLockScreenLyrics(it)
+                recentEntries = prefs.recentEntries()
+                val st = player.state.value
+                if (st.queueIds.isNotEmpty()) {
+                    if (isRemoteSongId(st.mediaId)) {
+                        val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
+                        if (stored.isNotEmpty()) {
+                            val json = withContext(Dispatchers.Default) { storedOnlineSongsToJson(stored) }
+                            prefs.onlineQueueJson = json
+                            prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
+                        }
+                    } else {
+                        val joined = withContext(Dispatchers.Default) { st.queueIds.joinToString(",") }
+                        prefs.playQueueIds = joined
+                        prefs.playQueueIndex = st.queueIndex
+                    }
+                }
+                prefs.playPositionMs = 0L
+                // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
+                // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
+                songById(id)?.let {
+                    player.refreshCurrentArtwork(it)
+                    ensureCover(it)
+                    // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
+                    maybeDownload(it)
+                    // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
+                    resolveStreamIfMissing(it)
+                    // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
+                    publishLockScreenLyrics(it)
+                }
             }
         }
 
@@ -1898,6 +1901,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.miniProgressStyle = value.ordinal
     }
 
+    /** 悬浮卡片左右滑动切歌样式（整卡滑动 / 槽内滑动） */
+    var miniSwipeStyle by mutableStateOf(MiniSwipeStyle.of(prefs.miniSwipeStyle))
+        private set
+
+    fun changeMiniSwipeStyle(value: MiniSwipeStyle) {
+        miniSwipeStyle = value
+        prefs.miniSwipeStyle = value.ordinal
+    }
+
     /** 左滑（下一首）/ 右滑（上一首）的触发阈值，百分比卡宽 */
     var miniSwipeLeftPct by mutableIntStateOf(prefs.miniSwipeLeftPct)
         private set
@@ -3070,8 +3082,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 播放到一首在线歌时调用：确认用户真的在听，然后存一份到本地。
      *
-     * 存的是**正在播的那条流**（标准音质），不是官方下载接口的高音质版本 ——
-     * 那些端点要登录 + 会员，这里刻意不碰。
+     * 存的是**和播放同一条流**：档位跟随「播放音质」设置（登录会员时可能就是无损，
+     * 落为 flac），不是官方下载接口那一套 —— 那些端点还要额外的权限校验，这里不走。
      */
     private fun maybeDownload(song: Song) {
         if (!onlineDownloadEnabled) return
@@ -3103,6 +3115,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
+            // 下载和播放走同一条取流：音质跟随设置，容器（mp3/flac）也有了依据。
+            // 这里通常已经命中播放时建立的缓存，不会多一次网络请求
+            val url = src.resolveStream(remoteId) ?: run {
+                android.util.Log.i("SonanceDownload", "取流失败，跳过「${song.title}」")
+                return@launch
+            }
             val outcome = OnlineDownloader.download(
                 context = app,
                 source = song.source,
@@ -3110,8 +3128,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 title = song.title,
                 artist = song.artist,
                 album = song.album,
-                streamUrl = src.streamUrl(remoteId),
-                coverBytes = coverBytesForTag(song)
+                streamUrl = url,
+                coverBytes = coverBytesForTag(song),
+                format = src.streamFormat(remoteId) ?: "mp3"
             )
             when (outcome) {
                 is OnlineDownloader.Outcome.Saved -> {
@@ -3124,6 +3143,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 // 会员歌 / 版权下架：静默跳过。它本来也播不了，
                 // 弹一句"下载失败"只会让用户以为哪里坏了
                 OnlineDownloader.Outcome.Unavailable -> Unit
+                // 没有下载权益时也不吵：自动下载是后台行为，为它弹一句"没权限"没必要
+                OnlineDownloader.Outcome.NoPermission -> Unit
                 OnlineDownloader.Outcome.Failed -> showToast("「${song.title}」保存失败")
                 OnlineDownloader.Outcome.Skipped -> Unit
             }
@@ -3175,7 +3196,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /**
-     * 列表里把「播不了的」过滤掉（VIP / 需购买）。默认开。
+     * 列表里把「播不了的」过滤掉（VIP / 需购买）。**默认关**。
      *
      * 只影响显示，[onlineResults] 本身不变。
      */
@@ -3185,6 +3206,66 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeOnlineHideUnplayable(v: Boolean) {
         onlineHideUnplayable = v
         prefs.onlineHideUnplayable = v
+    }
+
+    // ===== 网易云账号与音质 =====
+
+    /**
+     * 当前登录的网易云账号；null = 未登录。
+     *
+     * 直接在声明处读盘：冷启动不联网，离线时也能显示"已登录"（会员态是上次的值）。
+     * 不能放到 init 里赋值 —— Kotlin 不允许在属性声明之前初始化它。
+     */
+    var neteaseAccount by mutableStateOf(NeteaseAuth.ensureLoaded(getApplication()))
+        private set
+
+    /** 设置里的播放音质档位。下载跟随它 —— 定过的交互是「听什么存什么」 */
+    var onlineQuality by mutableStateOf(NeteaseLevel.fromId(prefs.onlineQuality))
+        private set
+
+    /**
+     * 当前这首在线歌**实际**拿到的音质（接口返回的 `level`，不是请求档）。
+     *
+     * 单独一个状态而不是塞进 `PlayerUiState`：它只在切歌时变一次，
+     * 和播放进度那种高频状态不是一回事，没必要参与每帧的重组路径。
+     */
+    var nowPlayingQuality by mutableStateOf<String?>(null)
+        private set
+
+    fun changeOnlineQuality(level: NeteaseLevel) {
+        onlineQuality = level
+        prefs.onlineQuality = level.apiValue
+        NeteaseQuality.current = level
+        // 旧缓存是按旧档位取的，清掉才会真的换档 —— 否则要等 20 分钟自然过期，
+        // 用户改完设置发现没变化，会以为设置坏了
+        NeteaseStream.clearCache()
+        nowPlayingQuality = null
+        showToast(
+            if (level.needsVip && neteaseAccount?.isVip != true) {
+                "已选「${level.label}」，当前账号不是会员，实际按能取到的最高档播放"
+            } else {
+                "播放音质：${level.label}"
+            }
+        )
+    }
+
+    /** 登录成功后由登录弹窗回调 —— 顺手重搜一次，让列表里的 VIP 歌立刻变成可播 */
+    fun onNeteaseLoggedIn(account: NeteaseAccount) {
+        neteaseAccount = account
+        NeteaseStream.clearCache()
+        val vip = if (account.isVip) "，已识别黑胶 VIP，可播放会员曲库" else ""
+        showToast("已登录：${account.nickname.ifBlank { "网易云用户" }}$vip")
+        if (onlineQuery.isNotBlank()) searchOnline()
+    }
+
+    fun logoutNetease() {
+        NeteaseAuth.logout(getApplication())
+        neteaseAccount = null
+        NeteaseStream.clearCache()
+        nowPlayingQuality = null
+        // 列表里的可播状态是按会员权益算的，退出后要重新算
+        if (onlineQuery.isNotBlank()) searchOnline()
+        showToast("已退出网易云账号")
     }
 
     // ===== 在线搜索历史 =====
@@ -3422,6 +3503,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             onlineNotice = null
             try {
                 val app = getApplication<Application>()
+                // 登录态可能是上次启动时的值：搜索前顺手校验一次（内部 10 分钟缓存）。
+                // 不校验的话，会员过期或刚续费时列表里的「可播」要等重启才更新
+                if (src.id == NeteaseSource.id && neteaseAccount != null) {
+                    NeteaseAuth.refreshIfStale(app)?.let { fresh ->
+                        if (fresh != neteaseAccount) neteaseAccount = fresh
+                    }
+                }
                 val page = withContext(Dispatchers.IO) { src.search(kw, ONLINE_PAGE_SIZE, 0) }
                 val tracks = page?.tracks.orEmpty()
 
@@ -3626,37 +3714,44 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
         if (at < 0) return
 
-        // 内置音源的地址是同步拼出来的，保持原来的零延迟路径
-        if (src !is PluginOnlineSource) {
-            player.play(onlineSongs.map { localCopyOf(it) ?: it }, at)
-            return
-        }
-        // 插件源的 getMediaSource 是异步 Promise。这里**只解析点中的这一首**：
-        // 以前是先把整页 20 首串行预热完再播，点击到出声要好几秒；
-        // 更糟的是任何一首取流失败都会留下空 uri，被播放器报成「找不到文件」。
-        viewModelScope.launch { playPluginQueue(src, onlineSongs, at, track.title) }
+        // 所有音源统一走异步取流。
+        //
+        // 以前内置源是"同步拼一个固定外链"，所以零延迟；但那条约 128k，
+        // 会员歌还会 302 到 HTML 页。现在网易云也要按档位现取，只能异步。
+        // 仍然**只解析点中的这一首**：整页 20 首串行预热会让人等好几秒，
+        // 而且任何一首失败都会留下空 uri，被播放器报成「找不到文件」。
+        viewModelScope.launch { playOnlineQueue(src, onlineSongs, at, track.title) }
     }
 
     /**
-     * 插件源的「点了就播」：解析 [at] 这一首 → 立刻入队播放 → 后台补其余曲目地址。
+     * 在线歌的「点了就播」：解析 [at] 这一首 → 立刻入队播放 → 后台补其余曲目地址。
+     *
+     * 对任何音源都适用：内置源和插件源的差别只在 [OnlineSource.resolveStream] 的实现里，
+     * 调用侧不再需要 `as? PluginOnlineSource` 这种类型判断。
      *
      * @return false 表示当前这首确实拿不到地址（已提示用户），调用方不要再调 [player.play]。
      */
-    private suspend fun playPluginQueue(
-        src: PluginOnlineSource,
+    private suspend fun playOnlineQueue(
+        src: OnlineSource,
         onlineSongs: List<Song>,
         at: Int,
         title: String,
     ): Boolean {
         val target = onlineSongs.getOrNull(at) ?: return false
+        val rid = target.remoteId.orEmpty()
 
         // 已经存到本地的歌走本地文件，不联网
         if (localCopyOf(target) == null) {
-            val url = src.resolveStream(target.remoteId.orEmpty())
+            val url = src.resolveStream(rid)
             if (url == null) {
-                showToast("「$title」获取播放地址失败，换一首或稍后再试")
+                // 失败原因由音源给出：「未登录」「没会员」「已下架」是三件不同的事，
+                // 一律说「获取地址失败」等于什么都没说
+                showToast(src.lastStreamError(rid) ?: "「$title」获取播放地址失败，换一首或稍后再试")
                 return false
             }
+            nowPlayingQuality = src.streamQualityLabel(rid)
+        } else {
+            nowPlayingQuality = null
         }
 
         val songs = onlineSongs.map { s ->
@@ -3682,19 +3777,30 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var prefetchStreamsJob: Job? = null
 
+    /** 网易云一次点播最多预取几首（取流接口有频率限制，见 [prefetchQueueStreams]） */
+    private val NET_PREFETCH_BUDGET = 3
+
     private fun prefetchQueueStreams(
-        src: PluginOnlineSource,
+        src: OnlineSource,
         queue: List<Song>,
         skipRemoteId: String?,
     ) {
         prefetchStreamsJob?.cancel()
         prefetchStreamsJob = viewModelScope.launch {
+            // 网易云的取流接口有频率限制（实测高频会回 460），整页 20 首一起打没意义：
+            // 真正需要的是"下一两首已经就位"。其余的在轮到它们时由
+            // [resolveStreamIfMissing] 现取，多等一下但不会卡住播放。
+            // 插件源维持原来的整队预取（它们的调用是本地的 WebView，不受这个限制）。
+            val budget = if (src.id == NeteaseSource.id) NET_PREFETCH_BUDGET else Int.MAX_VALUE
+            var fetched = 0
             for (s in queue) {
                 if (!isActive) break
+                if (fetched >= budget) break
                 val rid = s.remoteId ?: continue
                 if (rid == skipRemoteId) continue
                 if (src.streamUrl(rid).isNotBlank()) continue
                 if (localCopyOf(s) != null) continue
+                fetched++
                 val url = src.resolveStream(rid)
                 if (url != null) player.patchQueueUri(s.id, android.net.Uri.parse(url))
             }
@@ -3709,13 +3815,29 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 所以「多等一下」就能出声，而不是弹「找不到文件」。
      */
     private fun resolveStreamIfMissing(song: Song) {
-        if (song.isLocal) return
-        val src = OnlineSources.byId(song.source) as? PluginOnlineSource ?: return
+        if (song.isLocal) {
+            // 本地歌没有"在线音质"这回事；不清会把上一首的标签留在播放页上
+            nowPlayingQuality = null
+            return
+        }
+        val src = OnlineSources.byId(song.source) ?: return
         val rid = song.remoteId ?: return
+        // 预取过的话缓存里已经有实际档位，切歌时直接显示，不必等重新取流
+        nowPlayingQuality = src.streamQualityLabel(rid)
         if (src.streamUrl(rid).isNotBlank()) return
-        if (localCopyOf(song) != null) return
+        if (localCopyOf(song) != null) {
+            nowPlayingQuality = null
+            return
+        }
         viewModelScope.launch {
-            val url = src.resolveStream(rid) ?: return@launch
+            val url = src.resolveStream(rid) ?: run {
+                // 轮到它还是取不到：给出具体原因，别让播放器报「找不到文件」
+                src.lastStreamError(rid)?.let { showToast(it) }
+                return@launch
+            }
+            if (player.state.value.mediaId == song.id) {
+                nowPlayingQuality = src.streamQualityLabel(rid)
+            }
             player.patchQueueUri(song.id, android.net.Uri.parse(url))
         }
     }
@@ -4007,13 +4129,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(src.id, it.remoteId)] }
         val at = onlineSongs.indexOfFirst { it.remoteId == track.remoteId }
         if (at < 0) return
-        // 插件源的流地址是异步取的，走和搜索结果同一条「点了就播」路径
-        if (src is PluginOnlineSource) {
-            viewModelScope.launch { playPluginQueue(src, onlineSongs, at, track.title) }
-            return
-        }
-        val songs = onlineSongs.map { localCopyOf(it) ?: it }
-        player.play(songs, at)
+        // 和搜索结果走同一条「点了就播」：在线歌的地址都要现取（含音质档位）
+        viewModelScope.launch { playOnlineQueue(src, onlineSongs, at, track.title) }
     }
 
     /** 从歌单里第一首能播的开始放整个歌单（详情页的「播放全部」） */
@@ -4113,6 +4230,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         playlistDownloadDone++
                         continue
                     }
+                    // 逐首按当前音质取流；取不到就计入"跳过"，不打断整批
+                    val url = src.resolveStream(track.remoteId)
+                    if (url == null) {
+                        playlistDownloadSkipped++
+                        playlistDownloadDone++
+                        continue
+                    }
                     val outcome = OnlineDownloader.download(
                         context = app,
                         source = src.id,
@@ -4120,8 +4244,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         title = track.title,
                         artist = track.artist,
                         album = track.album,
-                        streamUrl = src.streamUrl(track.remoteId),
-                        coverBytes = coverBytesForTag(track.title, track.artist, track.coverUrl)
+                        streamUrl = url,
+                        coverBytes = coverBytesForTag(track.title, track.artist, track.coverUrl),
+                        format = src.streamFormat(track.remoteId) ?: "mp3"
                     )
                     when (outcome) {
                         is OnlineDownloader.Outcome.Saved -> {
@@ -4130,6 +4255,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                             playlistDownloadSaved++
                         }
                         OnlineDownloader.Outcome.Unavailable -> playlistDownloadSkipped++
+                        OnlineDownloader.Outcome.NoPermission -> playlistDownloadSkipped++
                         OnlineDownloader.Outcome.Failed -> playlistDownloadFailed++
                         OnlineDownloader.Outcome.Skipped -> playlistDownloadSkipped++
                     }
@@ -4867,7 +4993,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (prefs.playToastEnabled) showToast("已添加到下一首播放")
     }
 
-    // ===== 单曲队列的手动切歌 → 直接随机（与封面墙「随便听听」同一套逻辑）=====
+    // ===== 单曲队列：手动切歌与自然播完都 → 直接随机（与封面墙「随便听听」同一套逻辑）=====
 
     /** 最近随机到的专辑 key，窗口与封面墙一致（20），避免反复撞同一张 */
     private val randomRecentKeys = ArrayDeque<String>()

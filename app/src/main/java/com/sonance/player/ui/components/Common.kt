@@ -5,7 +5,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -43,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,12 +52,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -65,6 +66,9 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -115,9 +119,6 @@ fun CoverArt(
     val coverRevision = ArtworkLoader.coverRevision(coverKey)
     val selectedRevision = ArtworkLoader.selectedRevision(songId)
     val resetVersion = ArtworkLoader.cacheResetVersion
-    val legacyPinned = remember(songId, coverKey, resetVersion) {
-        songId > 0L && !prefs.pinnedCoverUrl(songId).isNullOrBlank()
-    }
     // 首帧就直接读内存缓存 —— 已加载过的封面必须立刻出现，不能先给占位图。
     // （load() 是 suspend 的，即使缓存命中也要走协程调度，等好几帧才赋值，
     //   表现就是"滚回来还要等半秒"。）
@@ -136,6 +137,7 @@ fun CoverArt(
     // "停下来还要等 0.5~1 秒"的成因。滚动中要不要降并发由 ArtworkLoader 内部决定
     // （见 withDecodeGate），界面这边只管发起。
     LaunchedEffect(albumId, sizePx, sourceUri, songId, coverKey, coverRevision, selectedRevision, resetVersion) {
+        val legacyPinned = songId > 0L && !prefs.pinnedCoverUrl(songId).isNullOrBlank()
         val chosen = ArtworkLoader.loadSelected(context, albumId, sizePx, sourceUri, songId, coverKey, legacyPinned)
         if (chosen != null) {
             selected = chosen
@@ -422,6 +424,8 @@ fun CtrlButton(
  *
  * 外占位尺寸沿用 [size]，布局不受影响。
  */
+private val DefaultPlayGradient = listOf(Color(0xFF38BDF8), Color(0xFF6366F1), Color(0xFFEC4899))
+
 @Composable
 fun PlayPauseButton(
     isPlaying: Boolean,
@@ -430,7 +434,9 @@ fun PlayPauseButton(
     size: Dp = 52.dp,
     iconSize: Dp = 22.dp,
     /** Shared gradient palette supplied by the main/mini/floating players. */
-    palette: PlayButtonPalette? = null
+    palette: PlayButtonPalette? = null,
+    /** 绘制阶段读取颜色的回调版本：供全屏播放页等滑动敏感场景使用，700ms 渐变零重组 */
+    paletteProvider: (() -> PlayButtonPalette)? = null
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
@@ -443,35 +449,34 @@ fun PlayPauseButton(
 
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
+    val pressScaleState = animateFloatAsState(
         targetValue = if (pressed) 0.88f else 1f,
         animationSpec = spring(dampingRatio = 0.6f, stiffness = 600f),
         label = "pressScale"
     )
 
-    // 点击水波纹：0 → 1 的一次性扩散
+    // 点击水波纹：0 → 1 的一次性扩散（只在绘制阶段读 ripple.value，避免 120fps 重组）
     val ripple = remember { androidx.compose.animation.core.Animatable(1f) }
-    val rippleVal = ripple.value
 
-    // 播放态呼吸（幅度很小，是"活着"不是"晃眼"）
-    val breath = if (isPlaying) {
+    // 播放态呼吸（幅度很小，是"活着"不是"晃眼"；仅保留 State 引用，不在组合期读 .value）
+    val breathState = if (isPlaying) {
         rememberInfiniteTransition(label = "breath").animateFloat(
             initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(tween(2200), RepeatMode.Reverse),
             label = "breath"
-        ).value
-    } else 0f
+        )
+    } else null
 
+    val hasCustomPalette = palette != null || paletteProvider != null
     // 播放态渐变缓旋（对应样机的 slowOrbit 11s）
-    val orbit = if (palette != null) {
-        rememberButtonOrbit(isPlaying).floatValue
-    } else if (isPlaying) {
+    val orbitState = if (hasCustomPalette) rememberButtonOrbit(isPlaying) else null
+    val orbitInfState = if (!hasCustomPalette && isPlaying) {
         rememberInfiniteTransition(label = "orbit").animateFloat(
             initialValue = 0f, targetValue = 360f,
             animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing)),
             label = "orbit"
-        ).value
-    } else 135f
+        )
+    } else null
 
     // 播放态的有机 blob 形变进度（对应样机 organicDropletMorph 5.5s alternate）。
     // 四组关键帧取自参考样机的 border-radius 百分比，绘制时插值成圆角矩形路径。
@@ -480,7 +485,7 @@ fun PlayPauseButton(
     // 关键帧的首帧（keys[0]）与末帧（keys[3]）形状不同，Restart 在循环点会
     // 直接把形状从末帧拽回首帧 —— 表现就是「播到结尾顿一下再跳回初始」。
     // Reverse 让它在两个端点连续折返，接缝处形状与速度都连续。
-    val morph = if (isPlaying) {
+    val morphState = if (isPlaying) {
         rememberInfiniteTransition(label = "morph").animateFloat(
             initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(
@@ -488,19 +493,15 @@ fun PlayPauseButton(
                 repeatMode = RepeatMode.Reverse
             ),
             label = "morph"
-        ).value
-    } else -1f // -1 = 暂停态，画正圆
+        )
+    } else null
 
     // Shared colored buttons pause without abruptly dropping glow/scale.
-    val shownBreath = if (palette != null) {
-        animateFloatAsState(breath, tween(250), label = "mainButtonBreath").value
-    } else breath
-    val playingBlend = if (palette != null) {
-        animateFloatAsState(if (isPlaying) 1f else 0f, tween(350), label = "mainButtonGlow").value
-    } else if (isPlaying) 1f else 0f
+    val playingBlendState = if (hasCustomPalette) {
+        animateFloatAsState(if (isPlaying) 1f else 0f, tween(350), label = "mainButtonGlow")
+    } else null
 
-    val gradientColors = palette?.let { listOf(it.light, it.main, it.deep) }
-        ?: listOf(Color(0xFF38BDF8), Color(0xFF6366F1), Color(0xFFEC4899))
+    val paletteState = rememberUpdatedState(palette)
     // 复用同一条 Path：形变逐帧重算，但不再每帧新建对象（减少 GC / 分配抖动）
     val blobPath = remember { Path() }
 
@@ -524,15 +525,18 @@ fun PlayPauseButton(
                 Modifier
                     .requiredSize(size * 1.5f)
                     .graphicsLayer {
-                        val s = 1f + shownBreath * 0.08f
+                        val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
+                        val b = (breathState?.value ?: 0f) * blend
+                        val s = 1f + b * 0.08f
                         scaleX = s
                         scaleY = s
-                        alpha = 0.5f + 0.45f * playingBlend
+                        alpha = 0.5f + 0.45f * blend
                     }
             ) {
+                val p = paletteProvider?.invoke() ?: paletteState.value
                 val r = this.size.minDimension / 2f
-                val glowMain = palette?.main ?: Color(0xFF6366F1)
-                val glowDeep = palette?.deep ?: Color(0xFFEC4899)
+                val glowMain = p?.main ?: Color(0xFF6366F1)
+                val glowDeep = p?.deep ?: Color(0xFFEC4899)
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
@@ -554,7 +558,11 @@ fun PlayPauseButton(
         Box(
             Modifier
                 .size(size)
-                .scale(pressScale)
+                .graphicsLayer {
+                    val s = pressScaleState.value
+                    scaleX = s
+                    scaleY = s
+                }
                 .clickable(interactionSource = interaction, indication = null) {
                     if (prefs.playBtnHaptics) {
                         view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
@@ -568,10 +576,21 @@ fun PlayPauseButton(
                     .matchParentSize()
                     .padding(2.dp)
                     .graphicsLayer {
-                        scaleX = 1f + shownBreath * 0.035f
-                        scaleY = 1f + shownBreath * 0.035f
+                        val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
+                        val b = (breathState?.value ?: 0f) * blend
+                        val s = 1f + b * 0.035f
+                        scaleX = s
+                        scaleY = s
                     }
             ) {
+                val p = paletteProvider?.invoke() ?: paletteState.value
+                val gradientColors = if (p != null) {
+                    listOf(p.light, p.main, p.deep)
+                } else {
+                    DefaultPlayGradient
+                }
+                val orbit = orbitState?.floatValue ?: orbitInfState?.value ?: 135f
+                val morph = morphState?.value ?: -1f
                 val w = this.size.width
                 val h = this.size.height
                 val angleRad = Math.toRadians(orbit.toDouble() - 45.0)
@@ -603,11 +622,11 @@ fun PlayPauseButton(
                 )
             }
 
-            // 点击水波纹（限制在圆内扩散，避免被裁剪截断成突兀的直线）
-            if (rippleVal < 1f) {
-                Canvas(Modifier.matchParentSize()) {
+            // 点击水波纹（在 Canvas 绘制期读取 Animatable.value，静止时几乎零开销、触发时不重组）
+            Canvas(Modifier.matchParentSize()) {
+                val t = ripple.value
+                if (t < 1f) {
                     val r = this.size.minDimension / 2f
-                    val t = rippleVal
                     drawCircle(
                         color = Color.White.copy(alpha = (1f - t) * 0.55f),
                         radius = r * (0.55f + 0.45f * t),
@@ -617,13 +636,17 @@ fun PlayPauseButton(
             }
 
             // 中心图标
+            val iconTint = rememberUpdatedState(skin.onAccent)
+            val tintProvider = remember(paletteProvider) {
+                { (paletteProvider?.invoke() ?: paletteState.value)?.icon ?: iconTint.value }
+            }
             Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
                 FluidPlayIcon(
                     isPlaying = isPlaying,
                     style = iconStyle,
                     scale = iconScale,
                     stage = iconSize,
-                    tint = palette?.icon ?: skin.onAccent
+                    tintProvider = tintProvider
                 )
             }
         }
@@ -654,17 +677,27 @@ private fun FluidPlayIcon(
     style: Int,
     scale: Float,
     stage: Dp,
-    tint: Color
+    tintProvider: () -> Color
 ) {
     when (style) {
-        0 -> androidx.compose.material3.Icon(
-            imageVector = if (isPlaying) com.sonance.player.ui.icon.SonanceIcons.Pause
-            else com.sonance.player.ui.icon.SonanceIcons.Play,
-            contentDescription = if (isPlaying) "暂停" else "播放",
-            tint = tint,
-            modifier = Modifier.size(stage * scale)
-        )
+        0 -> {
+            val painter = rememberVectorPainter(
+                if (isPlaying) com.sonance.player.ui.icon.SonanceIcons.Pause
+                else com.sonance.player.ui.icon.SonanceIcons.Play
+            )
+            val desc = if (isPlaying) "暂停" else "播放"
+            Canvas(
+                Modifier
+                    .size(stage * scale)
+                    .semantics { contentDescription = desc }
+            ) {
+                with(painter) {
+                    draw(size, colorFilter = ColorFilter.tint(tintProvider()))
+                }
+            }
+        }
         2 -> Canvas(Modifier.size(stage * scale)) {
+            val tint = tintProvider()
             val w = this.size.width
             val h = this.size.height
             if (isPlaying) {
@@ -693,39 +726,35 @@ private fun FluidPlayIcon(
             }
         }
         else -> {
-            // 液态三杆：杆宽/高/位移都按 stage 取比例，弹簧动画跟随播放态
+            // 液态三杆：杆宽/高/位移都按 stage 取比例，弹簧动画跟随播放态（仅在绘制阶段读 State）
             val springSpec = androidx.compose.animation.core.spring<Float>(
                 dampingRatio = 0.55f, stiffness = 380f
             )
             val s = stage * scale
             val barW = s * 0.20f
+            val maxBarH = s * 0.76f
 
             // 各杆的播放态目标：|← 杆 →|（双杠）；暂停态：三角（两根斜杆 + 左脊）
-            val topTx by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) -0.24f else 0.12f, springSpec, label = "topTx")
-            val topTy by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) 0f else -0.16f, springSpec, label = "topTy")
-            val topRot by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) 0f else -55f, springSpec, label = "topRot")
-            val botTx by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) 0.24f else 0.12f, springSpec, label = "botTx")
-            val botTy by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) 0f else 0.16f, springSpec, label = "botTy")
-            val botRot by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) 0f else 55f, springSpec, label = "botRot")
-            val spineTx by androidx.compose.animation.core.animateFloatAsState(
-                if (isPlaying) -0.24f else -0.19f, springSpec, label = "spineTx")
-            val spineAlpha by androidx.compose.animation.core.animateFloatAsState(
+            val topTxState = animateFloatAsState(if (isPlaying) -0.24f else 0.12f, springSpec, label = "topTx")
+            val topTyState = animateFloatAsState(if (isPlaying) 0f else -0.16f, springSpec, label = "topTy")
+            val topRotState = animateFloatAsState(if (isPlaying) 0f else -55f, springSpec, label = "topRot")
+            val botTxState = animateFloatAsState(if (isPlaying) 0.24f else 0.12f, springSpec, label = "botTx")
+            val botTyState = animateFloatAsState(if (isPlaying) 0f else 0.16f, springSpec, label = "botTy")
+            val botRotState = animateFloatAsState(if (isPlaying) 0f else 55f, springSpec, label = "botRot")
+            val spineTxState = animateFloatAsState(if (isPlaying) -0.24f else -0.19f, springSpec, label = "spineTx")
+            val spineAlphaState = animateFloatAsState(
                 if (isPlaying) 0f else 1f,
-                androidx.compose.animation.core.tween(280), label = "spineAlpha")
-            val barH by androidx.compose.animation.core.animateDpAsState(
-                if (isPlaying) s * 0.76f else s * 0.72f,
-                androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 380f),
-                label = "barH")
+                androidx.compose.animation.core.tween(280), label = "spineAlpha"
+            )
+            val barScaleYState = animateFloatAsState(
+                if (isPlaying) 1f else 0.72f / 0.76f,
+                springSpec,
+                label = "barH"
+            )
 
-            FluidBar(barW, barH, tint, s * topTx, s * topTy, topRot, 1f)
-            FluidBar(barW, barH, tint, s * botTx, s * botTy, botRot, 1f)
-            FluidBar(barW, barH, tint, s * spineTx, 0.dp, 0f, spineAlpha)
+            FluidBar(barW, maxBarH, s, tintProvider, topTxState, topTyState, topRotState, barScaleYState, null)
+            FluidBar(barW, maxBarH, s, tintProvider, botTxState, botTyState, botRotState, barScaleYState, null)
+            FluidBar(barW, maxBarH, s, tintProvider, spineTxState, null, null, barScaleYState, spineAlphaState)
         }
     }
 }
@@ -783,23 +812,37 @@ private fun organicBlobPath(path: Path, w: Float, h: Float, progress: Float): Pa
 }
 
 /**
- * 液态图标的单根圆角短杆（[tx]/[ty] 位移按 [width]/[height] 同量纲的 dp 值） */
+ * 液态图标的单根圆角短杆（位移动画与色彩读取全部延后到绘制阶段，零重组）
+ */
 @Composable
 private fun FluidBar(
-    width: Dp, height: Dp, color: Color,
-    tx: Dp, ty: Dp, rotation: Float, alpha: Float
+    width: Dp,
+    height: Dp,
+    stage: Dp,
+    tintProvider: () -> Color,
+    txFrac: State<Float>,
+    tyFrac: State<Float>?,
+    rotation: State<Float>?,
+    scaleYState: State<Float>,
+    alphaState: State<Float>?
 ) {
     Box(
         Modifier
             .size(width, height)
             .graphicsLayer {
-                translationX = tx.toPx()
-                translationY = ty.toPx()
-                rotationZ = rotation
-                this.alpha = alpha
+                translationX = (stage * txFrac.value).toPx()
+                translationY = if (tyFrac != null) (stage * tyFrac.value).toPx() else 0f
+                rotationZ = rotation?.value ?: 0f
+                scaleY = scaleYState.value
+                alpha = alphaState?.value ?: 1f
             }
-            .clip(RoundedCornerShape(width / 2f))
-            .background(color)
+            .drawBehind {
+                val r = this.size.width / 2f
+                drawRoundRect(
+                    color = tintProvider(),
+                    cornerRadius = CornerRadius(r, r)
+                )
+            }
     )
 }
 

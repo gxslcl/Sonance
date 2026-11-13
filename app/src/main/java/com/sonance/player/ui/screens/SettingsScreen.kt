@@ -74,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -88,17 +89,21 @@ import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.LyricPlaybarStyle
 import com.sonance.player.data.OnlineDownloader
+import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.PlayButtonColorMode
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.AdaptModeRow
 import com.sonance.player.ui.components.ChipsRow
+import com.sonance.player.ui.components.TagChip
+import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.components.GlassControls
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SliderLine
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.sheets.NeteaseLoginSheet
 import com.sonance.player.ui.sheets.ScanScopeSheet
 import com.sonance.player.ui.theme.AppIconVariant
 import com.sonance.player.ui.theme.AppIcons
@@ -108,6 +113,7 @@ import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
+import com.sonance.player.ui.theme.MiniSwipeStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import kotlinx.coroutines.launch
@@ -885,7 +891,11 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 MiniProgressStyle.BAR -> "长条进度"
                 MiniProgressStyle.BOTH -> "圆环+长条"
             }
-            append(" · ").append(prog)
+            val swipe = when (vm.miniSwipeStyle) {
+                MiniSwipeStyle.WHOLE_CARD -> "整卡滑动"
+                MiniSwipeStyle.INNER_SLOT -> "槽内滑动"
+            }
+            append(" · ").append(prog).append(" · ").append(swipe)
         }
     }
     CollapsibleSection(
@@ -1004,6 +1014,45 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 valueText = String.format("%.2f×", vm.miniCoverScale / 100f),
                 value = (vm.miniCoverScale - 100) / 100f
             ) { f -> vm.changeMiniCoverScale((100 + f * 100).roundToInt()) }
+
+            // ---- 滑动切歌动效（整卡 / 槽内）----
+            Spacer(Modifier.height(14.dp))
+            Text("滑动切歌动效", style = MaterialTheme.typography.titleSmall, color = skin.text)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "「整卡滑动」整张卡片带投影飞出；「槽内滑动」保留底座外框，卡片在槽内带圆角渐隐滑动。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MiniSwipeStyle.entries.forEach { s ->
+                    val on = s == vm.miniSwipeStyle
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (on) skin.accentGlow else skin.surface2)
+                            .border(
+                                width = if (on) 1.dp else 0.dp,
+                                color = if (on) skin.accent else Color.Transparent,
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeMiniSwipeStyle(s) }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = when (s) {
+                                MiniSwipeStyle.WHOLE_CARD -> "整卡滑动（默认）"
+                                MiniSwipeStyle.INNER_SLOT -> "槽内滑动"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (on) skin.accent else skin.textMuted
+                        )
+                    }
+                }
+            }
 
             // ---- 滑动切歌阈值（左右分开）----
             Spacer(Modifier.height(14.dp))
@@ -2236,6 +2285,10 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
 
     Column(Modifier.fillMaxWidth()) {
+        // 账号卡放在最上面：它决定了下面几项的实际效果（会员曲库 / 音质 / 下载）
+        NeteaseAccountCard(vm)
+        Spacer(Modifier.height(10.dp))
+
         SettingsSwitchRow(
             title = "在线搜索与播放",
             subtitle = "开启后可以在「在线音乐」页搜索并播放网络歌曲。默认关闭 —— " +
@@ -2269,10 +2322,10 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
         SettingsSwitchRow(
             title = "播放并下载",
             subtitle = "播放在线歌时自动存一份到本地。默认关闭。\n" +
-                "存的是正在播的那条流（标准音质），不是官方下载接口的高音质版本 —— " +
-                "那些端点要登录 + 会员，这里刻意不碰。\n" +
-                "存下的文件会写标签（歌名 / 歌手 / 专辑 / 封面），" +
-                "放在「${OnlineDownloader.FOLDER_NAME}」文件夹里 —— " +
+                "存的是和播放同一条流、同一个音质档位（上面选的播放音质），" +
+                "登录会员时可能就是无损；无损存为 flac，标准音质存为 mp3 并写入标签" +
+                "（歌名 / 歌手 / 专辑 / 封面）。\n" +
+                "文件放在「${OnlineDownloader.FOLDER_NAME}」文件夹里 —— " +
                 "重新扫描后「文件夹」页会有这个分类。",
             checked = vm.onlineDownloadEnabled,
             onCheckedChange = { on ->
@@ -2328,7 +2381,8 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
 
             Spacer(Modifier.height(14.dp))
             Text(
-                "• 能播的是音源上免费开放的曲目；标 VIP 的需要会员，取流接口拿不到地址\n" +
+                "• 未登录时只有音源上免费开放的曲目能播；登录会员账号后 VIP 曲目也可以\n" +
+                    "• 音质以音源实际返回的档位为准，标「无损」却只给 320k 时会如实显示 320k\n" +
                     "• 搜索只发送你输入的关键词，不发送任何本地路径或文件\n" +
                     "• 在线歌不进本地曲库，也不会写进「最近播放」「播放次数」\n" +
                     "• 队列里的在线歌在重启后不会恢复（播放地址是临时的，要重新解析）",
@@ -2336,6 +2390,125 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
                 color = skin.textDim
             )
         }
+    }
+}
+
+/**
+ * 网易云账号卡：未登录显示入口，已登录显示头像 / 昵称 / 会员态，下面是音质档位。
+ *
+ * 为什么把音质放在这张卡里而不是单独一段：音质和账号权益是同一件事的两面
+ * （会员才有无损），分开放用户要来回对照才知道"为什么无损是灰的"。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun NeteaseAccountCard(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    var showLogin by remember { mutableStateOf(false) }
+    val account = vm.neteaseAccount
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(skin.surface2)
+            .padding(14.dp)
+    ) {
+        if (account == null) {
+            Text(
+                "网易云账号",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.text
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "有会员的话登录自己的账号，就能搜到并播放会员曲库、取无损音质、下载会员歌曲。" +
+                    "不登录也能用，只是限于音源上免费开放的曲目。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(10.dp))
+            PillButton(label = "登录网易云", onClick = { showLogin = true })
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val avatar = rememberRemoteCover(
+                    account.avatarUrl.takeIf { it.isNotBlank() },
+                    120
+                )
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(skin.surface),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (avatar != null) {
+                        Image(
+                            bitmap = avatar,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(
+                            account.nickname.take(1).ifBlank { "云" },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        account.nickname.ifBlank { "网易云用户" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        if (account.isVip) "黑胶 VIP · 可播会员曲库" else "普通账号 · 无损需要会员",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (account.isVip) skin.accent else skin.textDim
+                    )
+                }
+                PillButton(label = "退出", filled = false, onClick = { vm.logoutNetease() })
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Text("播放音质", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+        Spacer(Modifier.height(8.dp))
+        // 非会员不展示无损两档：摆在那里点不动，比不摆更让人困惑
+        val levels = if (account?.isVip == true) NeteaseLevel.entries else NeteaseLevel.freeTier
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            levels.forEach { level ->
+                TagChip(
+                    label = level.label,
+                    selected = vm.onlineQuality == level,
+                    onClick = { vm.changeOnlineQuality(level) }
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (account?.isVip == true) {
+                "下载跟随这里的档位；实际以音源返回的档位为准（只给到 320k 时会显示 320k）。"
+            } else {
+                "未登录 / 非会员最高到 320k，无损与 Hi-Res 需要黑胶 VIP。" +
+                    "下载跟随这里的档位。"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim
+        )
+    }
+
+    if (showLogin) {
+        NeteaseLoginSheet(vm = vm, onDismiss = { showLogin = false })
     }
 }
 

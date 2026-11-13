@@ -9,6 +9,7 @@ import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
+import com.sonance.player.ui.theme.MiniSwipeStyle
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -84,9 +85,9 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_GAPLESS, true)
         set(v) = sp.edit().putBoolean(KEY_GAPLESS, v).apply()
 
-    /** 淡入淡出。默认关闭：开启后曲目结束前音量渐弱、新曲渐强。 */
+    /** 淡入淡出。默认开启（新安装用户）：曲目结束前音量渐弱、新曲渐强；设置里可关。 */
     var crossfadeEnabled: Boolean
-        get() = sp.getBoolean(KEY_CROSSFADE, false)
+        get() = sp.getBoolean(KEY_CROSSFADE, true)
         set(v) = sp.edit().putBoolean(KEY_CROSSFADE, v).apply()
 
     /** 淡入淡出时长（秒），1–10，默认 3。 */
@@ -94,9 +95,9 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_CROSSFADE_SEC, 3).coerceIn(1, 10)
         set(v) = sp.edit().putInt(KEY_CROSSFADE_SEC, v.coerceIn(1, 10)).apply()
 
-    /** 播放提示：切歌/起播时 toast「正在播放 · 歌名」。默认开启，设置里可关。 */
+    /** 播放提示：切歌/起播时 toast「正在播放 · 歌名」。默认关闭，设置里可开。 */
     var playToastEnabled: Boolean
-        get() = sp.getBoolean(KEY_PLAY_TOAST, true)
+        get() = sp.getBoolean(KEY_PLAY_TOAST, false)
         set(v) = sp.edit().putBoolean(KEY_PLAY_TOAST, v).apply()
 
     var playBtnColorMode: PlayButtonColorMode
@@ -610,6 +611,14 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putInt(KEY_MINI_PROGRESS, v).apply()
 
     /**
+     * 悬浮卡片左右滑动切歌时的动效样式：[MiniSwipeStyle] 的 ordinal。
+     * 默认整卡滑动；也支持保留外圈底座槽、内卡在槽内带圆角滑动渐隐。
+     */
+    var miniSwipeStyle: Int
+        get() = sp.getInt(KEY_MINI_SWIPE_STYLE, MiniSwipeStyle.WHOLE_CARD.ordinal)
+        set(v) = sp.edit().putInt(KEY_MINI_SWIPE_STYLE, v).apply()
+
+    /**
      * 左右滑动切歌的触发阈值，单位是**卡宽的百分比**。
      *
      * 两个方向分开存，因为手感本来就不不对称：大多数人右手持机，
@@ -824,19 +833,30 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString(KEY_ONLINE_SOURCE, v).apply()
 
     /**
-     * 在线搜索结果里，把**播不了的**过滤掉。**默认打开**。
+     * 在线搜索结果里，把**播不了的**过滤掉。**默认关闭**。
      *
-     * 默认开，是因为会员歌点了只会失败：它的外链 302 到一张 HTML 下载页，
-     * ExoPlayer 解析不了、报的是"容器不受支持"，用户会误以为是自己文件格式的问题。
-     *
-     * 想看完整列表（比如只是确认这首歌存不存在）可以关掉 —— 那时不可播的
-     * 仍然会打上徽标，不会让人误点。
+     * 以前默认开，代价是"搜不到全部"：实测搜「晴天」有 335 条，其中绝大多数是
+     * 会员曲目，被这个开关整条隐藏了 —— 用户以为网易云没有这些歌。
+     * 现在默认如实展示，播不了的打徽标（VIP / 无版权），点了会给出明确原因。
      *
      * 只影响**显示**，不影响结果集本身、也不影响分页条数。
      */
     var onlineHideUnplayable: Boolean
-        get() = sp.getBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, true)
+        get() = sp.getBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, false)
         set(v) = sp.edit().putBoolean(KEY_ONLINE_HIDE_UNPLAYABLE, v).apply()
+
+    /**
+     * 播放音质档位（[com.sonance.player.data.netease.NeteaseLevel] 的 id）。
+     *
+     * 默认 `exhigh`：未登录也有意义（实测免费歌匿名就能拿 320k），
+     * 登录会员后可以在设置里往上选无损 / Hi-Res。
+     *
+     * **下载音质跟随这个值** —— 定过的交互是"听什么存什么"，
+     * 不单独维护第二个档位，省得两边不一致。
+     */
+    var onlineQuality: String
+        get() = sp.getString(KEY_ONLINE_QUALITY, null).orEmpty().ifBlank { "exhigh" }
+        set(v) = sp.edit().putString(KEY_ONLINE_QUALITY, v).apply()
 
     // ===== 在线搜索历史 =====
 
@@ -1358,6 +1378,7 @@ class Prefs(context: Context) {
         private const val KEY_APP_NAME = "app_display_name"
         private const val KEY_ONLINE_SOURCE = "online_music_source"
         private const val KEY_ONLINE_HIDE_UNPLAYABLE = "online_hide_unplayable"
+        private const val KEY_ONLINE_QUALITY = "online_music_quality"
         private const val KEY_ONLINE_HISTORY = "online_search_history"
 
         /** 搜索历史最多存几条。再多这一行胶囊就翻不动了，而且没人会翻回去用 */
@@ -1399,6 +1420,7 @@ class Prefs(context: Context) {
         private const val KEY_MINI_GLASS_VIS = "mini_glass_visibility"
         private const val KEY_MINI_OPACITY = "mini_card_opacity"
         private const val KEY_MINI_PROGRESS = "mini_progress_style"
+        private const val KEY_MINI_SWIPE_STYLE = "mini_swipe_style"
         private const val KEY_LOCK_LYRICS = "lock_screen_lyrics"
         private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
         private const val KEY_MINI_SWIPE_RIGHT = "mini_swipe_right_pct"

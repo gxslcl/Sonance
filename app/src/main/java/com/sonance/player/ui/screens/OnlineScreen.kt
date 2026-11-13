@@ -396,9 +396,14 @@ private fun SingleSearchBody(
                         endLabel = "没有更多了 · 共 ${vm.onlineResults.size} 首",
                         onRetry = { vm.retryLoadMoreOnline() }
                     )
-                    // 把规则说清楚，省得用户以为是坏了
+                    // 把规则说清楚，省得用户以为是坏了。登录前后说得不一样：
+                    // 未登录时"VIP 歌播不了"是常态，登录后还播不了一般是版权问题
                     Text(
-                        text = "标 VIP 的歌需要会员，取流接口拿不到播放地址。",
+                        text = if (vm.neteaseAccount == null) {
+                            "标 VIP 的歌需要登录网易云会员账号才能播放，可在设置 → 曲库在线里登录。"
+                        } else {
+                            "标 VIP 的歌已按你的会员权益判断；灰掉的是当前账号仍拿不到地址的（下架或需单独购买）。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = skin.textMuted,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
@@ -888,7 +893,11 @@ internal fun OnlineTrackRow(
 
         if (track.vip) {
             Spacer(Modifier.width(8.dp))
-            VipBadge()
+            VipBadge(playable = track.playable)
+        } else if (!track.playable) {
+            // 不是 VIP 还播不了，基本就是版权下架 / 地区限制 —— 说"无版权"比不解释更清楚
+            Spacer(Modifier.width(8.dp))
+            UnavailableBadge()
         }
 
         if (downloaded) {
@@ -908,22 +917,47 @@ internal fun OnlineTrackRow(
     }
 }
 
-/** 「VIP」小徽标。用强调色而不是固定的金色，才能跟着皮肤走 */
+/**
+ * 「VIP」小徽标。用强调色而不是固定的金色，才能跟着皮肤走。
+ *
+ * [playable] 为 false（未登录 / 非会员）时降成中性色：那是一句"你需要会员"的提示，
+ * 不是一条可以点的权益。可播时用强调色，表示"这首歌走会员通道已经放行"。
+ */
 @Composable
-private fun VipBadge() {
+private fun VipBadge(playable: Boolean = false) {
     val skin = LocalSkin.current
+    val fg = if (playable) skin.accent else skin.textMuted
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(skin.accentGlow)
-            .border(1.dp, skin.accentDim, RoundedCornerShape(4.dp))
+            .background(if (playable) skin.accentGlow else skin.surface2)
+            .border(1.dp, if (playable) skin.accentDim else skin.surface2, RoundedCornerShape(4.dp))
             .padding(horizontal = 5.dp, vertical = 1.dp)
     ) {
         Text(
             text = "VIP",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
-            color = skin.accent
+            color = fg
+        )
+    }
+}
+
+/** 「无版权」徽标：确认拿不到地址、又不是 VIP 权益问题的那一类 */
+@Composable
+private fun UnavailableBadge() {
+    val skin = LocalSkin.current
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 5.dp, vertical = 1.dp)
+    ) {
+        Text(
+            text = "无版权",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.textMuted
         )
     }
 }

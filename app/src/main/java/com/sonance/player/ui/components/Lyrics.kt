@@ -125,11 +125,6 @@ fun LyricsOverlay(
     hideStatusBar: Boolean = false,
     /** 改「隐藏状态栏」开关 */
     onHideStatusBarChange: (Boolean) -> Unit = {},
-    /**
-     * 竖屏歌词手势锁：手指按在歌词舞台上时置 true，让播放页暂时别横向翻页。
-     * 竖排歌词的横滑翻列和三层轮播共用一条水平手势，不锁就会「翻歌词变成切页」。
-     */
-    onLyricDragLockChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -417,8 +412,7 @@ fun LyricsOverlay(
                             onSeek = seekFromLyric,
                             bgProfile = bgProfile,
                             adaptMode = adaptMode,
-                            skin = skin,
-                            onDragLockChange = onLyricDragLockChange
+                            skin = skin
                         )
                         else -> FullscreenThemedLyrics(
                             style = style,

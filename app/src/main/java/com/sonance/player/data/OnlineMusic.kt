@@ -4,6 +4,9 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.sonance.player.data.netease.NeteaseAuth
+import com.sonance.player.data.netease.NeteaseQuality
+import com.sonance.player.data.netease.NeteaseStream
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -88,6 +91,43 @@ interface OnlineSource {
      * ⚠️ 地址带签名会过期，**每次播放/下载都要重新取**。
      */
     fun streamUrl(remoteId: String): String
+
+    /**
+     * 异步取流。
+     *
+     * 内置源（网易云）的旧实现是同步拼一个固定外链；但那条约 128k，会员歌还会 302
+     * 到 HTML 下载页。现在改走 `player/url/v1`：要带 Cookie、会过期、可能降档，
+     * 只能异步拿。插件源的 `getMediaSource` 本来就是 Promise，也归到这条路径上。
+     *
+     * 默认实现退回同步 [streamUrl] —— 未来加"地址能直接算出来"的源时不用写这个方法。
+     *
+     * @return 可播放地址；null 表示失败（原因用 [lastStreamError] 取）
+     */
+    suspend fun resolveStream(remoteId: String): String? =
+        streamUrl(remoteId).takeIf { it.isNotBlank() }
+
+    /**
+     * 上一次取流失败的原因，直接可以给用户看。
+     *
+     * 为什么要单独一个方法：`null` 只说明"没拿到"，但"未登录""没会员""已下架"
+     * 是完全不同的三件事，提示混成一句"播放失败"等于什么都没说。
+     */
+    fun lastStreamError(remoteId: String): String? = null
+
+    /**
+     * 上一次取流**实际**拿到的音质标签（如 `320k` / `无损`）。
+     *
+     * 注意是响应里的档位，不是请求的档位 —— 请求无损却只给 320k 时必须显示 320k。
+     */
+    fun streamQualityLabel(remoteId: String): String? = null
+
+    /**
+     * 上一次取流拿到的容器（`mp3` / `flac`）。
+     *
+     * 下载要用它决定扩展名、MediaStore MIME，以及**是否写 ID3** ——
+     * 给 FLAC 套 ID3 头会直接把文件写坏。
+     */
+    fun streamFormat(remoteId: String): String? = null
 
     /**
      * 播放/下载前预热若干首歌的取流地址。
@@ -498,7 +538,8 @@ object OnlineSources {
  * 这是**预判**不是保证 —— 版权变动会让同一首歌的 `fee` 变，所以 UI 必须把
  * 「不可播」标出来而不是静默过滤，否则用户会以为是搜索坏了。
  */
-internal fun neteasePlayable(fee: Int): Boolean = fee == 0 || fee == 8
+internal fun neteasePlayable(fee: Int, vipLoggedIn: Boolean = false): Boolean =
+    fee == 0 || fee == 8 || (fee == 1 && vipLoggedIn)
 
 /** 网易云的 `fee` → 「是不是要会员/购买」。用于给列表打徽标 */
 internal fun neteaseVip(fee: Int): Boolean = fee == 1 || fee == 4
@@ -565,8 +606,31 @@ object NeteaseSource : OnlineSource {
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/120.0.0.0 Mobile Safari/537.36"
 
+    /**
+     * 同步读到的地址。
+     *
+     * 优先给 [NeteaseStream] 缓存里那条（v1 接口拿到的，可能是 320k / 无损）；
+     * 没有缓存时退回旧外链 `song/media/outer/url` —— 只有 128k，且会员歌会 302
+     * 到 HTML 页，所以它只是"兜底能不能出声"，真正的播放路径走 [resolveStream]。
+     */
     override fun streamUrl(remoteId: String): String =
-        "$BASE/song/media/outer/url?id=$remoteId.mp3"
+        NeteaseStream.cachedUrl(remoteId) ?: "$BASE/song/media/outer/url?id=$remoteId.mp3"
+
+    /**
+     * 真正取流：v1 接口 + 缓存 + 降级。
+     *
+     * 音质档位取用户在设置里选的（[NeteaseQuality.current]）；非会员请求无损时会
+     * 自动从 320k 起步，不白发一次必然被拒的请求。
+     */
+    override suspend fun resolveStream(remoteId: String): String? =
+        NeteaseStream.resolve(remoteId, NeteaseQuality.current)?.url
+
+    override fun lastStreamError(remoteId: String): String? = NeteaseStream.failureOf(remoteId)
+
+    override fun streamQualityLabel(remoteId: String): String? =
+        if (NeteaseStream.isTrial(remoteId)) "试听" else NeteaseStream.qualityOf(remoteId)?.shortLabel
+
+    override fun streamFormat(remoteId: String): String? = NeteaseStream.formatOf(remoteId)
 
     /**
      * 网易云图床认 `?param=宽y高` 这个约定，会**真的缩放**再返回。
@@ -621,7 +685,7 @@ object NeteaseSource : OnlineSource {
                 coverUrl = null,
                 // 实测：fee=1（会员）/ 4（需购买）的外链会 302 到下载页（HTML），
                 // fee=0（免费）/ 8（低音质免费）能正常播
-                playable = neteasePlayable(fee),
+                playable = neteasePlayable(fee, NeteaseAuth.account?.isVip == true),
                 vip = neteaseVip(fee)
             )
         }
@@ -793,7 +857,7 @@ object NeteaseSource : OnlineSource {
                             durationMs = o.optLong("duration"),
                             coverUrl = album?.optString("picUrl")?.takeIf { it.isNotBlank() },
                             // 和搜索接口同一套 fee 判据（见 neteasePlayable 的说明）
-                            playable = neteasePlayable(fee),
+                            playable = neteasePlayable(fee, NeteaseAuth.account?.isVip == true),
                             vip = neteaseVip(fee)
                         )
                     )

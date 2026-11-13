@@ -189,11 +189,38 @@ object SonanceIcons {
 
     // ===== 原型覆盖：收起箭头（顶栏） =====
     private val chevronSets = listOf(
-        o("ChevronDown0", "M6 9l6 6 6-6"),
-        lazy { build("ChevronDown1", listOf("M7 9.5l5 5 5-5"), emptyList(), 1.4f) },
-        f("ChevronDown2", "M5 7.5l7 7 7-7 2 2-9 9-9-9z")
+        o("ChevronDown0", "M6.5 9.5l5.5 5.5 5.5-5.5"),
+        lazy { build("ChevronDown1", listOf("M6.5 9.5l5.5 5.5 5.5-5.5"), emptyList(), 1.5f) },
+        lazy { build("ChevronDown2", listOf("M6.5 9.5l5.5 5.5 5.5-5.5"), emptyList(), 2.5f) }
     )
     val ChevronDown: ImageVector get() = pick(chevronSets)
+
+    /** 沉浸式黑胶模式入口：外圈唱片 + 纹路高光弧 + 中心标签环（线宽随套系） */
+    private val vinylDiscSets = listOf(
+        ow(
+            "VinylDisc0",
+            1.9f,
+            circle(12.0, 12.0, 8.8),
+            "M12 6.8a5.2 5.2 0 0 1 4.5 2.6",
+            "M12 17.2a5.2 5.2 0 0 1-4.5-2.6",
+            circle(12.0, 12.0, 2.5)
+        ),
+        ow(
+            "VinylDisc1",
+            1.5f,
+            circle(12.0, 12.0, 8.8),
+            "M12 7a5 5 0 0 1 4.3 2.5",
+            circle(12.0, 12.0, 2.3)
+        ),
+        ow(
+            "VinylDisc2",
+            2.2f,
+            circle(12.0, 12.0, 8.8),
+            "M12 6.8a5.2 5.2 0 0 1 4.5 2.6",
+            circle(12.0, 12.0, 2.5)
+        )
+    )
+    val VinylDisc: ImageVector get() = pick(vinylDiscSets)
 
     /** 全屏（进入沉浸式黑胶播放页的入口图标，feather maximize；线宽跟随套系） */
     private val maximizeSets = listOf(
@@ -312,11 +339,11 @@ object SonanceIcons {
         "M19,12 h3.5 v9 h-3.5 z"
     )
 
-    /** 睡眠定时器：带指针的圆 + 顶上两根"发条" */
+    /** 睡眠定时器：精致圆润表盘 + 紧凑顶部按键，与其他顶栏图标保持同一视觉高度 */
     private val timerSets = listOf(
-        ow("Timer0", 1.9f, circle(12.0, 13.0, 8.0), "M12 9v4l3 2", "M9 2h6", "M12 2v3"),
-        ow("Timer1", 1.4f, circle(12.0, 13.0, 8.0), "M12 9v4l3 2", "M10 2h4"),
-        ow("Timer2", 2.8f, circle(12.0, 13.5, 7.5), "M12 10v3.5l2.5 1.5", "M9 2h6", "M12 2v3.5")
+        ow("Timer0", 1.9f, circle(12.0, 13.0, 7.2), "M12 9.6v3.4l2.3 1.4", "M10 3.2h4", "M12 3.2v2.4"),
+        ow("Timer1", 1.5f, circle(12.0, 13.0, 7.2), "M12 9.6v3.4l2.3 1.4", "M10 3.2h4"),
+        ow("Timer2", 2.2f, circle(12.0, 13.0, 7.2), "M12 9.6v3.4l2.3 1.4", "M10 3.2h4", "M12 3.2v2.4")
     )
     val Timer: ImageVector get() = pick(timerSets)
 

@@ -23,8 +23,15 @@ import java.net.URL
  *
  * ## 存的是哪条流
  *
- * **正在播的那条**（标准音质 128kbps MP3），不是官方下载接口给的高音质版本 ——
- * 那些端点要登录 + 会员，这里刻意不碰。所以存下来的音质和你听到的一致。
+ * **和播放同一条流**：调用方先用 `OnlineSource.resolveStream` 按用户选的音质档位
+ * 取到地址，再交给这里下载。所以「听什么存什么」，登录会员存下来的可能就是无损。
+ *
+ * ## 两种容器
+ *
+ * MP3 沿用原来的做法：写好 ID3v2（歌名 / 歌手 / 专辑 / 封面）再落盘。
+ * FLAC **不能写 ID3** —— 那会破坏容器，播放器直接打不开。第一版对 FLAC 只落原始
+ * 字节，元数据靠 MediaStore 的 TITLE/ARTIST/ALBUM + 现有在线封面缓存，宁可少信息
+ * 也不能产出坏文件（写 Vorbis Comment 要引一个大依赖，不值得）。
  *
  * ## 字节从哪来：二次 GET，不复用播放流
  *
@@ -74,6 +81,9 @@ object OnlineDownloader {
 
         /** 已经下过了，跳过 */
         data object Skipped : Outcome
+
+        /** 当前账号没有下载这首歌的权益（未登录 / 非会员 / 该曲目不允许下载） */
+        data object NoPermission : Outcome
     }
 
     /**
@@ -91,11 +101,19 @@ object OnlineDownloader {
      * 歌手为空时只留歌名。**必须清洗** —— 歌名里带 `/`、`:`、`?`、`*` 的很多
      * （`AC/DC`、`Love Me Do?`），直接当文件名会创建失败或落到别的目录去。
      */
-    fun fileNameFor(title: String, artist: String): String {
+    fun fileNameFor(title: String, artist: String, extension: String = ".mp3"): String {
         val t = sanitize(title).ifBlank { "未知歌曲" }
         val a = sanitize(artist)
-        return (if (a.isBlank()) t else "$a - $t") + ".mp3"
+        return (if (a.isBlank()) t else "$a - $t") + extension
     }
+
+    /** 容器 → 扩展名。认不出来按 mp3 处理（服务端目前只给这两种） */
+    fun extensionFor(format: String?): String =
+        if (format.equals("flac", true) || format.equals("flac24bit", true)) ".flac" else ".mp3"
+
+    /** 容器 → MediaStore 的 MIME */
+    fun mimeFor(format: String?): String =
+        if (format.equals("flac", true) || format.equals("flac24bit", true)) "audio/flac" else "audio/mpeg"
 
     /**
      * 清掉文件名里不能用的字符。
@@ -126,9 +144,12 @@ object OnlineDownloader {
         artist: String,
         album: String,
         streamUrl: String,
-        coverBytes: ByteArray?
+        coverBytes: ByteArray?,
+        /** 容器（`mp3` / `flac`）。决定扩展名、MIME，以及要不要写 ID3 */
+        format: String = "mp3"
     ): Outcome = withContext(Dispatchers.IO) {
-        val fileName = fileNameFor(title, artist)
+        val isFlac = format.equals("flac", true) || format.equals("flac24bit", true)
+        val fileName = fileNameFor(title, artist, extensionFor(format))
         val temp = File(context.cacheDir, "dl-${System.nanoTime()}.part")
 
         try {
@@ -171,13 +192,21 @@ object OnlineDownloader {
                 runCatching { conn.disconnect() }
             }
 
-            // ---- 2) 写标签 + 落到目标位置（流式，不把整首歌读进内存）----
-            val tag = Id3Writer.buildTag(title, artist, album, coverBytes)
-            val opened = openTarget(context, fileName) ?: return@withContext Outcome.Failed
+            // ---- 2) 落盘（流式，不把整首歌读进内存）----
+            val opened = openTarget(context, fileName, mimeFor(format))
+                ?: return@withContext Outcome.Failed
             try {
                 temp.inputStream().use { input ->
                     opened.stream.use { out ->
-                        Id3Writer.copyWithTag(input, out, tag)
+                        if (isFlac) {
+                            // FLAC 不能套 ID3 头：写进去就是一个损坏的 flac。
+                            // 原样拷贝，元数据靠 MediaStore 与在线封面缓存
+                            input.copyTo(out, 64 * 1024)
+                        } else {
+                            Id3Writer.copyWithTag(
+                                input, out, Id3Writer.buildTag(title, artist, album, coverBytes)
+                            )
+                        }
                     }
                 }
             } catch (t: Throwable) {
@@ -265,12 +294,12 @@ object OnlineDownloader {
      *   而且**不需要任何权限**（应用写自己的媒体文件是允许的）
      * - API 24~28：直接写文件，写完调 `MediaScannerConnection.scanFile` 让它进媒体库
      */
-    private fun openTarget(context: Context, fileName: String): Target? = runCatching {
+    private fun openTarget(context: Context, fileName: String, mime: String): Target? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                put(MediaStore.Audio.Media.MIME_TYPE, mime)
                 put(
                     MediaStore.Audio.Media.RELATIVE_PATH,
                     "${Environment.DIRECTORY_MUSIC}/$FOLDER_NAME"

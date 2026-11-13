@@ -15,8 +15,8 @@ android {
         applicationId = "com.sonance.player"
         minSdk = 24
         targetSdk = 35
-        versionCode = 11
-        versionName = "2.3.1"
+        versionCode = 14
+        versionName = "2.4"
         resourceConfigurations += listOf("zh", "en")
     }
 
@@ -130,6 +130,10 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // 扫码登录网易云：二维码矩阵由 zxing 纯 Java 生成，自己画到 Compose Canvas 上。
+    // 只引 core（不打 zxing-android 那套 Activity/Intent 集成），混淆后约 300 KB。
+    implementation("com.google.zxing:core:3.5.3")
 
     // 把 src/main/baseline-prof.txt 打进 APK，让 ART 在安装时把关键路径
     // 提前 AOT。没有它 Compose 在 release 包第一次冷启动后依然解释执行，

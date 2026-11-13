@@ -19,7 +19,6 @@ import android.view.View
 import android.widget.RemoteViews
 import androidx.annotation.DrawableRes
 import androidx.annotation.LayoutRes
-import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import com.sonance.player.MainActivity
 import com.sonance.player.R
@@ -46,41 +45,51 @@ internal enum class WidgetStyle(
     val triLineLyrics: Boolean,
     val coverPx: Int,
     val defaultWidthDp: Int,
-    val defaultHeightDp: Int
+    val defaultHeightDp: Int,
+    /**
+     * 卡片渐变的固定种子色（酷狗概念版同款：每种布局一个专属色，不随封面变化）。
+     * 唱片外环、占位唱片也用它，整张卡始终同一色系。
+     */
+    val seedColor: Int
 ) {
-    /** 横向控制条 5x1 */
+    /** 横向控制条 5x1 · 翡翠绿 */
     BAR(
         SonanceWidgetBar::class.java, R.layout.widget_bar,
         showCover = true, showProgress = false, showBrand = false, triLineLyrics = false,
-        coverPx = 144, defaultWidthDp = 320, defaultHeightDp = 70
+        coverPx = 144, defaultWidthDp = 320, defaultHeightDp = 70,
+        seedColor = 0xFF00B870.toInt()
     ),
 
-    /** 封面卡片 3x2 */
+    /** 封面卡片 3x2 · 长春花蓝紫 */
     CARD(
         SonanceWidgetCard::class.java, R.layout.widget_card,
         showCover = true, showProgress = false, showBrand = false, triLineLyrics = true,
-        coverPx = 256, defaultWidthDp = 210, defaultHeightDp = 140
+        coverPx = 256, defaultWidthDp = 210, defaultHeightDp = 140,
+        seedColor = 0xFF7581DD.toInt()
     ),
 
-    /** 信息宽卡 5x2 */
+    /** 信息宽卡 5x2 · 晴空蓝 */
     WIDE(
         SonanceWidgetWide::class.java, R.layout.widget_wide,
         showCover = true, showProgress = true, showBrand = false, triLineLyrics = true,
-        coverPx = 280, defaultWidthDp = 320, defaultHeightDp = 140
+        coverPx = 280, defaultWidthDp = 320, defaultHeightDp = 140,
+        seedColor = 0xFF2E9EDD.toInt()
     ),
 
-    /** 极简横条 3x1 */
+    /** 极简横条 3x1 · 紫罗兰（与其余四种同属清透冷色系） */
     MINIMAL(
         SonanceWidgetMinimal::class.java, R.layout.widget_minimal,
         showCover = false, showProgress = false, showBrand = false, triLineLyrics = false,
-        coverPx = 0, defaultWidthDp = 250, defaultHeightDp = 70
+        coverPx = 0, defaultWidthDp = 250, defaultHeightDp = 70,
+        seedColor = 0xFF8A6FE0.toInt()
     ),
 
-    /** 大幅卡片 5x4：圆形唱片是主体，位图给大一号 */
+    /** 大幅卡片 5x4：圆形唱片是主体，位图给大一号 · 青碧 */
     LARGE(
         SonanceWidgetLarge::class.java, R.layout.widget_large,
         showCover = true, showProgress = true, showBrand = true, triLineLyrics = true,
-        coverPx = 400, defaultWidthDp = 360, defaultHeightDp = 280
+        coverPx = 400, defaultWidthDp = 360, defaultHeightDp = 280,
+        seedColor = 0xFF1CBCCE.toInt()
     );
 }
 
@@ -305,8 +314,8 @@ private fun formatTime(totalSec: Int): String {
 /**
  * 真正拼 `RemoteViews` 的地方。所有样式共用。
  *
- * 视觉原则（对齐参考图）：整张卡片是一块**从封面取色的渐变**，不是深色面板；
- * 圆形唱片带发光圆环；所有文字与图标统一纯白（背景亮度被压在中低区间，保证对比度）；
+ * 视觉原则（对齐参考图）：整张卡片是一块**每种样式固定专属色的渐变**（不随封面取色变化），
+ * 不是深色面板；圆形唱片带同色系发光圆环；所有文字与图标统一纯白（背景亮度被压在中低区间，保证对比度）；
  * 进度条是细线，不画假滑块。
  *
  * 为什么背景仍是一张位图而不是 `setBackgroundColor`：在不自动裁切小组件圆角的
@@ -332,16 +341,15 @@ internal object WidgetRenderer {
         val skin = runCatching { Skins.byId(prefs.skinId) }.getOrDefault(Skins.MidnightAmber)
         val views = RemoteViews(context.packageName, style.layoutId)
 
-        // ---- 1. 封面 + 取色渐变卡片 ----
-        val art = if (style.showCover) WidgetCover.load(context, snap, style.coverPx) else null
-        val seed = art?.seedColor
-            ?: runCatching { skin.accent.toArgb() }.getOrDefault(0xFF1BB8D8.toInt())
+        // ---- 1. 封面 + 固定配色渐变卡片（颜色只跟样式走，不随封面变化） ----
+        val seed = style.seedColor
+        val art = if (style.showCover) WidgetCover.load(context, snap, style.coverPx, seed) else null
         val (widthDp, heightDp) = resolveWidgetSizeDp(manager, widgetId, style)
         views.setImageViewBitmap(R.id.widget_bg_img, renderCardBackground(seed, widthDp, heightDp))
         if (style.showCover) {
             views.setImageViewBitmap(
                 R.id.widget_cover,
-                art?.bitmap ?: renderCoverPlaceholder(context, skin, seed, style.coverPx.coerceAtMost(360))
+                art ?: renderCoverPlaceholder(context, skin, seed, style.coverPx.coerceAtMost(360))
             )
         }
 

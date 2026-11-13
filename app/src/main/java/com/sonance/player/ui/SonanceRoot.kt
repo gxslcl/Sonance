@@ -69,6 +69,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -553,6 +554,18 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
     // 黑胶 / 封面墙任一盖稳后，下层（主界面 + 播放页）统一停绘、冻结动画
     val suppressVinylUnderlay = (vinylOpen && vinylCovered) || (nativeWallOpen && nativeWallCovered)
+    // 全屏播放页盖稳后冻结底层主界面与玻璃模糊背景（停绘 + 清空无障碍语义树 + 冻结派生参数），
+    // 防止快速切歌时 SongList / GlassBackdrop / Accessibility 抢占主线程。退出时立即恢复。
+    var fullPlayerCovered by remember { mutableStateOf(false) }
+    LaunchedEffect(fullPlayerOpen) {
+        if (fullPlayerOpen) {
+            delay(320)
+            fullPlayerCovered = true
+        } else {
+            fullPlayerCovered = false
+        }
+    }
+    val suppressHomeUnderlay = (fullPlayerOpen && fullPlayerCovered) || suppressVinylUnderlay
     var queueOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
@@ -662,7 +675,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 封面的分段平均色：**与封面同一帧换上**（先算色带、再换图）——
     // 均衡遮罩由色带算出，两者错帧的话新封面会顶着旧遮罩闪一帧错误的亮度
     var shellBands by remember { mutableStateOf<List<Color>?>(null) }
-    LaunchedEffect(skin.immersive, currentSong?.albumId, currentSong?.id, currentSong?.title, currentSong?.artist) {
+    LaunchedEffect(skin.immersive, suppressHomeUnderlay, currentSong?.albumId, currentSong?.id, currentSong?.title, currentSong?.artist) {
+        if (suppressHomeUnderlay) return@LaunchedEffect
         val s = currentSong
         if (!skin.immersive || s == null) {
             shellArt = null
@@ -685,7 +699,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
     var artSlideDir by remember { mutableStateOf(1) }
     var lastQueueIndex by remember { mutableStateOf(Int.MIN_VALUE) }
-    LaunchedEffect(playerState.queueIndex) {
+    LaunchedEffect(playerState.queueIndex, suppressHomeUnderlay) {
+        if (suppressHomeUnderlay) return@LaunchedEffect
         val idx = playerState.queueIndex
         if (lastQueueIndex != Int.MIN_VALUE && idx >= 0 && idx != lastQueueIndex) {
             artSlideDir = if (idx > lastQueueIndex) 1 else -1
@@ -773,6 +788,19 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         nativeWallOpen = true
     }
 
+    // 播放页完全覆盖后冻结传给主界面的状态，让 Compact/Medium/ExpandedLayout 完全跳过重组。
+    val frozenShellPlayerState = remember { mutableStateOf(playerState) }
+    val frozenShellSongTitle = remember { mutableStateOf(currentSong?.title) }
+    val frozenShellAdaptedSkin = remember { mutableStateOf(adaptedSkin) }
+    if (!suppressHomeUnderlay) {
+        frozenShellPlayerState.value = playerState
+        frozenShellSongTitle.value = currentSong?.title
+        frozenShellAdaptedSkin.value = adaptedSkin
+    }
+    val activeShellPlayerState = frozenShellPlayerState.value
+    val activeShellSongTitle = frozenShellSongTitle.value
+    val activeShellAdaptedSkin = frozenShellAdaptedSkin.value
+
     CompositionLocalProvider(LocalDenseLayout provides dense) {
         Box(Modifier.fillMaxSize()) {
 
@@ -788,7 +816,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 visibility = vm.shellGlassVisibility,
                 modifier = Modifier
                     .matchParentSize()
-                    .graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }
+                    .graphicsLayer { alpha = if (suppressHomeUnderlay) 0f else 1f }
                     // 1.35 倍放大的封面会溢出边界，裁掉（歌词页同款）
                     .clipToBounds(),
                 scrimColor = skin.bg,
@@ -814,14 +842,19 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
         // 沉浸皮肤的字色随封面明暗逐歌重算 —— 只包住主界面子树；
         // 全屏播放页有自己的晕染背景与调色逻辑，维持原皮肤
-        Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }) {
-        CompositionLocalProvider(LocalSkin provides adaptedSkin) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = if (suppressHomeUnderlay) 0f else 1f }
+                .then(if (suppressHomeUnderlay) Modifier.clearAndSetSemantics {} else Modifier)
+        ) {
+        CompositionLocalProvider(LocalSkin provides activeShellAdaptedSkin) {
         when (layout) {
             LayoutMode.COMPACT -> CompactLayout(
                 vm = vm,
-                playerState = playerState,
+                playerState = activeShellPlayerState,
                 detail = detail,
-                currentSongTitle = currentSong?.title,
+                currentSongTitle = activeShellSongTitle,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
@@ -833,7 +866,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
             LayoutMode.MEDIUM -> MediumLayout(
                 vm = vm,
-                playerState = playerState,
+                playerState = activeShellPlayerState,
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
@@ -846,7 +879,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
             LayoutMode.EXPANDED -> ExpandedLayout(
                 vm = vm,
-                playerState = playerState,
+                playerState = activeShellPlayerState,
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
@@ -881,13 +914,13 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             FullPlayer(
                 state = playerState,
                 queue = queue,
+                // 在线歌实际拿到的音质（本地歌为 null），显示在专辑后面
+                streamQuality = vm.nowPlayingQuality,
                 favorites = vm.favorites,
                 onClose = {
                     fullPlayerOpen = false
-                    // 收起播放页时把正在播放的那首滚进可视区
-                    vm.requestScrollToCurrent()
                 },
-                onPlayAt = { vm.player.playAt(it) },
+                onPlayAt = { vm.player.playAt(it, toggleIfCurrent = false) },
                 onToggleFavorite = { vm.toggleFavorite(it) },
                 onCyclePlayMode = { vm.cyclePlayMode() },
                 onPrev = { vm.previousOrRandom() },
@@ -1225,32 +1258,14 @@ private fun CompactLayout(
                         )
                     }
 
-                    // 「定位到正在播放」：只在曲库三页的列表视图显示。
-                    // 内容区已为悬浮卡让位 8dp，这里再补 2dp —— 正好「距悬浮播放窗
-                    // 上方 10dp、距屏幕右缘 15dp」；经典贴底时内容区不让位，改贴 10dp。
-                    // 点击走 requestScrollToCurrent，滚动逻辑复用 SongList 里的定位 effect。
-                    // 44dp 的 Box 保留完整点击面积；圆形裁剪让点击水波纹也按圆扩散，不露方框。
-                    // 当前播放歌已在可见区内时隐藏；不在可见区才出现。
-                    // 一层极浅的圆形底（用 skin.text 派生，深浅皮肤都看得见）。
+                    // 「定位到正在播放」：只在曲库三页的列表视图显示，当前播放歌不在可视区时出现。
                     if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
-                        Box(
+                        LocateCurrentSongButton(
+                            onClick = { vm.requestScrollToCurrent() },
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
-                                .padding(end = 15.dp)
-                                .padding(bottom = if (floating) 2.dp else 10.dp)
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(skin.text.copy(alpha = 0.06f), CircleShape)
-                                .clickable { vm.requestScrollToCurrent() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            androidx.compose.material3.Icon(
-                                imageVector = SonanceIcons.Locate,
-                                contentDescription = "定位到正在播放的歌曲",
-                                tint = skin.text.copy(alpha = 0.86f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
+                                .padding(end = 19.dp, bottom = if (floating) 5.dp else 13.dp)
+                        )
                     }
                 }
             }
@@ -1271,6 +1286,7 @@ private fun CompactLayout(
                     glassVisibility = vm.miniGlassVisibility,
                     cardOpacity = vm.miniCardOpacity,
                     progressStyle = vm.miniProgressStyle,
+                    swipeStyle = vm.miniSwipeStyle,
                     swipeLeftPct = vm.miniSwipeLeftPct,
                     swipeRightPct = vm.miniSwipeRightPct,
                     heightScale = vm.miniHeightScale / 100f,
@@ -1487,6 +1503,7 @@ private fun MediumLayout(
                     glassVisibility = vm.miniGlassVisibility,
                     cardOpacity = vm.miniCardOpacity,
                     progressStyle = vm.miniProgressStyle,
+                    swipeStyle = vm.miniSwipeStyle,
                     swipeLeftPct = vm.miniSwipeLeftPct,
                     swipeRightPct = vm.miniSwipeRightPct,
                     heightScale = vm.miniHeightScale / 100f,
@@ -1614,27 +1631,17 @@ private fun ExpandedLayout(
                         }
 
                         // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
-                        // 平板列表原来没有这个入口，长曲库里找回正在播放的歌只能手滚
                         if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
-                            Box(
+                            LocateCurrentSongButton(
+                                onClick = { vm.requestScrollToCurrent() },
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
-                                    .padding(end = 15.dp)
-                                    // 悬浮卡是整宽贴底的，按钮要抬到卡片上方才不被压住
-                                    .padding(bottom = if (floating) miniReserve + 8.dp else 10.dp)
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(skin.text.copy(alpha = 0.06f), CircleShape)
-                                    .clickable { vm.requestScrollToCurrent() },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                androidx.compose.material3.Icon(
-                                    imageVector = SonanceIcons.Locate,
-                                    contentDescription = "定位到正在播放的歌曲",
-                                    tint = skin.text.copy(alpha = 0.86f),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
+                                    .padding(
+                                        end = 19.dp,
+                                        // 悬浮卡是整宽贴底的，按钮要抬到卡片上方才不被压住
+                                        bottom = if (floating) miniReserve + 11.dp else 13.dp
+                                    )
+                            )
                         }
 
                         // 悬浮播放卡：设置里选了「悬浮」才出现（经典档仍是底部通栏）
@@ -1652,6 +1659,7 @@ private fun ExpandedLayout(
                                 glassVisibility = vm.miniGlassVisibility,
                                 cardOpacity = vm.miniCardOpacity,
                                 progressStyle = vm.miniProgressStyle,
+                                swipeStyle = vm.miniSwipeStyle,
                                 swipeLeftPct = vm.miniSwipeLeftPct,
                                 swipeRightPct = vm.miniSwipeRightPct,
                                 heightScale = vm.miniHeightScale / 100f,
@@ -1934,4 +1942,37 @@ private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when 
     }
 
     Detail.BiliCache -> "本机离线缓存"
+}
+
+/**
+ * 列表右下角「定位到正在播放」悬浮按钮：
+ * 外层 42dp 保留充足点击热区，内层圆形背景收至 34dp 配合 18dp 准星图标。
+ */
+@Composable
+private fun LocateCurrentSongButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = modifier
+            .size(42.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(skin.text.copy(alpha = 0.06f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Locate,
+                contentDescription = "定位到正在播放的歌曲",
+                tint = skin.text.copy(alpha = 0.86f),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
 }

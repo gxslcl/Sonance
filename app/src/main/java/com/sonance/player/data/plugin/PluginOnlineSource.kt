@@ -206,7 +206,7 @@ class PluginOnlineSource(
      * ExoPlayer 报成 `ERROR_CODE_IO_FILE_NOT_FOUND`，界面上显示成
      * 「找不到文件，可能已被移动或删除」，完全误导。
      */
-    suspend fun resolveStream(remoteId: String, timeoutMs: Long = DEFAULT_STREAM_TIMEOUT_MS): String? =
+    override suspend fun resolveStream(remoteId: String): String? =
         resolveLock.withLock {
             val id = remoteId.trim()
             if (id.isEmpty()) return@withLock null
@@ -225,7 +225,7 @@ class PluginOnlineSource(
                     put(item)
                     put(QUALITY)
                 }.toString(),
-                timeoutMs
+                DEFAULT_STREAM_TIMEOUT_MS
             ).getOrElse {
                 Log.w(TAG, "getMediaSource($id) 失败：${it.message}")
                 return@withLock null

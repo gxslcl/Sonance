@@ -24,6 +24,22 @@ enum class MiniProgressStyle(val label: String) {
 }
 
 /**
+ * 悬浮播放卡片左右滑动切歌时的动效样式。
+ * 默认 [WHOLE_CARD]：整张卡片带投影与圆角完整滑出；
+ * [INNER_SLOT]：保留微暗外框底座，内层圆角卡片在槽内滑动并渐隐。
+ */
+enum class MiniSwipeStyle(val label: String) {
+    WHOLE_CARD("整卡滑动（默认）"),
+    INNER_SLOT("槽内滑动"),
+    ;
+
+    companion object {
+        fun of(ordinal: Int): MiniSwipeStyle =
+            entries.getOrElse(ordinal) { WHOLE_CARD }
+    }
+}
+
+/**
  * 列表行的分隔方式。
  *
  * 默认 [NONE] —— 保持原来那种靠留白和封面区分的清爽感，

@@ -20,6 +20,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -57,13 +58,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.positionChange
@@ -85,6 +91,7 @@ import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
+import com.sonance.player.ui.theme.MiniSwipeStyle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -118,7 +125,8 @@ fun TransportControls(
     playSize: Dp = 52.dp,
     playIcon: Dp = 22.dp,
     gap: Dp = 6.dp,
-    playButtonPalette: PlayButtonPalette? = null
+    playButtonPalette: PlayButtonPalette? = null,
+    playButtonPaletteProvider: (() -> PlayButtonPalette)? = null
 ) {
     Row(
         modifier = modifier,
@@ -145,7 +153,8 @@ fun TransportControls(
             onClick = onPlayPause,
             size = playSize,
             iconSize = playIcon,
-            palette = playButtonPalette
+            palette = playButtonPalette,
+            paletteProvider = playButtonPaletteProvider
         )
         CtrlButton(
             icon = SonanceIcons.Next,
@@ -215,6 +224,30 @@ private fun progressFraction(state: PlayerUiState): Float {
     return (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
 }
 
+/**
+ * 仅在卡片外缘绘制柔和外投影：内区用 [ClipOp.Difference] 挖空，
+ * 避免半透明玻璃卡片在正常显示或滑出淡化时透出底层硬件阴影的矩形暗区。
+ */
+private fun Modifier.outerCardShadow(cornerRadius: Dp): Modifier = drawBehind {
+    val r = cornerRadius.toPx()
+    val cardPath = Path().apply {
+        addRoundRect(RoundRect(0f, 0f, size.width, size.height, r, r))
+    }
+    clipPath(cardPath, ClipOp.Difference) {
+        for (i in 1..4) {
+            val spread = (i * 2.5f).dp.toPx()
+            val yOffset = (i * 0.9f).dp.toPx()
+            val alpha = 0.085f * (5 - i) / 4f
+            drawRoundRect(
+                color = Color.Black.copy(alpha = alpha),
+                topLeft = Offset(-spread, -spread + yOffset),
+                size = Size(size.width + spread * 2f, size.height + spread * 2f),
+                cornerRadius = CornerRadius(r + spread, r + spread)
+            )
+        }
+    }
+}
+
 /* ============================================================
  * 迷你播放条（手机 / 中等宽度）
  * ============================================================ */
@@ -246,6 +279,8 @@ fun MiniPlayer(
     cardOpacity: Int = 100,
     /** 悬浮卡片上进度用环还是用线（见 [MiniProgressStyle]） */
     progressStyle: MiniProgressStyle = MiniProgressStyle.RING,
+    /** 悬浮卡片左右滑动切歌动效（整卡滑动 / 槽内滑动） */
+    swipeStyle: MiniSwipeStyle = MiniSwipeStyle.WHOLE_CARD,
     /** 左滑（下一首）阈值，百分比卡宽 */
     swipeLeftPct: Int = 20,
     /** 右滑（上一首）阈值。默认比左滑低：右手持机时"往回够"划不满同样的距离 */
@@ -325,7 +360,12 @@ fun MiniPlayer(
             val prevNow = rememberUpdatedState(onPrev)
             val leftPctNow = rememberUpdatedState(swipeLeftPct)
             val rightPctNow = rememberUpdatedState(swipeRightPct)
+            val isSlot = swipeStyle == MiniSwipeStyle.INNER_SLOT
 
+            // 外层容器永远稳住布局占位、触摸坐标与（槽内模式下的）微暗底座，避免拖拽时触摸区域跟着偏移；
+            // 注意：
+            // 1) 槽内底座是半透明表面，不能叠 Modifier.shadow —— Android 硬件阴影会在半透明底下面透出一块矩形暗斑；
+            // 2) clickable 不能挂在未裁圆角的外层上，否则左半边无子按钮区起滑时会触发默认矩形按压涟漪闪框。
             Box(
                 modifier = modifier
                     // 16dp 与列表高亮框、搜索框同一条边线 —— 12dp 的时候
@@ -334,18 +374,14 @@ fun MiniPlayer(
                     .padding(bottom = 10.dp)
                     .fillMaxWidth()
                     .onSizeChanged { cardW = it.width.toFloat().coerceAtLeast(1f) }
-                    // 投影必须在 clip 之前：先画外发光，再把内容裁成圆角
-                    .shadow(elevation = 14.dp, shape = shape, clip = false)
-                    .clip(shape)
-                    .background(skin.surface2.copy(alpha = cardOpacity / 100f))
-                    // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——
-                    // 浅色主题下白描边会直接消失，深色主题下它就是那条立体高光
-                    .border(1.dp, skin.text.copy(alpha = 0.10f), shape)
-                    .graphicsLayer {
-                        translationX = dragX
-                        // 位移越大越淡：滑到边缘时卡片自然"化"进背景，
-                        // 换歌那一帧就看不出切换
-                        alpha = 1f - (kotlin.math.abs(dragX) / cardW).coerceIn(0f, 0.5f)
+                    .let { m ->
+                        if (isSlot) {
+                            m.clip(shape)
+                                .background(skin.surface2.copy(alpha = (cardOpacity / 100f) * 0.36f))
+                                .border(1.dp, skin.text.copy(alpha = 0.09f), shape)
+                        } else {
+                            m
+                        }
                     }
                     .pointerInput(Unit) {
                         // 位移动画：总是先停掉上一条，保证永远只有一条在跑
@@ -415,38 +451,65 @@ fun MiniPlayer(
                             dragX = (dragX + delta).coerceIn(-cardW * 1.2f, cardW * 1.2f)
                         }
                     }
-                    .clickable(onClick = onOpen)
             ) {
-                // 玻璃：卡片自己的封面糊开铺底。压暗幅度刻意比整页小
-                // （scrimSpread 0.10），压太狠这块玻璃就看不出是玻璃了。
-                // edgeHighlight 打开：上边缘一条折射亮线，滑过深色列表项时
-                // 卡片不至于"融"进背景里。
-                GlassBackdrop(
-                    art = miniGlassArt(state, coverUri),
-                    style = glass,
-                    blurDp = glassBlur,
-                    visibility = glassVisibility,
-                    modifier = Modifier.matchParentSize(),
-                    scrimColor = skin.surface2,
-                    edgeHighlight = true,
-                    scrimSpread = 0.10f
-                )
-                Column(Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(
-                                horizontal = 12.dp,
-                                // 高度倍数只加"上下留白"，不动内部元素 ——
-                                // 这样调高度不会把字挤小、也不会把按钮撑变形
-                                vertical = 10.dp * heightScale
-                            ),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) { body() }
-                    // 进度线收进卡片下沿。设成"只用圆环"时这里不画 ——
-                    // 同一个进度说两遍，看着就是重复
-                    if (progressStyle.showsBar) {
-                        MiniProgressLine(frac = frac, thickness = 2.5.dp, rounded = true)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer {
+                            translationX = dragX
+                            val ratio = (kotlin.math.abs(dragX) / cardW).coerceIn(0f, 1.2f)
+                            // 位移越大越淡：槽内模式下更快渐隐融入底座，整卡模式下适度淡出保持卡片完整实体感
+                            alpha = if (isSlot) {
+                                (1f - ratio * 1.05f).coerceIn(0f, 1f)
+                            } else {
+                                1f - (ratio * 0.72f).coerceIn(0f, 0.72f)
+                            }
+                        }
+                        // 整卡模式仅在卡片外缘画柔和投影，杜绝半透明玻璃卡片透出系统阴影矩形底；槽内模式不叠加投影
+                        .let { m -> if (!isSlot) m.outerCardShadow(20.dp) else m }
+                        .clip(shape)
+                        .background(skin.surface2.copy(alpha = cardOpacity / 100f))
+                        // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——
+                        // 浅色主题下白描边会直接消失，深色主题下它就是那条立体高光
+                        .border(1.dp, skin.text.copy(alpha = if (isSlot) 0.14f else 0.10f), shape)
+                        // 点击挂在已裁圆角的内层卡片且关闭按压涟漪，避免起滑手势闪出矩形按压框
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpen
+                        )
+                ) {
+                    // 玻璃：卡片自己的封面糊开铺底。压暗幅度刻意比整页小
+                    // （scrimSpread 0.10），压太狠这块玻璃就看不出是玻璃了。
+                    // edgeHighlight 打开：上边缘一条折射亮线，滑过深色列表项时
+                    // 卡片不至于"融"进背景里。
+                    GlassBackdrop(
+                        art = miniGlassArt(state, coverUri),
+                        style = glass,
+                        blurDp = glassBlur,
+                        visibility = glassVisibility,
+                        modifier = Modifier.matchParentSize(),
+                        scrimColor = skin.surface2,
+                        edgeHighlight = true,
+                        scrimSpread = 0.10f
+                    )
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    horizontal = 12.dp,
+                                    // 高度倍数只加"上下留白"，不动内部元素 ——
+                                    // 这样调高度不会把字挤小、也不会把按钮撑变形
+                                    vertical = 10.dp * heightScale
+                                ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) { body() }
+                        // 进度线收进卡片下沿。设成"只用圆环"时这里不画 ——
+                        // 同一个进度说两遍，看着就是重复
+                        if (progressStyle.showsBar) {
+                            MiniProgressLine(frac = frac, thickness = 2.5.dp, rounded = true)
+                        }
                     }
                 }
             }

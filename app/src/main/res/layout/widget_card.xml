@@ -107,8 +107,8 @@
             android:id="@+id/widget_info_group"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:layout_marginBottom="4dp"
+            android:layout_marginTop="0dp"
+            android:layout_marginBottom="6dp"
             android:gravity="center_horizontal"
             android:orientation="vertical">
 
@@ -135,14 +135,15 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <!-- 底部三枚核心图标：红心收藏、播放/暂停、下一首（完全复刻酷狗概念版 3x2） -->
+        <!-- 底部三枚核心图标：红心居左、播放/暂停居中、下一首居右，全宽均匀分布（酷狗概念版 3x2） -->
         <LinearLayout
             android:id="@+id/widget_controls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:gravity="center"
-            android:orientation="horizontal">
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp">
 
             <ImageView
                 android:id="@+id/widget_fav"
@@ -153,16 +154,24 @@
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_heart_outline" />
 
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
             <ImageView
                 android:id="@+id/widget_play"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
-                android:layout_marginStart="24dp"
-                android:layout_marginEnd="24dp"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_play_desc"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_play" />
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
 
             <ImageView
                 android:id="@+id/widget_next"

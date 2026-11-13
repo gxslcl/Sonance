@@ -2,11 +2,9 @@
 <!--
   样式 1 · 横向控制条 5x1（酷狗概念版复刻）
 
-  左侧：发光彩胶唱片；
-  右侧：上下双层结构 ——
-    上层：歌名-歌手（或全宽完整歌词，最多 2 行）+ 右上角红心收藏键；
-    下层：5 枚纯白播控键均匀铺开（播放模式、上一首、播放/暂停、下一首、歌词开关）。
-  歌名/歌词不再和 4 个按钮挤在同一行，彻底解决「只能看到几个字」的问题。
+  左：发光彩胶唱片；
+  中：上下双层 —— 上层全宽歌名-歌手（或当前歌词），下层 5 枚播控键均匀铺开；
+  右：红心收藏键独立居右，不再和歌名挤同一行。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -44,22 +42,15 @@
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="10dp"
+            android:layout_marginEnd="8dp"
             android:layout_weight="1"
             android:gravity="center_vertical"
             android:orientation="vertical">
 
-            <!-- 上层：全宽歌名/歌词 + 右上角收藏心形 -->
-            <LinearLayout
+            <!-- 上层：全宽歌名/歌词 -->
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginEnd="6dp"
-                    android:layout_weight="1">
+                android:layout_height="wrap_content">
 
                     <LinearLayout
                         android:id="@+id/widget_info_group"
@@ -122,17 +113,7 @@
                             android:layout_height="0dp"
                             android:visibility="gone" />
                     </LinearLayout>
-                </FrameLayout>
-
-                <ImageView
-                    android:id="@+id/widget_fav"
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_fav_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_heart_outline" />
-            </LinearLayout>
+            </FrameLayout>
 
             <!-- 下层：5 个控制图标均匀分布 -->
             <LinearLayout
@@ -209,6 +190,16 @@
                     android:src="@drawable/widget_ic_lyric" />
             </LinearLayout>
         </LinearLayout>
+
+        <!-- 右侧独立红心收藏键 -->
+        <ImageView
+            android:id="@+id/widget_fav"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:background="@drawable/widget_btn_ripple"
+            android:contentDescription="@string/widget_fav_desc"
+            android:scaleType="fitCenter"
+            android:src="@drawable/widget_ic_heart_outline" />
     </LinearLayout>
 
     <!-- 本样式不放品牌行和进度条，但 id 必须存在（渲染代码统一寻址） -->

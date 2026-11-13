@@ -132,6 +132,14 @@ class PlayerController(private val context: Context) {
     var onSongStarted: ((Long) -> Unit)? = null
 
     /**
+     * 自然播放结束（STATE_ENDED）时回调。
+     *
+     * 只有 repeat OFF 才会到达 ENDED（单曲 / 列表循环由播放器自己绕回），
+     * 所以这里不需要再判循环模式。VM 用它做「单曲队列播完自动随机续播」。
+     */
+    var onPlaybackEnded: (() -> Unit)? = null
+
+    /**
      * App 侧的「随机」开关。[PlayerUiState.shuffle] 读的是它，不是播放器的标志 ——
      * 播放器那个标志一直关着，见 [setShuffle]。
      */
@@ -200,6 +208,10 @@ class PlayerController(private val context: Context) {
                     sync(player, events)
                 }
 
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) onPlaybackEnded?.invoke()
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
                     // 报错时 `_state.value.title` 可能还停在上一条（元数据是异步回调的），
                     // 直接读播放器当前的媒体项才不会把「鸟之诗」报成上一首。
@@ -250,11 +262,10 @@ class PlayerController(private val context: Context) {
         val id = player.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
         val duration = if (player.duration > 0) player.duration else (meta?.durationMs ?: 0L)
 
+        // 切歌只改变 currentMediaItemIndex，不会改变队列列表本身；仅在 TIMELINE_CHANGED 时
+        // 才重建 queueIds，避免快速连滑切歌期间每次都遍历整条队列。
         val queueChanged = events == null ||
-            events.containsAny(
-                Player.EVENT_TIMELINE_CHANGED,
-                Player.EVENT_MEDIA_ITEM_TRANSITION
-            )
+            events.contains(Player.EVENT_TIMELINE_CHANGED)
 
         _state.update { old ->
             old.copy(
@@ -314,7 +325,14 @@ class PlayerController(private val context: Context) {
         for (i in 0 until count) {
             ids += runCatching { player.getMediaItemAt(i).mediaId.toLongOrNull() ?: -1L }.getOrDefault(-1L)
         }
-        _state.update { it.copy(queueIds = ids, queueIndex = player.currentMediaItemIndex) }
+        val currentIdx = player.currentMediaItemIndex
+        _state.update { old ->
+            if (old.queueIds == ids) {
+                if (old.queueIndex == currentIdx) old else old.copy(queueIndex = currentIdx)
+            } else {
+                old.copy(queueIds = ids, queueIndex = currentIdx)
+            }
+        }
     }
 
     fun clearError() {
@@ -613,14 +631,19 @@ class PlayerController(private val context: Context) {
      * 完成后恢复用户音量并起播新曲。恢复值取 [_state].userVolume —— 它只由
      * [setVolume] 写入；[PlayerUiState.volume] 是瞬时音量，会被淡出本身污染。
      */
-    fun playAt(index: Int, fadeMs: Long = 0L) {
+    fun playAt(index: Int, fadeMs: Long = 0L, toggleIfCurrent: Boolean = true) {
         val c = controller ?: return
         if (index !in 0 until c.mediaItemCount) return
         fadeJob?.cancel()
         // 上一个淡出协程若被打断会停在半途音量上，先复原
         c.volume = _state.value.userVolume
         if (index == c.currentMediaItemIndex) {
-            togglePlay()
+            if (toggleIfCurrent) {
+                togglePlay()
+            } else {
+                if (c.playbackState == Player.STATE_IDLE) c.prepare()
+                if (!c.isPlaying) c.play()
+            }
         } else if (fadeMs > 0L && c.isPlaying) {
             lastNotifiedId = -1L
             fadeJob = scope.launch {
