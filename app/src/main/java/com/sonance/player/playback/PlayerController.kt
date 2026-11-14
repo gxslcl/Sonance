@@ -359,7 +359,19 @@ class PlayerController(private val context: Context) {
         if (current.mediaId != song.id.toString()) return
         val wanted = song.artworkUri(context)
         if (current.mediaMetadata.artworkUri == wanted) return
-        runCatching { c.replaceMediaItem(idx, song.toMediaItem(context)) }
+        // 只原地更新 metadata（封面与标签），保留当前 MediaItem 已经解析好的播放流地址，
+        // 避免 onlineSongMap 里的兜底外链（outer/url 30s 试听）把正在播的无损流顶掉。
+        val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle()).apply {
+            putLong(EXTRA_ALBUM_ID, song.albumId)
+        }
+        val metadata = current.mediaMetadata.buildUpon()
+            .setTitle(song.title)
+            .setArtist(song.artist)
+            .setAlbumTitle(song.album)
+            .setArtworkUri(wanted)
+            .setExtras(extras)
+            .build()
+        runCatching { c.replaceMediaItem(idx, current.buildUpon().setMediaMetadata(metadata).build()) }
             .onFailure { android.util.Log.w("SonanceCover", "刷新通知栏封面失败: ${it.message}") }
     }
 
@@ -372,19 +384,36 @@ class PlayerController(private val context: Context) {
      * 的当前项会跳过，避免把播放中的流打断。
      */
     fun patchQueueUri(mediaId: Long, uri: Uri) {
-        val c = controller ?: return
+        val c = controller
+        if (c == null) {
+            pendingRequest?.let { req ->
+                var touched = false
+                val updated = req.songs.map { s ->
+                    if (s.id == mediaId && s.uri != uri) {
+                        touched = true
+                        s.copy(uri = uri)
+                    } else s
+                }
+                if (touched) pendingRequest = req.copy(songs = updated)
+            }
+            return
+        }
         val count = runCatching { c.mediaItemCount }.getOrDefault(0)
         for (i in 0 until count) {
             val item = runCatching { c.getMediaItemAt(i) }.getOrNull() ?: continue
             if (item.mediaId != mediaId.toString()) continue
             if (item.localConfiguration?.uri == uri) return
-            if (i == c.currentMediaItemIndex && c.isPlaying) return
+            val curUri = item.localConfiguration?.uri?.toString()
+            if (i == c.currentMediaItemIndex && c.isPlaying && !isUnresolvedStreamUri(curUri)) return
             val extras = android.os.Bundle(item.mediaMetadata.extras ?: android.os.Bundle()).apply {
                 putString(EXTRA_URI, uri.toString())
             }
             val metadata = item.mediaMetadata.buildUpon().setExtras(extras).build()
             runCatching {
                 c.replaceMediaItem(i, item.buildUpon().setUri(uri).setMediaMetadata(metadata).build())
+                if (i == c.currentMediaItemIndex && c.playbackState == Player.STATE_IDLE) {
+                    c.prepare()
+                }
             }.onFailure { android.util.Log.w("Sonance", "补流地址失败: ${it.message}") }
             return
         }
@@ -779,6 +808,18 @@ class PlayerController(private val context: Context) {
         refreshQueue(c)
     }
 
+    /** 批量追加到播放队列末尾；当前队列为空时按第一首预备（不自动开播） */
+    fun appendToQueue(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        val c = controller
+        if (c == null || c.mediaItemCount == 0) {
+            play(songs, 0, autoplay = false, notifyStart = false)
+            return
+        }
+        c.addMediaItems(songs.map { it.toMediaItem(context) })
+        refreshQueue(c)
+    }
+
     fun removeAt(index: Int) {
         val c = controller ?: return
         if (index in 0 until c.mediaItemCount && c.mediaItemCount > 1) {
@@ -805,6 +846,12 @@ class PlayerController(private val context: Context) {
     companion object {
         const val EXTRA_ALBUM_ID = "sonance.album_id"
         const val EXTRA_URI = "sonance.source_uri"
+
+        /** 判断播放项当前的 URI 是否仍只是未解析的空地址或外链 30s 兜底页。 */
+        internal fun isUnresolvedStreamUri(uri: String?): Boolean {
+            val s = uri?.trim().orEmpty()
+            return s.isEmpty() || s.contains("/song/media/outer/url", ignoreCase = true)
+        }
 
         /**
          * 通知栏 / 锁屏取封面的地址。

@@ -1,8 +1,10 @@
 package com.sonance.player.data.netease
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
@@ -135,56 +137,74 @@ object NeteaseStream {
      * 取一首歌的播放地址。
      *
      * @param level 用户设置的目标档位；登录态不够档会自动降到能给的最高档
+     * @param expectedDurationMs 曲目已知总时长（用于识别未填 `freeTrialInfo` 却截断为 30s 的试听流）
      * @return 成功返回实际地址与档位；失败返回 null（原因用 [failureOf] 取）
      */
-    suspend fun resolve(remoteId: String, level: NeteaseLevel): NeteaseStreamInfo? {
-        val id = remoteId.trim()
-        if (id.isEmpty()) return null
-
-        cached(id)?.let { return it }
-
-        return resolveLock.withLock {
-            cached(id)?.let { return@withLock it }
+    suspend fun resolve(
+        remoteId: String,
+        level: NeteaseLevel,
+        expectedDurationMs: Long = 0L
+    ): NeteaseStreamInfo? =
+        withContext(Dispatchers.IO) {
+            val id = remoteId.trim()
+            if (id.isEmpty()) return@withContext null
 
             val account = NeteaseAuth.account
-            // 非会员把无损/HR 直接跳过 —— 少一次必然失败的请求
-            val start = if (level.needsVip && (account == null || !account.isVip)) {
-                NeteaseLevel.EXHIGH
-            } else {
-                level
-            }
+            cached(id, account)?.let { return@withContext it }
 
-            var lastCode = -1
-            for (lv in chain(start)) {
-                val attempt = request(id, lv, account)
-                when (attempt) {
-                    is Attempt.Ok -> {
-                        val ttl = (attempt.expi * 1000L - EXPIRE_SAFETY_MS)
-                            .coerceAtLeast(EXPIRE_SAFETY_MS)
-                        cache[id] = Entry(attempt.info, System.currentTimeMillis() + ttl)
+            resolveLock.withLock {
+                cached(id, account)?.let { return@withLock it }
+
+                // 非会员把无损/HR 直接跳过 —— 少一次必然失败的请求
+                val start = if (level.needsVip && (account == null || !account.isVip)) {
+                    NeteaseLevel.EXHIGH
+                } else {
+                    level
+                }
+
+                val selection = selectBestAttempt(chain(start), account?.isVip == true) { lv ->
+                    requestWithVipFallback(id, lv, account, expectedDurationMs)
+                }
+                when (selection) {
+                    is Selection.Found -> {
+                        if (!selection.attempt.info.trial || account?.isVip != true) {
+                            cacheAttempt(id, selection.attempt)
+                        } else {
+                            // 仅极短缓存试听标志让 UI 正确标示"试听"而非误标"Hi-Res"，
+                            // 下次 resolve 时 VIP 账号会自动跳过该试听缓存并重试。
+                            cache[id] = Entry(selection.attempt.info, System.currentTimeMillis() + 10_000L)
+                            Log.w(TAG, "会员账号仍只返回试听片段 id=$id level=${selection.attempt.info.level.apiValue}")
+                        }
                         clearError(id)
-                        return@withLock attempt.info
+                        return@withLock selection.attempt.info
                     }
-                    is Attempt.Denied -> {
-                        // 版权下架 / 需单独购买这类，降档再试也没用
-                        errors[id] = attempt.message
-                        Log.i(TAG, "取流被拒 id=$id ${attempt.message}")
-                        return@withLock null
+                    is Selection.Denied -> {
+                        errors[id] = selection.message
+                        Log.i(TAG, "取流被拒 id=$id ${selection.message}")
+                        null
                     }
-                    is Attempt.Retry -> {
-                        lastCode = attempt.code
+                    is Selection.Failed -> {
+                        errors[id] = messageForCode(selection.lastCode, account)
+                        Log.i(TAG, "取流失败 id=$id code=${selection.lastCode}")
+                        null
                     }
                 }
             }
-            errors[id] = messageForCode(lastCode, account)
-            Log.i(TAG, "取流失败 id=$id code=$lastCode")
-            null
         }
+
+    private fun cacheAttempt(id: String, attempt: Attempt.Ok) {
+        val ttl = (attempt.expi * 1000L - EXPIRE_SAFETY_MS)
+            .coerceAtLeast(EXPIRE_SAFETY_MS)
+        cache[id] = Entry(attempt.info, System.currentTimeMillis() + ttl)
     }
 
-    private fun cached(id: String): NeteaseStreamInfo? {
+    private fun cached(id: String, account: NeteaseAccount? = NeteaseAuth.account): NeteaseStreamInfo? {
         val entry = cache[id] ?: return null
         if (entry.expireAtMs - System.currentTimeMillis() <= 30_000L) return null
+        if (entry.info.trial && account?.isVip == true) {
+            cache.remove(id)
+            return null
+        }
         return entry.info
     }
 
@@ -194,9 +214,9 @@ object NeteaseStream {
         NeteaseLevel.EXHIGH -> listOf(NeteaseLevel.EXHIGH, NeteaseLevel.STANDARD)
         NeteaseLevel.HIGHER -> listOf(NeteaseLevel.HIGHER, NeteaseLevel.STANDARD)
         NeteaseLevel.STANDARD -> listOf(NeteaseLevel.STANDARD)
-    }.take(3)
+    }
 
-    private sealed interface Attempt {
+    internal sealed interface Attempt {
         class Ok(val info: NeteaseStreamInfo, val expi: Long) : Attempt
 
         /** 这首歌对这个账号就是没有可播地址（下架 / 付费专辑 / 未登录） */
@@ -206,17 +226,162 @@ object NeteaseStream {
         class Retry(val code: Int) : Attempt
     }
 
+    private fun requestWithVipFallback(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
+        // 1. 优先官方 EAPI（PC 客户端签名）—— 实测高音质与 VIP 曲目需走 EAPI 才稳定下发完整流
+        val eapiPc = requestV1Eapi(
+            remoteId = remoteId,
+            level = level,
+            account = account,
+            os = "pc",
+            appver = "3.0.18.203097",
+            osver = "10",
+            userAgent = NeteaseHttp.PC_UA,
+            expectedDurationMs = expectedDurationMs
+        )
+        if (eapiPc is Attempt.Ok && (!eapiPc.info.trial || account?.isVip != true)) {
+            return eapiPc
+        }
+        if (eapiPc is Attempt.Denied) return eapiPc
+
+        // 2. 若 PC EAPI 未拿到完整流（例如受限时试听或 -110），切换 Android EAPI 再试
+        val eapiAndroid = requestV1Eapi(
+            remoteId = remoteId,
+            level = level,
+            account = account,
+            os = "android",
+            appver = "8.10.05",
+            osver = "13",
+            userAgent = NeteaseHttp.ANDROID_UA,
+            expectedDurationMs = expectedDurationMs
+        )
+        if (eapiAndroid is Attempt.Ok && (!eapiAndroid.info.trial || account?.isVip != true)) {
+            return eapiAndroid
+        }
+        if (eapiAndroid is Attempt.Denied) return eapiAndroid
+
+        // 3. EAPI 均只返回试听或异常时，回落到兼容 /api 入口
+        val getAttempt = requestV1Get(remoteId, level, account, expectedDurationMs)
+        if (getAttempt is Attempt.Ok && (!getAttempt.info.trial || account?.isVip != true)) {
+            return getAttempt
+        }
+        val postAttempt = requestV1Post(remoteId, level, account, expectedDurationMs)
+        if (postAttempt is Attempt.Ok && !postAttempt.info.trial) {
+            return postAttempt
+        }
+        val legacyAttempt = requestLegacyUrl(remoteId, level, account, expectedDurationMs)
+        if (legacyAttempt is Attempt.Ok && !legacyAttempt.info.trial) {
+            return legacyAttempt
+        }
+        return (eapiAndroid as? Attempt.Ok)
+            ?: (eapiPc as? Attempt.Ok)
+            ?: (getAttempt as? Attempt.Ok)
+            ?: eapiAndroid
+    }
+
+    private fun requestV1Eapi(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        os: String,
+        appver: String,
+        osver: String,
+        userAgent: String,
+        expectedDurationMs: Long
+    ): Attempt {
+        val headerObj = JSONObject().apply {
+            put("os", os)
+            put("appver", appver)
+            put("osver", osver)
+            put("channel", "netease")
+            put("requestId", "${System.currentTimeMillis()}_0001")
+            if (!account?.musicU.isNullOrBlank()) put("MUSIC_U", account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) put("__csrf", account!!.csrf)
+        }
+        val payload = JSONObject().apply {
+            put("ids", "[$remoteId]")
+            put("level", level.apiValue)
+            put("encodeType", level.encodeType)
+            put("header", headerObj.toString())
+        }
+        val cookie = buildString {
+            append("os=").append(os).append("; appver=").append(appver)
+            if (!account?.musicU.isNullOrBlank()) append("; MUSIC_U=").append(account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) append("; __csrf=").append(account!!.csrf)
+        }
+        val body = NeteaseHttp.postEapi(
+            apiPath = "/api/song/enhance/player/url/v1",
+            payload = payload,
+            cookie = cookie,
+            userAgent = userAgent
+        ).body
+        val attempt = parsePlayerUrlResponse(body, expectedDurationMs)
+        if (attempt is Attempt.Ok) {
+            val pathTag = attempt.info.url.substringAfter(".net/", "").take(24)
+            Log.i(
+                TAG,
+                "取流[$os] id=$remoteId req=${level.apiValue} got=${attempt.info.level.apiValue} trial=${attempt.info.trial} br=${attempt.info.br} exp=${expectedDurationMs}ms path=$pathTag"
+            )
+        }
+        return attempt
+    }
+
     /**
-     * 请求一档。
-     *
-     * 用 `/api/song/enhance/player/url/v1`：实测 GET 免签名可用，
-     * 参数 `level` + `encodeType` 即可，不需要 weapi 那套 AES/RSA。
+     * 请求一档（GET v1）。
      */
-    private fun request(remoteId: String, level: NeteaseLevel, account: NeteaseAccount?): Attempt {
+    private fun requestV1Get(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
         val path = "/api/song/enhance/player/url/v1" +
             "?ids=%5B$remoteId%5D&level=${level.apiValue}&encodeType=${level.encodeType}"
-        val body = NeteaseHttp.get(path, account?.cookie).body ?: return Attempt.Retry(-1)
+        return parsePlayerUrlResponse(NeteaseHttp.get(path, account?.cookie).body, expectedDurationMs)
+    }
 
+    /** 请求一档（POST v1 form） */
+    private fun requestV1Post(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
+        val res = NeteaseHttp.postForm(
+            "/api/song/enhance/player/url/v1",
+            mapOf(
+                "ids" to "[$remoteId]",
+                "level" to level.apiValue,
+                "encodeType" to level.encodeType
+            ),
+            account?.cookie
+        )
+        return parsePlayerUrlResponse(res.body, expectedDurationMs)
+    }
+
+    /** 兼容旧版取流接口（按 br 取 320k/无损） */
+    private fun requestLegacyUrl(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
+        val br = when (level) {
+            NeteaseLevel.HIRES, NeteaseLevel.LOSSLESS -> 999000
+            NeteaseLevel.EXHIGH -> 320000
+            NeteaseLevel.HIGHER -> 192000
+            NeteaseLevel.STANDARD -> 128000
+        }
+        val path = "/api/song/enhance/player/url?ids=%5B$remoteId%5D&br=$br"
+        return parsePlayerUrlResponse(NeteaseHttp.get(path, account?.cookie).body, expectedDurationMs)
+    }
+
+    internal fun parsePlayerUrlResponse(body: String?, expectedDurationMs: Long = 0L): Attempt {
+        if (body == null) return Attempt.Retry(-1)
         val json = runCatching { JSONObject(body) }.getOrNull() ?: return Attempt.Retry(-1)
         val topCode = json.optInt("code", -1)
         val item = json.optJSONArray("data")?.optJSONObject(0)
@@ -239,16 +404,66 @@ object NeteaseStream {
             }
         }
 
+        val hasTrialInfo = item.opt("freeTrialInfo") != null && item.opt("freeTrialInfo") != JSONObject.NULL
+        val isTrialCdnPath = url.contains("jd-musicrep-ts", ignoreCase = true)
+        val returnedTimeMs = item.optLong("time", 0L)
+        val br = item.optInt("br", 0)
+        val sizeBytes = item.optLong("size", 0L)
+        val estimatedMs = if (br > 0 && sizeBytes > 0L) (sizeBytes * 8_000L) / br else 0L
+        val knownFullMs = maxOf(expectedDurationMs, returnedTimeMs)
+        // 部分接口场景（尤其 Hi-Res/日推曲目）会返回 null 的 freeTrialInfo 且 time 为 0 或整曲时长，
+        // 但实际下发的 URL 或文件体积（size * 8 / br）只有约 30 秒试听片段；多信号联合判别。
+        val timeIsTrial = returnedTimeMs in 1L..45_000L && (
+            expectedDurationMs >= 65_000L ||
+                (expectedDurationMs <= 0L && returnedTimeMs in 28_000L..32_500L)
+            )
+        val sizeIsTrial = estimatedMs in 1L..45_000L && (
+            knownFullMs >= 65_000L ||
+                (knownFullMs <= 0L && estimatedMs in 25_000L..35_000L)
+            )
+        val ftp = item.optJSONObject("freeTrialPrivilege")
+        val privilegeDenied = ftp != null &&
+            ftp.optBoolean("resConsumable", false) &&
+            ftp.has("userConsumable") &&
+            !ftp.optBoolean("userConsumable", true)
+        val sizeLooksFull = knownFullMs > 0L && estimatedMs >= (knownFullMs * 7L) / 10L
+        val privilegeTrial = privilegeDenied && !sizeLooksFull
         val info = NeteaseStreamInfo(
             url = url,
             level = NeteaseLevel.of(item.optString("level")),
-            br = item.optInt("br", 0),
+            br = br,
             type = item.optString("type").ifBlank { "mp3" },
-            // 非 null 表示只给了试听片段（会员权益没生效）
-            trial = item.opt("freeTrialInfo") != null && item.opt("freeTrialInfo") != JSONObject.NULL
+            trial = hasTrialInfo || isTrialCdnPath || timeIsTrial || sizeIsTrial || privilegeTrial
         )
         val expi = item.optLong("expi", DEFAULT_TTL_MS / 1000)
         return Attempt.Ok(info, if (expi > 0) expi else DEFAULT_TTL_MS / 1000)
+    }
+
+    internal sealed interface Selection {
+        class Found(val attempt: Attempt.Ok) : Selection
+        class Denied(val message: String) : Selection
+        class Failed(val lastCode: Int) : Selection
+    }
+
+    /** 从多档尝试里选出最优流：对 VIP 优先完整流，非完整流仅作最后兜底 */
+    internal fun selectBestAttempt(
+        levels: List<NeteaseLevel>,
+        isVip: Boolean,
+        fetcher: (NeteaseLevel) -> Attempt
+    ): Selection {
+        var lastCode = -1
+        var bestTrial: Attempt.Ok? = null
+        for (lv in levels) {
+            when (val attempt = fetcher(lv)) {
+                is Attempt.Ok -> {
+                    if (!attempt.info.trial || !isVip) return Selection.Found(attempt)
+                    if (bestTrial == null) bestTrial = attempt
+                }
+                is Attempt.Denied -> return Selection.Denied(attempt.message)
+                is Attempt.Retry -> lastCode = attempt.code
+            }
+        }
+        return if (bestTrial != null) Selection.Found(bestTrial) else Selection.Failed(lastCode)
     }
 
     private fun messageForCode(code: Int, account: NeteaseAccount?): String = when (code) {

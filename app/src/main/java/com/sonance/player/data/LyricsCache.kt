@@ -22,8 +22,17 @@ object LyricsCache {
 
     private const val TAG = "SonanceLyrics"
     private const val DIR = "lyrics_cache"
+    private const val CUSTOM_DIR = "custom_lyrics"
     private const val EXT = ".lrc"
+    private const val DELETED_EXT = ".deleted"
     private const val MAX_FILES = 500
+
+    /** 按 songId 保存的用户手动操作覆盖状态（优先于内嵌歌词与在线缓存） */
+    sealed interface Override {
+        data class Imported(val text: String) : Override
+        data object Deleted : Override
+        data object None : Override
+    }
 
     /** 缓存查询结果 */
     sealed interface Lookup {
@@ -99,11 +108,56 @@ object LyricsCache {
         dirOf(context).listFiles()?.sumOf { it.length() }?.div(1024) ?: 0L
     }.getOrDefault(0L)
 
+    fun lookupOverride(context: Context, songId: Long): Override {
+        if (songId == 0L) return Override.None
+        if (deletedMarkerOf(context, songId).exists()) return Override.Deleted
+        val imported = customFileOf(context, songId)
+        if (imported.exists()) {
+            val text = runCatching { imported.readText() }.getOrNull()
+            if (!text.isNullOrBlank()) return Override.Imported(text)
+        }
+        return Override.None
+    }
+
+    fun saveImported(context: Context, songId: Long, text: String) {
+        if (songId == 0L || text.isBlank()) return
+        runCatching {
+            val dir = customDirOf(context)
+            if (!dir.exists() && !dir.mkdirs()) return
+            deletedMarkerOf(context, songId).delete()
+            customFileOf(context, songId).writeText(text)
+        }.onFailure { Log.w(TAG, "保存导入歌词失败: ${it.message}") }
+    }
+
+    fun markDeleted(context: Context, songId: Long) {
+        if (songId == 0L) return
+        runCatching {
+            val dir = customDirOf(context)
+            if (!dir.exists() && !dir.mkdirs()) return
+            customFileOf(context, songId).delete()
+            deletedMarkerOf(context, songId).writeText("1")
+        }.onFailure { Log.w(TAG, "标记删除歌词失败: ${it.message}") }
+    }
+
+    fun clearOverride(context: Context, songId: Long) {
+        if (songId == 0L) return
+        runCatching {
+            customFileOf(context, songId).delete()
+            deletedMarkerOf(context, songId).delete()
+        }.onFailure { Log.w(TAG, "清理歌词覆盖标记失败: ${it.message}") }
+    }
+
     /* ============================================================ */
 
     private fun dirOf(context: Context) = File(context.filesDir, DIR)
 
     private fun fileOf(context: Context, key: String) = File(dirOf(context), "$key$EXT")
+
+    private fun customDirOf(context: Context) = File(context.filesDir, CUSTOM_DIR)
+
+    private fun customFileOf(context: Context, songId: Long) = File(customDirOf(context), "song_$songId$EXT")
+
+    private fun deletedMarkerOf(context: Context, songId: Long) = File(customDirOf(context), "song_$songId$DELETED_EXT")
 
     /** 超过上限就按最后修改时间删掉最旧的一批，避免无限增长 */
     private fun trim(dir: File) {

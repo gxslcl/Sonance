@@ -103,11 +103,11 @@ import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SliderLine
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.ui.icon.SonanceIcons
-import com.sonance.player.ui.sheets.NeteaseLoginSheet
 import com.sonance.player.ui.sheets.ScanScopeSheet
 import com.sonance.player.ui.theme.AppIconVariant
 import com.sonance.player.ui.theme.AppIcons
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.HiResBadgeSize
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.LocalSkin
@@ -1524,6 +1524,10 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
         append(" · ")
         append(if (vm.vinylMode) "黑碟旋转已开启" else "标准方角封面")
         if (vm.vinylSfxEnabled) append(" · 机械音效")
+        append(
+            if (vm.hiResBadgeEnabled) " · Hi-Res 金标（${vm.hiResBadgeSize.label}）"
+            else " · 金标已关"
+        )
     }
 
     CollapsibleSection(
@@ -1688,6 +1692,52 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
                 onValueChange = { vm.changeVinylSfxVolume(it) },
                 valueRange = 0f..1f,
                 modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // ===== 播放页 Hi-Res 小金标 =====
+        Spacer(Modifier.height(16.dp))
+        SettingsGroupLabel("Hi-Res 音质金标")
+        SettingsSwitchRow(
+            title = "显示 Hi-Res 小金标",
+            subtitle = "播放在线高音质（320k / 无损 / Hi-Res）或本地无损、高码率歌曲时，在播放主界面封面外右下角展示「Hi·Res AUDIO」金标（不遮挡封面且不随呼吸缩放抖动）。",
+            checked = vm.hiResBadgeEnabled,
+            onCheckedChange = { vm.changeHiResBadgeEnabled(it) }
+        )
+        if (vm.hiResBadgeEnabled) {
+            Spacer(Modifier.height(10.dp))
+            Text("金标大小", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HiResBadgeSize.entries.forEach { sizeOption ->
+                    val selected = sizeOption == vm.hiResBadgeSize
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(
+                                width = if (selected) 1.dp else 0.dp,
+                                color = if (selected) skin.accent else Color.Transparent,
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeHiResBadgeSize(sizeOption) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = sizeOption.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "当前：${vm.hiResBadgeSize.label}（${vm.hiResBadgeSize.badgeDp}dp）。「小」为最初经典尺寸，推荐「中」或「大」在封面外更清晰协调。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
             )
         }
     }
@@ -2285,8 +2335,8 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
 
     Column(Modifier.fillMaxWidth()) {
-        // 账号卡放在最上面：它决定了下面几项的实际效果（会员曲库 / 音质 / 下载）
-        NeteaseAccountCard(vm)
+        // 账号登录已迁至「在线音乐」页右上角，这里仅保留在线音质档位设置
+        NeteaseQualityCard(vm)
         Spacer(Modifier.height(10.dp))
 
         SettingsSwitchRow(
@@ -2394,16 +2444,12 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
 }
 
 /**
- * 网易云账号卡：未登录显示入口，已登录显示头像 / 昵称 / 会员态，下面是音质档位。
- *
- * 为什么把音质放在这张卡里而不是单独一段：音质和账号权益是同一件事的两面
- * （会员才有无损），分开放用户要来回对照才知道"为什么无损是灰的"。
+ * 在线播放音质档位卡（账号登录已移至「在线音乐」页右上角）。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun NeteaseAccountCard(vm: SonanceViewModel) {
+private fun NeteaseQualityCard(vm: SonanceViewModel) {
     val skin = LocalSkin.current
-    var showLogin by remember { mutableStateOf(false) }
     val account = vm.neteaseAccount
 
     Column(
@@ -2413,72 +2459,7 @@ private fun NeteaseAccountCard(vm: SonanceViewModel) {
             .background(skin.surface2)
             .padding(14.dp)
     ) {
-        if (account == null) {
-            Text(
-                "网易云账号",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = skin.text
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "有会员的话登录自己的账号，就能搜到并播放会员曲库、取无损音质、下载会员歌曲。" +
-                    "不登录也能用，只是限于音源上免费开放的曲目。",
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted
-            )
-            Spacer(Modifier.height(10.dp))
-            PillButton(label = "登录网易云", onClick = { showLogin = true })
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val avatar = rememberRemoteCover(
-                    account.avatarUrl.takeIf { it.isNotBlank() },
-                    120
-                )
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(skin.surface),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (avatar != null) {
-                        Image(
-                            bitmap = avatar,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Text(
-                            account.nickname.take(1).ifBlank { "云" },
-                            style = MaterialTheme.typography.titleMedium,
-                            color = skin.textMuted
-                        )
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        account.nickname.ifBlank { "网易云用户" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = skin.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        if (account.isVip) "黑胶 VIP · 可播会员曲库" else "普通账号 · 无损需要会员",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (account.isVip) skin.accent else skin.textDim
-                    )
-                }
-                PillButton(label = "退出", filled = false, onClick = { vm.logoutNetease() })
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-        Text("播放音质", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+        Text("播放音质", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = skin.text)
         Spacer(Modifier.height(8.dp))
         // 非会员不展示无损两档：摆在那里点不动，比不摆更让人困惑
         val levels = if (account?.isVip == true) NeteaseLevel.entries else NeteaseLevel.freeTier
@@ -2499,16 +2480,11 @@ private fun NeteaseAccountCard(vm: SonanceViewModel) {
             if (account?.isVip == true) {
                 "下载跟随这里的档位；实际以音源返回的档位为准（只给到 320k 时会显示 320k）。"
             } else {
-                "未登录 / 非会员最高到 320k，无损与 Hi-Res 需要黑胶 VIP。" +
-                    "下载跟随这里的档位。"
+                "未登录 / 非会员最高到 320k，无损与 Hi-Res 需在「在线音乐」页登录黑胶 VIP 账号。下载跟随这里的档位。"
             },
             style = MaterialTheme.typography.labelSmall,
             color = skin.textDim
         )
-    }
-
-    if (showLogin) {
-        NeteaseLoginSheet(vm = vm, onDismiss = { showLogin = false })
     }
 }
 

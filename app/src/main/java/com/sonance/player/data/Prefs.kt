@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.sonance.player.playback.EqPreset
 import com.sonance.player.ui.theme.AppIcons
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.HiResBadgeSize
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.MiniPlayerStyle
@@ -655,6 +656,18 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_LIST_COVER_SCALE, ListCoverScale.X12.ordinal)
         set(v) = sp.edit().putInt(KEY_LIST_COVER_SCALE, v).apply()
 
+    // ===== 播放页 Hi-Res 小金标 =====
+
+    /** 是否在播放主界面高音质/无损歌曲的封面外右下角显示「Hi·Res AUDIO」小金标 */
+    var hiResBadgeEnabled: Boolean
+        get() = sp.getBoolean(KEY_HIRES_BADGE_ENABLED, true)
+        set(v) = sp.edit().putBoolean(KEY_HIRES_BADGE_ENABLED, v).apply()
+
+    /** 小金标尺寸：[HiResBadgeSize] 的 ordinal（0=小 1=中 2=大，默认中） */
+    var hiResBadgeSize: Int
+        get() = sp.getInt(KEY_HIRES_BADGE_SIZE, HiResBadgeSize.MEDIUM.ordinal)
+        set(v) = sp.edit().putInt(KEY_HIRES_BADGE_SIZE, v).apply()
+
     // ===== 顶栏品牌 =====
 
     /**
@@ -929,6 +942,11 @@ class Prefs(context: Context) {
     var onlineDownloadEnabled: Boolean
         get() = sp.getBoolean(KEY_DL_ENABLED, false)
         set(v) = sp.edit().putBoolean(KEY_DL_ENABLED, v).apply()
+
+    /** 已登录用户是否已执行过「默认关闭听 8 秒自动下载」的一次性重置。 */
+    var loggedInAutoDownloadResetDone: Boolean
+        get() = sp.getBoolean(KEY_LOGGED_IN_DL_RESET, false)
+        set(v) = sp.edit().putBoolean(KEY_LOGGED_IN_DL_RESET, v).apply()
 
     /**
      * 只在 Wi-Fi 下下载。**默认开** ——
@@ -1389,6 +1407,7 @@ class Prefs(context: Context) {
         private val VALID_SNIFF_TARGETS =
             com.sonance.player.data.netease.SniffApp.entries.map { it.name }.toSet()
         private const val KEY_DL_ENABLED = "online_download_enabled"
+        private const val KEY_LOGGED_IN_DL_RESET = "logged_in_auto_dl_reset"
         private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
         private const val KEY_DL_KEYS = "online_download_keys"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
@@ -1428,6 +1447,8 @@ class Prefs(context: Context) {
         private const val KEY_MINI_COVER = "mini_cover_scale"
         private const val KEY_LIST_ROW_STYLE = "list_row_style"
         private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
+        private const val KEY_HIRES_BADGE_ENABLED = "hires_badge_enabled"
+        private const val KEY_HIRES_BADGE_SIZE = "hires_badge_size"
         private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"
         private const val KEY_SCROLL_HAPTIC = "scroll_haptic_enabled"
         private const val KEY_RIGHT_RAIL_LETTERS = "right_rail_letters"

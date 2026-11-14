@@ -658,9 +658,10 @@ internal fun VerticalEmptyLyrics(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (onlineEnabled) {
-                    PillButton(label = "手动搜索歌词", onClick = onManualSearch)
-                }
+                PillButton(
+                    label = if (onlineEnabled) "搜索 / 导入歌词" else "导入歌词",
+                    onClick = onManualSearch
+                )
                 PillButton(
                     label = "清除本首缓存",
                     onClick = {

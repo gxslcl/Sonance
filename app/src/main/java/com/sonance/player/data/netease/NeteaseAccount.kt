@@ -37,13 +37,12 @@ data class NeteaseAccount(
     /**
      * 拼进每个请求的 Cookie。
      *
-     * `os=pc; appver=2.10.13` 这两个是**硬要求**（实测 2026-11-13）：
-     * 不带的话服务端按普通网页访客处理，会员账号也只给 128k 或试听片段，
-     * 表现为"明明登录了却没有音质"。社区里绝大多数"登录后仍低音质"都是漏了它。
+     * `os=pc; appver=...` 这两个是**硬要求**（实测 2026-11）：
+     * 不带的话服务端按普通网页访客处理，会员账号也只给 128k 或试听片段。
      */
     val cookie: String
         get() = buildString {
-            append("os=pc; appver=2.10.13")
+            append("os=pc; appver=3.0.18.203097")
             if (musicU.isNotBlank()) append("; MUSIC_U=").append(musicU)
             if (csrf.isNotBlank()) append("; __csrf=").append(csrf)
         }

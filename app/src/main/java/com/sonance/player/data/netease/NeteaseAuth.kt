@@ -111,26 +111,193 @@ object NeteaseAuth {
                     return@withContext PollResult.Failed("登录响应缺少凭证，请稍后再试")
                 }
                 val csrf = NeteaseHttp.cookieValue(response.setCookies, "__csrf").orEmpty()
-                val draft = NeteaseAccount(
-                    musicU = musicU,
-                    csrf = csrf,
-                    userId = 0L,
-                    nickname = "",
-                    avatarUrl = "",
-                    vipType = 0,
-                    savedAtMs = System.currentTimeMillis()
-                )
-                // 803 的体里字段各版本不一致（有的带 profile，有的只带 userId），
-                // 所以再用 Cookie 问一次账号信息 —— 那是唯一权威来源，顺带能拿到会员态
-                val full = fetchAccount(draft) ?: draft
-                account = full
-                NeteaseAccountStore.save(context, full)
+                val full = finalizeCookieLogin(context, musicU, csrf, fallbackDraft = true)!!
                 PollResult.Confirmed(full)
             }
             8821 -> PollResult.Failed("账号存在安全风险，需要在手机上验证后再扫码")
             else -> {
                 Log.w(TAG, "扫码轮询未知 code=$code：${body.take(200)}")
                 PollResult.Failed("登录失败（code=$code）")
+            }
+        }
+    }
+
+    // ===== 手机验证码 / 密码登录 =====
+
+    sealed interface SmsSendResult {
+        data object Sent : SmsSendResult
+        data class Failed(val message: String) : SmsSendResult
+    }
+
+    sealed interface LoginResult {
+        data class Success(val account: NeteaseAccount) : LoginResult
+        data class Failed(val message: String) : LoginResult
+    }
+
+    /** 发送手机登录验证码。国内手机号自动走 +86 */
+    suspend fun sendSmsCaptcha(phone: String, ctcode: String = "86"): SmsSendResult =
+        withContext(Dispatchers.IO) {
+            val cleaned = phone.trim()
+            if (cleaned.length < 6 || cleaned.any { !it.isDigit() }) {
+                return@withContext SmsSendResult.Failed("请输入正确的手机号")
+            }
+            val code = ctcode.trim().ifBlank { "86" }
+            val path = "/api/sms/captcha/sent?cellphone=${java.net.URLEncoder.encode(cleaned, "UTF-8")}" +
+                "&ctcode=${java.net.URLEncoder.encode(code, "UTF-8")}"
+            val res = NeteaseHttp.get(path)
+            val raw = res.body ?: res.errorBody
+            parseSmsSendResponse(raw)
+        }
+
+    /** 手机号 + 短信验证码登录 */
+    suspend fun loginWithPhoneCaptcha(
+        context: Context,
+        phone: String,
+        captcha: String,
+        ctcode: String = "86"
+    ): LoginResult = withContext(Dispatchers.IO) {
+        val cleanedPhone = phone.trim()
+        val cleanedCode = captcha.trim()
+        if (cleanedPhone.length < 6 || cleanedPhone.any { !it.isDigit() }) {
+            return@withContext LoginResult.Failed("请输入正确的手机号")
+        }
+        if (cleanedCode.length < 4 || cleanedCode.any { !it.isDigit() }) {
+            return@withContext LoginResult.Failed("请输入收到的短信验证码")
+        }
+        val res = NeteaseHttp.postForm(
+            "/api/login/cellphone",
+            mapOf(
+                "phone" to cleanedPhone,
+                "countrycode" to ctcode.trim().ifBlank { "86" },
+                "captcha" to cleanedCode,
+                "rememberLogin" to "true"
+            )
+        )
+        completeCellphoneLogin(context, res)
+    }
+
+    /** 手机号 + 密码登录（密码按网易云约定做 MD5 后提交，本地不落盘） */
+    suspend fun loginWithPassword(
+        context: Context,
+        phone: String,
+        password: String,
+        ctcode: String = "86"
+    ): LoginResult = withContext(Dispatchers.IO) {
+        val cleanedPhone = phone.trim()
+        if (cleanedPhone.length < 6 || cleanedPhone.any { !it.isDigit() }) {
+            return@withContext LoginResult.Failed("请输入正确的手机号")
+        }
+        if (password.isBlank()) {
+            return@withContext LoginResult.Failed("请输入登录密码")
+        }
+        val res = NeteaseHttp.postForm(
+            "/api/login/cellphone",
+            mapOf(
+                "phone" to cleanedPhone,
+                "countrycode" to ctcode.trim().ifBlank { "86" },
+                "password" to md5Hex(password),
+                "rememberLogin" to "true"
+            )
+        )
+        completeCellphoneLogin(context, res)
+    }
+
+    private suspend fun completeCellphoneLogin(
+        context: Context,
+        res: NeteaseHttp.Response
+    ): LoginResult {
+        val parsed = parseCellphoneLoginPayload(res.body ?: res.errorBody, res.setCookies)
+        if (parsed.errorMessage != null) return LoginResult.Failed(parsed.errorMessage)
+        val musicU = parsed.musicU ?: return LoginResult.Failed("未拿到登录凭证，请改用扫码或 Cookie 登录")
+        val full = finalizeCookieLogin(
+            context = context,
+            musicU = musicU,
+            csrf = parsed.csrf,
+            fallbackDraft = false,
+            seedUserId = parsed.userId,
+            seedNickname = parsed.nickname,
+            seedAvatarUrl = parsed.avatarUrl
+        ) ?: return LoginResult.Failed("登录态校验失败，请重试或改用扫码登录")
+        return LoginResult.Success(full)
+    }
+
+    internal data class ParsedLoginPayload(
+        val musicU: String? = null,
+        val csrf: String = "",
+        val userId: Long = 0L,
+        val nickname: String = "",
+        val avatarUrl: String = "",
+        val errorMessage: String? = null
+    )
+
+    internal fun parseSmsSendResponse(raw: String?): SmsSendResult {
+        if (raw.isNullOrBlank()) return SmsSendResult.Failed("网络不通或请求被拦截，稍后再试")
+        val json = runCatching { org.json.JSONObject(raw) }.getOrNull()
+            ?: return SmsSendResult.Failed("发送失败，响应异常")
+        val code = json.optInt("code", -1)
+        if (code == 200) return SmsSendResult.Sent
+        val msg = json.optString("message").ifBlank { json.optString("msg") }
+        val friendly = when (code) {
+            400 -> "手机号格式有误或未支持该号段"
+            405 -> "发送太频繁，请稍后再试"
+            462, 8821 -> "触发安全验证，建议改用「扫码登录」"
+            else -> msg.ifBlank { "发送失败（code=$code）" }
+        }
+        return SmsSendResult.Failed(friendly)
+    }
+
+    internal fun parseCellphoneLoginPayload(
+        raw: String?,
+        setCookies: List<String>
+    ): ParsedLoginPayload {
+        if (raw.isNullOrBlank()) {
+            return ParsedLoginPayload(errorMessage = "网络不通，稍后再试")
+        }
+        val json = runCatching { org.json.JSONObject(raw) }.getOrNull()
+            ?: return ParsedLoginPayload(errorMessage = "登录响应无法解析")
+        val code = json.optInt("code", -1)
+        if (code != 200) {
+            val serverMsg = json.optString("message").ifBlank { json.optString("msg") }
+            val friendly = when (code) {
+                400 -> "手机号或登录方式不被接口接受，可切换扫码登录"
+                501 -> "账号不存在"
+                502 -> "手机号或密码错误"
+                503 -> "验证码错误或已失效"
+                509 -> "尝试次数过多，请稍后再试或使用扫码登录"
+                462, 8821 -> "账号需要安全校验，请使用网易云 App 扫码或 Cookie 登录"
+                -460 -> "当前网络环境触发网易云校验，建议直接「扫码登录」"
+                else -> serverMsg.ifBlank { "登录失败（code=$code）" }
+            }
+            return ParsedLoginPayload(errorMessage = friendly)
+        }
+        val rawCookie = json.optString("cookie")
+        val musicU = NeteaseHttp.cookieValue(setCookies, "MUSIC_U")
+            ?: extractCookieValue(rawCookie, "MUSIC_U")
+        if (musicU.isNullOrBlank()) {
+            return ParsedLoginPayload(errorMessage = "响应未下发会话凭证，请改用扫码登录")
+        }
+        val csrf = NeteaseHttp.cookieValue(setCookies, "__csrf")
+            ?: extractCookieValue(rawCookie, "__csrf").orEmpty()
+        val accObj = json.optJSONObject("account")
+        val profileObj = json.optJSONObject("profile")
+        val userId = accObj?.optLong("id")?.takeIf { it > 0L }
+            ?: profileObj?.optLong("userId") ?: 0L
+        return ParsedLoginPayload(
+            musicU = musicU,
+            csrf = csrf,
+            userId = userId,
+            nickname = profileObj?.optString("nickname").orEmpty(),
+            avatarUrl = profileObj?.optString("avatarUrl").orEmpty()
+        )
+    }
+
+    internal fun md5Hex(text: String): String {
+        val bytes = java.security.MessageDigest.getInstance("MD5")
+            .digest(text.toByteArray(Charsets.UTF_8))
+        return buildString(bytes.size * 2) {
+            for (b in bytes) {
+                append(((b.toInt() ushr 4) and 0xF).toString(16))
+                append((b.toInt() and 0xF).toString(16))
             }
         }
     }
@@ -150,21 +317,38 @@ object NeteaseAuth {
                 ?: return@withContext null
             if (musicU.length < 10) return@withContext null
 
-            val draft = NeteaseAccount(
+            finalizeCookieLogin(
+                context = context,
                 musicU = musicU,
                 csrf = extractCookieValue(raw, "__csrf").orEmpty(),
-                userId = 0L,
-                nickname = "",
-                avatarUrl = "",
-                vipType = 0,
-                savedAtMs = System.currentTimeMillis()
+                fallbackDraft = false
             )
-            // 必须问一次账号信息：既验证 Cookie 有效，也拿到昵称和会员态
-            val full = fetchAccount(draft) ?: return@withContext null
-            account = full
-            NeteaseAccountStore.save(context, full)
-            full
         }
+
+    private suspend fun finalizeCookieLogin(
+        context: Context,
+        musicU: String,
+        csrf: String,
+        fallbackDraft: Boolean,
+        seedUserId: Long = 0L,
+        seedNickname: String = "",
+        seedAvatarUrl: String = ""
+    ): NeteaseAccount? {
+        val draft = NeteaseAccount(
+            musicU = musicU,
+            csrf = csrf,
+            userId = seedUserId,
+            nickname = seedNickname,
+            avatarUrl = seedAvatarUrl,
+            vipType = 0,
+            savedAtMs = System.currentTimeMillis()
+        )
+        // 再用 Cookie 问一次账号详情 —— 唯一权威的 vipType / profile 来源
+        val full = fetchAccount(draft) ?: if (fallbackDraft) draft else return null
+        account = full
+        NeteaseAccountStore.save(context, full)
+        return full
+    }
 
     private fun extractCookieValue(raw: String, name: String): String? {
         val idx = raw.indexOf("$name=", ignoreCase = true)

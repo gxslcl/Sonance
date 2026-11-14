@@ -4,7 +4,11 @@ import android.content.Context
 import android.net.Uri
 import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 
 /**
  * 逐字/逐词片段。
@@ -41,7 +45,7 @@ sealed interface Lyrics {
 }
 
 /** 歌词来源 */
-enum class LyricsSource { EMBEDDED, ONLINE }
+enum class LyricsSource { EMBEDDED, ONLINE, IMPORTED }
 
 /** 加载结果：歌词本体 + 来源（[lyrics] 为 null 表示没找到） */
 data class LyricsResult(val lyrics: Lyrics?, val source: LyricsSource?)
@@ -66,6 +70,9 @@ object LyricsRepository {
     /** 命中率很高（同一首歌反复看），用一个小的 LRU 缓存；null 也缓存，避免反复开文件/发请求 */
     private val cache = LruCache<String, LyricsResult>(48)
 
+    /** 导入 / 删除歌词后自增，通知单行歌词条等其它订阅方即时刷新 */
+    val revision = MutableStateFlow(0L)
+
     suspend fun load(
         context: Context,
         songId: Long,
@@ -83,19 +90,36 @@ object LyricsRepository {
     ): LyricsResult {
         // 缓存键带服务地址：换了歌词源就自然走新命名空间，不会读到旧源的结果
         val cacheKey = LyricsCache.keyOf(title, artist, apiBase) ?: "id:$songId"
-        cache.get(cacheKey)?.let { return it }
+        val scopedKey = "$cacheKey|id:$songId"
+        cache.get(scopedKey)?.let { return it }
 
         return withContext(Dispatchers.IO) {
-            cache.get(cacheKey)?.let { return@withContext it }
+            cache.get(scopedKey)?.let { return@withContext it }
 
             var text: String? = null
             var source: LyricsSource? = null
 
+            // ---- 0) 用户手动导入 / 显式删除覆盖（优先级最高）----
+            when (val ov = LyricsCache.lookupOverride(context, songId)) {
+                is LyricsCache.Override.Deleted -> {
+                    val deleted = LyricsResult(null, null)
+                    cache.put(scopedKey, deleted)
+                    return@withContext deleted
+                }
+                is LyricsCache.Override.Imported -> {
+                    text = ov.text
+                    source = LyricsSource.IMPORTED
+                }
+                LyricsCache.Override.None -> Unit
+            }
+
             // ---- 1) 内嵌（免费且权威）----
-            val embedded = runCatching { AudioTags.readLyrics(context, uri) }.getOrNull()
-            if (!embedded.isNullOrBlank()) {
-                text = embedded
-                source = LyricsSource.EMBEDDED
+            if (source == null) {
+                val embedded = runCatching { AudioTags.readLyrics(context, uri) }.getOrNull()
+                if (!embedded.isNullOrBlank()) {
+                    text = embedded
+                    source = LyricsSource.EMBEDDED
+                }
             }
 
             // ---- 2) 本地在线缓存 ----
@@ -173,7 +197,7 @@ object LyricsRepository {
             }
             val parsed = shown?.takeIf { it.isNotBlank() }?.let { parse(it) }
             val result = LyricsResult(parsed, if (parsed != null) source else null)
-            cache.put(cacheKey, result)
+            cache.put(scopedKey, result)
             result
         }
     }
@@ -224,15 +248,107 @@ object LyricsRepository {
             LyricsCache.store(context, originKey, online)
         }
         if (originSongId != 0L) {
+            LyricsCache.clearOverride(context, originSongId)
             LyricsCache.store(context, "id:$originSongId", online)
         }
         val shown = if (convertToSimplified) ChineseConverter.toSimplified(context, online) else online
         val parsed = shown.takeIf { it.isNotBlank() }?.let { parse(it) }
         val result = LyricsResult(parsed, if (parsed != null) LyricsSource.ONLINE else null)
         cache.put(key, result)
-        if (originKey != null && originKey != key) cache.put(originKey, result)
+        if (originKey != null && originKey != key) {
+            cache.put(originKey, result)
+            cache.put("$originKey|id:$originSongId", result)
+        }
         if (originSongId != 0L) cache.put("id:$originSongId", result)
+        revision.value++
         result
+    }
+
+    /** 手动导入歌词文本（支持外部 .lrc/.txt 文件或粘贴），优先于内嵌与在线歌词 */
+    suspend fun importManual(
+        context: Context,
+        songId: Long,
+        title: String,
+        artist: String,
+        apiBase: String,
+        rawText: String,
+        convertToSimplified: Boolean = true
+    ): LyricsResult = withContext(Dispatchers.IO) {
+        val cleaned = rawText.removePrefix("\uFEFF").trim()
+        val shown = if (convertToSimplified && cleaned.isNotEmpty()) {
+            ChineseConverter.toSimplified(context, cleaned)
+        } else {
+            cleaned
+        }
+        val parsed = shown.takeIf { it.isNotBlank() }?.let { parse(it) }
+            ?: return@withContext LyricsResult(null, null)
+
+        LyricsCache.saveImported(context, songId, cleaned)
+        val result = LyricsResult(parsed, LyricsSource.IMPORTED)
+        val key = LyricsCache.keyOf(title, artist, apiBase) ?: "id:$songId"
+        cache.put("$key|id:$songId", result)
+        cache.put(key, result)
+        if (songId != 0L) cache.put("id:$songId", result)
+        revision.value++
+        result
+    }
+
+    /** 删除当前歌曲的歌词（清除缓存并记录删除标记，防止切回时再次自动显示旧内嵌/旧缓存歌词） */
+    suspend fun deleteLyrics(
+        context: Context,
+        songId: Long,
+        title: String,
+        artist: String,
+        apiBase: String
+    ) = withContext(Dispatchers.IO) {
+        val key = LyricsCache.keyOf(title, artist, apiBase)
+        if (key != null) {
+            cache.remove(key)
+            cache.remove("$key|id:$songId")
+            LyricsCache.remove(context, key)
+        }
+        if (songId != 0L) {
+            val idKey = "id:$songId"
+            cache.remove(idKey)
+            cache.remove("$idKey|id:$songId")
+            LyricsCache.remove(context, idKey)
+            LyricsCache.markDeleted(context, songId)
+        }
+        revision.value++
+    }
+
+    /**
+     * 解码外部 `.lrc` / `.txt` 字节流：先按严格 UTF-8（跳过 BOM）校验，
+     * 遇到国内常见老式 GBK / GB18030 编码自动回退到 GB18030，避免中文歌词乱码。
+     */
+    fun decodeLyricsBytes(bytes: ByteArray): String {
+        if (bytes.isEmpty()) return ""
+        val hasUtf8Bom = bytes.size >= 3 &&
+            bytes[0] == 0xEF.toByte() &&
+            bytes[1] == 0xBB.toByte() &&
+            bytes[2] == 0xBF.toByte()
+        if (hasUtf8Bom) {
+            return String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
+        }
+        // UTF-16 BOM
+        if (bytes.size >= 2) {
+            if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
+                return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
+            }
+            if (bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+                return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+            }
+        }
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        } catch (_: Throwable) {
+            runCatching { String(bytes, Charset.forName("GB18030")) }
+                .getOrElse { String(bytes, Charsets.UTF_8) }
+        }
     }
 
     /** 忘掉这一首的在线歌词缓存（拿到错误歌词后先清掉，再重新搜） */

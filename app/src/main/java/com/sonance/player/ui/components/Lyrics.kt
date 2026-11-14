@@ -1,6 +1,8 @@
 package com.sonance.player.ui.components
 
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.background
@@ -40,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.LongState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -211,8 +214,10 @@ fun LyricsOverlay(
         if (!state.isPlaybackActive) onPlayPause()
     }
 
-    // 开关进 key：用户在设置里打开「网易云补全」后回到歌词页要能立刻生效
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
+    val lyricsRev by LyricsRepository.revision.collectAsState()
+
+    // 开关或导入/删除版本进 key：任何改动回到歌词页都会即时同步
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill, lyricsRev) {
         loading = true
         result = LyricsRepository.load(
             context = context,
@@ -312,16 +317,14 @@ fun LyricsOverlay(
                 // Spacer 把图标推到右侧。
                 Spacer(Modifier.weight(1f))
 
-                // 手动搜索：拿到错误歌词时的补救入口
-                if (onlineEnabled) {
-                    IconAction(
-                        icon = SonanceIcons.Search,
-                        contentDescription = "手动搜索歌词",
-                        onClick = { showSearch = true },
-                        iconSize = 19.dp,
-                        tint = skin.textDim
-                    )
-                }
+                // 手动搜索 & 导入 / 删除歌词
+                IconAction(
+                    icon = SonanceIcons.Search,
+                    contentDescription = "搜索或管理歌词",
+                    onClick = { showSearch = true },
+                    iconSize = 19.dp,
+                    tint = skin.textDim
+                )
                 // 外观：背景玻璃 + 字号 + 简繁，**合并成一个入口**。
                 //
                 // 原来是两个图标（Layers 背景 / Sort 字号），两个都不好认，
@@ -613,11 +616,54 @@ fun LyricsOverlay(
         }
     }
 
-    // ===== 手动搜索对话框 =====
+    // ===== 手动搜索 / 导入 / 删除歌词对话框 =====
+    val importFileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { pickedUri ->
+        if (pickedUri == null) return@rememberLauncherForActivityResult
+        showSearch = false
+        searching = true
+        notice = null
+        scope.launch {
+            val rawText = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(pickedUri)?.use { stream ->
+                        val bytes = stream.readBytes()
+                        if (bytes.size > 2 * 1024 * 1024) return@use ""
+                        LyricsRepository.decodeLyricsBytes(bytes)
+                    }
+                }.getOrNull()
+            }
+            if (rawText.isNullOrBlank()) {
+                searching = false
+                notice = "导入失败：文件为空或无法读取"
+                return@launch
+            }
+            val imported = LyricsRepository.importManual(
+                context = context,
+                songId = song.id,
+                title = song.title,
+                artist = song.artist,
+                apiBase = apiBase,
+                rawText = rawText,
+                convertToSimplified = convertT2S
+            )
+            searching = false
+            if (imported.lyrics == null) {
+                notice = "导入失败：未解析到有效歌词内容"
+            } else {
+                result = imported
+                notice = "已导入本地歌词"
+            }
+        }
+    }
+
     if (showSearch) {
         LyricsSearchDialog(
             initialTitle = song.title,
             initialArtist = song.artist,
+            onlineEnabled = onlineEnabled,
+            hasLyrics = lyrics != null,
             onDismiss = { showSearch = false },
             onConfirm = { title, artist ->
                 showSearch = false
@@ -643,6 +689,46 @@ fun LyricsOverlay(
                     } else {
                         null
                     }
+                }
+            },
+            onImportFile = {
+                importFileLauncher.launch(arrayOf("text/*", "application/octet-stream", "*/*"))
+            },
+            onImportText = { rawText ->
+                showSearch = false
+                searching = true
+                notice = null
+                scope.launch {
+                    val imported = LyricsRepository.importManual(
+                        context = context,
+                        songId = song.id,
+                        title = song.title,
+                        artist = song.artist,
+                        apiBase = apiBase,
+                        rawText = rawText,
+                        convertToSimplified = convertT2S
+                    )
+                    searching = false
+                    if (imported.lyrics == null) {
+                        notice = "导入失败：内容为空或无法解析歌词"
+                    } else {
+                        result = imported
+                        notice = "已导入歌词"
+                    }
+                }
+            },
+            onDeleteLyrics = {
+                showSearch = false
+                scope.launch {
+                    LyricsRepository.deleteLyrics(
+                        context = context,
+                        songId = song.id,
+                        title = song.title,
+                        artist = song.artist,
+                        apiBase = apiBase
+                    )
+                    result = LyricsResult(null, null)
+                    notice = "已删除当前歌曲歌词"
                 }
             }
         )
@@ -1833,9 +1919,10 @@ private fun EmptyLyrics(song: Song, onlineEnabled: Boolean, onManualSearch: () -
             )
             Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                if (onlineEnabled) {
-                    PillButton(label = "手动搜索", onClick = onManualSearch)
-                }
+                PillButton(
+                    label = if (onlineEnabled) "搜索 / 导入歌词" else "导入歌词",
+                    onClick = onManualSearch
+                )
                 PillButton(
                     label = "清除本首缓存",
                     onClick = {
@@ -1857,12 +1944,20 @@ private fun EmptyLyrics(song: Song, onlineEnabled: Boolean, onManualSearch: () -
 private fun LyricsSearchDialog(
     initialTitle: String,
     initialArtist: String,
+    onlineEnabled: Boolean,
+    hasLyrics: Boolean,
     onDismiss: () -> Unit,
-    onConfirm: (title: String, artist: String) -> Unit
+    onConfirm: (title: String, artist: String) -> Unit,
+    onImportFile: () -> Unit,
+    onImportText: (rawText: String) -> Unit,
+    onDeleteLyrics: () -> Unit
 ) {
     val skin = LocalSkin.current
     var title by remember { mutableStateOf(initialTitle) }
     var artist by remember { mutableStateOf(initialArtist) }
+    var pasteMode by remember { mutableStateOf(false) }
+    var pasteText by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1870,42 +1965,176 @@ private fun LyricsSearchDialog(
         titleContentColor = skin.text,
         textContentColor = skin.textDim,
         title = {
-            Text("手动搜索歌词", style = MaterialTheme.typography.titleMedium, color = skin.text)
+            Text(
+                text = if (pasteMode) "粘贴导入歌词" else "搜索与管理歌词",
+                style = MaterialTheme.typography.titleMedium,
+                color = skin.text
+            )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "默认填的是当前歌曲的标签信息。如果之前匹配到错误歌词，\n" +
-                        "改一下歌名或歌手再搜一次，搜到会记住这次的写法。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.textMuted
-                )
-                LabeledField(
-                    label = "歌曲名",
-                    value = title,
-                    onValueChange = { title = it },
-                    skin = skin
-                )
-                LabeledField(
-                    label = "歌手",
-                    value = artist,
-                    onValueChange = { artist = it },
-                    skin = skin
-                )
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (pasteMode) {
+                    Text(
+                        "粘贴 LRC（带 [mm:ss.xx] 时间轴）或纯文本歌词，保存后立即覆盖当前显示。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.textMuted
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 120.dp, max = 210.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(skin.surface)
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        if (pasteText.isEmpty()) {
+                            Text(
+                                "[00:12.34] 在此粘贴歌词内容…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = skin.textDim
+                            )
+                        }
+                        BasicTextField(
+                            value = pasteText,
+                            onValueChange = { pasteText = it },
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = skin.text),
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(skin.accent),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PillButton(
+                            label = "返回搜索",
+                            onClick = { pasteMode = false },
+                            filled = false
+                        )
+                        PillButton(
+                            label = "确认导入",
+                            onClick = {
+                                if (pasteText.isNotBlank()) onImportText(pasteText)
+                            }
+                        )
+                    }
+                } else {
+                    Text(
+                        if (onlineEnabled) {
+                            "默认填的是当前歌曲的标签信息。改一下歌名或歌手再搜一次，也可以直接导入或删除歌词。"
+                        } else {
+                            "当前未开启在线歌词（可在「设置 → 歌词」开启），可在此直接导入外部 .lrc / 粘贴歌词或删除当前歌词。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.textMuted
+                    )
+                    LabeledField(
+                        label = "歌曲名",
+                        value = title,
+                        onValueChange = { title = it },
+                        skin = skin
+                    )
+                    LabeledField(
+                        label = "歌手",
+                        value = artist,
+                        onValueChange = { artist = it },
+                        skin = skin
+                    )
+
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "本地歌词管理",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DialogActionChip(
+                            label = "导入文件",
+                            onClick = onImportFile,
+                            modifier = Modifier.weight(1f),
+                            skin = skin
+                        )
+                        DialogActionChip(
+                            label = "粘贴文本",
+                            onClick = { pasteMode = true },
+                            modifier = Modifier.weight(1f),
+                            skin = skin
+                        )
+                    }
+                    if (hasLyrics) {
+                        DialogActionChip(
+                            label = if (confirmDelete) "再点一次确认删除当前歌词" else "删除当前歌词",
+                            onClick = {
+                                if (confirmDelete) onDeleteLyrics() else confirmDelete = true
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            destructive = true,
+                            highlighted = confirmDelete,
+                            skin = skin
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
-            PillButton(
-                label = "搜索",
-                onClick = {
-                    if (title.isNotBlank()) onConfirm(title.trim(), artist.trim())
-                }
-            )
+            if (!pasteMode && onlineEnabled) {
+                PillButton(
+                    label = "搜索",
+                    onClick = {
+                        if (title.isNotBlank()) onConfirm(title.trim(), artist.trim())
+                    }
+                )
+            }
         },
         dismissButton = {
-            PillButton(label = "取消", onClick = onDismiss, filled = false)
+            PillButton(label = "关闭", onClick = onDismiss, filled = false)
         }
     )
+}
+
+@Composable
+private fun DialogActionChip(
+    label: String,
+    onClick: () -> Unit,
+    skin: Skin,
+    modifier: Modifier = Modifier,
+    destructive: Boolean = false,
+    highlighted: Boolean = false
+) {
+    val bg = when {
+        highlighted && destructive -> skin.accent.copy(alpha = 0.22f)
+        destructive -> skin.surface.copy(alpha = 0.85f)
+        else -> skin.surface
+    }
+    val fg = when {
+        highlighted && destructive -> skin.accent
+        destructive -> skin.textMuted
+        else -> skin.text
+    }
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .border(
+                width = 0.8.dp,
+                color = if (highlighted) skin.accent else skin.border,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(vertical = 9.dp, horizontal = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
 
 @Composable
@@ -1969,8 +2198,9 @@ fun LyricStrip(
     val apiBase = prefs.lyricsApiBase
     val convertT2S = prefs.lyricsConvertToSimplified
     val neteaseFill = prefs.neteaseFillEnabled
+    val lyricsRev by LyricsRepository.revision.collectAsState()
 
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill, lyricsRev) {
         lines = null
         val loaded = LyricsRepository.load(
             context = context,

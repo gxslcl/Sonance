@@ -109,6 +109,7 @@ import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.PlayerBar
 import com.sonance.player.ui.components.PlayerLayer
 import com.sonance.player.ui.components.SideNavigation
+import com.sonance.player.ui.components.SongAudioSpecCard
 import com.sonance.player.ui.components.ToastHost
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.screens.AlbumsScreen
@@ -440,6 +441,7 @@ private fun RecognizeSheet(vm: SonanceViewModel) {
         }
         is SonanceViewModel.RecognizeState.Done -> {
             val r = state.result
+            val song = vm.songById(state.songId)
             AlertDialog(
                 onDismissRequest = { vm.dismissRecognition() },
                 title = { Text("识别到歌曲") },
@@ -452,10 +454,16 @@ private fun RecognizeSheet(vm: SonanceViewModel) {
                                 modifier = Modifier.padding(top = 4.dp)
                             )
                         }
+                        if (song != null) {
+                            SongAudioSpecCard(
+                                song = song,
+                                modifier = Modifier.padding(top = 10.dp)
+                            )
+                        }
                         Text(
                             "应用后将写入文件标签，并把文件改名为" +
                                 "「${SongMetaEditor.outputStem(r.title, r.artist)}」。",
-                            modifier = Modifier.padding(top = 8.dp)
+                            modifier = Modifier.padding(top = 10.dp)
                         )
                     }
                 },
@@ -952,7 +960,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
                 onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
                 vinylMode = vm.vinylMode,
-                onVinylModeChange = { vm.changeVinylMode(it) }
+                onVinylModeChange = { vm.changeVinylMode(it) },
+                hiResBadgeEnabled = vm.hiResBadgeEnabled,
+                hiResBadgeSize = vm.hiResBadgeSize
             )
         }
 

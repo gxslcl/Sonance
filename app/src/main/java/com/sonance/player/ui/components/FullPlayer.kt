@@ -136,6 +136,7 @@ import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.playback.PlayMode
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.isCompactLandscapePhone
+import com.sonance.player.ui.theme.HiResBadgeSize
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.solidSurface
@@ -273,6 +274,10 @@ fun FullPlayer(
     vinylMode: Boolean = false,
     /** 双击封面那个面板切黑碟模式 */
     onVinylModeChange: (Boolean) -> Unit = {},
+    /** 是否在播放主界面封面外右下角显示 Hi-Res AUDIO 小金标 */
+    hiResBadgeEnabled: Boolean = true,
+    /** 小金标尺寸档位（小 / 中 / 大） */
+    hiResBadgeSize: HiResBadgeSize = HiResBadgeSize.MEDIUM,
     /**
      * 当前这首在线歌**实际**拿到的音质（如 `320k` / `无损`）。本地歌为 null。
      *
@@ -984,6 +989,8 @@ fun FullPlayer(
                             null
                         },
                         vinylMode = vinylMode,
+                        hiResBadgeEnabled = hiResBadgeEnabled,
+                        hiResBadgeSize = hiResBadgeSize,
                         lyricsExpanded = lyricsExpanded,
                         onToggleLyrics = { lyricsExpanded = !lyricsExpanded },
                         onOpenGlow = { showGlowSheet = true },
@@ -2019,6 +2026,10 @@ private fun PlayerPage(
     glowImage: ImageBitmap?,
     /** 封面是否用「黑碟播放器」样式 */
     vinylMode: Boolean,
+    /** 是否显示封面外右下角 Hi-Res 小金标 */
+    hiResBadgeEnabled: Boolean,
+    /** 小金标尺寸档位 */
+    hiResBadgeSize: HiResBadgeSize,
     /** 「歌词」那一行是否已展开成单行滚动歌词 */
     lyricsExpanded: Boolean,
     /** 展开 / 收起那一行（不切页、不改布局） */
@@ -2041,6 +2052,11 @@ private fun PlayerPage(
     // ArtworkLoader.tintOf 读的是 SnapshotStateMap，于是分页器里**同时组合的 3 页**
     // 都对 tints 建立了快照依赖，任何一首歌的色卡被算出来都会让它们全部失效重组。
     val coverKey = OnlineCover.keyOf(song.title, song.artist)
+    val showHiResBadge = if (hiResBadgeEnabled) {
+        rememberHiResBadgeVisible(song, streamQuality)
+    } else {
+        false
+    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val boxW = maxWidth
@@ -2174,6 +2190,21 @@ private fun PlayerPage(
                             )
                         }
                     }
+                    // 静止放在封面外右下角正下方，脱离 coverScale 缩放层以消除呼吸抖动
+                    if (!lyricsExpanded && showHiResBadge) {
+                        val density = LocalDensity.current
+                        val badgeOffsetY = with(density) {
+                            -COVER_LIFT_PX + hiResBadgeTotalDp(hiResBadgeSize).toPx() + 10.dp.toPx()
+                        }
+                        Box(Modifier.size(landscapeSide)) {
+                            HiResGoldBadge(
+                                badgeSize = hiResBadgeSize,
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .graphicsLayer { translationY = badgeOffsetY }
+                            )
+                        }
+                    }
                 }
                 Column(
                     modifier = Modifier
@@ -2232,6 +2263,7 @@ private fun PlayerPage(
                     .padding(horizontal = 26.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                var portraitAreaHeightPx by remember { mutableIntStateOf(0) }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2244,6 +2276,7 @@ private fun PlayerPage(
                         // 竖屏这里可以直接报主区域矩形：封面被分页内容的
                         // min constraints 撑满了这一块，两者是同一个矩形。
                         .onGloballyPositioned {
+                            portraitAreaHeightPx = it.size.height
                             onCoverBounds(it.boundsInRoot().translate(Offset(0f, -COVER_LIFT_PX)))
                         },
                     contentAlignment = Alignment.Center
@@ -2308,6 +2341,37 @@ private fun PlayerPage(
                                     coverKey = coverKey
                                 )
                             }
+                        }
+                    }
+                    // 静止放在封面外右下角正下方（不进入 CoverLift / coverScale，杜绝呼吸抖动）
+                    if (!lyricsExpanded && showHiResBadge) {
+                        val density = LocalDensity.current
+                        val coverSidePx = with(density) { portraitSide.toPx() }
+                        val gapPx = with(density) { 10.dp.toPx() }
+                        val badgeTotalPx = with(density) { hiResBadgeTotalDp(hiResBadgeSize).toPx() }
+                        val bottomMarginPx = with(density) { 2.dp.toPx() }
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .width(portraitSide)
+                                .fillMaxHeight()
+                        ) {
+                            HiResGoldBadge(
+                                badgeSize = hiResBadgeSize,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .graphicsLayer {
+                                        if (portraitAreaHeightPx <= 0) {
+                                            alpha = 0f
+                                        } else {
+                                            val h = portraitAreaHeightPx.toFloat()
+                                            val side = minOf(coverSidePx, h)
+                                            val desiredY = (h - side) * 0.41f - COVER_LIFT_PX + side + gapPx
+                                            val maxY = (h - badgeTotalPx - bottomMarginPx).coerceAtLeast(0f)
+                                            translationY = desiredY.coerceIn(0f, maxY)
+                                        }
+                                    }
+                            )
                         }
                     }
                 }

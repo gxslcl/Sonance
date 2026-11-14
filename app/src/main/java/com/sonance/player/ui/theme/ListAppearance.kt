@@ -79,3 +79,19 @@ enum class ListCoverScale(val factor: Float, val label: String) {
             entries.getOrElse(ordinal) { X1 }
     }
 }
+
+/**
+ * 播放主界面封面外右下角「Hi-Res AUDIO」小金标的尺寸档位。
+ * [SMALL] 维持原有标准尺寸（24dp）；[MEDIUM]（30dp，默认）观感更舒展；[LARGE]（36dp）更醒目。
+ */
+enum class HiResBadgeSize(val label: String, val badgeDp: Int) {
+    SMALL("小", 24),
+    MEDIUM("中", 30),
+    LARGE("大", 36),
+    ;
+
+    companion object {
+        fun of(ordinal: Int): HiResBadgeSize =
+            entries.getOrElse(ordinal) { MEDIUM }
+    }
+}

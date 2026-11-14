@@ -37,4 +37,13 @@ class PlaybackIntentTest {
         assertEquals(listOf(true, true, true), states.map { it.isPlaybackActive })
         assertEquals(listOf(true, false, true), states.map { it.isPlaying })
     }
+
+    @Test
+    fun `unresolved stream uri identifies blank and outer url fallbacks only`() {
+        assertTrue(PlayerController.isUnresolvedStreamUri(null))
+        assertTrue(PlayerController.isUnresolvedStreamUri(""))
+        assertTrue(PlayerController.isUnresolvedStreamUri("https://music.163.com/song/media/outer/url?id=447925059.mp3"))
+        assertFalse(PlayerController.isUnresolvedStreamUri("https://m801.music.126.net/20261114081726/ebaaaa279/ymusic/1234.flac"))
+        assertFalse(PlayerController.isUnresolvedStreamUri("content://media/external/audio/media/42"))
+    }
 }

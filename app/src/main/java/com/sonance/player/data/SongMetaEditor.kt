@@ -47,7 +47,7 @@ object SongMetaEditor {
         /** 在线歌没有本地文件可写 */
         data object NotLocal : Result
 
-        /** 容器不是 mp3 / m4a（flac / ogg 暂不写） */
+        /** 暂不支持的音频容器格式 */
         data object UnsupportedFormat : Result
 
         /** 被系统拦下，需要用户确认（同 [CoverTagWriter.Result.NeedsPermission] 的约定） */
@@ -60,7 +60,7 @@ object SongMetaEditor {
     /**
      * 把 [title] / [artist] / [album] 写进 [song] 对应的文件。
      *
-     * 三个字段都传什么就写什么：空串表示清掉该帧（mp3）或该原子（m4a）。
+     * 三个字段都传什么就写什么：空串表示清掉对应标签字段。
      */
     suspend fun edit(
         context: Context,
@@ -73,8 +73,49 @@ object SongMetaEditor {
         val ext = song.displayName.lowercase().substringAfterLast('.', "")
         return when (ext) {
             "mp3", "mp2", "mpga", "mpa" -> editMp3(context, song, title, artist, album)
-            "m4a", "m4b", "mp4" -> editMp4(context, song, title, artist, album)
+            "m4a", "m4b", "mp4", "3gp" -> editMp4(context, song, title, artist, album)
+            "aac" -> editAac(context, song, title, artist, album)
+            "flac" -> editWithTransform(context, song, title, artist, album, ".flac") { src, dst ->
+                MultiFormatTagEditor.editFlac(src, dst, title, artist, album)
+            }
+            "ogg", "oga", "opus" -> editWithTransform(context, song, title, artist, album, ".$ext") { src, dst ->
+                MultiFormatTagEditor.editOgg(src, dst, title, artist, album)
+            }
+            "wav", "wave" -> editWithTransform(context, song, title, artist, album, ".wav") { src, dst ->
+                MultiFormatTagEditor.editWav(src, dst, title, artist, album)
+            }
+            "aiff", "aif", "aifc" -> editWithTransform(context, song, title, artist, album, ".$ext") { src, dst ->
+                MultiFormatTagEditor.editAiff(src, dst, title, artist, album)
+            }
+            "dsf" -> editWithTransform(context, song, title, artist, album, ".dsf") { src, dst ->
+                MultiFormatTagEditor.editDsf(src, dst, title, artist, album)
+            }
             else -> Result.UnsupportedFormat
+        }
+    }
+
+    /** `.aac` 可能是 MP4 容器也可能是带 ID3v2 头的 ADTS 流，按前 8 字节魔数分流 */
+    private suspend fun editAac(
+        context: Context,
+        song: Song,
+        title: String,
+        artist: String,
+        album: String
+    ): Result {
+        val isMp4 = withContext(Dispatchers.IO) {
+            runCatching {
+                context.contentResolver.openInputStream(song.uri)?.use { input ->
+                    val head = ByteArray(8)
+                    readFully(input, head, 8) &&
+                        head[4] == 'f'.code.toByte() && head[5] == 't'.code.toByte() &&
+                        head[6] == 'y'.code.toByte() && head[7] == 'p'.code.toByte()
+                } ?: false
+            }.getOrDefault(false)
+        }
+        return if (isMp4) {
+            editMp4(context, song, title, artist, album)
+        } else {
+            editMp3(context, song, title, artist, album)
         }
     }
 
@@ -123,6 +164,49 @@ object SongMetaEditor {
             }
         } finally {
             runCatching { temp.delete() }
+        }
+    }
+
+    /** 通用安全改写骨架：先拷贝到缓存、在临时目标上重写并校验，再覆写回源 URI（失败不损原文件） */
+    private suspend fun editWithTransform(
+        context: Context,
+        song: Song,
+        title: String,
+        artist: String,
+        album: String,
+        suffix: String,
+        transform: (src: File, dst: File) -> Boolean
+    ): Result = withContext(Dispatchers.IO) {
+        val app = context.applicationContext
+        val srcTmp = File(app.cacheDir, "meta-src-${System.nanoTime()}$suffix")
+        val dstTmp = File(app.cacheDir, "meta-dst-${System.nanoTime()}$suffix")
+        try {
+            app.contentResolver.openInputStream(song.uri)?.use { i ->
+                srcTmp.outputStream().use { o -> i.copyTo(o, BUF) }
+            } ?: return@withContext Result.Failed
+
+            if (!transform(srcTmp, dstTmp) || !dstTmp.isFile || dstTmp.length() <= 0L) {
+                return@withContext Result.Failed
+            }
+
+            val out = app.contentResolver.openOutputStream(song.uri, "wt")
+                ?: return@withContext Result.Failed
+            out.use { o ->
+                dstTmp.inputStream().use { i -> i.copyTo(o, BUF) }
+            }
+
+            val renamed = renameBestEffort(app, song, title, artist)
+            rescan(app, song.uri)
+            Log.i(TAG, "歌曲信息已写入文件：${song.displayName}")
+            Result.Written(renamed)
+        } catch (t: Throwable) {
+            permissionWall(t, app, song.uri) ?: run {
+                Log.w(TAG, "写入歌曲信息失败: ${t.javaClass.simpleName}: ${t.message}")
+                Result.Failed
+            }
+        } finally {
+            runCatching { srcTmp.delete() }
+            runCatching { dstTmp.delete() }
         }
     }
 

@@ -105,6 +105,7 @@ import com.sonance.player.ui.components.ListHeader
 import com.sonance.player.ui.components.LoadingState
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.PillButton
+import com.sonance.player.ui.components.SongAudioSpecCard
 import com.sonance.player.ui.components.SongRow
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.isCompactLandscapePhone
@@ -446,6 +447,7 @@ fun SongList(
             title = { Text("编辑歌曲信息") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SongAudioSpecCard(song = target)
                     Text(
                         "修改会写入音频文件的标签，并将文件改名为「歌名 - 歌手」。",
                         style = MaterialTheme.typography.bodySmall,

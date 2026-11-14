@@ -1,22 +1,27 @@
 package com.sonance.player.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -46,12 +51,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.SonanceViewModel.OnlineSearchMode
 import com.sonance.player.data.OnlineSource
@@ -59,6 +67,7 @@ import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.formatDuration
+import com.sonance.player.data.netease.NeteaseAccount
 import com.sonance.player.data.remoteSongId
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.ChipsRow
@@ -71,9 +80,14 @@ import com.sonance.player.ui.components.PlaceholderCover
 import com.sonance.player.ui.components.SearchField
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.sheets.NeteaseAccountSheet
+import com.sonance.player.ui.sheets.NeteaseLoginSheet
 import com.sonance.player.ui.theme.LocalSkin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 在线音乐：搜索 + 播放。
@@ -127,10 +141,12 @@ fun OnlineScreen(
         return
     }
 
-    // ---- 首页推荐歌单：进页面 / 换音源时拉一次 ----
-    // loadRecommendedPlaylists 内部有"已经有结果就不重复拉"的判断，这里放心调
-    LaunchedEffect(vm.onlineMusicEnabled, vm.onlineSourceId) {
+    // ---- 首页推荐歌单 & 登录后专属页：进页面 / 换音源 / 登录状态变化时拉一次 ----
+    LaunchedEffect(vm.onlineMusicEnabled, vm.onlineSourceId, vm.neteaseAccount?.userId) {
         vm.loadRecommendedPlaylists()
+        if (vm.neteaseAccount != null) {
+            vm.loadOnlineHome()
+        }
     }
 
     // ---- 防抖搜索 ----
@@ -177,16 +193,16 @@ fun OnlineScreen(
 
     Column(modifier.fillMaxSize()) {
 
-        // ---- 搜索对象切换：单曲 / 歌单 ----
-        // 右边留一个「当前音源」快捷切换：装了插件后这里才出现（没装就不占位置）。
-        // 和设置页那排 chips 读写同一个 onlineSourceId，不会出现两份状态。
+        // ---- 顶部栏：单曲 / 歌单 (+ 多音源切换) + 右侧登录/账号入口（对齐下方「只看可播」开关） ----
         var sourceMenuExpanded by remember { mutableStateOf(false) }
+        var showLoginSheet by remember { mutableStateOf(false) }
+        var showAccountSheet by remember { mutableStateOf(false) }
         val skin = LocalSkin.current
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
-                .padding(top = if (dense) 4.dp else 10.dp),
+                .padding(top = 0.dp, bottom = if (dense) 4.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ChipsRow(
@@ -201,17 +217,17 @@ fun OnlineScreen(
                 }
             )
             if (vm.onlineSources.size > 1) {
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
                 Box {
                     Text(
                         text = (vm.onlineSources.firstOrNull { it.id == vm.onlineSourceId }?.label
                             ?: "音源") + " ▾",
                         style = MaterialTheme.typography.labelMedium,
-                        color = skin.accent,
+                        color = skin.textMuted,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { sourceMenuExpanded = true }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                     DropdownMenu(
                         expanded = sourceMenuExpanded,
@@ -229,14 +245,39 @@ fun OnlineScreen(
                     }
                 }
             }
+            Spacer(Modifier.weight(1f))
+            OnlineAccountActionPill(
+                account = vm.neteaseAccount,
+                onClick = {
+                    if (vm.neteaseAccount == null) {
+                        showLoginSheet = true
+                    } else {
+                        showAccountSheet = true
+                    }
+                }
+            )
         }
 
-        // ---- 搜索框 + 「只看可播」开关 ----
+        if (showLoginSheet) {
+            NeteaseLoginSheet(
+                vm = vm,
+                onDismiss = { showLoginSheet = false }
+            )
+        }
+        if (showAccountSheet) {
+            NeteaseAccountSheet(
+                vm = vm,
+                onSwitchAccount = { showLoginSheet = true },
+                onDismiss = { showAccountSheet = false }
+            )
+        }
+
+        // ---- 搜索框 ----
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
-                .padding(top = if (dense) 6.dp else 10.dp),
+                .padding(top = if (dense) 2.dp else 4.dp, bottom = if (dense) 2.dp else 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             SearchField(
@@ -248,18 +289,9 @@ fun OnlineScreen(
                     "搜索在线歌曲"
                 },
                 modifier = Modifier.weight(1f),
-                height = if (dense) 38.dp else 44.dp,
+                height = if (dense) 36.dp else 40.dp,
                 onSearch = { vm.searchOnline() }
             )
-            // 「只看可播」只对单曲有意义 —— 歌单是整体，没有"可播"这个属性
-            if (vm.onlineSearchMode == OnlineSearchMode.SINGLE) {
-                Spacer(Modifier.width(10.dp))
-                PlayableFilterToggle(
-                    checked = vm.onlineHideUnplayable,
-                    onCheckedChange = { vm.changeOnlineHideUnplayable(it) },
-                    height = if (dense) 38.dp else 44.dp
-                )
-            }
         }
 
         // ---- 搜索历史：输入框为空时显示，点一下直接搜 ----
@@ -272,33 +304,65 @@ fun OnlineScreen(
             )
         }
 
-        // ---- 音源切换 + 结果统计 ----
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(top = if (dense) 8.dp else 12.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (OnlineSources.all.size > 1) {
-                ChipsRow(
-                    chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
-                    onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) },
-                    modifier = Modifier.weight(1f)
-                )
-            } else {
-                CountLabel("音源 · ${src.label}", Modifier.weight(1f))
-            }
-            if (vm.onlineSearching) {
-                // 搜索中就别显示旧的统计了 —— 那个数字马上会变，看着像卡住了
-                CountLabel("搜索中…")
-            } else if (vm.onlineSearchMode == OnlineSearchMode.PLAYLIST) {
-                if (vm.onlinePlaylistResults.isNotEmpty()) {
-                    CountLabel("${vm.onlinePlaylistResults.size} 个歌单")
+        // ---- 音源切换（多音源或未登录） + 搜索结果统计 / 仅可播筛选 ----
+        val loggedIn = vm.neteaseAccount != null
+        val hasSingleResults = vm.onlineSearchMode == OnlineSearchMode.SINGLE && vm.onlineResults.isNotEmpty()
+        val hasPlaylistResults = vm.onlineSearchMode == OnlineSearchMode.PLAYLIST && vm.onlinePlaylistResults.isNotEmpty()
+        val showStatusRow = OnlineSources.all.size > 1 ||
+            !loggedIn ||
+            vm.onlineSearching ||
+            hasSingleResults ||
+            hasPlaylistResults
+        if (showStatusRow) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(top = if (dense) 4.dp else 6.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (OnlineSources.all.size > 1) {
+                    ChipsRow(
+                        chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
+                        onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) },
+                        modifier = Modifier.weight(1f)
+                    )
+                } else if (!loggedIn) {
+                    CountLabel("音源 · ${src.label}", Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
                 }
-            } else if (vm.onlineResults.isNotEmpty()) {
-                val playable = vm.onlineResults.count { it.playable }
-                CountLabel("可播 $playable / ${vm.onlineResults.size}")
+                if (vm.onlineSearching) {
+                    CountLabel("搜索中…")
+                } else if (hasPlaylistResults) {
+                    CountLabel("${vm.onlinePlaylistResults.size} 个歌单")
+                } else if (hasSingleResults) {
+                    val playable = vm.onlineResults.count { it.playable }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CountLabel("可播 $playable / ${vm.onlineResults.size}")
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (vm.onlineHideUnplayable) skin.accentGlow else skin.surface2)
+                                .border(
+                                    1.dp,
+                                    if (vm.onlineHideUnplayable) skin.accent.copy(alpha = 0.5f) else Color.Transparent,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { vm.changeOnlineHideUnplayable(!vm.onlineHideUnplayable) }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = if (vm.onlineHideUnplayable) "仅看可播 ✓" else "全部结果",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (vm.onlineHideUnplayable) skin.accent else skin.textMuted
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -339,18 +403,20 @@ private fun SingleSearchBody(
 ) {
     val skin = LocalSkin.current
     when {
-        // 输入框为空 = 首页：推荐歌单 + 搜索提示
-        vm.onlineQuery.isEmpty() && !vm.onlineSearching -> HomeRecommend(
+        // 输入框为空 = 首页：登录后展示方案 C 杂志画报 Hero 版，未登录保持简化推荐页
+        vm.onlineQuery.isEmpty() && !vm.onlineSearching -> OnlineHomeContent(
             vm = vm,
             onOpenPlaylist = onOpenPlaylist,
             hint = "输入歌名、歌手或专辑名，停一下就会自动搜索。"
         )
 
-        // 有结果、但开关把能播的都过滤掉了 —— 说明白，别显示成一个空列表
+        // 有结果、但开关把能播的都过滤掉了 —— 说明白并给一键恢复
         vm.onlineResults.isNotEmpty() && vm.visibleOnlineResults.isEmpty() -> EmptyState(
             icon = SonanceIcons.Search,
             title = "这 ${vm.onlineResults.size} 首都播不了",
-            subtitle = "都是会员 / 需购买的歌。关掉搜索框右边的开关能看到完整列表。"
+            subtitle = "都是会员 / 需购买的歌。",
+            actionLabel = "显示全部歌曲",
+            onAction = { vm.changeOnlineHideUnplayable(false) }
         )
 
         // ★ 有结果就**先显示着**，不要换成转圈。
@@ -400,7 +466,7 @@ private fun SingleSearchBody(
                     // 未登录时"VIP 歌播不了"是常态，登录后还播不了一般是版权问题
                     Text(
                         text = if (vm.neteaseAccount == null) {
-                            "标 VIP 的歌需要登录网易云会员账号才能播放，可在设置 → 曲库在线里登录。"
+                            "标 VIP 的歌需要登录网易云会员账号才能播放，点右上角「登录网易云」即可登录。"
                         } else {
                             "标 VIP 的歌已按你的会员权益判断；灰掉的是当前账号仍拿不到地址的（下架或需单独购买）。"
                         },
@@ -441,7 +507,7 @@ private fun PlaylistSearchBody(
     onOpenPlaylist: (RemotePlaylist) -> Unit
 ) {
     when {
-        vm.onlineQuery.isEmpty() && !vm.onlineSearching -> HomeRecommend(
+        vm.onlineQuery.isEmpty() && !vm.onlineSearching -> OnlineHomeContent(
             vm = vm,
             onOpenPlaylist = onOpenPlaylist,
             hint = "输入关键词搜索歌单，或从上面的推荐里挑一个。"
@@ -498,6 +564,641 @@ private fun PlaylistSearchBody(
 }
 
 /**
+ * 在线页右上角（对齐下方「只看可播」开关）：未登录显示「登录网易云 ▾」，已登录显示头像 + 昵称 + VIP 徽标。
+ */
+@Composable
+private fun OnlineAccountActionPill(
+    account: NeteaseAccount?,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    if (account == null) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(skin.accentGlow)
+                .border(1.dp, skin.accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 11.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(skin.accent)
+            )
+            Text(
+                text = "登录网易云 ▾",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.accent,
+                maxLines = 1
+            )
+        }
+    } else {
+        val avatar = rememberRemoteCover(account.avatarUrl.takeIf { it.isNotBlank() }, 96)
+        Row(
+            modifier = Modifier
+                .widthIn(max = 176.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(skin.surface2)
+                .border(1.dp, skin.accentDim, RoundedCornerShape(16.dp))
+                .clickable(onClick = onClick)
+                .padding(start = 4.dp, end = 9.dp, top = 3.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(skin.surface3),
+                contentAlignment = Alignment.Center
+            ) {
+                if (avatar != null) {
+                    Image(
+                        bitmap = avatar,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = account.nickname.take(1).ifBlank { "云" },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = skin.textMuted
+                    )
+                }
+            }
+            Text(
+                text = account.nickname.ifBlank { "网易云" },
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            if (account.isVip) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(skin.accent.copy(alpha = 0.22f))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "VIP",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        fontWeight = FontWeight.Bold,
+                        color = skin.accent
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 根据登录态自动切换「简化未登录首页」与「方案 C · 杂志画报 Hero 版」。 */
+@Composable
+private fun OnlineHomeContent(
+    vm: SonanceViewModel,
+    onOpenPlaylist: (RemotePlaylist) -> Unit,
+    hint: String
+) {
+    val account = vm.neteaseAccount
+    if (account == null) {
+        HomeRecommend(vm = vm, onOpenPlaylist = onOpenPlaylist, hint = hint)
+    } else {
+        LoggedInHeroHome(vm = vm, account = account, onOpenPlaylist = onOpenPlaylist)
+    }
+}
+
+/**
+ * 方案 C · 杂志画报 Hero 版：
+ * 非对称 Bento Hero（每日私人推荐 + 我喜欢的 + 私人 FM）→ 我的云歌单横向卷轴 → 精选探索广场双列网格。
+ */
+@Composable
+private fun LoggedInHeroHome(
+    vm: SonanceViewModel,
+    account: NeteaseAccount,
+    onOpenPlaylist: (RemotePlaylist) -> Unit
+) {
+    val skin = LocalSkin.current
+    val dailyTracks = vm.onlineDailyTracks
+    val likedPlaylist = vm.onlineLikedPlaylist
+    val userPlaylists = vm.onlineUserPlaylists
+    val dateTag = remember { SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date()) }
+    val heroCoverUrl = remember(dailyTracks) {
+        dailyTracks.firstOrNull { !it.coverUrl.isNullOrBlank() }?.coverUrl
+    }
+    val heroCover = rememberRemoteCover(heroCoverUrl, 320)
+
+    // 精选探索广场：把热门官方榜与推荐歌单去重后拆开展示（榜单用紧凑横卡，推荐用双列封面卡）
+    val toplists = remember(vm.onlineToplists) { vm.onlineToplists.take(4) }
+    val recommends = remember(vm.onlineToplists, vm.recommendedPlaylists) {
+        val toplistIds = toplists.mapTo(HashSet()) { it.remoteId }
+        vm.recommendedPlaylists.filter { it.remoteId !in toplistIds }
+    }
+
+    val homeListState = rememberLazyListState()
+    val heroNearBottom by remember {
+        derivedStateOf {
+            val info = homeListState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 3
+        }
+    }
+    LaunchedEffect(
+        homeListState,
+        recommends.size,
+        vm.recommendedHasMore,
+        vm.recommendedLoadingMore
+    ) {
+        if (vm.recommendedHasMore && recommends.isNotEmpty()) {
+            snapshotFlow { heroNearBottom }.first { it }
+            vm.loadMoreRecommendedPlaylists()
+        }
+    }
+
+    LazyColumn(
+        state = homeListState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // 1. 非对称 Bento Hero
+        item(key = "bento_hero") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(174.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // 左主卡：每日私人推荐
+                Box(
+                    modifier = Modifier
+                        .weight(1.22f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(
+                                    skin.accent.copy(alpha = 0.55f),
+                                    skin.surface3
+                                )
+                            )
+                        )
+                        .border(1.dp, skin.accent.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                        .clickable { onOpenPlaylist(vm.dailyRecommendPlaylist()) }
+                ) {
+                    if (heroCover != null) {
+                        Image(
+                            bitmap = heroCover,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        0f to Color.Black.copy(alpha = 0.24f),
+                                        0.45f to Color.Black.copy(alpha = 0.54f),
+                                        1f to Color.Black.copy(alpha = 0.90f)
+                                    )
+                                )
+                        )
+                    } else {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        0f to Color.Black.copy(alpha = 0.14f),
+                                        1f to Color.Black.copy(alpha = 0.68f)
+                                    )
+                                )
+                        )
+                    }
+
+                    // 顶部日期角标
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.Black.copy(alpha = 0.42f))
+                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = "DAILY MIX",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            ),
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = dateTag,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            ),
+                            color = skin.accent
+                        )
+                    }
+
+                    // 底部文案与一键播按钮
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "每日私人推荐",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                text = if (dailyTracks.isNotEmpty()) {
+                                    "${dailyTracks.size} 首 · ${account.nickname.ifBlank { "专属口味" }}"
+                                } else if (vm.onlineHomeLoading) {
+                                    "正在生成今日歌单…"
+                                } else {
+                                    "点此查看今日推荐"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.84f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(skin.accent.copy(alpha = 0.92f))
+                                .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape)
+                                .clickable { vm.playDailyRecommend() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = SonanceIcons.Play,
+                                contentDescription = "播放每日推荐",
+                                tint = Color.White,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
+                }
+
+                // 右侧两张叠放小卡：我喜欢的 + 私人 FM
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val likedThumb = likedPlaylist?.coverUrl?.let { vm.playlistThumbUrl(likedPlaylist, THUMB_PX) }
+                    val likedCover = rememberRemoteCover(likedThumb, THUMB_PX)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color(0xFF4A1D28),
+                                        skin.surface2
+                                    )
+                                )
+                            )
+                            .border(1.dp, skin.accentDim.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                            .clickable {
+                                if (likedPlaylist != null) onOpenPlaylist(likedPlaylist)
+                                else vm.loadOnlineHome(force = true)
+                            }
+                    ) {
+                        if (likedCover != null) {
+                            Image(
+                                bitmap = likedCover,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .alpha(0.45f)
+                            )
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            0f to Color(0xFF3E1823).copy(alpha = 0.92f),
+                                            1f to Color(0xFF28121B).copy(alpha = 0.60f)
+                                        )
+                                    )
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .padding(11.dp)
+                        ) {
+                            Icon(
+                                imageVector = SonanceIcons.HeartFilled,
+                                contentDescription = null,
+                                tint = skin.accent.copy(alpha = 0.88f),
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .align(Alignment.TopEnd)
+                            )
+                            Column(
+                                Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(end = 74.dp)
+                            ) {
+                                Text(
+                                    text = "我喜欢的",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = likedPlaylist?.let { "${it.trackCount} 首红心单曲" }
+                                        ?: if (vm.onlineHomeLoading) "同步歌单中…" else "点击同步歌单",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.78f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(skin.accent.copy(alpha = 0.88f))
+                                    .clickable(enabled = !vm.intelligenceLoading) {
+                                        vm.playIntelligenceMode()
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                if (vm.intelligenceLoading) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        strokeWidth = 1.5.dp,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = SonanceIcons.HeartFilled,
+                                        contentDescription = "心动模式",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                }
+                                Text(
+                                    text = if (vm.intelligenceLoading) "开启中" else "心动",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color(0xFF1D2C3F),
+                                        skin.surface2
+                                    )
+                                )
+                            )
+                            .border(1.dp, skin.accentDim.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+                            .clickable { vm.playPersonalFm() }
+                            .padding(11.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.Black.copy(alpha = 0.30f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = "FM RADIO",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 9.sp
+                                ),
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF9AC9FF)
+                            )
+                        }
+                        Icon(
+                            imageVector = SonanceIcons.Waveform,
+                            contentDescription = null,
+                            tint = Color(0xFF7BB8FF).copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .size(20.dp)
+                                .align(Alignment.TopEnd)
+                        )
+                        Column(Modifier.align(Alignment.BottomStart)) {
+                            Text(
+                                text = "私人 FM",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "无限漫游 · 顺耳电台",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.72f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. 我的云歌单横向卷轴
+        item(key = "user_playlists_section") {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "我的云歌单",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text
+                    )
+                    Text(
+                        text = if (vm.onlineHomeLoading) "同步中…"
+                        else if (userPlaylists.isNotEmpty()) "${userPlaylists.size} 个歌单"
+                        else "点击刷新",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (!vm.onlineHomeLoading && userPlaylists.isEmpty()) skin.accent else skin.textMuted,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = !vm.onlineHomeLoading) { vm.loadOnlineHome(force = true) }
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+
+                if (userPlaylists.isNotEmpty()) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(items = userPlaylists, key = { it.remoteId }) { pl ->
+                            PlaylistCard(
+                                playlist = pl,
+                                thumbUrl = vm.playlistThumbUrl(pl, THUMB_PX),
+                                showCreator = pl.creatorName.isNotBlank() && pl.creatorName != account.nickname,
+                                modifier = Modifier.width(120.dp),
+                                onClick = { onOpenPlaylist(pl) }
+                            )
+                        }
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(skin.surface2)
+                            .padding(horizontal = 14.dp, vertical = 14.dp)
+                    ) {
+                        Text(
+                            text = if (vm.onlineHomeLoading) "正在从网易云同步你的歌单…" else "暂无同步到个人歌单，点击右上角账号可重新登录或刷新",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. 精选探索广场（榜单紧凑横卡 + 推荐双列网格）
+        if (toplists.isNotEmpty() || recommends.isNotEmpty()) {
+            item(key = "explore_header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "精选探索广场",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text
+                    )
+                    Text(
+                        text = "热歌榜 · 每日精选",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+            }
+
+            if (toplists.isNotEmpty()) {
+                items(toplists.chunked(2), key = { "toplist_" + it.first().remoteId }) { rowItems ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        rowItems.forEach { p ->
+                            ToplistCompactCard(
+                                playlist = p,
+                                thumbUrl = vm.playlistThumbUrl(p, THUMB_PX),
+                                modifier = Modifier.weight(1f),
+                                onClick = { onOpenPlaylist(p) }
+                            )
+                        }
+                        if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+
+            items(recommends.chunked(2), key = { "explore_" + it.first().remoteId }) { rowItems ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    rowItems.forEach { p ->
+                        PlaylistCard(
+                            playlist = p,
+                            thumbUrl = vm.playlistThumbUrl(p, THUMB_PX),
+                            modifier = Modifier.weight(1f),
+                            onClick = { onOpenPlaylist(p) }
+                        )
+                    }
+                    if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+
+            item(key = "explore_footer") {
+                OnlineListFooter(
+                    loadingMore = vm.recommendedLoadingMore,
+                    loadMoreFailed = vm.recommendedLoadMoreFailed,
+                    hasMore = vm.recommendedHasMore,
+                    endLabel = "已展示全部精选歌单 · 共 ${recommends.size} 个",
+                    onRetry = { vm.retryLoadMoreRecommendedPlaylists() }
+                )
+            }
+        } else if (vm.recommendedLoading || vm.onlineHomeLoading) {
+            item(key = "explore_loading") {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = skin.accent,
+                        trackColor = skin.surface3,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * 首页（输入框为空时）：推荐歌单 + 搜索提示。
  *
  * 推荐拉不到就退回普通空态 —— 三种情况分清楚：还在拉 / 拉失败（可重试）/ 音源没给。
@@ -531,9 +1232,30 @@ private fun HomeRecommend(
         return
     }
 
+    val recListState = rememberLazyListState()
+    val recNearBottom by remember {
+        derivedStateOf {
+            val info = recListState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 3
+        }
+    }
+    LaunchedEffect(
+        recListState,
+        recs.size,
+        vm.recommendedHasMore,
+        vm.recommendedLoadingMore
+    ) {
+        if (vm.recommendedHasMore && recs.isNotEmpty()) {
+            snapshotFlow { recNearBottom }.first { it }
+            vm.loadMoreRecommendedPlaylists()
+        }
+    }
+
     LazyColumn(
+        state = recListState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
@@ -565,11 +1287,81 @@ private fun HomeRecommend(
             }
         }
 
-        item {
+        item(key = "rec_footer") {
+            Column(Modifier.fillMaxWidth()) {
+                OnlineListFooter(
+                    loadingMore = vm.recommendedLoadingMore,
+                    loadMoreFailed = vm.recommendedLoadMoreFailed,
+                    hasMore = vm.recommendedHasMore,
+                    endLabel = "已展示全部推荐歌单 · 共 ${recs.size} 个",
+                    onRetry = { vm.retryLoadMoreRecommendedPlaylists() }
+                )
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+            }
+        }
+    }
+}
+
+/** 官方榜紧凑横卡：收住高亮大图的视觉抢眼，方便一屏多看几张榜 */
+@Composable
+private fun ToplistCompactCard(
+    playlist: RemotePlaylist,
+    thumbUrl: String?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val cover = rememberRemoteCover(thumbUrl, THUMB_PX)
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2.copy(alpha = 0.82f))
+            .border(1.dp, skin.border, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(46.dp)
+                .clip(RoundedCornerShape(8.dp))
+        ) {
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                PlaceholderCover(
+                    seed = playlist.name,
+                    showMark = false,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
             Text(
-                text = hint,
-                style = MaterialTheme.typography.bodySmall,
-                color = skin.textMuted
+                text = playlist.name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = if (playlist.trackCount > 0) "TOP · ${playlist.trackCount} 首" else "官方榜",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -580,6 +1372,7 @@ private fun HomeRecommend(
 private fun PlaylistCard(
     playlist: RemotePlaylist,
     thumbUrl: String?,
+    showCreator: Boolean = true,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
@@ -587,8 +1380,9 @@ private fun PlaylistCard(
     val cover = rememberRemoteCover(thumbUrl, THUMB_PX)
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
+            .padding(bottom = 4.dp)
     ) {
         Box(
             Modifier
@@ -637,7 +1431,7 @@ private fun PlaylistCard(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        if (playlist.creatorName.isNotBlank()) {
+        if (showCreator && playlist.creatorName.isNotBlank()) {
             Spacer(Modifier.height(2.dp))
             Text(
                 text = playlist.creatorName,
@@ -774,6 +1568,7 @@ private fun OnlineListFooter(
  * 序号、专辑跳转，而这里的数据是 [RemoteTrack]（还没有变成 [com.sonance.player.data.Song]），
  * 硬套要造一堆假值，还会把用不上的按钮画出来。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun OnlineTrackRow(
     track: RemoteTrack,
@@ -784,22 +1579,57 @@ internal fun OnlineTrackRow(
     downloaded: Boolean = false,
     isCurrent: Boolean,
     isPlaying: Boolean,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val skin = LocalSkin.current
     val cover = rememberRemoteCover(thumbUrl, THUMB_PX)
     // 不可播的整行压暗，一眼能看出"这条点不了"
     val rowAlpha = if (track.playable) 1f else 0.45f
+    val rowBg = when {
+        selectionMode && selected -> skin.accentGlow
+        isCurrent && !selectionMode -> skin.accentGlow
+        else -> Color.Transparent
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(if (isCurrent) skin.accentGlow else Color.Transparent)
-            .clickable(onClick = onClick)
+            .background(rowBg)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (selectionMode) {
+            Box(
+                modifier = Modifier
+                    .padding(end = 10.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) skin.accent else Color.Transparent)
+                    .border(
+                        width = 1.5.dp,
+                        color = if (selected) skin.accent else skin.textDim,
+                        shape = CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (selected) {
+                    Icon(
+                        imageVector = SonanceIcons.Check,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                }
+            }
+        }
         Box(Modifier.size(44.dp)) {
             if (cover != null) {
                 Image(
@@ -1023,18 +1853,18 @@ private fun SearchHistoryRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .padding(horizontal = 16.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "最近",
-            style = MaterialTheme.typography.labelMedium,
-            color = skin.textMuted,
-            modifier = Modifier.padding(end = 10.dp)
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim,
+            modifier = Modifier.padding(end = 6.dp)
         )
         LazyRow(
             modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // key 用词条本身：删掉某一条时，Compose 只需要处理那一个，
@@ -1042,41 +1872,41 @@ private fun SearchHistoryRow(
             items(items, key = { it }) { term ->
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(skin.surface)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(skin.surface2.copy(alpha = 0.65f))
                         .clickable { onPick(term) }
-                        .padding(start = 14.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                        .padding(start = 9.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = term,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = skin.text,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(2.dp))
                     Icon(
                         imageVector = SonanceIcons.Close,
                         contentDescription = "删除「$term」",
-                        tint = skin.textMuted,
+                        tint = skin.textDim,
                         modifier = Modifier
-                            .size(18.dp)
+                            .size(14.dp)
                             .clip(CircleShape)
                             .clickable { onRemove(term) }
-                            .padding(3.dp)
+                            .padding(2.dp)
                     )
                 }
             }
             item {
                 Text(
                     text = "清空",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = skin.accent,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(14.dp))
                         .clickable(onClick = onClearAll)
-                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
                 )
             }
         }

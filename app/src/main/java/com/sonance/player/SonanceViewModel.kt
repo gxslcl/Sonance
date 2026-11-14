@@ -83,6 +83,9 @@ import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.netease.NcConvertSummary
 import com.sonance.player.data.netease.NeteaseAccount
 import com.sonance.player.data.netease.NeteaseAuth
+import com.sonance.player.data.netease.NeteaseExplore
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.netease.NeteaseQuality
 import com.sonance.player.data.netease.NeteaseStream
@@ -113,6 +116,7 @@ import com.sonance.player.playback.PlayerController
 import com.sonance.player.playback.RepeatMode
 import com.sonance.player.ui.icon.IconSetState
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.HiResBadgeSize
 import com.sonance.player.ui.theme.ListCoverScale
 import com.sonance.player.ui.theme.ListRowStyle
 import com.sonance.player.ui.theme.MiniPlayerStyle
@@ -600,6 +604,40 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var playbackRestored = false
 
     /**
+     * 在线歌的 id → [Song]。
+     *
+     * 必须声明在 `init {}` 之前（与 [playbackRestored] 同理），因为冷启动恢复在线队列
+     * `restoreOnlinePlayback()` 在 `init` 内就会写入它。
+     */
+    private val onlineSongMap = mutableStateMapOf<Long, Song>()
+
+    /** 在线歌集合的版本号。`remember` 需要一个不可变的 key，而 map 本身是可变的 */
+    var onlineRevision by mutableIntStateOf(0)
+        private set
+
+    /**
+     * 当前登录的网易云账号；null = 未登录。
+     *
+     * 必须声明在 `init {}` 之前（与 [onlineSongMap] 同理）：`init {}` 里的
+     * `restoreOnlinePlayback()` 会立即为在线歌取流；若账号声明在 `init` 之后，
+     * 冷启动首轮取流时 `NeteaseAuth.account` 仍为 null，会把会员歌缓存成 30s 试听。
+     */
+    var neteaseAccount by mutableStateOf(NeteaseAuth.ensureLoaded(getApplication()))
+        private set
+
+    /** 设置里的播放音质档位。下载跟随它 —— 定过的交互是「听什么存什么」 */
+    var onlineQuality by mutableStateOf(NeteaseLevel.fromId(prefs.onlineQuality))
+        private set
+
+    /** 当前这首在线歌**实际**拿到的音质（接口返回的 `level`，不是请求档）。 */
+    var nowPlayingQuality by mutableStateOf<String?>(null)
+        private set
+
+    /** 听 8 秒自动下载开关：必须声明在 init {} 之前，方便冷启动按登录态做一次性初始化。 */
+    var onlineDownloadEnabled by mutableStateOf(prefs.onlineDownloadEnabled)
+        private set
+
+    /**
      * 恢复完成、等播放器报出 mediaId 后要请求一次列表定位。
      *
      * **只有上次没留下滚动位置时才做**：存的那个位置是用户上一次真正翻到的地方，
@@ -608,6 +646,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingStartupScroll = false
 
     private var songStartedJob: Job? = null
+    private var prefetchAdjacentJob: Job? = null
 
     private fun armStartupScroll() {
         pendingStartupScroll = prefs.libraryScroll.isBlank()
@@ -627,6 +666,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         applyPersistedPlayMode()
         // 网易云音质：把持久化的档位灌进数据层（账号在属性声明处直接读盘，见 neteaseAccount）
         NeteaseQuality.current = NeteaseLevel.fromId(prefs.onlineQuality)
+        // 已登录用户首次升级到此版本时默认关闭「听 8 秒自动下载」，之后仍允许用户在设置中手动开启
+        if (neteaseAccount != null && !prefs.loggedInAutoDownloadResetDone) {
+            prefs.loggedInAutoDownloadResetDone = true
+            if (onlineDownloadEnabled) {
+                onlineDownloadEnabled = false
+                prefs.onlineDownloadEnabled = false
+            }
+        }
         // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
         // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
         player.onPlaybackEnded = {
@@ -688,6 +735,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     maybeDownload(it)
                     // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
                     resolveStreamIfMissing(it)
+                    // 顺带预取队列后续曲目的真实流地址，避免切歌时 ExoPlayer 预加载兜底 30s 外链
+                    prefetchNextOnlineStreams(it)
                     // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
                     publishLockScreenLyrics(it)
                 }
@@ -763,19 +812,32 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val list = queue.ifEmpty { listOfNotNull(last) }
         if (list.isEmpty()) return false
 
+        // 把恢复出来的在线歌放进 onlineSongMap 并推进版本号 ——
+        // 否则冷启动后 songById() / songMap() 全查不到，播放页与队列页整批显示成「未知歌曲」
+        var added = false
+        list.forEach { if (onlineSongMap.put(it.id, it) == null) added = true }
+        if (added) onlineRevision++
+
+        val restoredIndex = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex)
+        val restoredQueue = list.map { localCopyOf(it) ?: it }
+        val activeSong = restoredQueue[restoredIndex]
+
         playbackRestored = true
         armStartupScroll()
         // autoplay=false：冷启动就出声很吓人，摆成"暂停在这首歌"等用户按播放。
         // notifyStart=false：这只是把上次的歌摆回来，不该给播放次数 +1。
         player.play(
-            songs = list,
-            index = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex),
+            songs = restoredQueue,
+            index = restoredIndex,
             autoplay = false,
             // 上次停在哪就摆回哪（配合 persistPlayback 对在线歌存进度）。
             // 地址是当场重新取的（带签名会过期）；流不支持 Range 时最坏退化为从头播。
             startPositionMs = prefs.playPositionMs.coerceAtLeast(0L),
             notifyStart = false
         )
+        if (isRemoteSongId(activeSong.id)) {
+            resolveStreamIfMissing(activeSong)
+        }
         return true
     }
 
@@ -2198,6 +2260,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.vinylMode = enabled
     }
 
+    /** 是否在播放主界面显示 Hi-Res AUDIO 小金标 */
+    var hiResBadgeEnabled by mutableStateOf(prefs.hiResBadgeEnabled)
+        private set
+
+    fun changeHiResBadgeEnabled(enabled: Boolean) {
+        hiResBadgeEnabled = enabled
+        prefs.hiResBadgeEnabled = enabled
+    }
+
+    /** 播放主界面 Hi-Res 小金标尺寸（小 / 中 / 大） */
+    var hiResBadgeSize by mutableStateOf(HiResBadgeSize.of(prefs.hiResBadgeSize))
+        private set
+
+    fun changeHiResBadgeSize(size: HiResBadgeSize) {
+        hiResBadgeSize = size
+        prefs.hiResBadgeSize = size.ordinal
+    }
+
     /** 黑胶页机械音效开关（页面内小喇叭按钮与设置页读写同一份 Prefs） */
     var vinylSfxEnabled by mutableStateOf(prefs.vinylSfxEnabled)
         private set
@@ -2663,20 +2743,33 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { writeSongMeta(songId, title, artist, album) }
     }
 
-    private suspend fun writeSongMeta(songId: Long, title: String, artist: String, album: String) {
+    private suspend fun writeSongMeta(
+        songId: Long,
+        title: String,
+        artist: String,
+        album: String,
+        recognizedPrefix: String? = null
+    ) {
         val app = getApplication<Application>()
         val song = songById(songId) ?: return
         val result = SongMetaEditor.edit(app, song, title, artist, album)
         when (result) {
             is SongMetaEditor.Result.Written -> {
                 applySongMetaInMemory(song, title, artist, album)
-                showToast(if (result.renamed) "已写入文件，文件已改名" else "已写入文件")
+                val msg = if (recognizedPrefix != null) {
+                    if (result.renamed) "$recognizedPrefix，已写入并改名" else "$recognizedPrefix，已写入文件"
+                } else {
+                    if (result.renamed) "已写入文件，文件已改名" else "已写入文件"
+                }
+                showToast(msg)
             }
             is SongMetaEditor.Result.NeedsPermission ->
                 pendingMetaEdit = PendingMetaEdit(songId, title, artist, album, result.intentSender)
             SongMetaEditor.Result.NotLocal -> showToast("在线歌曲没有本地文件可写")
-            SongMetaEditor.Result.UnsupportedFormat -> showToast("该格式暂不支持写入（仅 mp3 / m4a）")
-            SongMetaEditor.Result.Failed -> showToast("写入文件失败")
+            SongMetaEditor.Result.UnsupportedFormat ->
+                showToast("该格式暂不支持写入（支持 mp3 / m4a / flac / wav / ogg / opus / aac / aiff / dsf）")
+            SongMetaEditor.Result.Failed ->
+                showToast(if (recognizedPrefix != null) "$recognizedPrefix，写入文件失败" else "写入文件失败")
         }
     }
 
@@ -2743,12 +2836,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
             recognizeState = RecognizeState.Running(songId, "正在识别歌曲")
             val match = NeteaseRecognizer.match(fp.fp, song.durationMs)
-            if (match.recognized == null) {
+            val recognized = match.recognized
+            if (recognized == null) {
                 recognizeState = RecognizeState.Idle
                 showToast(match.error ?: "未识别出歌曲")
                 return@launch
             }
-            recognizeState = RecognizeState.Done(songId, match.recognized)
+            // 识别成功后直接写入标签并改名，不再弹出二次确认框打断用户
+            recognizeState = RecognizeState.Running(songId, "正在写入歌曲信息")
+            try {
+                writeSongMeta(
+                    songId = songId,
+                    title = recognized.title,
+                    artist = recognized.artist,
+                    album = recognized.album,
+                    recognizedPrefix = "已识别「${recognized.title} - ${recognized.artist}」"
+                )
+            } finally {
+                recognizeState = RecognizeState.Idle
+            }
         }
     }
 
@@ -3037,9 +3143,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 播放并下载 =====
 
-    var onlineDownloadEnabled by mutableStateOf(prefs.onlineDownloadEnabled)
-        private set
-
     var onlineDownloadWifiOnly by mutableStateOf(prefs.onlineDownloadWifiOnly)
         private set
 
@@ -3117,8 +3220,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
             // 下载和播放走同一条取流：音质跟随设置，容器（mp3/flac）也有了依据。
             // 这里通常已经命中播放时建立的缓存，不会多一次网络请求
-            val url = src.resolveStream(remoteId) ?: run {
+            // 仅极短试听片段绝不落盘为本地副本（否则下次 localCopyOf 会一直播 30s 本地文件）
+            val url = src.resolveStream(remoteId, song.durationMs) ?: run {
                 android.util.Log.i("SonanceDownload", "取流失败，跳过「${song.title}」")
+                return@launch
+            }
+            if (src.id == NeteaseSource.id && com.sonance.player.data.netease.NeteaseStream.isTrial(remoteId)) {
+                android.util.Log.i("SonanceDownload", "仅获取到试听片段，跳过自动下载「${song.title}」")
                 return@launch
             }
             val outcome = OnlineDownloader.download(
@@ -3210,28 +3318,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ===== 网易云账号与音质 =====
 
-    /**
-     * 当前登录的网易云账号；null = 未登录。
-     *
-     * 直接在声明处读盘：冷启动不联网，离线时也能显示"已登录"（会员态是上次的值）。
-     * 不能放到 init 里赋值 —— Kotlin 不允许在属性声明之前初始化它。
-     */
-    var neteaseAccount by mutableStateOf(NeteaseAuth.ensureLoaded(getApplication()))
-        private set
-
-    /** 设置里的播放音质档位。下载跟随它 —— 定过的交互是「听什么存什么」 */
-    var onlineQuality by mutableStateOf(NeteaseLevel.fromId(prefs.onlineQuality))
-        private set
-
-    /**
-     * 当前这首在线歌**实际**拿到的音质（接口返回的 `level`，不是请求档）。
-     *
-     * 单独一个状态而不是塞进 `PlayerUiState`：它只在切歌时变一次，
-     * 和播放进度那种高频状态不是一回事，没必要参与每帧的重组路径。
-     */
-    var nowPlayingQuality by mutableStateOf<String?>(null)
-        private set
-
     fun changeOnlineQuality(level: NeteaseLevel) {
         onlineQuality = level
         prefs.onlineQuality = level.apiValue
@@ -3249,13 +3335,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** 登录成功后由登录弹窗回调 —— 顺手重搜一次，让列表里的 VIP 歌立刻变成可播 */
+    /** 登录成功后由登录弹窗回调 —— 默认关闭听 8 秒自动下载、清缓存并重取当前在播在线曲 */
     fun onNeteaseLoggedIn(account: NeteaseAccount) {
         neteaseAccount = account
+        // 登录之后默认关闭「听 8 秒自动下载」（即使此前处于开启状态）；退出登录也不恢复，除非用户手动开启
+        if (onlineDownloadEnabled) {
+            onlineDownloadEnabled = false
+        }
+        prefs.onlineDownloadEnabled = false
+        prefs.loggedInAutoDownloadResetDone = true
         NeteaseStream.clearCache()
+        nowPlayingQuality = null
         val vip = if (account.isVip) "，已识别黑胶 VIP，可播放会员曲库" else ""
         showToast("已登录：${account.nickname.ifBlank { "网易云用户" }}$vip")
+        val currentId = player.state.value.mediaId
+        if (isRemoteSongId(currentId)) {
+            songById(currentId)?.let { resolveStreamIfMissing(it) }
+        }
         if (onlineQuery.isNotBlank()) searchOnline()
+        loadOnlineHome(force = true)
     }
 
     fun logoutNetease() {
@@ -3263,6 +3361,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         neteaseAccount = null
         NeteaseStream.clearCache()
         nowPlayingQuality = null
+        clearOnlineHome()
         // 列表里的可播状态是按会员权益算的，退出后要重新算
         if (onlineQuery.isNotBlank()) searchOnline()
         showToast("已退出网易云账号")
@@ -3358,21 +3457,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineSearchFailed by mutableStateOf(false)
         private set
 
-    /**
-     * 在线歌的 id → [Song]。
-     *
-     * 为什么必须留着：播放队列、队列页、播放页、收藏判断全都按 id 查 [songMap]，
-     * 而在线歌不在本地曲库里。**只增不减** —— 用户搜了新的词之后，
-     * 上一轮搜索留在队列里的歌还得能查到，不然队列页会凭空少几首。
-     *
-     * 用 SnapshotStateMap 是为了让组合能观察到它（配合 [onlineRevision]）。
-     */
-    private val onlineSongMap = mutableStateMapOf<Long, Song>()
-
-    /** 在线歌集合的版本号。`remember` 需要一个不可变的 key，而 map 本身是可变的 */
-    var onlineRevision by mutableIntStateOf(0)
-        private set
-
     fun changeOnlineMusic(enabled: Boolean) {
         onlineMusicEnabled = enabled
         prefs.onlineMusicEnabled = enabled
@@ -3391,9 +3475,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 推荐也是按音源拉的，一并清掉让界面重新拉一次
         recommendedJob?.cancel()
         recommendedJob = null
+        recommendedMoreJob?.cancel()
+        recommendedMoreJob = null
         recommendedPlaylists = emptyList()
         recommendedFailed = false
         recommendedLoading = false
+        recommendedOffset = 0
+        recommendedHasMore = false
+        recommendedLoadingMore = false
+        recommendedLoadMoreFailed = false
     }
 
     // ===== 内容源插件 =====
@@ -3742,7 +3832,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
         // 已经存到本地的歌走本地文件，不联网
         if (localCopyOf(target) == null) {
-            val url = src.resolveStream(rid)
+            val url = src.resolveStream(rid, target.durationMs)
             if (url == null) {
                 // 失败原因由音源给出：「未登录」「没会员」「已下架」是三件不同的事，
                 // 一律说「获取地址失败」等于什么都没说
@@ -3757,9 +3847,19 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val songs = onlineSongs.map { s ->
             val url = src.streamUrl(s.remoteId.orEmpty())
             if (url.isNotBlank() && localCopyOf(s) == null) {
-                s.copy(uri = android.net.Uri.parse(url))
+                s.copy(uri = android.net.Uri.parse(url)).also { onlineSongMap[it.id] = it }
             } else s
         }.map { localCopyOf(it) ?: it }
+        // 入队时立即落盘在线队列 —— 防止用户在 360ms 防抖保存落地前就强杀应用
+        onlineSongs.getOrNull(at)?.toStoredOrNull()?.let { stored ->
+            prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
+            prefs.lastPlayedOnline = true
+        }
+        val queueStored = onlineSongs.mapNotNull { it.toStoredOrNull() }
+        if (queueStored.isNotEmpty()) {
+            prefs.onlineQueueJson = storedOnlineSongsToJson(queueStored)
+            prefs.onlineQueueIndex = at.coerceIn(0, queueStored.lastIndex)
+        }
         player.play(songs, at)
 
         // 队列里剩下的歌此刻还没有地址。后台按顺序补齐并**原地替换**队列项，
@@ -3798,10 +3898,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (fetched >= budget) break
                 val rid = s.remoteId ?: continue
                 if (rid == skipRemoteId) continue
-                if (src.streamUrl(rid).isNotBlank()) continue
+                if (src.hasFreshStream(rid)) continue
                 if (localCopyOf(s) != null) continue
                 fetched++
-                val url = src.resolveStream(rid)
+                val url = src.resolveStream(rid, s.durationMs)
                 if (url != null) player.patchQueueUri(s.id, android.net.Uri.parse(url))
             }
         }
@@ -3824,13 +3924,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val rid = song.remoteId ?: return
         // 预取过的话缓存里已经有实际档位，切歌时直接显示，不必等重新取流
         nowPlayingQuality = src.streamQualityLabel(rid)
-        if (src.streamUrl(rid).isNotBlank()) return
+        if (src.hasFreshStream(rid)) return
         if (localCopyOf(song) != null) {
             nowPlayingQuality = null
             return
         }
         viewModelScope.launch {
-            val url = src.resolveStream(rid) ?: run {
+            val url = src.resolveStream(rid, song.durationMs) ?: run {
                 // 轮到它还是取不到：给出具体原因，别让播放器报「找不到文件」
                 src.lastStreamError(rid)?.let { showToast(it) }
                 return@launch
@@ -3838,7 +3938,41 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             if (player.state.value.mediaId == song.id) {
                 nowPlayingQuality = src.streamQualityLabel(rid)
             }
-            player.patchQueueUri(song.id, android.net.Uri.parse(url))
+            val resolvedUri = android.net.Uri.parse(url)
+            onlineSongMap[song.id]?.let { onlineSongMap[song.id] = it.copy(uri = resolvedUri) }
+            player.patchQueueUri(song.id, resolvedUri)
+        }
+    }
+
+    /**
+     * 切到队列中某首在线歌时，提前把紧随其后的若干首真实流地址解析并写入 ExoPlayer，
+     * 避免播完当前首自动无缝切曲时，下一首仍挂着会返回 30s 试听的 outer/url 外链。
+     */
+    private fun prefetchNextOnlineStreams(currentSong: Song, aheadCount: Int = 2) {
+        if (currentSong.isLocal) return
+        val src = OnlineSources.byId(currentSong.source) ?: return
+        val queue = currentQueue()
+        val curIdx = queue.indexOfFirst { it.id == currentSong.id }
+        if (curIdx < 0 || queue.size <= 1) return
+        val upcoming = (1..aheadCount)
+            .map { offset -> queue[(curIdx + offset) % queue.size] }
+            .distinctBy { it.id }
+            .filter { !it.isLocal && it.id != currentSong.id && localCopyOf(it) == null }
+            .filter { s ->
+                val rid = s.remoteId
+                !rid.isNullOrBlank() && !src.hasFreshStream(rid)
+            }
+        if (upcoming.isEmpty()) return
+        prefetchAdjacentJob?.cancel()
+        prefetchAdjacentJob = viewModelScope.launch {
+            for (s in upcoming) {
+                val rid = s.remoteId ?: continue
+                val url = src.resolveStream(rid, s.durationMs) ?: continue
+                val resolvedUri = android.net.Uri.parse(url)
+                onlineSongMap[s.id]?.let { onlineSongMap[s.id] = it.copy(uri = resolvedUri) }
+                player.patchQueueUri(s.id, resolvedUri)
+                kotlinx.coroutines.delay(150)
+            }
         }
     }
 
@@ -4011,7 +4145,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var recommendedFailed by mutableStateOf(false)
         private set
 
+    var recommendedLoadingMore by mutableStateOf(false)
+        private set
+
+    var recommendedHasMore by mutableStateOf(false)
+        private set
+
+    var recommendedLoadMoreFailed by mutableStateOf(false)
+        private set
+
+    private var recommendedOffset = 0
     private var recommendedJob: Job? = null
+    private var recommendedMoreJob: Job? = null
 
     /**
      * 拉一次推荐歌单。
@@ -4032,6 +4177,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     recommendedFailed = true
                 } else {
                     recommendedPlaylists = list
+                    recommendedOffset = 0
+                    recommendedLoadMoreFailed = false
+                    recommendedHasMore = src.id == NeteaseSource.id
                 }
             } finally {
                 recommendedLoading = false
@@ -4042,9 +4190,217 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun retryRecommendedPlaylists() {
         recommendedJob?.cancel()
         recommendedJob = null
+        recommendedMoreJob?.cancel()
+        recommendedMoreJob = null
         recommendedLoading = false
         recommendedFailed = false
+        recommendedOffset = 0
+        recommendedHasMore = false
+        recommendedLoadingMore = false
+        recommendedLoadMoreFailed = false
         loadRecommendedPlaylists()
+    }
+
+    /** 首页推荐无限滚动：基于网易云热门歌单分页接口持续追加并去重。 */
+    fun loadMoreRecommendedPlaylists(retryFailed: Boolean = false) {
+        val src = onlineSource ?: return
+        if (src.id != NeteaseSource.id || !onlineMusicEnabled) return
+        if (recommendedLoading || recommendedLoadingMore || !recommendedHasMore) return
+        if (recommendedLoadMoreFailed && !retryFailed) return
+        val offset = recommendedOffset
+        recommendedMoreJob = viewModelScope.launch {
+            recommendedLoadingMore = true
+            recommendedLoadMoreFailed = false
+            try {
+                val page = withContext(Dispatchers.IO) {
+                    NeteaseExplore.fetchExplorePlaylists(EXPLORE_PLAYLIST_PAGE_SIZE, offset)
+                }
+                if (page == null) {
+                    recommendedLoadMoreFailed = true
+                } else {
+                    val existing = recommendedPlaylists.mapTo(HashSet(recommendedPlaylists.size)) { it.remoteId }
+                    val fresh = page.playlists.filter { existing.add(it.remoteId) }
+                    if (fresh.isNotEmpty()) {
+                        recommendedPlaylists = recommendedPlaylists + fresh
+                    }
+                    recommendedOffset = offset + page.playlists.size
+                    recommendedHasMore = page.playlists.isNotEmpty() &&
+                        page.hasMore(offset, EXPLORE_PLAYLIST_PAGE_SIZE)
+                }
+            } finally {
+                recommendedLoadingMore = false
+            }
+        }
+    }
+
+    fun retryLoadMoreRecommendedPlaylists() {
+        loadMoreRecommendedPlaylists(retryFailed = true)
+    }
+
+    // ---- 登录后杂志画报 Hero 首页（日推 / 喜欢的音乐 / 云歌单 / 私人 FM / 榜单） ----
+
+    var onlineLikedPlaylist by mutableStateOf<RemotePlaylist?>(null)
+        private set
+
+    var onlineUserPlaylists by mutableStateOf<List<RemotePlaylist>>(emptyList())
+        private set
+
+    var onlineDailyTracks by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var onlineToplists by mutableStateOf<List<RemotePlaylist>>(emptyList())
+        private set
+
+    var onlineHomeLoading by mutableStateOf(false)
+        private set
+
+    private var onlineHomeLoadedForUid: Long? = null
+    private var onlineHomeJob: Job? = null
+
+    fun clearOnlineHome() {
+        onlineHomeJob?.cancel()
+        onlineHomeJob = null
+        onlineLikedPlaylist = null
+        onlineUserPlaylists = emptyList()
+        onlineDailyTracks = emptyList()
+        onlineToplists = emptyList()
+        onlineHomeLoadedForUid = null
+        onlineHomeLoading = false
+    }
+
+    fun loadOnlineHome(force: Boolean = false) {
+        if (!onlineMusicEnabled) return
+        val acc = neteaseAccount ?: return
+        val alreadyLoaded = onlineHomeLoadedForUid == acc.userId &&
+            (onlineDailyTracks.isNotEmpty() || onlineUserPlaylists.isNotEmpty() || onlineLikedPlaylist != null)
+        if (!force && (onlineHomeLoading || alreadyLoaded)) return
+        onlineHomeJob?.cancel()
+        onlineHomeJob = viewModelScope.launch {
+            onlineHomeLoading = true
+            try {
+                val (playlistsRes, daily, tops) = withContext(Dispatchers.IO) {
+                    coroutineScope {
+                        val plDef = async { NeteaseExplore.fetchUserPlaylists(acc) }
+                        val dailyDef = async { NeteaseExplore.fetchDailyRecommend(acc) }
+                        val topDef = async { NeteaseExplore.fetchToplists(limit = 6) }
+                        Triple(plDef.await(), dailyDef.await(), topDef.await())
+                    }
+                }
+                if (neteaseAccount?.userId != acc.userId) return@launch
+                if (playlistsRes != null) {
+                    onlineLikedPlaylist = playlistsRes.likedPlaylist
+                    onlineUserPlaylists = playlistsRes.otherPlaylists
+                }
+                if (daily != null) onlineDailyTracks = daily
+                if (tops != null) onlineToplists = tops
+                onlineHomeLoadedForUid = acc.userId
+            } finally {
+                onlineHomeLoading = false
+            }
+        }
+    }
+
+    fun dailyRecommendPlaylist(): RemotePlaylist = RemotePlaylist(
+        remoteId = NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID,
+        name = "每日私人推荐",
+        coverUrl = onlineDailyTracks.firstOrNull { !it.coverUrl.isNullOrBlank() }?.coverUrl,
+        trackCount = onlineDailyTracks.size,
+        creatorName = neteaseAccount?.nickname?.takeIf { it.isNotBlank() } ?: "专属口味"
+    )
+
+    fun playDailyRecommend() {
+        val acc = neteaseAccount ?: return
+        if (!onlineMusicEnabled) return
+        viewModelScope.launch {
+            val tracks = onlineDailyTracks.ifEmpty {
+                withContext(Dispatchers.IO) { NeteaseExplore.fetchDailyRecommend(acc) }.orEmpty()
+                    .also { if (it.isNotEmpty()) onlineDailyTracks = it }
+            }
+            playRemoteTrackBatch(tracks, emptyMessage = "每日推荐暂时不可用，稍后再试")
+        }
+    }
+
+    fun playPersonalFm() {
+        val acc = neteaseAccount ?: return
+        if (!onlineMusicEnabled) return
+        viewModelScope.launch {
+            val tracks = withContext(Dispatchers.IO) { NeteaseExplore.fetchPersonalFm(acc) }
+            if (tracks == null) {
+                showToast("私人 FM 获取失败，检查网络后重试")
+                return@launch
+            }
+            playRemoteTrackBatch(tracks, emptyMessage = "私人 FM 暂无可播曲目")
+        }
+    }
+
+    var intelligenceLoading by mutableStateOf(false)
+        private set
+
+    /** 开启网易云「心动模式」：以红心歌单和种子曲目驱动相似雷达推荐队列。 */
+    fun playIntelligenceMode(seedTrackId: String? = null) {
+        val acc = neteaseAccount ?: run {
+            showToast("请先登录网易云账号后使用心动模式")
+            return
+        }
+        if (!onlineMusicEnabled || intelligenceLoading) return
+        viewModelScope.launch {
+            intelligenceLoading = true
+            try {
+                val liked = onlineLikedPlaylist ?: withContext(Dispatchers.IO) {
+                    NeteaseExplore.fetchUserPlaylists(acc)?.also { res ->
+                        onlineLikedPlaylist = res.likedPlaylist
+                        onlineUserPlaylists = res.otherPlaylists
+                    }?.likedPlaylist
+                }
+                if (liked == null) {
+                    showToast("未找到「我喜欢的音乐」歌单，无法启动心动模式")
+                    return@launch
+                }
+                val resolvedSeed = seedTrackId?.takeIf { it.isNotBlank() }
+                    ?: if (playlistDetail?.remoteId == liked.remoteId && playlistTracks.isNotEmpty()) {
+                        playlistTracks.random().remoteId
+                    } else {
+                        withContext(Dispatchers.IO) {
+                            NeteaseExplore.fetchPlaylistSeedTrackId(acc, liked.remoteId)
+                        } ?: onlineDailyTracks.firstOrNull()?.remoteId
+                    }
+                if (resolvedSeed.isNullOrBlank()) {
+                    showToast("红心歌单里还没有歌曲，先红心几首再来试试吧")
+                    return@launch
+                }
+                val tracks = withContext(Dispatchers.IO) {
+                    NeteaseExplore.fetchIntelligenceList(acc, resolvedSeed, liked.remoteId)
+                }
+                if (tracks == null) {
+                    showToast("心动模式获取失败，检查网络或重新登录后重试")
+                    return@launch
+                }
+                if (playRemoteTrackBatch(tracks, emptyMessage = "心动模式暂未返回可播歌曲")) {
+                    showToast("已开启心动模式 · ${tracks.size} 首")
+                }
+            } finally {
+                intelligenceLoading = false
+            }
+        }
+    }
+
+    private suspend fun playRemoteTrackBatch(tracks: List<RemoteTrack>, emptyMessage: String): Boolean {
+        if (tracks.isEmpty()) {
+            showToast(emptyMessage)
+            return false
+        }
+        val playable = tracks.filter { it.playable }
+        if (playable.isEmpty()) {
+            showToast("当前列表里的歌曲需要会员或暂无音源")
+            return false
+        }
+        commitOnlinePage(NeteaseSource, playable)
+        val onlineSongs = playable.mapNotNull { onlineSongMap[remoteSongId(NeteaseSource.id, it.remoteId)] }
+        if (onlineSongs.isEmpty()) {
+            showToast(emptyMessage)
+            return false
+        }
+        return playOnlineQueue(NeteaseSource, onlineSongs, 0, onlineSongs.first().title)
     }
 
     // ---- 歌单详情 ----
@@ -4081,7 +4437,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         playlistLoading = true
         playlistJob = viewModelScope.launch {
             try {
-                val tracks = withContext(Dispatchers.IO) { src.playlistTracks(playlist.remoteId) }
+                val tracks = withContext(Dispatchers.IO) {
+                    if (playlist.remoteId == NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID) {
+                        val acc = neteaseAccount
+                        if (acc == null) null
+                        else onlineDailyTracks.ifEmpty { NeteaseExplore.fetchDailyRecommend(acc) }
+                            ?.also { onlineDailyTracks = it }
+                    } else {
+                        src.playlistTracks(playlist.remoteId)
+                    }
+                }
                 // 期间关掉了 / 又点了别的歌单：这一批已经不属于当前页面
                 if (playlistDetail?.remoteId != playlist.remoteId) return@launch
                 if (tracks == null) {
@@ -4089,7 +4454,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     playlistTracks = tracks
                     // 并进 onlineSongMap：播放、队列页、播放页、收藏判断都要按 id 反查
-                    commitOnlinePage(src, tracks)
+                    val targetSrc = if (playlist.remoteId == NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID) {
+                        NeteaseSource
+                    } else {
+                        src
+                    }
+                    commitOnlinePage(targetSrc, tracks)
                 }
             } finally {
                 if (playlistDetail?.remoteId == playlist.remoteId) playlistLoading = false
@@ -4119,7 +4489,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 自动续播到它就会卡住报错，用户还以为播放器坏了。
      */
     fun playPlaylistTrack(index: Int) {
-        val src = onlineSource ?: return
+        val src = if (playlistDetail?.remoteId == NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID) {
+            NeteaseSource
+        } else {
+            onlineSource ?: return
+        }
         val track = playlistTracks.getOrNull(index) ?: return
         if (!track.playable) {
             showToast("「${track.title}」需要会员，拿不到播放地址")
@@ -4199,10 +4573,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 一首接一首地下，不并发：并发会和播放抢带宽，网易云对外链请求也不友好。
      * 可播的、没存过的才下；VIP / 下架的跳过并计数，不报错（它们本来也播不了）。
      */
-    fun downloadPlaylistTracks() {
+    fun downloadPlaylistTracks(tracks: List<RemoteTrack> = playlistTracks) {
         val src = onlineSource ?: return
-        if (playlistDownloadActive) return
-        val tracks = playlistTracks
+        if (playlistDownloadActive) {
+            showToast("正在下载队列中的歌曲，请稍候")
+            return
+        }
         if (tracks.isEmpty()) return
 
         playlistDownloadJob = viewModelScope.launch {
@@ -4231,7 +4607,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         continue
                     }
                     // 逐首按当前音质取流；取不到就计入"跳过"，不打断整批
-                    val url = src.resolveStream(track.remoteId)
+                    val url = src.resolveStream(track.remoteId, track.durationMs)
                     if (url == null) {
                         playlistDownloadSkipped++
                         playlistDownloadDone++
@@ -4276,6 +4652,38 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+    }
+
+    /**
+     * 将多选的在线曲目批量加入播放队列末尾。
+     *
+     * 过滤掉不可播的歌曲；已下载到本地的曲目优先替换成本地副本，
+     * 在线曲目登记到 [onlineSongMap] 并按需预取下一首流地址。
+     */
+    fun enqueueOnlineTracks(tracks: List<RemoteTrack>) {
+        val src = onlineSource ?: return
+        val playable = tracks.filter { it.playable }
+        if (playable.isEmpty()) {
+            showToast("所选曲目暂无可播音源")
+            return
+        }
+        var addedToMap = false
+        val songs = playable.map { t ->
+            val mapped = onlineSongMap[remoteSongId(src.id, t.remoteId)] ?: src.toSong(t).also { s ->
+                onlineSongMap[s.id] = s
+                addedToMap = true
+            }
+            localCopyOf(mapped) ?: mapped
+        }
+        if (addedToMap) onlineRevision++
+        val wasEmpty = player.state.value.queueIds.isEmpty()
+        player.appendToQueue(songs)
+        if (wasEmpty) {
+            songs.firstOrNull()?.let { first ->
+                if (isRemoteSongId(first.id)) resolveStreamIfMissing(first)
+            }
+        }
+        showToast("已将 ${songs.size} 首加入播放列表")
     }
 
     /** 取消正在跑的歌单下载。进度状态由协程的 `finally` 收尾 */
@@ -5064,6 +5472,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 再多会让首页首屏等太久。
          */
         private const val RECOMMEND_LIMIT = 12
+        private const val EXPLORE_PLAYLIST_PAGE_SIZE = 20
 
         /**
          * 开始播放后**多久**才真正触发下载。

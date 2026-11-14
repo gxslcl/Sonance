@@ -106,6 +106,18 @@ interface OnlineSource {
     suspend fun resolveStream(remoteId: String): String? =
         streamUrl(remoteId).takeIf { it.isNotBlank() }
 
+    /** 携带已知整曲时长（ms）解析流，便于识别未返回 `freeTrialInfo` 却截断为 30s 的试听流。 */
+    suspend fun resolveStream(remoteId: String, expectedDurationMs: Long): String? =
+        resolveStream(remoteId)
+
+    /**
+     * 当前是否已经有可用的新鲜取流地址（未过期/非仅兜底外链）。
+     *
+     * 用于冷启动恢复队列或切歌补流判断：像 [NeteaseSource] 的同步 [streamUrl] 会退回
+     * 低音质兜底外链，不能靠它非空就跳过 [resolveStream]。
+     */
+    fun hasFreshStream(remoteId: String): Boolean = streamUrl(remoteId).isNotBlank()
+
     /**
      * 上一次取流失败的原因，直接可以给用户看。
      *
@@ -625,6 +637,12 @@ object NeteaseSource : OnlineSource {
     override suspend fun resolveStream(remoteId: String): String? =
         NeteaseStream.resolve(remoteId, NeteaseQuality.current)?.url
 
+    override suspend fun resolveStream(remoteId: String, expectedDurationMs: Long): String? =
+        NeteaseStream.resolve(remoteId, NeteaseQuality.current, expectedDurationMs)?.url
+
+    override fun hasFreshStream(remoteId: String): Boolean =
+        NeteaseStream.cachedUrl(remoteId) != null
+
     override fun lastStreamError(remoteId: String): String? = NeteaseStream.failureOf(remoteId)
 
     override fun streamQualityLabel(remoteId: String): String? =
@@ -977,6 +995,9 @@ object NeteaseSource : OnlineSource {
                 setRequestProperty("User-Agent", UA)
                 setRequestProperty("Accept", "application/json, text/plain, */*")
                 setRequestProperty("Referer", "$BASE/")
+                NeteaseAuth.account?.cookie?.takeIf { it.isNotBlank() }?.let {
+                    setRequestProperty("Cookie", it)
+                }
             }
             val code = conn.responseCode
             if (code !in 200..299) {

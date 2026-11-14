@@ -1175,22 +1175,28 @@ fun PillButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     filled: Boolean = true,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    compact: Boolean = false
 ) {
     val skin = LocalSkin.current
+    val shape = RoundedCornerShape(if (compact) 8.dp else 10.dp)
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(shape)
             .background(if (filled) skin.accent else skin.surface2)
-            .alpha(if (enabled) 1f else 0.45f)
+            .alpha(if (enabled) 1f else 0.42f)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 11.dp)
+            .padding(
+                horizontal = if (compact) 12.dp else 20.dp,
+                vertical = if (compact) 6.dp else 11.dp
+            )
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
             color = if (filled) skin.onAccent else skin.text,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
         )
     }
 }

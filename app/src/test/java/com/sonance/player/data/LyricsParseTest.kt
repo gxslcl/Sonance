@@ -290,4 +290,15 @@ class LyricsParseTest {
         assertEquals("Let my touch", lyrics.lines[0])
         assertEquals("Be indistinct", lyrics.lines[1])
     }
+
+    @Test
+    fun `外部 LRC 字节解码同时兼容 UTF-8 BOM 与 GBK 中文编码`() {
+        val sample = "[00:01.00]山水有清音\n[00:05.00]余音绕梁"
+        val utf8Bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) +
+            sample.toByteArray(Charsets.UTF_8)
+        assertEquals(sample, LyricsRepository.decodeLyricsBytes(utf8Bom))
+
+        val gbkBytes = sample.toByteArray(java.nio.charset.Charset.forName("GB18030"))
+        assertEquals(sample, LyricsRepository.decodeLyricsBytes(gbkBytes))
+    }
 }

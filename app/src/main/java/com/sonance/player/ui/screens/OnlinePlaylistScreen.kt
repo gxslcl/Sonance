@@ -1,11 +1,15 @@
 package com.sonance.player.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,10 +19,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,12 +36,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.RemotePlaylist
+import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.remoteSongId
 import com.sonance.player.playback.PlayerUiState
@@ -96,7 +106,20 @@ fun OnlinePlaylistScreen(
     val loading = !ready || vm.playlistLoading
     val tracks = if (ready) vm.playlistTracks else emptyList()
 
-    var confirmOpen by remember(playlist.remoteId) { mutableStateOf(false) }
+    var selectionMode by remember(playlist.remoteId) { mutableStateOf(false) }
+    var selectedIds by remember(playlist.remoteId) { mutableStateOf<Set<String>>(emptySet()) }
+    var pendingDownloadTracks by remember(playlist.remoteId) { mutableStateOf<List<RemoteTrack>?>(null) }
+
+    val exitSelection = {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    BackHandler(enabled = selectionMode) { exitSelection() }
+
+    val selectedTracks = remember(tracks, selectedIds) {
+        if (selectedIds.isEmpty()) emptyList()
+        else tracks.filter { it.remoteId in selectedIds }
+    }
 
     Column(modifier.fillMaxSize()) {
         PlaylistHeader(
@@ -105,7 +128,7 @@ fun OnlinePlaylistScreen(
             loadedCount = if (ready) tracks.size else null,
             totalMs = if (ready) tracks.sumOf { it.durationMs } else 0L,
             onPlayAll = { vm.playPlaylist() },
-            onDownload = { confirmOpen = true }
+            onDownload = { pendingDownloadTracks = tracks }
         )
 
         // 只有"这轮下载属于本歌单"才显示进度条：下载跨页面存活，用户可能已经翻到
@@ -118,6 +141,35 @@ fun OnlinePlaylistScreen(
                 skipped = vm.playlistDownloadSkipped,
                 failed = vm.playlistDownloadFailed,
                 onCancel = { vm.cancelPlaylistDownload() }
+            )
+        }
+
+        // 歌曲列表顶部同一行操作栏：常规态左上角摆「多选」，进入多选后同一行右侧出现「下载」与「加入播放队列」（未选时禁用）
+        if (ready && tracks.isNotEmpty() && !loading) {
+            val allSelected = selectedIds.size >= tracks.size
+            val selectedDownloadable = selectedTracks.count { it.playable && !vm.isDownloaded(it) }
+            TrackListToolbar(
+                selectionMode = selectionMode,
+                selectedCount = selectedTracks.size,
+                totalCount = tracks.size,
+                downloadableCount = selectedDownloadable,
+                allSelected = allSelected,
+                downloading = vm.playlistDownloadActive,
+                onEnterSelect = {
+                    selectedIds = emptySet()
+                    selectionMode = true
+                },
+                onToggleSelectAll = {
+                    selectedIds = if (allSelected) emptySet() else tracks.mapTo(HashSet()) { it.remoteId }
+                },
+                onDownloadSelected = {
+                    pendingDownloadTracks = selectedTracks
+                },
+                onAddToQueue = {
+                    vm.enqueueOnlineTracks(selectedTracks)
+                    exitSelection()
+                },
+                onCancel = exitSelection
             )
         }
 
@@ -156,6 +208,7 @@ fun OnlinePlaylistScreen(
                         items = tracks,
                         key = { _, t -> t.remoteId }
                     ) { index, track ->
+                        val checked = track.remoteId in selectedIds
                         OnlineTrackRow(
                             track = track,
                             thumbUrl = vm.onlineThumbUrl(track, ROW_COVER_PX),
@@ -163,8 +216,26 @@ fun OnlinePlaylistScreen(
                             downloaded = vm.isDownloaded(track),
                             isCurrent = playerState.mediaId == remoteSongId(src.id, track.remoteId),
                             isPlaying = playerState.isPlaying,
-                            // 下标是 playlistTracks 里的原始下标 —— 队列就是按它建的
-                            onClick = { vm.playPlaylistTrack(index) }
+                            selectionMode = selectionMode,
+                            selected = checked,
+                            onLongClick = {
+                                if (!selectionMode) {
+                                    selectionMode = true
+                                    selectedIds = setOf(track.remoteId)
+                                }
+                            },
+                            // 多选模式下点击切换选中态，常规模式按 playlistTracks 原始下标点播
+                            onClick = {
+                                if (selectionMode) {
+                                    selectedIds = if (checked) {
+                                        selectedIds - track.remoteId
+                                    } else {
+                                        selectedIds + track.remoteId
+                                    }
+                                } else {
+                                    vm.playPlaylistTrack(index)
+                                }
+                            }
                         )
                     }
 
@@ -181,25 +252,158 @@ fun OnlinePlaylistScreen(
         }
     }
 
-    if (confirmOpen) {
+    pendingDownloadTracks?.let { targetTracks ->
         DownloadConfirmDialog(
             playlist = playlist,
+            tracks = targetTracks,
+            isPartial = selectionMode && targetTracks.size < tracks.size,
             vm = vm,
-            onDismiss = { confirmOpen = false },
+            onDismiss = { pendingDownloadTracks = null },
             onConfirm = {
-                confirmOpen = false
-                vm.downloadPlaylistTracks()
+                pendingDownloadTracks = null
+                if (selectionMode) exitSelection()
+                vm.downloadPlaylistTracks(targetTracks)
             }
+        )
+    }
+}
+
+@Composable
+private fun TrackListToolbar(
+    selectionMode: Boolean,
+    selectedCount: Int,
+    totalCount: Int,
+    downloadableCount: Int,
+    allSelected: Boolean,
+    downloading: Boolean,
+    onEnterSelect: () -> Unit,
+    onToggleSelectAll: () -> Unit,
+    onDownloadSelected: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            if (!selectionMode) {
+                SmallToolbarButton(
+                    label = "多选",
+                    icon = SonanceIcons.Check,
+                    onClick = onEnterSelect
+                )
+                Text(
+                    text = "共 $totalCount 首",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textDim
+                )
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SmallToolbarButton(
+                        label = if (allSelected) "全不选" else "全选",
+                        highlighted = allSelected,
+                        onClick = onToggleSelectAll
+                    )
+                    SmallToolbarButton(
+                        label = "取消",
+                        onClick = onCancel
+                    )
+                    if (selectedCount > 0) {
+                        Text(
+                            text = "已选 $selectedCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.accent,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val canDownload = selectedCount > 0 && downloadableCount > 0 && !downloading
+                    SmallToolbarButton(
+                        label = if (downloading) "下载中" else if (canDownload) "下载 $downloadableCount" else "下载",
+                        enabled = canDownload,
+                        onClick = onDownloadSelected
+                    )
+                    SmallToolbarButton(
+                        label = "加入队列",
+                        enabled = selectedCount > 0,
+                        highlighted = selectedCount > 0,
+                        onClick = onAddToQueue
+                    )
+                }
+            }
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            thickness = 0.5.dp,
+            color = skin.border
+        )
+    }
+}
+
+@Composable
+private fun SmallToolbarButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    highlighted: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(7.dp)
+    val bg = when {
+        highlighted && enabled -> skin.accent
+        else -> skin.surface2.copy(alpha = 0.72f)
+    }
+    val fg = when {
+        highlighted && enabled -> skin.onAccent
+        else -> skin.text
+    }
+    Row(
+        modifier = Modifier
+            .clip(shape)
+            .background(bg)
+            .border(0.8.dp, if (highlighted && enabled) skin.accent else skin.border, shape)
+            .alpha(if (enabled) 1f else 0.36f)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            color = fg,
+            maxLines = 1
         )
     }
 }
 
 /**
  * 头部：封面 + 标题 + 创建者/曲目数 + 「播放全部 / 下载全部」。
- *
- * [loadedCount] 为 null 表示曲目还没到 —— 此时不摆下载按钮（下载的目标数还不知道，
- * 摆一个「下载全部 0」是误导）。标题下的曲目数先用音源报的 [RemotePlaylist.trackCount]。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PlaylistHeader(
     playlist: RemotePlaylist,
@@ -217,11 +421,11 @@ private fun PlaylistHeader(
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = if (dense) 6.dp else 12.dp),
+            .padding(horizontal = 16.dp, vertical = if (dense) 6.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Box(Modifier.size(if (dense) 76.dp else 104.dp)) {
+        Box(Modifier.size(if (dense) 88.dp else 108.dp)) {
             if (cover != null) {
                 Image(
                     bitmap = cover,
@@ -229,7 +433,7 @@ private fun PlaylistHeader(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxSize()
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(10.dp))
                 )
             } else {
                 PlaceholderCover(
@@ -237,7 +441,7 @@ private fun PlaylistHeader(
                     showMark = false,
                     modifier = Modifier
                         .fillMaxSize()
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(10.dp))
                 )
             }
         }
@@ -245,7 +449,8 @@ private fun PlaylistHeader(
         Column(Modifier.weight(1f)) {
             Text(
                 text = playlist.name,
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
                 color = skin.text,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -262,29 +467,37 @@ private fun PlaylistHeader(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(if (dense) 8.dp else 12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Spacer(Modifier.height(if (dense) 8.dp else 10.dp))
+            val isLikedPlaylist = playlist.remoteId == vm.onlineLikedPlaylist?.remoteId &&
+                vm.neteaseAccount != null
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                PillButton(label = "播放全部", onClick = onPlayAll)
+                PlaylistActionButton(label = "播放全部", onClick = onPlayAll, filled = true)
 
-                // 曲目还没到时先不摆下载按钮：目标数都不知道，摆一个「下载全部 0」是误导
+                if (isLikedPlaylist) {
+                    PlaylistActionButton(
+                        label = if (vm.intelligenceLoading) "开启中" else "心动模式",
+                        onClick = { if (!vm.intelligenceLoading) vm.playIntelligenceMode() },
+                        filled = false
+                    )
+                }
+
+                // 曲目还没到时先不摆下载按钮：目标数都不知道，摆出来会误导
                 if (loadedCount != null) {
                     val left = vm.playlistDownloadableCount
                     when {
-                        // 本歌单正在下：进度条已经在下面了，再摆一个会让人以为能重开一轮
                         vm.playlistDownloadActive && vm.playlistDownloadOwner == playlist.remoteId -> Unit
 
-                        // 别的歌单正在下：ViewModel 会拒绝新的一轮，所以按钮不能摆 ——
-                        // 摆出来点了没反应比不摆更让人困惑。说清楚为什么点不了。
                         vm.playlistDownloadActive -> Text(
                             text = "有歌单正在下载…",
                             style = MaterialTheme.typography.labelMedium,
-                            color = skin.textMuted
+                            color = skin.textMuted,
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         )
 
-                        left > 0 -> PillButton(
+                        left > 0 -> PlaylistActionButton(
                             label = "下载全部 $left",
                             onClick = onDownload,
                             filled = false
@@ -293,12 +506,38 @@ private fun PlaylistHeader(
                         else -> Text(
                             text = "已全部存到本地",
                             style = MaterialTheme.typography.labelMedium,
-                            color = skin.textMuted
+                            color = skin.textMuted,
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PlaylistActionButton(
+    label: String,
+    onClick: () -> Unit,
+    filled: Boolean
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(9.dp)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(if (filled) skin.accent else skin.surface2)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 15.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (filled) skin.onAccent else skin.text,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
     }
 }
 
@@ -380,23 +619,25 @@ private fun DownloadProgress(
 @Composable
 private fun DownloadConfirmDialog(
     playlist: RemotePlaylist,
+    tracks: List<RemoteTrack>,
+    isPartial: Boolean,
     vm: SonanceViewModel,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
     val skin = LocalSkin.current
-    val total = vm.playlistTracks.size
-    val playable = vm.playlistTracks.count { it.playable }
+    val total = tracks.size
+    val playable = tracks.count { it.playable }
     val notPlayable = total - playable
-    val downloadable = vm.playlistDownloadableCount
-    val downloaded = vm.playlistDownloadedCount
+    val downloaded = tracks.count { vm.isDownloaded(it) }
+    val downloadable = tracks.count { it.playable && !vm.isDownloaded(it) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = skin.surface2,
         title = {
             Text(
-                text = "下载整个歌单",
+                text = if (isPartial) "下载所选曲目" else "下载整个歌单",
                 style = MaterialTheme.typography.titleMedium,
                 color = skin.text
             )
