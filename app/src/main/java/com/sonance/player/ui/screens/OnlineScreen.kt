@@ -1,5 +1,6 @@
 package com.sonance.player.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -54,6 +55,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,7 +79,10 @@ import com.sonance.player.ui.components.EqualizerBars
 import com.sonance.player.ui.components.LoadingState
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.PlaceholderCover
+import com.sonance.player.ui.components.RowActionSheet
+import com.sonance.player.ui.components.RowSheetAction
 import com.sonance.player.ui.components.SearchField
+import com.sonance.player.ui.components.hapticTick
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.sheets.NeteaseAccountSheet
@@ -307,11 +312,14 @@ fun OnlineScreen(
         // ---- 音源切换（多音源或未登录） + 搜索结果统计 / 仅可播筛选 ----
         val loggedIn = vm.neteaseAccount != null
         val hasSingleResults = vm.onlineSearchMode == OnlineSearchMode.SINGLE && vm.onlineResults.isNotEmpty()
+        val hasVisibleSingle = vm.onlineSearchMode == OnlineSearchMode.SINGLE && vm.visibleOnlineResults.isNotEmpty()
         val hasPlaylistResults = vm.onlineSearchMode == OnlineSearchMode.PLAYLIST && vm.onlinePlaylistResults.isNotEmpty()
+        // 单音源 + 已登录 + 有可展示结果时，把「可播统计 + 筛选胶囊」并入下方工具条，不再单独空占一行
+        val mergeSingleToolbar = OnlineSources.all.size <= 1 && loggedIn && hasVisibleSingle && !vm.onlineSearching
         val showStatusRow = OnlineSources.all.size > 1 ||
             !loggedIn ||
             vm.onlineSearching ||
-            hasSingleResults ||
+            (hasSingleResults && !mergeSingleToolbar) ||
             hasPlaylistResults
         if (showStatusRow) {
             Row(
@@ -336,32 +344,13 @@ fun OnlineScreen(
                     CountLabel("搜索中…")
                 } else if (hasPlaylistResults) {
                     CountLabel("${vm.onlinePlaylistResults.size} 个歌单")
-                } else if (hasSingleResults) {
-                    val playable = vm.onlineResults.count { it.playable }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        CountLabel("可播 $playable / ${vm.onlineResults.size}")
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (vm.onlineHideUnplayable) skin.accentGlow else skin.surface2)
-                                .border(
-                                    1.dp,
-                                    if (vm.onlineHideUnplayable) skin.accent.copy(alpha = 0.5f) else Color.Transparent,
-                                    RoundedCornerShape(10.dp)
-                                )
-                                .clickable { vm.changeOnlineHideUnplayable(!vm.onlineHideUnplayable) }
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = if (vm.onlineHideUnplayable) "仅看可播 ✓" else "全部结果",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (vm.onlineHideUnplayable) skin.accent else skin.textMuted
-                            )
-                        }
-                    }
+                } else if (hasSingleResults && !mergeSingleToolbar) {
+                    PlayableFilterControls(
+                        playable = vm.onlineResults.count { it.playable },
+                        total = vm.onlineResults.size,
+                        hideUnplayable = vm.onlineHideUnplayable,
+                        onToggleHideUnplayable = { vm.changeOnlineHideUnplayable(!vm.onlineHideUnplayable) }
+                    )
                 }
             }
         }
@@ -374,6 +363,7 @@ fun OnlineScreen(
                     playerState = playerState,
                     src = src,
                     listState = listState,
+                    mergeStatusIntoToolbar = mergeSingleToolbar,
                     onOpenPlaylist = onOpenPlaylist
                 )
 
@@ -384,6 +374,48 @@ fun OnlineScreen(
                     onOpenPlaylist = onOpenPlaylist
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun PlayableFilterControls(
+    playable: Int,
+    total: Int,
+    hideUnplayable: Boolean,
+    onToggleHideUnplayable: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CountLabel("可播 $playable / $total")
+        Box(
+            modifier = Modifier
+                .clip(shape)
+                .background(
+                    if (hideUnplayable) skin.accentGlow
+                    else skin.surface2.copy(alpha = if (skin.isLight) 0.85f else 0.72f)
+                )
+                .then(
+                    if (hideUnplayable) {
+                        Modifier.border(0.8.dp, skin.accent.copy(alpha = 0.45f), shape)
+                    } else {
+                        Modifier
+                    }
+                )
+                .clickable(onClick = onToggleHideUnplayable)
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        ) {
+            Text(
+                text = if (hideUnplayable) "仅看可播 ✓" else "全部结果",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
+                color = if (hideUnplayable) skin.accent else skin.textDim,
+                maxLines = 1
+            )
         }
     }
 }
@@ -399,9 +431,28 @@ private fun SingleSearchBody(
     playerState: PlayerUiState,
     src: OnlineSource,
     listState: LazyListState,
+    mergeStatusIntoToolbar: Boolean = false,
     onOpenPlaylist: (RemotePlaylist) -> Unit
 ) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
+    var selectionMode by remember(src.id, vm.onlineQuery) { mutableStateOf(false) }
+    var selectedIds by remember(src.id, vm.onlineQuery) { mutableStateOf<Set<String>>(emptySet()) }
+    var pendingDownloadTracks by remember(src.id, vm.onlineQuery) { mutableStateOf<List<RemoteTrack>?>(null) }
+    var actionTrack by remember(src.id, vm.onlineQuery) { mutableStateOf<RemoteTrack?>(null) }
+
+    val exitSelection = {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    BackHandler(enabled = selectionMode) { exitSelection() }
+
+    val visibleTracks = vm.visibleOnlineResults.map { it.second }
+    val selectedTracks = remember(visibleTracks, selectedIds) {
+        if (selectedIds.isEmpty()) emptyList()
+        else visibleTracks.filter { it.remoteId in selectedIds }
+    }
+
     when {
         // 输入框为空 = 首页：登录后展示方案 C 杂志画报 Hero 版，未登录保持简化推荐页
         vm.onlineQuery.isEmpty() && !vm.onlineSearching -> OnlineHomeContent(
@@ -422,59 +473,180 @@ private fun SingleSearchBody(
         // ★ 有结果就**先显示着**，不要换成转圈。
         // 输入即搜索是"每停一次手就搜一次"，把列表换成 spinner 会一直闪；
         // 加载状态改由上面的「搜索中…」提示，列表本身保持稳定。
-        vm.visibleOnlineResults.isNotEmpty() -> LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = 10.dp,
-                end = 10.dp,
-                top = 4.dp,
-                bottom = 24.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            itemsIndexed(
-                items = vm.visibleOnlineResults,
-                // remoteId 在单个音源内唯一，正好当 key
-                key = { _, pair -> pair.second.remoteId }
-            ) { _, pair ->
-                // first 是**原始下标**，播放队列按 onlineResults 建的，必须用它对上
-                val (index, track) = pair
-                val songId = remoteSongId(src.id, track.remoteId)
-                OnlineTrackRow(
-                    track = track,
-                    thumbUrl = vm.onlineThumbUrl(track, THUMB_PX),
-                    sourceLabel = src.label,
-                    // 存过本地的标出来：点它播的是文件，不再联网
-                    downloaded = vm.isDownloaded(track),
-                    isCurrent = playerState.mediaId == songId,
-                    isPlaying = playerState.isPlaying,
-                    onClick = { vm.playOnline(index) }
+        vm.visibleOnlineResults.isNotEmpty() -> {
+            Column(Modifier.fillMaxSize()) {
+                if (vm.playlistDownloadActive &&
+                    vm.playlistDownloadOwner == SonanceViewModel.DOWNLOAD_OWNER_SEARCH
+                ) {
+                    OnlineDownloadProgressBanner(
+                        done = vm.playlistDownloadDone,
+                        total = vm.playlistDownloadTotal,
+                        saved = vm.playlistDownloadSaved,
+                        skipped = vm.playlistDownloadSkipped,
+                        failed = vm.playlistDownloadFailed,
+                        onCancel = { vm.cancelPlaylistDownload() }
+                    )
+                }
+
+                val allSelected = selectedIds.size >= visibleTracks.size
+                val selectedDownloadable = selectedTracks.count { it.playable && !vm.isDownloaded(it) }
+                val playableTotal = vm.onlineResults.count { it.playable }
+                OnlineTrackListToolbar(
+                    selectionMode = selectionMode,
+                    selectedCount = selectedTracks.size,
+                    totalCount = visibleTracks.size,
+                    downloadableCount = selectedDownloadable,
+                    allSelected = allSelected,
+                    downloading = vm.playlistDownloadActive,
+                    hintText = "长按单曲可下载 / 入队 · 共 ${visibleTracks.size} 首",
+                    leadingNote = if (mergeStatusIntoToolbar) "长按可操作" else null,
+                    trailingContent = if (mergeStatusIntoToolbar) {
+                        {
+                            PlayableFilterControls(
+                                playable = playableTotal,
+                                total = vm.onlineResults.size,
+                                hideUnplayable = vm.onlineHideUnplayable,
+                                onToggleHideUnplayable = { vm.changeOnlineHideUnplayable(!vm.onlineHideUnplayable) }
+                            )
+                        }
+                    } else null,
+                    onEnterSelect = {
+                        selectedIds = emptySet()
+                        selectionMode = true
+                    },
+                    onToggleSelectAll = {
+                        selectedIds = if (allSelected) {
+                            emptySet()
+                        } else {
+                            visibleTracks.mapTo(HashSet()) { it.remoteId }
+                        }
+                    },
+                    onDownloadSelected = {
+                        pendingDownloadTracks = selectedTracks
+                    },
+                    onAddToQueue = {
+                        vm.enqueueOnlineTracks(selectedTracks)
+                        exitSelection()
+                    },
+                    onCancel = exitSelection
+                )
+
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(
+                        start = 10.dp,
+                        end = 10.dp,
+                        top = 4.dp,
+                        bottom = 24.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    itemsIndexed(
+                        items = vm.visibleOnlineResults,
+                        // remoteId 在单个音源内唯一，正好当 key
+                        key = { _, pair -> pair.second.remoteId }
+                    ) { _, pair ->
+                        // first 是**原始下标**，播放队列按 onlineResults 建的，必须用它对上
+                        val (index, track) = pair
+                        val songId = remoteSongId(src.id, track.remoteId)
+                        val checked = track.remoteId in selectedIds
+                        OnlineTrackRow(
+                            track = track,
+                            thumbUrl = vm.onlineThumbUrl(track, THUMB_PX),
+                            sourceLabel = src.label,
+                            // 存过本地的标出来：点它播的是文件，不再联网
+                            downloaded = vm.isDownloaded(track),
+                            isCurrent = playerState.mediaId == songId,
+                            isPlaying = playerState.isPlaying,
+                            selectionMode = selectionMode,
+                            selected = checked,
+                            onLongClick = {
+                                if (!selectionMode) {
+                                    hapticTick(context)
+                                    actionTrack = track
+                                } else {
+                                    selectedIds = if (checked) {
+                                        selectedIds - track.remoteId
+                                    } else {
+                                        selectedIds + track.remoteId
+                                    }
+                                }
+                            },
+                            onClick = {
+                                if (selectionMode) {
+                                    selectedIds = if (checked) {
+                                        selectedIds - track.remoteId
+                                    } else {
+                                        selectedIds + track.remoteId
+                                    }
+                                } else {
+                                    vm.playOnline(index)
+                                }
+                            }
+                        )
+                    }
+
+                    item {
+                        Column(Modifier.fillMaxWidth()) {
+                            OnlineListFooter(
+                                loadingMore = vm.onlineLoadingMore,
+                                loadMoreFailed = vm.onlineLoadMoreFailed,
+                                hasMore = vm.onlineHasMore,
+                                endLabel = "没有更多了 · 共 ${vm.onlineResults.size} 首",
+                                onRetry = { vm.retryLoadMoreOnline() }
+                            )
+                            // 把规则说清楚，省得用户以为是坏了。登录前后说得不一样：
+                            // 未登录时"VIP 歌播不了"是常态，登录后还播不了一般是版权问题
+                            Text(
+                                text = if (vm.neteaseAccount == null) {
+                                    "标 VIP 的歌需要登录网易云会员账号才能播放，点右上角「登录网易云」即可登录。"
+                                } else {
+                                    "标 VIP 的歌已按你的会员权益判断；灰掉的是当前账号仍拿不到地址的（下架或需单独购买）。"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = skin.textMuted,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            actionTrack?.let { target ->
+                RowActionSheet(
+                    title = target.title,
+                    subtitle = listOf(target.artist, target.album)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · ")
+                        .ifBlank { null },
+                    actions = listOf(
+                        RowSheetAction(
+                            label = if (vm.isDownloaded(target)) "下载（已保存到本地）" else "下载"
+                        ) {
+                            vm.downloadSingleOnlineTrack(target)
+                        },
+                        RowSheetAction("加入队列") {
+                            vm.enqueueOnlineTracks(listOf(target))
+                        }
+                    ),
+                    onDismiss = { actionTrack = null }
                 )
             }
 
-            item {
-                Column(Modifier.fillMaxWidth()) {
-                    OnlineListFooter(
-                        loadingMore = vm.onlineLoadingMore,
-                        loadMoreFailed = vm.onlineLoadMoreFailed,
-                        hasMore = vm.onlineHasMore,
-                        endLabel = "没有更多了 · 共 ${vm.onlineResults.size} 首",
-                        onRetry = { vm.retryLoadMoreOnline() }
-                    )
-                    // 把规则说清楚，省得用户以为是坏了。登录前后说得不一样：
-                    // 未登录时"VIP 歌播不了"是常态，登录后还播不了一般是版权问题
-                    Text(
-                        text = if (vm.neteaseAccount == null) {
-                            "标 VIP 的歌需要登录网易云会员账号才能播放，点右上角「登录网易云」即可登录。"
-                        } else {
-                            "标 VIP 的歌已按你的会员权益判断；灰掉的是当前账号仍拿不到地址的（下架或需单独购买）。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = skin.textMuted,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
-                    )
-                }
+            pendingDownloadTracks?.let { targetTracks ->
+                OnlineDownloadConfirmDialog(
+                    collectionTitle = if (vm.onlineQuery.isNotBlank()) "搜索「${vm.onlineQuery}」" else "在线搜索结果",
+                    tracks = targetTracks,
+                    isPartial = targetTracks.size < visibleTracks.size,
+                    vm = vm,
+                    onDismiss = { pendingDownloadTracks = null },
+                    onConfirm = {
+                        pendingDownloadTracks = null
+                        exitSelection()
+                        vm.downloadSearchTracks(targetTracks)
+                    }
+                )
             }
         }
 

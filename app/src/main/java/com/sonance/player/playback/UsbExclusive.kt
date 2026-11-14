@@ -34,6 +34,18 @@ object UsbExclusive {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var deviceCallback: AudioDeviceCallback? = null
     private var appliedDeviceId = -1
+    private var appliedSampleRate = 0
+    private var appliedEncoding = AudioFormat.ENCODING_INVALID
+    private var appliedChannels = 0
+
+    @Volatile
+    private var lastTrackSampleRate = 44_100
+
+    @Volatile
+    private var lastTrackEncoding = androidx.media3.common.C.ENCODING_PCM_16BIT
+
+    @Volatile
+    private var lastTrackChannels = 2
 
     private fun streamAttributes(): AudioAttributes =
         AudioAttributes.Builder()
@@ -89,27 +101,123 @@ object UsbExclusive {
         watchDevices(app)
     }
 
+    /**
+     * 当正在播放的音轨格式变化时调用：按设备支持的位深与采样率动态重协商 USB 独占属性
+     * （例如从 44.1kHz/16bit 切到 96kHz/24bit 时，不再被锁死在 44.1k/16bit 重采样）。
+     */
+    fun syncTrackFormat(context: Context, sampleRateHz: Int, pcmEncoding: Int, channelCount: Int) {
+        if (sampleRateHz <= 0) return
+        lastTrackSampleRate = sampleRateHz
+        lastTrackEncoding = pcmEncoding
+        lastTrackChannels = channelCount.coerceIn(1, 2)
+        val app = context.applicationContext
+        if (Build.VERSION.SDK_INT < 34 || !Prefs(app).usbExclusiveEnabled) return
+        val am = app.getSystemService(AudioManager::class.java) ?: return
+        val device = usbOutput(am) ?: return
+        apply(am, device)
+    }
+
+    private fun toAndroidEncoding(pcmEncoding: Int): Int = when (pcmEncoding) {
+        androidx.media3.common.C.ENCODING_PCM_24BIT -> AudioFormat.ENCODING_PCM_24BIT_PACKED
+        androidx.media3.common.C.ENCODING_PCM_32BIT -> AudioFormat.ENCODING_PCM_32BIT
+        androidx.media3.common.C.ENCODING_PCM_FLOAT -> AudioFormat.ENCODING_PCM_FLOAT
+        else -> AudioFormat.ENCODING_PCM_16BIT
+    }
+
+    private fun encodingRank(enc: Int): Int = when (enc) {
+        AudioFormat.ENCODING_PCM_FLOAT -> 4
+        AudioFormat.ENCODING_PCM_32BIT -> 3
+        AudioFormat.ENCODING_PCM_24BIT_PACKED -> 2
+        AudioFormat.ENCODING_PCM_16BIT -> 1
+        else -> 0
+    }
+
     private fun apply(am: AudioManager, device: AudioDeviceInfo): String? {
         if (Build.VERSION.SDK_INT < 34) return "USB 独占需要 Android 14 及以上系统"
         return runCatching {
-            // USB 设备的 sampleRates 可能为空（表示全支持）：优先 44.1k / 48k 这两个音乐主流档
-            val rates = device.sampleRates
-            val rate = when {
-                rates.contains(44100) -> 44100
-                rates.contains(48000) -> 48000
-                rates.isNotEmpty() -> rates[0]
-                else -> 44100
+            val desiredRate = lastTrackSampleRate.coerceAtLeast(8000)
+            val desiredEnc = toAndroidEncoding(lastTrackEncoding)
+            val desiredChannelMask = if (lastTrackChannels == 1) {
+                AudioFormat.CHANNEL_OUT_MONO
+            } else {
+                AudioFormat.CHANNEL_OUT_STEREO
             }
-            val format = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(rate)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                .build()
-            val mixer = AudioMixerAttributes.Builder(format)
+
+            val supportedBitPerfect = runCatching {
+                am.getSupportedMixerAttributes(device)
+                    .filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
+            }.getOrDefault(emptyList())
+
+            val bestSupported = supportedBitPerfect.maxByOrNull { attr ->
+                val f = attr.format
+                var score = 0
+                score += when {
+                    f.sampleRate == desiredRate -> 10_000
+                    f.sampleRate == desiredRate * 2 -> 3_000
+                    f.sampleRate == 48_000 || f.sampleRate == 44_100 -> 1_000
+                    f.sampleRate > desiredRate -> 500
+                    else -> 0
+                }
+                score += if (f.encoding == desiredEnc) 500 else encodingRank(f.encoding) * 80
+                if (f.channelMask == desiredChannelMask) score += 200
+                score
+            }
+
+            val chosenFormat = if (bestSupported != null) {
+                val f = bestSupported.format
+                val targetRate = if (f.sampleRate == AudioFormat.SAMPLE_RATE_UNSPECIFIED) desiredRate else f.sampleRate
+                val targetEnc = if (f.encoding == AudioFormat.ENCODING_INVALID) desiredEnc else f.encoding
+                val targetMask = if (f.channelMask == AudioFormat.CHANNEL_INVALID) desiredChannelMask else f.channelMask
+                if (device.id == appliedDeviceId &&
+                    targetRate == appliedSampleRate &&
+                    targetEnc == appliedEncoding &&
+                    lastTrackChannels == appliedChannels
+                ) {
+                    return@runCatching
+                }
+                AudioFormat.Builder()
+                    .setEncoding(targetEnc)
+                    .setSampleRate(targetRate)
+                    .setChannelMask(targetMask)
+                    .build()
+            } else {
+                val rates = device.sampleRates
+                val rate = when {
+                    rates.contains(desiredRate) -> desiredRate
+                    rates.contains(44100) -> 44100
+                    rates.contains(48000) -> 48000
+                    rates.isNotEmpty() -> rates[0]
+                    else -> desiredRate
+                }
+                val encodings = device.encodings
+                val enc = when {
+                    encodings.contains(desiredEnc) -> desiredEnc
+                    encodings.contains(AudioFormat.ENCODING_PCM_24BIT_PACKED) -> AudioFormat.ENCODING_PCM_24BIT_PACKED
+                    encodings.contains(AudioFormat.ENCODING_PCM_32BIT) -> AudioFormat.ENCODING_PCM_32BIT
+                    else -> AudioFormat.ENCODING_PCM_16BIT
+                }
+                if (device.id == appliedDeviceId &&
+                    rate == appliedSampleRate &&
+                    enc == appliedEncoding &&
+                    lastTrackChannels == appliedChannels
+                ) {
+                    return@runCatching
+                }
+                AudioFormat.Builder()
+                    .setEncoding(enc)
+                    .setSampleRate(rate)
+                    .setChannelMask(desiredChannelMask)
+                    .build()
+            }
+
+            val mixer = AudioMixerAttributes.Builder(chosenFormat)
                 .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
                 .build()
             am.setPreferredMixerAttributes(streamAttributes(), device, mixer)
             appliedDeviceId = device.id
+            appliedSampleRate = chosenFormat.sampleRate
+            appliedEncoding = chosenFormat.encoding
+            appliedChannels = lastTrackChannels
         }.exceptionOrNull()?.let { "USB 独占开启失败：${it.message ?: "设备不支持"}" }
     }
 
@@ -122,6 +230,9 @@ object UsbExclusive {
             if (device != null) am.clearPreferredMixerAttributes(streamAttributes(), device)
         }
         appliedDeviceId = -1
+        appliedSampleRate = 0
+        appliedEncoding = AudioFormat.ENCODING_INVALID
+        appliedChannels = 0
     }
 
     /** USB 设备拔出后系统规则随之失效：把偏好一起收掉，保持界面与实际一致。 */
@@ -132,6 +243,9 @@ object UsbExclusive {
             override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
                 if (removedDevices.none { it.id == appliedDeviceId }) return
                 appliedDeviceId = -1
+                appliedSampleRate = 0
+                appliedEncoding = AudioFormat.ENCODING_INVALID
+                appliedChannels = 0
                 Prefs(context).usbExclusiveEnabled = false
             }
         }

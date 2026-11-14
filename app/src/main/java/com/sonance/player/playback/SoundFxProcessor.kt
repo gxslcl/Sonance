@@ -9,21 +9,20 @@ import java.nio.ByteBuffer
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
-import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.tanh
 
 /**
  * 合并式音效处理器。
  *
- * EQ 和虚拟低音 / 混响 / 声场 / 峰值保护在同一条浮点链路中完成，最后才量化为 PCM。
- * 这样 EQ 增益不会先在 16 位中间缓冲削顶，再被后面的前置增益“救”回来。
+ * EQ 和虚拟低音 / 双耳交叉馈送 / 外放保护高通 / 混响 / 声场 / 峰值保护
+ * 在同一条浮点链路中完成，支持 16 / 24 / 32 位整型与 32 位浮点 PCM（16 位输出启用 TPDF 抖动）。
  *
- * 算法全部是公开的数学原理（RBJ biquad、Freeverb 式 comb/allpass、missing-fundamental
- * 谐波生成、M/S 矩阵、峰值限幅），自己实现，不引第三方引擎、不加载 IR 文件。
- * 纯 DSP 部分抽成 [SoundFxDsp]，JVM 单测里可以直接喂正弦波量输出。
+ * 算法全部是公开数学原理（64 位 RBJ biquad、BS2B 双耳串扰、互质抽头 Freeverb、
+ * 零直流动态包络虚拟低音、低音锁相 M/S 声场、峰值包络软限幅），零第三方库或外部 IR 文件。
  */
 class SoundFxProcessor : BaseAudioProcessor() {
 
@@ -36,11 +35,13 @@ class SoundFxProcessor : BaseAudioProcessor() {
 
     private var floatScratch = FloatArray(0)
     private var shortScratch = ShortArray(0)
+    private var intScratch = IntArray(0)
+    private var ditherSeed = 0x517CC1B7
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val enc = inputAudioFormat.encoding
         val ch = inputAudioFormat.channelCount
-        if ((enc != C.ENCODING_PCM_16BIT && enc != C.ENCODING_PCM_FLOAT) || ch !in 1..32 ||
+        if (!PcmCodec.isSupportedEncoding(enc) || ch !in 1..32 ||
             inputAudioFormat.sampleRate <= 0
         ) {
             sampleRate = 0
@@ -83,51 +84,30 @@ class SoundFxProcessor : BaseAudioProcessor() {
         }
 
         if (floatScratch.size < samples) floatScratch = FloatArray(samples)
+        if (encoding == C.ENCODING_PCM_32BIT && intScratch.size < samples) intScratch = IntArray(samples)
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.short / 32768f
-                    i++
-                }
-            }
-            else -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.float
-                    i++
-                }
-            }
-        }
-
+        PcmCodec.readToFloat(inputBuffer, floatScratch, samples, encoding)
         engine.process(floatScratch, frames)
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                if (shortScratch.size < samples) shortScratch = ShortArray(samples)
-                var i = 0
-                while (i < samples) {
-                    val v = floatScratch[i]
-                    shortScratch[i] = when {
-                        v >= 1f -> Short.MAX_VALUE
-                        v <= -1f -> Short.MIN_VALUE
-                        else -> (v * 32768f).roundToInt().coerceIn(-32768, 32767).toShort()
-                    }
-                    i++
-                }
-                out.asShortBuffer().put(shortScratch, 0, samples)
-            }
-            else -> out.asFloatBuffer().put(floatScratch, 0, samples)
-        }
-        // asShortBuffer()/asFloatBuffer() 是视图，写它不会推进原缓冲的 position
-        out.position(remaining)
-        out.flip()
+        val (nextSeed, updatedShorts) = PcmCodec.writeFromFloat(
+            src = floatScratch,
+            outBuffer = out,
+            remainingBytes = remaining,
+            samples = samples,
+            encoding = encoding,
+            shortScratch = shortScratch,
+            intScratch = intScratch,
+            applyDither = true,
+            ditherSeed = ditherSeed
+        )
+        ditherSeed = nextSeed
+        shortScratch = updatedShorts
     }
 
     /** 切歌 / seek 必须清掉混响延迟线，否则上一首的尾巴会拖进下一首 */
     override fun onFlush() {
         dsp?.reset()
+        ditherSeed = 0x517CC1B7
         // reset 清除了目标参数；即使总线版本没变，下一块也必须重新同步。
         appliedFxRevision = -1L
         appliedEqRevision = -1L
@@ -192,12 +172,7 @@ internal class SoundChainDsp(private val sampleRate: Int, private val channels: 
             eqBoostDb = EqResponse(gains, sampleRate).maxBoostDb()
             lastGains = gains.copyOf()
         }
-        val widthBudget = if (channels == 2 && params.stereoWidth > 1f) {
-            12f * log10(params.stereoWidth)
-        } else 0f
-        val effectBudget = if (channels <= 2) {
-            widthBudget + params.virtualBass * 0.25f + params.reverbWet * 0.25f
-        } else 0f
+        val effectBudget = effectPreampBudgetDb(params, channels)
         val boost = eqBoostDb + effectBudget
         // 见 eqAutoPreampDb：日常曲线只留轻量净空，切换预设时响度稳定不塌陷。
         val automaticDb = eqAutoPreampDb(boost)
@@ -378,11 +353,15 @@ private class LinearRamp(initial: Float) {
 @VisibleForTesting
 internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int) {
     private val bass = VirtualBass(sampleRate)
+    private val speakerHpf = DoubleBiquad(min(channels, 2))
+    private val crossfeed = BinauralCrossfeed(sampleRate)
     private val imager = StereoImager(sampleRate)
     private val reverb = Freeverb(sampleRate, min(channels, 2))
     private val limiter = SoftLimiter(sampleRate)
     private val rampFrames = (sampleRate * 0.03f).toInt().coerceAtLeast(1)
     private val bassAmount = LinearRamp(0f)
+    private val speakerHpfMix = LinearRamp(0f)
+    private val crossfeedMix = LinearRamp(0f)
     private val wet = LinearRamp(0f)
     private val decay = LinearRamp(0.5f)
     private val width = LinearRamp(1f)
@@ -390,17 +369,33 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     private val limiterMix = LinearRamp(0f)
     private val limiterThreshold = LinearRamp(10f.pow(-1f / 20f))
     private var target = SoundFxParams.NEUTRAL
+    private var appliedHpfHz = -1f
     private var bassRunning = false
+    private var hpfRunning = false
+    private var crossfeedRunning = false
     private var reverbRunning = false
     private var limiterRunning = false
 
     val isNeutral: Boolean
-        get() = target.isNeutral && bassAmount.isSettledAt(0f) && wet.isSettledAt(0f) &&
-            width.isSettledAt(1f) && gain.isSettledAt(1f) && limiterMix.isSettledAt(0f)
+        get() = target.isNeutral &&
+            bassAmount.isSettledAt(0f) &&
+            speakerHpfMix.isSettledAt(0f) &&
+            crossfeedMix.isSettledAt(0f) &&
+            wet.isSettledAt(0f) &&
+            width.isSettledAt(1f) &&
+            gain.isSettledAt(1f) &&
+            limiterMix.isSettledAt(0f)
 
     fun setTarget(p: SoundFxParams) {
         target = p.clamp()
         bassAmount.setTarget(target.virtualBass, rampFrames)
+        val hpfHz = target.speakerHpfHz
+        speakerHpfMix.setTarget(if (hpfHz >= 20f) 1f else 0f, rampFrames)
+        if (hpfHz >= 20f && hpfHz != appliedHpfHz) {
+            appliedHpfHz = hpfHz
+            speakerHpf.setCoeffs(BiquadDesign.highPass(hpfHz.toDouble(), sampleRate))
+        }
+        crossfeedMix.setTarget(target.crossfeed, rampFrames)
         wet.setTarget(target.reverbWet, rampFrames)
         decay.setTarget(target.reverbDecay, rampFrames)
         width.setTarget(target.stereoWidth, rampFrames)
@@ -414,6 +409,8 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
         repeat(frames) {
             val g = gain.next()
             val bassValue = bassAmount.next()
+            val hpfMix = speakerHpfMix.next()
+            val cfValue = crossfeedMix.next()
             val widthValue = width.next()
             val wetValue = wet.next()
             val decayValue = decay.next()
@@ -421,16 +418,43 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
             val threshold = limiterThreshold.next()
             for (ch in 0 until channels) buf[index + ch] *= g
 
-            // 空间效果只处理单/双声道；多声道仍保留各声道 EQ 和峰值保护。
+            // 空间与谐波效果只处理单/双声道；多声道仍保留 EQ 与峰值保护。
             if (channels <= 2) {
+                // 关键顺序：先在高通保护之前抽取完整原始低频基波去合成 2f/3f 谐波，
+                // 再由 SpeakerHpf 切除小喇叭打底易破音的超低频，最后把高通以上频率区间内的
+                // 谐波温和叠回主通道 —— 外放既防破音又不丢低音轮廓。
+                val preHpfMono = if (channels == 2) (buf[index] + buf[index + 1]) * 0.5f else buf[index]
+                if (hpfMix > 0f) {
+                    for (ch in 0 until channels) {
+                        val dry = buf[index + ch]
+                        val filtered = speakerHpf.processSample(dry.toDouble(), ch).toFloat()
+                        buf[index + ch] = dry + (filtered - dry) * hpfMix
+                    }
+                    hpfRunning = true
+                } else if (hpfRunning) {
+                    speakerHpf.reset()
+                    appliedHpfHz = -1f
+                    hpfRunning = false
+                }
                 if (bassValue > 0f) {
-                    bass.processFrame(buf, index, channels, bassValue)
+                    val add = bass.processMonoSample(preHpfMono, bassValue)
+                    buf[index] += add
+                    if (channels == 2) buf[index + 1] += add
                     bassRunning = true
                 } else if (bassRunning) {
                     bass.reset()
                     bassRunning = false
                 }
-                if (channels == 2) imager.processFrame(buf, index, widthValue)
+                if (channels == 2) {
+                    if (cfValue > 0f) {
+                        crossfeed.processFrame(buf, index, cfValue)
+                        crossfeedRunning = true
+                    } else if (crossfeedRunning) {
+                        crossfeed.reset()
+                        crossfeedRunning = false
+                    }
+                    imager.processFrame(buf, index, widthValue)
+                }
                 if (wetValue > 0f) {
                     reverb.processFrame(buf, index, channels, wetValue, decayValue)
                     reverbRunning = true
@@ -452,10 +476,14 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
 
     fun reset() {
         bass.reset()
+        speakerHpf.reset()
+        crossfeed.reset()
         imager.reset()
         reverb.reset()
         limiter.reset()
         bassAmount.reset(0f)
+        speakerHpfMix.reset(0f)
+        crossfeedMix.reset(0f)
         wet.reset(0f)
         decay.reset(0.5f)
         width.reset(1f)
@@ -463,44 +491,34 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
         limiterMix.reset(0f)
         limiterThreshold.reset(10f.pow(-1f / 20f))
         target = SoundFxParams.NEUTRAL
+        appliedHpfHz = -1f
         bassRunning = false
+        hpfRunning = false
+        crossfeedRunning = false
         reverbRunning = false
         limiterRunning = false
     }
 }
 
 /**
- * 虚拟低音（missing fundamental + 动态跟踪偶/奇次谐波合成）。
+ * 虚拟低音（missing fundamental + 零直流漂移动态包络谐波合成）。
  *
- * 手机与平板扬声器很难还原 100 Hz 以下的基频，普通入耳式耳机在低频下潜上也容易干瘪。
- * 这里通过提取超低频包络并生成缺失基频的**偶次（温暖厚度）+ 奇次（结实弹性）谐波族**，
- * 让听觉系统自然还原出深沉饱满的低音基石。
- *
- * 核心声学改进：
- * 1. **四级 140 Hz 低通 + 通带增益补偿**：保证 1 kHz 人声频段抑制超过 -68 dB（绝不污染人声），
- *    同时把 50~90 Hz 底鼓基频的滤波衰减补偿回满幅度，解决旧版四级串联后低频先缩水一半的问题。
- * 2. **动态跟踪软驱动（Level-Compensated Harmonic Exciter）**：
- *    纯多项式 `x²` / `x³` 在中小音量（如 `x = 0.15`）下会急剧退化到千分之几，导致平时几乎听不见效果；
- *    而硬除以包络又会在安静段落放大底噪。这里引入带噪声门限（-45 dBFS）的包络反比软增益，
- *    使生成的 2f/3f 谐波与基频保持恒定的黄金比例：轻敲底鼓有轻柔弹性，重砸底鼓有澎湃下潜，安静段落零底噪。
- * 3. **70 Hz 高通去直流 + 280 Hz 二阶谐波聚焦低通**：把谐波能量严格收束在 85~260 Hz 的胸腔共鸣甜区，
- *    谐波随阶数自然衰减（2f > 3f > 4f），绝不窜入中高频变成毛刺。
+ * 在消除多项式负向直流抽吸的前提下兼顾饱满下潜与小单元投影力：
+ * 1. **64 位二阶 Butterworth 138 Hz 低通提取**：通带平坦（<100 Hz 零无谓衰减），
+ *    同时把 1 kHz 人声干净隔离在低音激励链路之外；
+ * 2. **归一化全波偶次 + Chebyshev 三次谐波合成**：按瞬时包络归一化基波，再用去均值的全波整流
+ *    `abs(xn) - 2/π` 生成丰润 2f 温暖谐波、用 Chebyshev T3 `(4*xn² - 3)*xn` 生成 3f 弹性锤感（零基波残留），
+ *    放宽峰值压缩系数 `0.18` 让鼓点瞬态力度直接透出；
+ * 3. **64 位 74 Hz 二阶高通 + 295 Hz 二阶低通**：既严格切断直流与 50 Hz 以下无用共振，又完整保留
+ *    75~115 Hz 决定"厚实感"的关键二次泛音，高通以上直到 295 Hz 的 3 次谐波也能帮外放清脆立住低音轮廓。
  */
 @VisibleForTesting
 internal class VirtualBass(sampleRate: Int) {
-    private val lpA = 1f - exp(-2f * PI.toFloat() * 140f / sampleRate)
-    private val hpB = exp(-2f * PI.toFloat() * 70f / sampleRate)
-    private val outputLpA = 1f - exp(-2f * PI.toFloat() * 280f / sampleRate)
+    private val inputLpf = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.lowPass(138.0, sampleRate)) }
+    private val outputHpf = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.highPass(74.0, sampleRate)) }
+    private val outputLpf = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.lowPass(295.0, sampleRate)) }
     private val envRelease = 1f - exp(-1f / (sampleRate * 0.025f).coerceAtLeast(1f))
-    private var lp1 = 0f
-    private var lp2 = 0f
-    private var lp3 = 0f
-    private var lp4 = 0f
     private var envelope = 0f
-    private var hp = 0f
-    private var prev = 0f
-    private var outputLp1 = 0f
-    private var outputLp2 = 0f
 
     fun process(buf: FloatArray, frames: Int, channels: Int, amount: Float) {
         if (amount <= 0f) return
@@ -513,69 +531,95 @@ internal class VirtualBass(sampleRate: Int) {
 
     fun processFrame(buf: FloatArray, i: Int, channels: Int, amount: Float) {
         val mono = if (channels == 2) (buf[i] + buf[i + 1]) * 0.5f else buf[i]
-        lp1 += lpA * (mono - lp1)
-        lp2 += lpA * (lp1 - lp2)
-        lp3 += lpA * (lp2 - lp3)
-        lp4 += lpA * (lp3 - lp4)
+        val add = processMonoSample(mono, amount)
+        buf[i] += add
+        if (channels == 2) buf[i + 1] += add
+    }
 
-        // 补偿四级 RC 低通在 60~80 Hz 处的通带插损（约 1.32x），同时仍对 1 kHz 保持 >65 dB 隔离
-        val x = lp4 * 1.32f
+    internal fun processMonoSample(mono: Float, amount: Float): Float {
+        val x = inputLpf.processSample(mono.toDouble(), 0).toFloat()
         val magnitude = abs(x)
         envelope = if (magnitude > envelope) {
             magnitude
         } else {
             envelope + (magnitude - envelope) * envRelease
         }
-
-        // 只留谐波，严禁混入直流与原始基频（否则会改变 60 Hz 本身的幅度）：
-        //   x² 的直流分量 = A²/2，减掉后纯出 2f 偶次谐波（温暖丰满度）；
-        //   x³ 的基频分量 = 3A²/4·x，减掉后纯出 3f 奇次谐波（手机喇叭也能听见的结实弹性）。
-        val env2 = envelope * envelope
-        val even = x * x - 0.5f * env2
-        val odd = x * x * x - 0.75f * env2 * x
-
-        // 动态跟踪增益：带平滑门限（< -45 dBFS 自动归零），中小音量下适度托起二次/三次谐波比例
-        val gate = (envelope / (envelope + 0.006f)).let { it * it }
-        val evenScale = gate / (envelope + 0.22f)
-        val oddScale = gate / (env2 + 0.14f)
-        val harmonic = 0.11f * even * evenScale + 0.065f * odd * oddScale
-
-        hp = hpB * (hp + harmonic - prev)
-        prev = harmonic
-        outputLp1 += outputLpA * (hp - outputLp1)
-        outputLp2 += outputLpA * (outputLp1 - outputLp2)
-        val add = outputLp2 * amount
-        buf[i] += add
-        if (channels == 2) buf[i + 1] += add
+        val gate = (envelope / (envelope + 0.005f)).let { it * it }
+        val norm = envelope.coerceAtLeast(1e-4f)
+        val xn = (x / norm).coerceIn(-1.5f, 1.5f)
+        val even = (abs(xn) - TWO_OVER_PI) * 0.32f
+        val odd = ((4f * xn * xn - 3f) * xn) * 0.075f
+        val envScale = (envelope / (1f + envelope * 0.22f)) * gate
+        val harmonic = (even + odd) * envScale
+        val cleaned = outputLpf.processSample(outputHpf.processSample(harmonic.toDouble(), 0), 0)
+        return cleaned.toFloat() * amount
     }
 
     fun reset() {
-        lp1 = 0f
-        lp2 = 0f
-        lp3 = 0f
-        lp4 = 0f
+        inputLpf.reset()
+        outputHpf.reset()
+        outputLpf.reset()
         envelope = 0f
-        hp = 0f
-        prev = 0f
-        outputLp1 = 0f
-        outputLp2 = 0f
+    }
+
+    private companion object {
+        const val TWO_OVER_PI = 0.63661977f
+    }
+}
+
+/**
+ * 双耳交叉馈送（BS2B 物理头影串扰建模）：
+ * 在模拟扬声器 30° 摆位的前提下，把对侧声道经过约 280 微秒声学时延与 700 Hz 头影低通后
+ * 轻度馈入同侧耳朵，减轻耳机直灌导致的「头中效应」，同时保证居中单声道与高频空气感无损。
+ */
+@VisibleForTesting
+internal class BinauralCrossfeed(sampleRate: Int) {
+    private val delaySamples = (sampleRate * 0.00028f).roundToInt().coerceIn(1, 64)
+    private val lpAlpha = 1f - exp(-2f * PI.toFloat() * 700f / sampleRate.coerceAtLeast(1))
+    private val ringL = FloatArray(delaySamples)
+    private val ringR = FloatArray(delaySamples)
+    private var ringIdx = 0
+    private var lpL = 0f
+    private var lpR = 0f
+
+    fun processFrame(buf: FloatArray, index: Int, amount: Float) {
+        val dryL = buf[index]
+        val dryR = buf[index + 1]
+        val delayedL = ringL[ringIdx]
+        val delayedR = ringR[ringIdx]
+        ringL[ringIdx] = dryL
+        ringR[ringIdx] = dryR
+        ringIdx = if (ringIdx + 1 >= delaySamples) 0 else ringIdx + 1
+
+        lpL += lpAlpha * (delayedL - lpL)
+        lpR += lpAlpha * (delayedR - lpR)
+
+        // 对正中人声（lpL == lpR）整体仅 +0.05*amount 极微变化，高频 (>1.5 kHz) 保持全透传
+        val feed = 0.50f * amount.coerceIn(0f, 1f)
+        buf[index] = dryL - 0.45f * feed * lpL + 0.55f * feed * lpR
+        buf[index + 1] = dryR - 0.45f * feed * lpR + 0.55f * feed * lpL
+    }
+
+    fun reset() {
+        ringL.fill(0f)
+        ringR.fill(0f)
+        ringIdx = 0
+        lpL = 0f
+        lpR = 0f
     }
 }
 
 /**
  * 双频段 M/S 立体声声像器。
  *
- * - 展宽（`width > 1`）时：一阶 210 Hz 分频锁死低频中心（50 Hz 鼓点与贝斯绝不往两边跑，
- *   避免耳机头中发空及手机/平板双扬声器空气声学反相抵消），同时对 >2.2 kHz 的高频空气泛音
- *   赋予更舒展的横向散射，中置人声（Mid）保持 100% 原始能量守恒。
- * - 收窄（`width < 1`，如「人声 · 贴耳」设 0.90）时：平稳收拢两侧伴奏，使中置人声自然贴近；
- *   `width == 0` 时完全合并为单声道。
+ * - 展宽（`width > 1`）时：采用二阶 Butterworth 210 Hz 低通锁定低频重心（50 Hz 鼓点与贝斯
+ *   不再向两侧泄露而失去冲击力），高频泛音按适度比例舒展，中置人声能量保持 100% 守恒；
+ * - 收窄（`width < 1`）时：线性收拢侧翼声像，`width == 0` 时完全合并为单声道。
  */
 @VisibleForTesting
 internal class StereoImager(sampleRate: Int) {
-    private val lowpass = 1f - exp(-2f * PI.toFloat() * 210f / sampleRate)
-    private val airLowpass = 1f - exp(-2f * PI.toFloat() * 2200f / sampleRate)
-    private var lowSide = 0f
+    private val sideLowpass = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.lowPass(210.0, sampleRate)) }
+    private val airLowpass = 1f - exp(-2f * PI.toFloat() * 2200f / sampleRate.coerceAtLeast(1))
     private var midHighSide = 0f
 
     fun processFrame(buf: FloatArray, index: Int, width: Float) {
@@ -583,14 +627,19 @@ internal class StereoImager(sampleRate: Int) {
         val right = buf[index + 1]
         val mid = (left + right) * 0.5f
         val side = (left - right) * 0.5f
-        lowSide += lowpass * (side - lowSide)
+        val lowSide = sideLowpass.processSample(side.toDouble(), 0).toFloat()
         val highSide = side - lowSide
         midHighSide += airLowpass * (highSide - midHighSide)
         val airSide = highSide - midHighSide
         val adjusted = if (width >= 1f) {
             val extra = width - 1f
-            // 中高频按目标宽度展开，高频泛音额外补一点空气感但保持在自然区间
-            side + extra * highSide + extra * 0.06f * airSide
+            val expanded = side + extra * highSide + extra * 0.06f * airSide
+            // 仅在极大展宽突发过冲时柔化侧翼防削波，正常幅值保持全线性
+            if (abs(expanded) > 0.85f) {
+                0.85f * (expanded / abs(expanded)) + 0.25f * tanh((expanded - 0.85f * (expanded / abs(expanded))) / 0.25f)
+            } else {
+                expanded
+            }
         } else {
             side * width
         }
@@ -599,49 +648,52 @@ internal class StereoImager(sampleRate: Int) {
     }
 
     fun reset() {
-        lowSide = 0f
+        sideLowpass.reset()
         midHighSide = 0f
     }
 }
 
 /**
- * 带早期横向反射（Early Reflections）的轻量房间/舞台混响；直达声保持 100%。
+ * 互质抽头早期反射 + 交叉立体声尾韵房间混响；直达声保持 100%。
  *
- * 决定空间感"高级不高级、真不真"的四个要素：
- * - **22 ms 预延迟**：直达声和第一波空间反射严格分开，人声永远清晰贴在前面，绝不糊成澡堂回音；
- * - **双抽头早期横向反射（26 ms / 35 ms）**：真实 Livehouse 和影院的临场感首先来自左右侧墙的早期反射，
- *   加入早期反射后，不需要拖很长的尾音就能一耳朵听出立体舞台包裹感；
- * - **送入前高通 220 Hz / 低通 6.2 kHz**：低频不进混响（防浑浊轰头），极高频齿音不反复折射；
- * - **阻尼随衰减自适应**：余韵越长高频吸收越自然，尾音温润消散。
+ * 改进点：
+ * - 保持 >20 ms 纯净预延迟窗口（主混响抽头 22 ms），人声永远清晰居中不糊团；
+ * - 缩放各采样率后自动规避 3/5/7 倍公因子（互质错开），消除 48k/96k 下的周期性金属颤音；
+ * - 尾声左右声道 86%/14% 轻微立体声交叉融合，空间包裹度更浑然；
+ * - 阻尼系数随采样率归一化，高采样率歌曲混响尾音不再偏闷。
  */
 @VisibleForTesting
 internal class Freeverb(private val sampleRate: Int, channels: Int) {
     private val sendHighpass = exp(-2f * PI.toFloat() * 220f / sampleRate)
     private val sendLowpass = 1f - exp(-2f * PI.toFloat() * 6200f / sampleRate)
+    private val dampRateCompensation = (44100f / sampleRate.coerceAtLeast(8000)).coerceIn(0.25f, 2f)
     private val hpState = FloatArray(channels)
     private val hpPrevInput = FloatArray(channels)
     private val lpState = FloatArray(channels)
-    // 预延迟环扩充到 38 ms，主混响仍从 22 ms 抽头读取（保持 >20 ms 纯净预延迟窗口），
-    // 同时在 26 ms 与 34 ms 处取左右交叉的早期横向反射
+    private val tailScratch = FloatArray(channels)
     private val preDelayTap = (sampleRate * 0.022f).toInt().coerceIn(1, sampleRate)
     private val earlyTap1 = (sampleRate * 0.026f).toInt().coerceIn(1, sampleRate)
     private val earlyTap2 = (sampleRate * 0.034f).toInt().coerceIn(1, sampleRate)
-    private val ringSize = ( earlyTap2 + 8 ).coerceAtLeast(preDelayTap + 1)
+    private val ringSize = (earlyTap2 + 8).coerceAtLeast(preDelayTap + 1)
     private val preDelay = Array(channels) { FloatArray(ringSize) }
     private var writeIndex = 0
     private val combs = Array(channels) { ch ->
         Array(COMB_TAPS.size) { k ->
-            Comb(scale(COMB_TAPS[k] + if (ch == 1) STEREO_SPREAD else 0))
+            Comb(scaleCoprime(COMB_TAPS[k] + if (ch == 1) STEREO_SPREAD else 0, sampleRate))
         }
     }
     private val allpass = Array(channels) { ch ->
         Array(ALLPASS_TAPS.size) { k ->
-            Allpass(scale(ALLPASS_TAPS[k] + if (ch == 1) STEREO_SPREAD else 0))
+            Allpass(scaleCoprime(ALLPASS_TAPS[k] + if (ch == 1) STEREO_SPREAD else 0, sampleRate))
         }
     }
 
-    private fun scale(base: Int): Int =
-        (base * sampleRate / 44100f).toInt().coerceAtLeast(8)
+    private fun scaleCoprime(base: Int, sr: Int): Int {
+        var n = (base * sr / 44100f).toInt().coerceAtLeast(11)
+        if (n % 2 == 0) n += 1
+        while (n % 3 == 0 || n % 5 == 0 || n % 7 == 0) n += 2
+        return n
+    }
 
     fun process(buf: FloatArray, frames: Int, channels: Int, wet: Float, decay: Float) {
         var i = 0
@@ -653,8 +705,10 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
 
     fun processFrame(buf: FloatArray, i: Int, channels: Int, wet: Float, decay: Float) {
         val d = decay.coerceIn(0f, 1f)
-        val feedback = 0.50f + d * 0.38f
-        val damp = 0.24f + d * 0.30f
+        val baseFeedback = 0.50f + d * 0.38f
+        val feedback = baseFeedback.pow(dampRateCompensation)
+        val rawDamp = (0.22f + d * 0.34f).coerceIn(0.05f, 0.85f)
+        val damp = 1f - (1f - rawDamp).pow(dampRateCompensation)
         val left = buf[i]
         val right = if (channels == 2) buf[i + 1] else left
         val idxMain = (writeIndex - preDelayTap + ringSize) % ringSize
@@ -672,16 +726,24 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
         }
 
         for (ch in 0 until channels) {
-            val direct = if (ch == 0) left else right
-            val opp = if (channels == 2) 1 - ch else 0
             val send = preDelay[ch][idxMain]
-            // 早期反射：本声道 26 ms + 对侧声道 34 ms 交叉反射，塑造立体房间轮廓
-            val early = preDelay[ch][idxE1] * 0.22f - preDelay[opp][idxE2] * 0.16f
             var y = 0f
             for (k in combs[ch].indices) y += combs[ch][k].process(send, feedback, damp)
-            y /= combs[ch].size
+            y *= 0.095f
             for (k in allpass[ch].indices) y = allpass[ch][k].process(y)
-            buf[i + ch] = direct + (early + y * 0.68f) * wet
+            tailScratch[ch] = y
+        }
+
+        for (ch in 0 until channels) {
+            val direct = if (ch == 0) left else right
+            val opp = if (channels == 2) 1 - ch else 0
+            val early = preDelay[ch][idxE1] * 0.24f - preDelay[opp][idxE2] * 0.16f
+            val tail = if (channels == 2) {
+                tailScratch[ch] * 0.86f + tailScratch[opp] * 0.14f
+            } else {
+                tailScratch[0]
+            }
+            buf[i + ch] = direct + (early + tail) * wet
         }
         writeIndex = if (++writeIndex >= ringSize) 0 else writeIndex
     }
@@ -694,6 +756,7 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
         hpState.fill(0f)
         hpPrevInput.fill(0f)
         lpState.fill(0f)
+        tailScratch.fill(0f)
     }
 
     private class Comb(size: Int) {
@@ -742,29 +805,23 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
 }
 
 /**
- * 声道联动的采样峰值保护：只在接近上限时作用，不宣称真峰值或扬声器硬件保护。
+ * 声道联动的采样峰值保护：零额外采样延迟、超阈值不抽吸，同时留出自然鼓点瞬态冲击力。
  *
- * 三级处理，顺序不能换：
- * 1. **峰值包络**（上升立即跟随、50 ms 慢放）：旧版逐采样用瞬时峰值算增益，
- *    一个 60 Hz 周期里增益要"松-压"好几次，正弦被削成锯齿 —— 这就是低频
- *    "发毛"的真正来源，不是削顶。
- * 2. **增益包络**（2 ms 起控 / 150 ms 释放）：起控够快不漏瞬态，释放够慢不抽吸。
- *    稳态目标留在阈值下方 7%，天花板平时根本不参与工作。
- * 3. **圆滑天花板**：起控那 2 ms 里的残余过冲用双曲正切收口，保证输出永不越界，
- *    又不像硬砍那样一下子长出刺耳谐波。
- *
- * 天花板按**帧内最大声道**统一缩放，左右比例保持不变，声像不会跑。
+ * 1. **1.4 ms 音乐性起控 + 95 ms 快速释放**：让底鼓与军鼓最前面的 1 ms 瞬态锐度透出，
+ *    持续大动态仍平滑介入不泵音（瞬态越界由 [softCeil] 同步圆滑兜底，严格不破音）；
+ * 2. **正确追踪目标增益 `want`**：释放分支平滑逼近 `want`，杜绝高电平调幅颤振；
+ * 3. **圆滑天花板按 `mix` 同步交叉渐入渐出**，开关瞬间零咔哒。
  */
 @VisibleForTesting
 internal class SoftLimiter(sampleRate: Int) {
     private var gain = 1f
     private var envelope = 0f
     private val envelopeRelease =
-        1f - exp(-1f / (sampleRate * 0.05f).coerceAtLeast(1f))
+        1f - exp(-1f / (sampleRate * 0.035f).coerceAtLeast(1f))
     private val attackCoef =
-        1f - exp(-1f / (sampleRate * 0.002f).coerceAtLeast(1f))
+        1f - exp(-1f / (sampleRate * 0.0014f).coerceAtLeast(1f))
     private val releaseCoef =
-        1f - exp(-1f / (sampleRate * 0.15f).coerceAtLeast(1f))
+        1f - exp(-1f / (sampleRate * 0.095f).coerceAtLeast(1f))
 
     fun process(buf: FloatArray, frames: Int, channels: Int, thresholdDb: Float) {
         val th = 10f.pow(thresholdDb.coerceIn(-12f, 0f) / 20f)
@@ -784,17 +841,19 @@ internal class SoftLimiter(sampleRate: Int) {
         gain = if (want < gain) {
             gain + (want - gain) * attackCoef
         } else {
-            gain + (1f - gain) * releaseCoef
+            gain + (want - gain) * releaseCoef
         }
-        val scale = 1f + (gain - 1f) * mix.coerceIn(0f, 1f)
+        val m = mix.coerceIn(0f, 1f)
+        val scale = 1f + (gain - 1f) * m
         var scaledPeak = 0f
         for (ch in 0 until channels) {
             buf[index + ch] *= scale
             scaledPeak = max(scaledPeak, abs(buf[index + ch]))
         }
-        if (scaledPeak > threshold * KNEE) {
+        if (scaledPeak > threshold * KNEE && m > 0f) {
             val k = softCeil(scaledPeak, threshold) / scaledPeak
-            for (ch in 0 until channels) buf[index + ch] *= k
+            val blendK = 1f + (k - 1f) * m
+            for (ch in 0 until channels) buf[index + ch] *= blendK
         }
     }
 
@@ -802,7 +861,7 @@ internal class SoftLimiter(sampleRate: Int) {
     private fun softCeil(peak: Float, th: Float): Float {
         val knee = th * KNEE
         val room = th - knee
-        return knee + room * kotlin.math.tanh((peak - knee) / room)
+        return knee + room * tanh((peak - knee) / room)
     }
 
     fun reset() {

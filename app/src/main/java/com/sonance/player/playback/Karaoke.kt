@@ -7,54 +7,54 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
 
 /**
- * 人声/伴奏（卡拉OK）模式：**中置声道消除**。
+ * 人声/伴奏（卡拉OK）模式：**频带限制中置人声消除**。
  *
- * ## 原理与边界
+ * ## 声学原理升级
  *
- * 人声通常录制在立体声的**正中央**（主唱轨 L=R），而伴奏的鼓、贝斯、吉他
- * 往往偏在某一侧。把两个声道相减（L−R）正好把居中的内容抵消掉，留下伴奏。
- *
- * 这是经典 DSP 技巧，不是 AI 分离 —— 效果因歌而异：
- * - 单声道文件（L 恒等于 R）相减后是全零，**无效**，所以直接旁路；
- * - 人声带宽混响或偏声道录法的歌，人声只能减弱、不能完全消掉；
- * - 输出是「侧信号」（side），声场会比原曲窄，属预期。
- *
- * ## 结构
- *
- * 与 [EqBus] 同一套约定：UI 写 [KaraokeBus]，处理器在音频线程读，开关
- * 即时生效（`enabled=false` 时整块旁路，零开销）。
+ * 旧版整段直接做 `side = L - R` 并反相输出 `(side, -side)`，会连同正中央的低音底鼓、贝斯一起砍空，
+ * 遇到部分真单声道外放手机反相求和还会完全静音。
+ * 现在改为先提取中置通道 `mid = (L + R) * 0.5`，再用二阶 160 Hz 高通 + 4.8 kHz 低通锁定主唱人声核心频段，
+ * 从左右声道同相位等量抵消 `0.92 * band(mid)`：
+ * - `<160 Hz` 底鼓与贝斯保持丰满有力；
+ * - `>4.8 kHz` 鼓镲与高频细节自然保留；
+ * - 立体声伴奏乐器保持原有左右声像，单声道扬声器求和也不会抵消变静音。
  */
 object KaraokeBus {
 
-    /** true = 伴奏模式（中置消除），false = 原唱直通 */
+    /** true = 伴奏模式（频带中置人声消除），false = 原唱直通 */
     @Volatile
     var enabled: Boolean = false
 }
 
 /**
- * 卡拉OK 处理器：立体声逐样本 `side = (L − R)`，左右声道反相输出。
- *
- * 只处理 16bit / float 的**双声道** PCM —— 其它编码或声道数直接旁路。
- * 相减幅度最高是原信号的两倍，16bit 输出在写入前做钳制防削顶。
+ * 卡拉OK 处理器：立体声频带限制中置消除（支持 16 / 24 / 32 位整型与 32 位浮点 PCM）。
  */
 class KaraokeProcessor : BaseAudioProcessor() {
 
     private var channels = 0
     private var encoding = C.ENCODING_INVALID
+    private var vocalHpf: DoubleBiquad? = null
+    private var vocalLpf: DoubleBiquad? = null
 
     private var floatScratch = FloatArray(0)
+    private var shortScratch = ShortArray(0)
+    private var intScratch = IntArray(0)
+    private var ditherSeed = 0x2468ACE1
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val enc = inputAudioFormat.encoding
-        if ((enc == C.ENCODING_PCM_16BIT || enc == C.ENCODING_PCM_FLOAT) &&
-            inputAudioFormat.channelCount == 2
-        ) {
+        val sr = inputAudioFormat.sampleRate
+        if (PcmCodec.isSupportedEncoding(enc) && inputAudioFormat.channelCount == 2 && sr > 0) {
             channels = 2
             encoding = enc
-            Log.i(TAG, "卡拉OK处理器就绪：${inputAudioFormat.sampleRate}Hz 2ch enc=$enc")
+            vocalHpf = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.highPass(160.0, sr)) }
+            vocalLpf = DoubleBiquad(1).apply { setCoeffs(BiquadDesign.lowPass(4800.0, sr)) }
+            Log.i(TAG, "卡拉OK处理器就绪：${sr}Hz 2ch enc=$enc")
         } else {
             channels = 0
             encoding = C.ENCODING_INVALID
+            vocalHpf = null
+            vocalLpf = null
             Log.w(TAG, "卡拉OK：$enc ${inputAudioFormat.channelCount}ch 不支持中置消除，将直接旁路")
         }
         return inputAudioFormat
@@ -65,7 +65,9 @@ class KaraokeProcessor : BaseAudioProcessor() {
         if (remaining <= 0) return
 
         val out = replaceOutputBuffer(remaining)
-        if (!KaraokeBus.enabled || channels != 2) {
+        val hpf = vocalHpf
+        val lpf = vocalLpf
+        if (!KaraokeBus.enabled || channels != 2 || hpf == null || lpf == null) {
             out.put(inputBuffer)
             out.flip()
             return
@@ -80,56 +82,48 @@ class KaraokeProcessor : BaseAudioProcessor() {
         }
         val samples = frames * 2
         if (floatScratch.size < samples) floatScratch = FloatArray(samples)
+        if (encoding == C.ENCODING_PCM_32BIT && intScratch.size < samples) intScratch = IntArray(samples)
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.short / 32768f
-                    i++
-                }
-            }
-            else -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.float
-                    i++
-                }
-            }
-        }
+        PcmCodec.readToFloat(inputBuffer, floatScratch, samples, encoding)
 
-        // 中置消除：side = (L − R)，R 输出反相 —— 两声道能量对称，总响度 -3dB 左右
+        // 只抵消 160 Hz..4.8 kHz 的居中主唱频段，保留低频贝斯底鼓与立体声高频伴奏
         var i = 0
         while (i < samples) {
             val l = floatScratch[i]
             val r = floatScratch[i + 1]
-            val side = l - r
-            floatScratch[i] = side
-            floatScratch[i + 1] = -side
+            val mid = (l + r) * 0.5
+            val band = lpf.processSample(hpf.processSample(mid, 0), 0).toFloat() * 0.92f
+            floatScratch[i] = l - band
+            floatScratch[i + 1] = r - band
             i += 2
         }
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                var j = 0
-                while (j < samples) {
-                    val v = floatScratch[j]
-                    out.asShortBuffer().put(j, when {
-                        v >= 1f -> Short.MAX_VALUE
-                        v <= -1f -> Short.MIN_VALUE
-                        else -> (v * 32767f).toInt().toShort()
-                    })
-                    j++
-                }
-            }
-            else -> out.asFloatBuffer().put(floatScratch, 0, samples)
-        }
-        // asShortBuffer()/asFloatBuffer() 是视图，写它不会推进原缓冲的 position
-        out.position(remaining)
-        out.flip()
+        val (nextSeed, updatedShorts) = PcmCodec.writeFromFloat(
+            src = floatScratch,
+            outBuffer = out,
+            remainingBytes = remaining,
+            samples = samples,
+            encoding = encoding,
+            shortScratch = shortScratch,
+            intScratch = intScratch,
+            applyDither = true,
+            ditherSeed = ditherSeed
+        )
+        ditherSeed = nextSeed
+        shortScratch = updatedShorts
+    }
+
+    override fun onFlush() {
+        vocalHpf?.reset()
+        vocalLpf?.reset()
+        ditherSeed = 0x2468ACE1
     }
 
     override fun onReset() {
+        vocalHpf?.reset()
+        vocalLpf?.reset()
+        vocalHpf = null
+        vocalLpf = null
         channels = 0
         encoding = C.ENCODING_INVALID
     }

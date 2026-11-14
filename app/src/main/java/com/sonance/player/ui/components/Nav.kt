@@ -91,6 +91,9 @@ fun SideNavigation(
     biliVisible: Boolean = false,
     biliSelected: Boolean = false,
     onOpenBili: () -> Unit = {},
+    dlnaVisible: Boolean = false,
+    dlnaSelected: Boolean = false,
+    onOpenDlna: () -> Unit = {},
     /** 左上角的品牌名（= 应用显示名，可在双击时修改） */
     appName: String = "Sonance",
     /** 左上角的品牌图案（AppIcons id，空串 = 内置 Logo） */
@@ -196,7 +199,7 @@ fun SideNavigation(
         var lastSection = -1
         // 停在「B站缓存」时，下面那些 tab 一个都不该高亮：它不属于任何一个 tab，
         // 若沿用 vm.tab，"我的收藏"会和它一起亮着（用户看到的是「同时选中两项」）
-        val activeTab: LibraryTab? = if (biliSelected) null else selected
+        val activeTab: LibraryTab? = if (biliSelected || dlnaSelected) null else selected
         navEntries.forEach { entry ->
             if (entry.section != lastSection) {
                 lastSection = entry.section
@@ -243,6 +246,16 @@ fun SideNavigation(
                     expanded = expanded,
                     badge = null,
                     onClick = onOpenBili
+                )
+            }
+            if (entry.tab == LibraryTab.FAVORITES && dlnaVisible) {
+                NavRow(
+                    icon = SonanceIcons.Cast,
+                    label = "D-LAN",
+                    selected = dlnaSelected,
+                    expanded = expanded,
+                    badge = null,
+                    onClick = onOpenDlna
                 )
             }
         }

@@ -17,13 +17,23 @@
        证书是坏的（CERT_ALTNAME_INVALID），想 https 都升不上去，
        只能放行明文。
 
-  ## 为什么不用 android:usesCleartextTraffic="true"
+  ## 为什么 base-config 也放开了（而不是只写白名单）
 
-  那个开关是**全局**的，等于给整个应用开明文。这里逐域名放行，
-  其余一律维持系统的默认禁止。
+  早期是逐域名放行的，其余维持系统默认禁止。加入 D-LAN（DLNA / UPnP）后这条走不通：
+  媒体服务器与本机回连地址都是 `http://<局域网动态 IP>:<端口>/...`，设备 IP 无法预先通过
+  `domain-config` 枚举，只能把 `base-config` 打开。
+
+  ## 代价与现状
+
+  - 这等价于对整个应用放行明文 HTTP，所以下面那份域名白名单现在只是**记录性质**
+    （说明哪些第三方域名本来就依赖明文），不再承担拦截作用。
+  - 仍然是 `usesCleartextTraffic` 之外的做法：今后若要收紧，只能靠「DLNA 会话期间临时放行」
+    这类运行时手段，单纯改回逐域名白名单会让投屏失效。
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
+    <!-- D-LAN (DLNA / UPnP) 需要访问局域网内任意动态 IP 的 HTTP 设备描述、SOAP 控制和音频流，
+         设备 IP 无法预先通过 domain-config 枚举，因此允许标准明文 HTTP 流量。 -->
+    <base-config cleartextTrafficPermitted="true" />
 
     <domain-config cleartextTrafficPermitted="true">
         <!-- 网易云音频 CDN（带子域，覆盖 m701/m801 等按节点编号的下载机） -->

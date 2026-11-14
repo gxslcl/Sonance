@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  样式 1 · 横向控制条 5x1（酷狗概念版复刻）
-
-  左：发光彩胶唱片；
-  中：上下双层 —— 上层全宽歌名-歌手（或当前歌词），下层 5 枚播控键均匀铺开；
-  右：红心收藏键独立居右，不再和歌名挤同一行。
+  STYLE A · 保留 5 列样式 2：横向控制条 5×1
+  左：52dp 圆角方图封面；
+  中：歌名+歌手（或双行歌词）；
+  右：红心 + 上一首 + 高对比圆形播放键 + 下一首 + 歌词开关；
+  底缘：2.5dp 贴边实时细进度条。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -26,211 +26,193 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingStart="10dp"
-        android:paddingTop="6dp"
-        android:paddingEnd="14dp"
-        android:paddingBottom="6dp">
+        android:paddingTop="8dp"
+        android:paddingEnd="11dp"
+        android:paddingBottom="10dp">
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="54dp"
-            android:layout_height="54dp"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
             android:contentDescription="@string/widget_cover_desc"
             android:scaleType="fitCenter"
             android:src="@drawable/widget_placeholder" />
 
-        <LinearLayout
+        <FrameLayout
             android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginStart="10dp"
-            android:layout_marginEnd="8dp"
-            android:layout_weight="1"
-            android:gravity="center_vertical"
-            android:orientation="vertical">
+            android:layout_height="wrap_content"
+            android:layout_marginStart="9dp"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1">
 
-            <!-- 上层：全宽歌名/歌词 -->
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content">
-
-                    <LinearLayout
-                        android:id="@+id/widget_info_group"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:id="@+id/widget_title"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:ellipsize="end"
-                            android:fontFamily="sans-serif-medium"
-                            android:includeFontPadding="false"
-                            android:maxLines="1"
-                            android:shadowColor="#26000000"
-                            android:shadowDy="1"
-                            android:shadowRadius="2"
-                            android:text="@string/widget_idle_title"
-                            android:textColor="#FFFFFFFF"
-                            android:textSize="13.5sp" />
-
-                        <TextView
-                            android:id="@+id/widget_artist"
-                            android:layout_width="0dp"
-                            android:layout_height="0dp"
-                            android:visibility="gone" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:id="@+id/widget_lyric_group"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical"
-                        android:visibility="gone">
-
-                        <TextView
-                            android:id="@+id/widget_lyric_prev"
-                            android:layout_width="0dp"
-                            android:layout_height="0dp"
-                            android:visibility="gone" />
-
-                        <TextView
-                            android:id="@+id/widget_lyric_cur"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:ellipsize="end"
-                            android:fontFamily="sans-serif-medium"
-                            android:includeFontPadding="false"
-                            android:maxLines="1"
-                            android:shadowColor="#26000000"
-                            android:shadowDy="1"
-                            android:shadowRadius="2"
-                            android:textColor="#FFFFFFFF"
-                            android:textSize="13.5sp" />
-
-                        <TextView
-                            android:id="@+id/widget_lyric_next"
-                            android:layout_width="0dp"
-                            android:layout_height="0dp"
-                            android:visibility="gone" />
-                    </LinearLayout>
-            </FrameLayout>
-
-            <!-- 下层：5 个控制图标均匀分布 -->
             <LinearLayout
-                android:id="@+id/widget_controls"
+                android:id="@+id/widget_info_group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:orientation="vertical">
 
-                <ImageView
-                    android:id="@+id/widget_mode"
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_mode_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_mode_shuffle" />
+                <TextView
+                    android:id="@+id/widget_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:fontFamily="sans-serif-medium"
+                    android:includeFontPadding="false"
+                    android:maxLines="1"
+                    android:text="@string/widget_idle_title"
+                    android:textColor="#F5FFFFFF"
+                    android:textSize="13.5sp" />
 
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <ImageView
-                    android:id="@+id/widget_prev"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_prev_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_prev" />
-
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <ImageView
-                    android:id="@+id/widget_play"
-                    android:layout_width="28dp"
-                    android:layout_height="28dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_play_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_play" />
-
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <ImageView
-                    android:id="@+id/widget_next"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_next_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_next" />
-
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1" />
-
-                <ImageView
-                    android:id="@+id/widget_lyric_toggle"
-                    android:layout_width="23dp"
-                    android:layout_height="23dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_lyric_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_lyric" />
+                <TextView
+                    android:id="@+id/widget_artist"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:ellipsize="end"
+                    android:includeFontPadding="false"
+                    android:maxLines="1"
+                    android:text="@string/widget_idle_subtitle"
+                    android:textColor="#ABFFFFFF"
+                    android:textSize="11sp" />
             </LinearLayout>
-        </LinearLayout>
 
-        <!-- 右侧独立红心收藏键 -->
-        <ImageView
-            android:id="@+id/widget_fav"
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:background="@drawable/widget_btn_ripple"
-            android:contentDescription="@string/widget_fav_desc"
-            android:scaleType="fitCenter"
-            android:src="@drawable/widget_ic_heart_outline" />
+            <LinearLayout
+                android:id="@+id/widget_lyric_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/widget_lyric_prev"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/widget_lyric_cur"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:fontFamily="sans-serif-medium"
+                    android:includeFontPadding="false"
+                    android:maxLines="1"
+                    android:textColor="#F5FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/widget_lyric_next"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:ellipsize="end"
+                    android:includeFontPadding="false"
+                    android:maxLines="1"
+                    android:textColor="#94FFFFFF"
+                    android:textSize="10.5sp" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <LinearLayout
+            android:id="@+id/widget_controls"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/widget_fav"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:background="@drawable/widget_btn_ripple"
+                android:contentDescription="@string/widget_fav_desc"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_ic_heart_outline" />
+
+            <ImageView
+                android:id="@+id/widget_prev"
+                android:layout_width="25dp"
+                android:layout_height="25dp"
+                android:layout_marginStart="2dp"
+                android:background="@drawable/widget_btn_ripple"
+                android:contentDescription="@string/widget_prev_desc"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_ic_prev" />
+
+            <ImageView
+                android:id="@+id/widget_play"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:layout_marginStart="2dp"
+                android:background="@drawable/widget_btn_ripple"
+                android:contentDescription="@string/widget_play_desc"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_ic_play" />
+
+            <ImageView
+                android:id="@+id/widget_next"
+                android:layout_width="25dp"
+                android:layout_height="25dp"
+                android:layout_marginStart="2dp"
+                android:background="@drawable/widget_btn_ripple"
+                android:contentDescription="@string/widget_next_desc"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_ic_next" />
+
+            <ImageView
+                android:id="@+id/widget_lyric_toggle"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="2dp"
+                android:background="@drawable/widget_btn_ripple"
+                android:contentDescription="@string/widget_lyric_desc"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_ic_lyric" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- 本样式不放品牌行和进度条，但 id 必须存在（渲染代码统一寻址） -->
+    <!-- 底缘贴边细进度线 -->
+    <LinearLayout
+        android:id="@+id/widget_progress_row"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="2dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_time_cur"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
+
+        <ImageView
+            android:id="@+id/widget_progress"
+            android:layout_width="0dp"
+            android:layout_height="3dp"
+            android:layout_weight="1"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY" />
+
+        <TextView
+            android:id="@+id/widget_time_total"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/widget_mode"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/widget_brand"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:visibility="gone" />
-
-    <LinearLayout
-        android:id="@+id/widget_progress_row"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:orientation="horizontal"
-        android:visibility="gone">
-
-        <TextView
-            android:id="@+id/widget_time_cur"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-
-        <ImageView
-            android:id="@+id/widget_progress"
-            android:layout_width="0dp"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:importantForAccessibility="no" />
-
-        <TextView
-            android:id="@+id/widget_time_total"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-    </LinearLayout>
 </FrameLayout>

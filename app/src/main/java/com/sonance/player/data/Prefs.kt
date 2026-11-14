@@ -1017,6 +1017,17 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_SOUND_FX_PARAMS, null) ?: ""
         set(v) = sp.edit().putString(KEY_SOUND_FX_PARAMS, v).apply()
 
+    /** 是否随输出设备（外放/耳机/蓝牙/USB）自动记忆与切换音效预设；默认关闭以免打扰习惯固定音效的用户 */
+    var autoPresetByOutputEnabled: Boolean
+        get() = sp.getBoolean(KEY_SOUND_AUTO_ROUTE, false)
+        set(v) = sp.edit().putBoolean(KEY_SOUND_AUTO_ROUTE, v).apply()
+
+    fun presetIdForRoute(routeId: String): String? =
+        sp.getString(KEY_SOUND_ROUTE_PREFIX + routeId, null)
+
+    fun setPresetIdForRoute(routeId: String, presetId: String) =
+        sp.edit().putString(KEY_SOUND_ROUTE_PREFIX + routeId, presetId).apply()
+
     // ===== 播放速度 =====
 
     /** 播放速度（0.5–2.5 倍）。音调保持不变（time-stretch） */
@@ -1313,6 +1324,29 @@ class Prefs(context: Context) {
         }
     }
 
+    // ===== D-LAN (DLNA / UPnP) 手动设备记录 =====
+
+    fun dlnaManualHosts(): List<String> =
+        (sp.getString(KEY_DLNA_MANUAL_HOSTS, "") ?: "")
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .toList()
+
+    fun addDlnaManualHost(host: String) {
+        val clean = host.trim()
+        if (clean.isEmpty()) return
+        val next = (listOf(clean) + dlnaManualHosts()).distinct().take(12)
+        sp.edit().putString(KEY_DLNA_MANUAL_HOSTS, next.joinToString("\n")).apply()
+    }
+
+    fun removeDlnaManualHost(host: String) {
+        val clean = host.trim()
+        val next = dlnaManualHosts().filter { it != clean }
+        sp.edit().putString(KEY_DLNA_MANUAL_HOSTS, next.joinToString("\n")).apply()
+    }
+
     companion object {
         /** 晕染浓度的可调范围（界面上的滑块直接用这两个值） */
         const val MIN_GLOW_STRENGTH = 0.02f
@@ -1358,6 +1392,7 @@ class Prefs(context: Context) {
         private const val KEY_ONLINE_QUEUE = "online_queue"
         private const val KEY_ONLINE_QUEUE_INDEX = "online_queue_index"
         private const val KEY_LAST_PLAYED_ONLINE = "last_played_online"
+        private const val KEY_DLNA_MANUAL_HOSTS = "dlna_manual_hosts"
 
         /** 最近播放保留多少条。再往上翻既没人看，也会把 SharedPreferences 撑大 */
         private const val RECENT_LIMIT = 200
@@ -1476,6 +1511,8 @@ class Prefs(context: Context) {
         private const val KEY_SOUND_FX_ENABLED = "sound_fx_enabled"
         private const val KEY_SOUND_PRESET = "sound_preset_id"
         private const val KEY_SOUND_FX_PARAMS = "sound_fx_params"
+        private const val KEY_SOUND_AUTO_ROUTE = "sound_auto_route"
+        private const val KEY_SOUND_ROUTE_PREFIX = "sound_route_preset_"
 
         /** 歌词字号默认值 20sp（旧版是 18sp，反馈偏小，见 [migrateOnce]） */
         const val DEFAULT_LYRICS_FONT = 20

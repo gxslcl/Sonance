@@ -144,7 +144,8 @@ private enum class SettingsCategory(
 fun SettingsScreen(
     vm: SonanceViewModel,
     modifier: Modifier = Modifier,
-    onOpenEqualizer: () -> Unit = {}
+    onOpenEqualizer: () -> Unit = {},
+    onOpenDlna: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val skin = LocalSkin.current
@@ -199,6 +200,7 @@ fun SettingsScreen(
                 category = pageCategories[safe],
                 vm = vm,
                 onOpenEqualizer = onOpenEqualizer,
+                onOpenDlna = onOpenDlna,
                 openScanScope = { showScanScope = true },
                 scrollState = pageScrolls[safe]
             )
@@ -222,6 +224,7 @@ private fun SettingsCategoryPage(
     category: SettingsCategory,
     vm: SonanceViewModel,
     onOpenEqualizer: () -> Unit,
+    onOpenDlna: () -> Unit,
     openScanScope: () -> Unit,
     scrollState: ScrollState
 ) {
@@ -298,7 +301,7 @@ private fun SettingsCategoryPage(
                 onOpenEqualizer = onOpenEqualizer
             )
 
-            AudioOutputSettingsSection(vm = vm)
+            AudioOutputSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
 
             PlayControlSettingsSection(vm = vm)
 
@@ -1341,7 +1344,10 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
  * 播放输出与衔接：USB 独占（bit-perfect）、无缝播放、淡入淡出、播放提示。
  */
 @Composable
-private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
+private fun AudioOutputSettingsSection(
+    vm: SonanceViewModel,
+    onOpenDlna: () -> Unit = {}
+) {
     val summary = buildString {
         append(if (vm.usbExclusiveEnabled) "USB 独占开" else "USB 独占关")
         append(if (vm.gaplessEnabled) " · 无缝" else " · 曲间停顿")
@@ -1385,6 +1391,16 @@ private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
             subtitle = "切歌 / 起播时弹出「正在播放 · 歌名」提示",
             checked = vm.playToastEnabled,
             onCheckedChange = { vm.changePlayToast(it) }
+        )
+
+        Spacer(Modifier.height(14.dp))
+
+        SettingsActionRow(
+            title = "D-LAN 无线投屏与共享",
+            subtitle = vm.dlnaActiveRenderer?.let { "正在投屏至：${it.friendlyName}" }
+                ?: "浏览同一 Wi-Fi 下的 NAS/电脑曲库，或向音箱/电视无线投屏",
+            onClick = onOpenDlna,
+            actionLabel = if (vm.dlnaActiveRenderer != null) "控制" else "打开"
         )
     }
 }
@@ -2243,17 +2259,21 @@ private data class WidgetStyleInfo(
 )
 
 private val WIDGET_STYLES = listOf(
-    WidgetStyleInfo("横向控制条", "5×1", "取封面配色的渐变胶囊，圆形唱片 + 歌名 + 上下曲 / 播放 / 歌词", true),
-    WidgetStyleInfo("封面卡片", "3×2", "大圆形唱片居中，歌名与播控键，可切成三行歌词", true),
-    WidgetStyleInfo("信息宽卡", "5×2", "左唱片右信息，带真实进度条、上下曲与歌词切换", true),
-    WidgetStyleInfo("极简横条", "3×1", "不显示封面，只留歌名与四个控制键，最省资源", false),
-    WidgetStyleInfo("大幅卡片", "5×4", "大圆形唱片 + 三行歌词 + 进度条，桌面上的完整播放器", true)
+    WidgetStyleInfo("极简横条", "2×1（4列新）/ 3×1（5列留）", "单行流光胶囊，左侧调性光柱 + 播控；2×1 旁可整齐摆两个 App", false),
+    WidgetStyleInfo("横向控制条", "4×1（4列新）/ 5×1（5列留）", "莫兰迪克制底色 + 圆角方图封面 + 底缘 2.5dp 实时细进度线", true),
+    WidgetStyleInfo("封面方卡", "2×2（4列新）/ 3×2（5列留）", "圆角方图封面与胶囊播放键，切歌词仍保留缩略封面", true),
+    WidgetStyleInfo("信息宽卡", "4×2（4列新）/ 5×2（5列留）", "左方图右歌名与圆点进度条，背景退居克制衬托专辑主角", true),
+    WidgetStyleInfo("大幅卡片", "4×4（4列新）/ 5×4（5列留）", "品牌徽标 + 居中主视觉封面 + 三行歌词平滑切换，适配全桌面列数", true)
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WidgetSettingsContent(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val context = LocalContext.current
+    var appearance by remember {
+        mutableStateOf(com.sonance.player.widget.WidgetState.readAppearance(context))
+    }
 
     Column(Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -2299,12 +2319,33 @@ private fun WidgetSettingsContent(vm: SonanceViewModel) {
                 }
             }
 
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "卡片明暗质感",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.text
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                com.sonance.player.widget.WidgetAppearance.entries.forEach { item ->
+                    PillButton(
+                        label = item.label,
+                        onClick = {
+                            appearance = item
+                            com.sonance.player.widget.SonanceWidgets.onAppearanceChanged(context, item)
+                            vm.showToast("小组件已切为「${item.label}」")
+                        },
+                        filled = (appearance == item)
+                    )
+                }
+            }
+
             Spacer(Modifier.height(2.dp))
             Text(
-                "添加方式：长按桌面空白处 → 小组件 → 找到「山水有清音」。\n" +
-                    "每张卡片都带上一曲 / 播放 / 下一曲和歌词键：点一下歌词键才显示，\n" +
-                    "默认关闭，各张卡片各自记住开关；没有同步歌词时会如实说明。\n" +
-                    "卡片颜色跟着当前封面走，点卡片空白处打开应用。",
+                "添加方式：长按桌面空白处 → 小组件 → 找到「山水有清音」（共 10 套：含 5 列保留与 4 列新增）。\n" +
+                    "采用「克制莫兰迪取色」：高艳专辑自动压低饱和度、黑白封面锁死零色相，确保封面纯净突出不喧宾夺主。",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textDim
             )

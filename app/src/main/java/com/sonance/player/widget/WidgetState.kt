@@ -47,6 +47,10 @@ object WidgetState {
     private const val K_HAS_LYRICS = "has_lyrics"
 
     private const val K_LYRIC_ON = "lyric_on_"
+    private const val K_APPEARANCE = "widget_appearance"
+    private const val K_EXTRACTED_RGB = "extracted_rgb"
+    private const val K_EXTRACTED_HAS = "extracted_has"
+    private const val K_EXTRACTED_SIG = "extracted_sig"
 
     /**
      * 皮肤色的默认值 = `res/values/colors.xml` 里那套 widget 配色。
@@ -223,6 +227,35 @@ object WidgetState {
         if (widgetIds.isEmpty()) return
         val editor = flags(context).edit()
         widgetIds.forEach { editor.remove(K_LYRIC_ON + it) }
+        editor.apply()
+    }
+
+    // ===== 明暗外观偏好（深色烟熏琉璃 / 浅色磨砂白 / 跟随应用皮肤） =====
+
+    fun readAppearance(context: Context): WidgetAppearance =
+        WidgetAppearance.fromPref(flags(context).getString(K_APPEARANCE, null))
+
+    fun writeAppearance(context: Context, appearance: WidgetAppearance) {
+        flags(context).edit().putString(K_APPEARANCE, appearance.prefValue).apply()
+    }
+
+    fun artworkSignature(snap: Snapshot): String =
+        "${snap.coverKey.orEmpty()}|${snap.albumId}|${snap.sourceUri.orEmpty()}"
+
+    fun readExtractedRgb(context: Context, sig: String): Pair<Boolean, Int?> {
+        val sp = context.applicationContext.getSharedPreferences(SP, Context.MODE_PRIVATE)
+        val savedSig = sp.getString(K_EXTRACTED_SIG, null)
+        if (savedSig != sig) return false to null
+        val hasRgb = sp.getBoolean(K_EXTRACTED_HAS, false)
+        return true to if (hasRgb) sp.getInt(K_EXTRACTED_RGB, 0) else null
+    }
+
+    fun writeExtractedRgb(context: Context, sig: String, rgb: Int?) {
+        val sp = context.applicationContext.getSharedPreferences(SP, Context.MODE_PRIVATE)
+        val editor = sp.edit()
+            .putString(K_EXTRACTED_SIG, sig)
+            .putBoolean(K_EXTRACTED_HAS, rgb != null)
+        if (rgb != null) editor.putInt(K_EXTRACTED_RGB, rgb) else editor.remove(K_EXTRACTED_RGB)
         editor.apply()
     }
 }

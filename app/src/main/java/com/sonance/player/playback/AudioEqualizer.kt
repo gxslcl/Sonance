@@ -137,25 +137,25 @@ object EqBus {
 @VisibleForTesting
 internal class EqCascade(val bandCount: Int, val channels: Int) {
 
-    private val b0 = FloatArray(bandCount)
-    private val b1 = FloatArray(bandCount)
-    private val b2 = FloatArray(bandCount)
-    private val a1 = FloatArray(bandCount)
-    private val a2 = FloatArray(bandCount)
+    private val b0 = DoubleArray(bandCount)
+    private val b1 = DoubleArray(bandCount)
+    private val b2 = DoubleArray(bandCount)
+    private val a1 = DoubleArray(bandCount)
+    private val a2 = DoubleArray(bandCount)
 
-    /** 每声道、每段的 DF2T 状态 */
-    private val z1 = Array(channels) { FloatArray(bandCount) }
-    private val z2 = Array(channels) { FloatArray(bandCount) }
+    /** 每声道、每段的 DF2T 状态（64 位双精度消除 96/192 kHz 低频极点精度漂移） */
+    private val z1 = Array(channels) { DoubleArray(bandCount) }
+    private val z2 = Array(channels) { DoubleArray(bandCount) }
 
     /** 按当前采样率把 [gainsDb] 设计成系数（[freqs] 与 [gainsDb] 一一对应） */
     fun design(freqs: IntArray, gainsDb: FloatArray, sampleRate: Int) {
         var b = 0
         while (b < bandCount) {
-            val c = designPeakingCoeffs(
-                f0 = freqs.getOrElse(b) { 0 }.toFloat(),
-                gainDb = gainsDb.getOrElse(b) { 0f },
+            val c = BiquadDesign.peaking(
+                f0 = freqs.getOrElse(b) { 0 }.toDouble(),
+                gainDb = gainsDb.getOrElse(b) { 0f }.toDouble(),
                 sampleRate = sampleRate,
-                q = eqBandQ(b)
+                q = eqBandQ(b).toDouble()
             )
             b0[b] = c[0]; b1[b] = c[1]; b2[b] = c[2]; a1[b] = c[3]; a2[b] = c[4]
             b++
@@ -166,8 +166,8 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
     fun reset() {
         var ch = 0
         while (ch < channels) {
-            z1[ch].fill(0f)
-            z2[ch].fill(0f)
+            z1[ch].fill(0.0)
+            z2[ch].fill(0.0)
             ch++
         }
     }
@@ -176,7 +176,7 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
     fun processSample(input: Float, channel: Int): Float {
         val s1 = z1[channel]
         val s2 = z2[channel]
-        var x = input
+        var x = input.toDouble()
         var b = 0
         while (b < bandCount) {
             val y = b0[b] * x + s1[b]
@@ -185,7 +185,7 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
             x = y
             b++
         }
-        return x
+        return x.toFloat()
     }
 
     /**
@@ -202,7 +202,7 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
             var i = 0
             while (i < frames) {
                 val idx = i * channels + ch
-                var x = buf[idx]
+                var x = buf[idx].toDouble()
                 var b = 0
                 while (b < bandCount) {
                     // DF2T：状态更新必须用**输入** x，先算 y 再更新，不能把 x 覆盖掉
@@ -212,7 +212,7 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
                     x = y
                     b++
                 }
-                buf[idx] = x
+                buf[idx] = x.toFloat()
                 i++
             }
             ch++
@@ -222,9 +222,7 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
 
 /**
  * 均衡处理器：把输入原样交给下游，中间串一串 peaking biquad。
- *
- * 只处理 16bit / float PCM —— 其它编码直接旁路（保持原样透传），
- * 免得在不认识的格式上瞎改字节。
+ * 支持 16 / 24 / 32 位整型及 32 位浮点 PCM（16 位输出开启 TPDF 抖动）。
  */
 class EqProcessor : BaseAudioProcessor() {
 
@@ -239,13 +237,15 @@ class EqProcessor : BaseAudioProcessor() {
 
     private var floatScratch = FloatArray(0)
     private var shortScratch = ShortArray(0)
+    private var intScratch = IntArray(0)
+    private var ditherSeed = 0x13579BDF
 
     /** 当前是否真的在滤波（`enabled == false` 时整条链旁路） */
     private var filtering: Boolean = false
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val enc = inputAudioFormat.encoding
-        if (enc != C.ENCODING_PCM_16BIT && enc != C.ENCODING_PCM_FLOAT) {
+        if (!PcmCodec.isSupportedEncoding(enc)) {
             sampleRate = 0
             channels = 0
             encoding = C.ENCODING_INVALID
@@ -287,50 +287,29 @@ class EqProcessor : BaseAudioProcessor() {
         }
 
         if (floatScratch.size < samples) floatScratch = FloatArray(samples)
+        if (encoding == C.ENCODING_PCM_32BIT && intScratch.size < samples) intScratch = IntArray(samples)
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.short / 32768f
-                    i++
-                }
-            }
-            else -> {
-                var i = 0
-                while (i < samples) {
-                    floatScratch[i] = inputBuffer.float
-                    i++
-                }
-            }
-        }
-
+        PcmCodec.readToFloat(inputBuffer, floatScratch, samples, encoding)
         cas.process(floatScratch, frames)
 
-        when (encoding) {
-            C.ENCODING_PCM_16BIT -> {
-                if (shortScratch.size < samples) shortScratch = ShortArray(samples)
-                var i = 0
-                while (i < samples) {
-                    val v = floatScratch[i]
-                    shortScratch[i] = when {
-                        v >= 1f -> Short.MAX_VALUE
-                        v <= -1f -> Short.MIN_VALUE
-                        else -> (v * 32767f).toInt().toShort()
-                    }
-                    i++
-                }
-                out.asShortBuffer().put(shortScratch, 0, samples)
-            }
-            else -> out.asFloatBuffer().put(floatScratch, 0, samples)
-        }
-        // asShortBuffer()/asFloatBuffer() 是视图，写它不会推进原缓冲的 position
-        out.position(remaining)
-        out.flip()
+        val (nextSeed, updatedShorts) = PcmCodec.writeFromFloat(
+            src = floatScratch,
+            outBuffer = out,
+            remainingBytes = remaining,
+            samples = samples,
+            encoding = encoding,
+            shortScratch = shortScratch,
+            intScratch = intScratch,
+            applyDither = true,
+            ditherSeed = ditherSeed
+        )
+        ditherSeed = nextSeed
+        shortScratch = updatedShorts
     }
 
     override fun onFlush() {
         cascade?.reset()
+        ditherSeed = 0x13579BDF
     }
 
     override fun onReset() {
@@ -389,30 +368,25 @@ internal fun designPeakingCoeffs(
     sampleRate: Int,
     q: Float = EQ_Q
 ): FloatArray {
-    val fs = sampleRate.toFloat()
-    if (gainDb == 0f || f0 <= 0f || fs <= 0f || f0 >= fs * 0.5f) {
-        return floatArrayOf(1f, 0f, 0f, 0f, 0f)
-    }
-    val a = 10f.pow(gainDb / 40f)
-    val w0 = 2.0 * PI * f0 / fs
-    val cosW = cos(w0).toFloat()
-    val sinW = sin(w0).toFloat()
-    val alpha = sinW / (2f * q)
-    val a0 = 1f + alpha / a
-    return floatArrayOf(
-        (1f + alpha * a) / a0,
-        (-2f * cosW) / a0,
-        (1f - alpha * a) / a0,
-        (-2f * cosW) / a0,
-        (1f - alpha / a) / a0
+    val c = BiquadDesign.peaking(
+        f0 = f0.toDouble(),
+        gainDb = gainDb.toDouble(),
+        sampleRate = sampleRate,
+        q = q.toDouble()
     )
+    return FloatArray(5) { c[it].toFloat() }
 }
 
-/** 与实际 biquad 使用同一组系数，用于自动留余量和均衡器的频响示意图。 */
+/** 与实际 64 位 biquad 使用同一组系数，用于自动留余量和均衡器的频响示意图。 */
 internal class EqResponse(gainsDb: FloatArray, private val sampleRate: Int) {
     private val coefficients = Array(EQ_BAND_COUNT) { i ->
         val gain = gainsDb.getOrElse(i) { 0f }.let { if (it.isFinite()) it else 0f }
-        designPeakingCoeffs(EQ_CENTER_FREQS[i].toFloat(), gain, sampleRate, eqBandQ(i))
+        BiquadDesign.peaking(
+            f0 = EQ_CENTER_FREQS[i].toDouble(),
+            gainDb = gain.toDouble(),
+            sampleRate = sampleRate,
+            q = eqBandQ(i).toDouble()
+        )
     }
 
     fun dbAt(frequencyHz: Double): Float {
@@ -455,12 +429,11 @@ internal class EqResponse(gainsDb: FloatArray, private val sampleRate: Int) {
 /**
  * 一次算好整条曲线给 UI 画图用：31 Hz–16 kHz 对数扫 [points] 个点。
  *
- * 曲线必须画"实际听到的"：只画 [SoundPreset.eqDb] 会漏掉自动前置增益带来的整体
- * 电平变化，看起来"低频抬了 4 dB"，实际听到的只有 3 dB。
+ * 与运行时 [SoundChainDsp] 共用 [effectPreampBudgetDb]，保证画面与实际听到的电平一致。
  */
 fun presetNetCurve(preset: SoundPreset, points: Int, sampleRate: Int = 48_000): FloatArray {
     val response = EqResponse(preset.eqDb, sampleRate)
-    val trim = eqAutoPreampDb(response.maxBoostDb())
+    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, channels = 2))
     val safePoints = points.coerceAtLeast(2)
     return FloatArray(safePoints) { i ->
         val hz = 31.0 * (16_000.0 / 31.0).pow(i.toDouble() / (safePoints - 1))
@@ -469,12 +442,12 @@ fun presetNetCurve(preset: SoundPreset, points: Int, sampleRate: Int = 48_000): 
 }
 
 /**
- * 低频 / 中频 / 高频的整体倾向（dB，已计入自动余量），给用户看的"这套预设改了什么"。
+ * 低频 / 中频 / 高频的整体倾向（dB，已计入自动余量与效果预算），给用户看的"这套预设改了什么"。
  * 三段的取值区间按听感划分，不是技术上的倍频程。
  */
 fun presetToneBands(preset: SoundPreset, sampleRate: Int = 48_000): FloatArray {
     val response = EqResponse(preset.eqDb, sampleRate)
-    val trim = eqAutoPreampDb(response.maxBoostDb())
+    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, channels = 2))
     fun avg(vararg hz: Double): Float {
         var sum = 0.0
         for (frequency in hz) sum += response.dbAt(frequency)

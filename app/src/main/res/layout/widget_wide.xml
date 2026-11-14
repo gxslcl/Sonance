@@ -1,12 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  样式 3 · 信息宽卡 5x2（酷狗概念版复刻）
-
-  左侧：发光彩胶唱片（106dp × 106dp）；
-  右侧：
-    - 上层：歌名 + 歌手（或全宽完整三行歌词，当前行最多 2 行自动换行）+ 右上角红心收藏键；
-    - 中层：左侧当前时间 + 细白圆角进度条 + 右侧总时长；
-    - 下层：5 枚纯白播控图标均匀铺开（播放模式、上一首、播放/暂停、下一首、歌词切换）。
+  STYLE A · 保留 5 列样式 4：信息宽卡 5×2
+  左：114dp 大圆角方图封面（唯一视觉主角）；
+  右：上层歌名/歌手（或歌词）+ 收藏/词，中间圆点进度条，下层 5 枚平衡控件与 HQ 标识。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -27,15 +23,15 @@
         android:layout_height="match_parent"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingTop="10dp"
+        android:paddingStart="14dp"
+        android:paddingTop="13dp"
         android:paddingEnd="14dp"
-        android:paddingBottom="10dp">
+        android:paddingBottom="13dp">
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="104dp"
-            android:layout_height="104dp"
+            android:layout_width="112dp"
+            android:layout_height="112dp"
             android:contentDescription="@string/widget_cover_desc"
             android:scaleType="fitCenter"
             android:src="@drawable/widget_placeholder" />
@@ -43,11 +39,11 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginStart="12dp"
+            android:layout_marginStart="13dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
-            <!-- 上层：歌名/歌手 或 完整歌词 + 右上角红心收藏 -->
+            <!-- 顶层：信息/歌词 + 收藏/歌词切换 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
@@ -76,12 +72,9 @@
                             android:fontFamily="sans-serif-medium"
                             android:includeFontPadding="false"
                             android:maxLines="1"
-                            android:shadowColor="#26000000"
-                            android:shadowDy="1"
-                            android:shadowRadius="2"
                             android:text="@string/widget_idle_title"
-                            android:textColor="#FFFFFFFF"
-                            android:textSize="16sp" />
+                            android:textColor="#F5FFFFFF"
+                            android:textSize="15.5sp" />
 
                         <TextView
                             android:id="@+id/widget_artist"
@@ -92,7 +85,7 @@
                             android:includeFontPadding="false"
                             android:maxLines="1"
                             android:text="@string/widget_idle_subtitle"
-                            android:textColor="#CCFFFFFF"
+                            android:textColor="#ABFFFFFF"
                             android:textSize="11.5sp" />
                     </LinearLayout>
 
@@ -111,7 +104,7 @@
                             android:ellipsize="end"
                             android:includeFontPadding="false"
                             android:maxLines="1"
-                            android:textColor="#99FFFFFF"
+                            android:textColor="#78FFFFFF"
                             android:textSize="10.5sp" />
 
                         <TextView
@@ -119,47 +112,55 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:layout_marginBottom="2dp"
                             android:ellipsize="end"
                             android:fontFamily="sans-serif-medium"
                             android:includeFontPadding="false"
                             android:maxLines="2"
-                            android:shadowColor="#26000000"
-                            android:shadowDy="1"
-                            android:shadowRadius="2"
-                            android:textColor="#FFFFFFFF"
+                            android:textColor="#F5FFFFFF"
                             android:textSize="13.5sp" />
 
                         <TextView
                             android:id="@+id/widget_lyric_next"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:ellipsize="end"
-                            android:includeFontPadding="false"
-                            android:maxLines="1"
-                            android:textColor="#99FFFFFF"
-                            android:textSize="10.5sp" />
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:visibility="gone" />
                     </LinearLayout>
                 </FrameLayout>
 
-                <ImageView
-                    android:id="@+id/widget_fav"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
                     android:layout_gravity="top"
-                    android:layout_marginTop="2dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_fav_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_heart_outline" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:id="@+id/widget_fav"
+                        android:layout_width="25dp"
+                        android:layout_height="25dp"
+                        android:background="@drawable/widget_btn_ripple"
+                        android:contentDescription="@string/widget_fav_desc"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/widget_ic_heart_outline" />
+
+                    <ImageView
+                        android:id="@+id/widget_lyric_toggle"
+                        android:layout_width="25dp"
+                        android:layout_height="25dp"
+                        android:layout_marginStart="3dp"
+                        android:background="@drawable/widget_btn_ripple"
+                        android:contentDescription="@string/widget_lyric_desc"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/widget_ic_lyric" />
+                </LinearLayout>
             </LinearLayout>
 
-            <!-- 中层：真实进度条 -->
+            <!-- 中层：真实带圆点细进度条 -->
             <LinearLayout
                 android:id="@+id/widget_progress_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="4dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -167,16 +168,18 @@
                     android:id="@+id/widget_time_cur"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
                     android:includeFontPadding="false"
-                    android:textColor="#E6FFFFFF"
+                    android:text="@string/widget_time_zero"
+                    android:textColor="#ABFFFFFF"
                     android:textSize="10sp" />
 
                 <ImageView
                     android:id="@+id/widget_progress"
                     android:layout_width="0dp"
-                    android:layout_height="7dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_marginEnd="8dp"
+                    android:layout_height="10dp"
+                    android:layout_marginStart="7dp"
+                    android:layout_marginEnd="7dp"
                     android:layout_weight="1"
                     android:importantForAccessibility="no"
                     android:scaleType="fitXY" />
@@ -185,12 +188,13 @@
                     android:id="@+id/widget_time_total"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
                     android:includeFontPadding="false"
-                    android:textColor="#E6FFFFFF"
+                    android:textColor="#ABFFFFFF"
                     android:textSize="10sp" />
             </LinearLayout>
 
-            <!-- 下层：5 枚播控图标均匀排布 -->
+            <!-- 下层：模式 + 上曲 + 圆形实心播放 + 下曲 + HQ -->
             <LinearLayout
                 android:id="@+id/widget_controls"
                 android:layout_width="match_parent"
@@ -201,8 +205,8 @@
 
                 <ImageView
                     android:id="@+id/widget_mode"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_mode_desc"
                     android:scaleType="fitCenter"
@@ -215,8 +219,8 @@
 
                 <ImageView
                     android:id="@+id/widget_prev"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_prev_desc"
                     android:scaleType="fitCenter"
@@ -229,8 +233,8 @@
 
                 <ImageView
                     android:id="@+id/widget_play"
-                    android:layout_width="32dp"
-                    android:layout_height="32dp"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_play_desc"
                     android:scaleType="fitCenter"
@@ -243,8 +247,8 @@
 
                 <ImageView
                     android:id="@+id/widget_next"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_next_desc"
                     android:scaleType="fitCenter"
@@ -255,14 +259,16 @@
                     android:layout_height="1dp"
                     android:layout_weight="1" />
 
-                <ImageView
-                    android:id="@+id/widget_lyric_toggle"
-                    android:layout_width="25dp"
-                    android:layout_height="25dp"
-                    android:background="@drawable/widget_btn_ripple"
-                    android:contentDescription="@string/widget_lyric_desc"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/widget_ic_lyric" />
+                <TextView
+                    android:id="@id/widget_hq_badge"
+                    android:layout_width="26dp"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-medium"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text="HQ"
+                    android:textColor="#6EFFFFFF"
+                    android:textSize="9.5sp" />
             </LinearLayout>
         </LinearLayout>
     </LinearLayout>

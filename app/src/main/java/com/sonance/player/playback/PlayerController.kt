@@ -590,8 +590,21 @@ class PlayerController(private val context: Context) {
         }
     }
 
+    /**
+     * 处于 D-LAN 远端投屏会话时由 ViewModel 设为 true，
+     * 保证切歌/点播更新队列与当前曲目索引时不在手机端意外出声。
+     */
+    @Volatile
+    var blockAutoplayForCast: Boolean = false
+
+    fun pause() {
+        cancelPendingSwitchFade()
+        controller?.pause()
+    }
+
     private fun applyPlay(req: PlayRequest) {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         val items = req.songs.map { it.toMediaItem(context) }
         if (items.isEmpty()) return
         val start = req.index.coerceIn(0, items.lastIndex)
@@ -599,7 +612,7 @@ class PlayerController(private val context: Context) {
         suppressNextStart = !req.notifyStart
         c.setMediaItems(items, start, req.startPositionMs.coerceAtLeast(0L))
         c.prepare()
-        if (req.autoplay) c.play() else c.pause()
+        if (req.autoplay && !blockAutoplayForCast) c.play() else c.pause()
         refreshQueue(c)
         sync(c, null)
     }
@@ -631,6 +644,7 @@ class PlayerController(private val context: Context) {
             )
             return
         }
+        cancelPendingSwitchFade()
         val curIdx = c.currentMediaItemIndex
         val curMediaId = c.currentMediaItem?.mediaId
         val targetSong = songs[target]
@@ -650,53 +664,83 @@ class PlayerController(private val context: Context) {
 
     fun togglePlay() {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         // 与桌面小组件共用同一套判定（见 PlaybackCommands）
         PlaybackCommands.execute(c, PlaybackCommands.PLAY_PAUSE)
     }
 
-    /** 切歌音量淡出协程：新调用先取消旧的，避免被打断的旧协程停在半途音量上 */
+    /** 兜底切歌音量淡出协程（服务尚未建立进程内引用时使用）；正常路径由 TransitionEffects 托管 */
     private var fadeJob: Job? = null
+
+    /**
+     * 取消尚未提交的切歌淡出，确保后续手动操作或系统切歌不再被延迟覆盖。
+     */
+    private fun cancelPendingSwitchFade() {
+        val hadFallback = fadeJob != null
+        fadeJob?.cancel()
+        fadeJob = null
+        PlaybackService.cancelSwitchFade()
+        if (hadFallback) {
+            controller?.let { it.volume = _state.value.userVolume }
+        }
+    }
 
     /**
      * 播放指定曲目。
      *
      * [fadeMs] > 0 且正在播放时，先把当前曲目音量在 fadeMs 内渐降到 0 再切换
      * （黑胶页唱臂抬起时传 150ms 极短淡出，消除音频硬截断叠上机械音效的突兀感），
-     * 完成后恢复用户音量并起播新曲。恢复值取 [_state].userVolume —— 它只由
-     * [setVolume] 写入；[PlayerUiState.volume] 是瞬时音量，会被淡出本身污染。
+     * 完成后恢复用户音量并起播新曲。主路径直接委托给服务端 [PlaybackService.switchTrackWithFade]，
+     * 保证与交叉淡化共用同一个 `userVolume` 基准而不会把 0 采样进去。
      */
     fun playAt(index: Int, fadeMs: Long = 0L, toggleIfCurrent: Boolean = true) {
         val c = controller ?: return
         if (index !in 0 until c.mediaItemCount) return
-        fadeJob?.cancel()
-        // 上一个淡出协程若被打断会停在半途音量上，先复原
-        c.volume = _state.value.userVolume
         if (index == c.currentMediaItemIndex) {
-            if (toggleIfCurrent) {
+            cancelPendingSwitchFade()
+            if (blockAutoplayForCast) {
+                c.pause()
+            } else if (toggleIfCurrent) {
                 togglePlay()
             } else {
                 if (c.playbackState == Player.STATE_IDLE) c.prepare()
                 if (!c.isPlaying) c.play()
             }
+        } else if (blockAutoplayForCast) {
+            cancelPendingSwitchFade()
+            lastNotifiedId = -1L
+            c.seekToDefaultPosition(index)
+            if (c.playbackState == Player.STATE_IDLE) c.prepare()
+            c.pause()
         } else if (fadeMs > 0L && c.isPlaying) {
             lastNotifiedId = -1L
-            fadeJob = scope.launch {
-                val target = _state.value.userVolume
-                val steps = 5
-                repeat(steps) { step ->
-                    if (!c.isPlaying) {
-                        c.volume = target // 淡出中被打断（暂停/退出）：复原后放弃切歌
-                        return@launch
+            fadeJob?.cancel()
+            fadeJob = null
+            if (!PlaybackService.switchTrackWithFade(index, fadeMs)) {
+                c.volume = _state.value.userVolume
+                fadeJob = scope.launch {
+                    val target = _state.value.userVolume
+                    var committed = false
+                    try {
+                        val steps = 5
+                        repeat(steps) { step ->
+                            if (!c.playWhenReady) return@launch
+                            c.volume = target * (steps - step - 1f) / steps
+                            delay(fadeMs / steps)
+                        }
+                        c.volume = target
+                        committed = true
+                        c.seekToDefaultPosition(index)
+                        if (c.playbackState == Player.STATE_IDLE) c.prepare()
+                        c.play()
+                    } finally {
+                        if (fadeJob === coroutineContext[Job]) fadeJob = null
+                        if (!committed) c.volume = target
                     }
-                    c.volume = target * (steps - step - 1f) / steps
-                    delay(fadeMs / steps)
                 }
-                c.volume = target
-                c.seekToDefaultPosition(index)
-                if (c.playbackState == Player.STATE_IDLE) c.prepare()
-                c.play()
             }
         } else {
+            cancelPendingSwitchFade()
             lastNotifiedId = -1L
             c.seekToDefaultPosition(index)
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
@@ -720,14 +764,27 @@ class PlayerController(private val context: Context) {
      */
     fun next() {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         lastNotifiedId = -1L
+        if (blockAutoplayForCast && c.mediaItemCount > 0) {
+            val nextIdx = (c.currentMediaItemIndex + 1) % c.mediaItemCount
+            playAt(nextIdx)
+            return
+        }
         // 规则只写在 PlaybackCommands 一处：桌面小组件点「下一首」走的是同一段代码
         PlaybackCommands.execute(c, PlaybackCommands.NEXT)
     }
 
     fun previous() {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         lastNotifiedId = -1L
+        if (blockAutoplayForCast && c.mediaItemCount > 0) {
+            val count = c.mediaItemCount
+            val prevIdx = ((c.currentMediaItemIndex - 1) % count + count) % count
+            playAt(prevIdx)
+            return
+        }
         PlaybackCommands.execute(c, PlaybackCommands.PREVIOUS)
     }
 
@@ -753,7 +810,9 @@ class PlayerController(private val context: Context) {
     fun setVolume(value: Float) {
         val c = controller ?: return
         val v = value.coerceIn(0f, 1f)
+        cancelPendingSwitchFade()
         c.volume = v
+        PlaybackService.syncUserVolume(v)
         _state.update { it.copy(volume = v, userVolume = v) }
     }
 
@@ -827,6 +886,7 @@ class PlayerController(private val context: Context) {
 
     fun removeAt(index: Int) {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         if (index in 0 until c.mediaItemCount && c.mediaItemCount > 1) {
             c.removeMediaItem(index)
             refreshQueue(c)
@@ -835,12 +895,14 @@ class PlayerController(private val context: Context) {
 
     fun clearQueue() {
         val c = controller ?: return
+        cancelPendingSwitchFade()
         c.clearMediaItems()
         lastNotifiedId = -1L
         _state.update { PlayerUiState(connected = true, volume = it.volume, userVolume = it.userVolume) }
     }
 
     fun release() {
+        cancelPendingSwitchFade()
         ticker?.cancel()
         controllerFuture?.let { runCatching { MediaController.releaseFuture(it) } }
         controllerFuture = null

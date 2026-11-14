@@ -221,6 +221,8 @@ internal fun WallPlaybackControls(
     preview: Boolean,
     coverColor: Color,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    wide: Boolean = false,
     onToggle: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
@@ -270,16 +272,68 @@ internal fun WallPlaybackControls(
     val progress = dragFraction ?: playbackFraction
     val displayedPosition = dragFraction?.let { (it.toDouble() * durationMs).toLong().coerceIn(0L, durationMs) } ?: positionMs
 
+    val horizontalPad = if (compact || wide) 8.dp else 28.dp
+    val topPad = if (compact) 4.dp else 8.dp
+    val bottomPad = if (compact) 6.dp else if (wide) 12.dp else 16.dp
+    val scrollModifier = if (compact) Modifier else Modifier.verticalScroll(rememberScrollState())
+
     Column(
-        modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp).padding(top = 8.dp, bottom = 16.dp)
+        modifier
+            .fillMaxWidth()
+            .then(scrollModifier)
+            .padding(horizontal = horizontalPad)
+            .padding(top = topPad, bottom = bottomPad)
     ) {
-        Text(title, color = ControlsText, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.staggeredEntrance(0))
-        Spacer(Modifier.height(4.dp))
-        Text(artist, color = Color.White.copy(alpha = 0.62f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.staggeredEntrance(1))
-        Spacer(Modifier.height(14.dp))
+        if (compact) {
+            Row(
+                Modifier.fillMaxWidth().staggeredEntrance(0),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        color = ControlsText,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        artist,
+                        color = Color.White.copy(alpha = 0.62f),
+                        fontSize = 12.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .clickable(role = Role.Button, onClick = onTracks)
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    WallGlyph("tracks", Color.White.copy(alpha = 0.80f), 15.dp)
+                    Text(
+                        "曲目 · ${album.tracks.size}",
+                        color = Color.White.copy(alpha = 0.80f),
+                        fontSize = 11.5.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+        } else {
+            Text(title, color = ControlsText, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.staggeredEntrance(0))
+            Spacer(Modifier.height(4.dp))
+            Text(artist, color = Color.White.copy(alpha = 0.62f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.staggeredEntrance(1))
+            Spacer(Modifier.height(14.dp))
+        }
         Box(
-            Modifier.fillMaxWidth().height(32.dp).staggeredEntrance(2)
+            Modifier.fillMaxWidth().height(if (compact) 24.dp else 32.dp).staggeredEntrance(2)
                 .semantics {
                     contentDescription = "播放进度"
                     progressBarRangeInfo = ProgressBarRangeInfo(progress, 0f..1f)
@@ -338,59 +392,65 @@ internal fun WallPlaybackControls(
                 }
             }
         }
-        Spacer(Modifier.height(7.dp))
+        Spacer(Modifier.height(if (compact) 2.dp else 7.dp))
         Row(Modifier.fillMaxWidth().staggeredEntrance(2), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatDuration(displayedPosition), color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
-            Text(formatDuration(durationMs), color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+            Text(formatDuration(displayedPosition), color = Color.White.copy(alpha = 0.5f), fontSize = if (compact) 11.sp else 12.sp)
+            Text(formatDuration(durationMs), color = Color.White.copy(alpha = 0.5f), fontSize = if (compact) 11.sp else 12.sp)
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
         // 与普通播放页同款：两侧线性上一首 / 下一首 + 中间液态水滴播放键
         // （光晕 / 图标样式 / 缩放 / 配色档位都跟随设置），不再是白底圆饼。
+        val sideBtnSize = if (compact) 40.dp else 46.dp
+        val sideIconSize = if (compact) 21.dp else 24.dp
+        val mainBtnSize = if (compact) 52.dp else 62.dp
+        val mainIconSize = if (compact) 22.dp else 26.dp
         Row(
             Modifier.fillMaxWidth().staggeredEntrance(3),
-            horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 18.dp else 22.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
             CtrlButton(
                 icon = SonanceIcons.Prev,
                 contentDescription = "上一首",
                 onClick = onPrev,
-                size = 46.dp,
-                iconSize = 24.dp,
+                size = sideBtnSize,
+                iconSize = sideIconSize,
                 tint = Color.White.copy(alpha = 0.85f)
             )
             PlayPauseButton(
                 isPlaying = isPlaying,
                 onClick = onToggle,
-                size = 62.dp,
-                iconSize = 26.dp,
+                size = mainBtnSize,
+                iconSize = mainIconSize,
                 palette = playPalette
             )
             CtrlButton(
                 icon = SonanceIcons.Next,
                 contentDescription = "下一首",
                 onClick = onNext,
-                size = 46.dp,
-                iconSize = 24.dp,
+                size = sideBtnSize,
+                iconSize = sideIconSize,
                 tint = Color.White.copy(alpha = 0.85f)
             )
         }
-        Spacer(Modifier.height(14.dp))
-        Row(
-            Modifier.align(Alignment.CenterHorizontally).staggeredEntrance(4).clip(RoundedCornerShape(20.dp))
-                .background(Color.White.copy(alpha = 0.08f)).clickable(role = Role.Button, onClick = onTracks)
-                .padding(horizontal = 18.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            WallGlyph("tracks", Color.White.copy(alpha = 0.75f), 18.dp)
-            Text("曲目列表 · ${album.tracks.size} 首", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp)
+        if (!compact) {
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier.align(Alignment.CenterHorizontally).staggeredEntrance(4).clip(RoundedCornerShape(20.dp))
+                    .background(Color.White.copy(alpha = 0.08f)).clickable(role = Role.Button, onClick = onTracks)
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                WallGlyph("tracks", Color.White.copy(alpha = 0.75f), 18.dp)
+                Text("曲目列表 · ${album.tracks.size} 首", color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(if (wide) 14.dp else 22.dp))
+            Text(
+                "↓ 向下拖动，把唱片插回墙上", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp,
+                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().staggeredEntrance(5)
+            )
         }
-        Spacer(Modifier.height(22.dp))
-        Text(
-            "↓ 向下拖动，把唱片插回墙上", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp,
-            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().staggeredEntrance(5)
-        )
     }
 }
 

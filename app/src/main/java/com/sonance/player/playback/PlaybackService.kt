@@ -8,12 +8,15 @@ import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -50,6 +53,7 @@ class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var transitions: TransitionEffects? = null
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     override fun onCreate() {
         // 必须先于 super.onCreate()：MediaSessionService 在 super 里就会建通知管理器，
@@ -78,8 +82,13 @@ class PlaybackService : MediaSessionService() {
         val karaoke = KaraokeProcessor()
         val fx = SoundFxProcessor()
         val tap = PcmTapProcessor()
+        // ⚠️ 必须保持 DefaultAudioSink 默认浮点关闭（setEnableFloatOutput(false)）：
+        //    Media3 1.5.0 在 enableFloatOutput=true 且播放 24/32bit Hi-Res 音轨时会直接跳过整个
+        //    audioProcessorChain（导致均衡器、音效、卡拉OK 和频谱全失效）。关闭后各 Processor 已
+        //    通过 PcmCodec 原生解码 16/24/32/Float 并在内部全程 32/64 位处理。
         val audioSink = DefaultAudioSink.Builder(this)
             .setAudioOffloadSupportProvider { _, _ -> AudioOffloadSupport.DEFAULT_UNSUPPORTED }
+            .setEnableFloatOutput(false)
             .setAudioProcessors(arrayOf<AudioProcessor>(karaoke, fx, tap))
             .build()
 
@@ -111,6 +120,22 @@ class PlaybackService : MediaSessionService() {
             it.start()
         }
         UsbExclusive.syncWithPrefs(this)
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: Format,
+                decoderReuseEvaluation: DecoderReuseEvaluation?
+            ) {
+                if (format.sampleRate > 0) {
+                    UsbExclusive.syncTrackFormat(
+                        context = this@PlaybackService,
+                        sampleRateHz = format.sampleRate,
+                        pcmEncoding = format.pcmEncoding,
+                        channelCount = format.channelCount
+                    )
+                }
+            }
+        })
 
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(sessionActivity)
@@ -163,10 +188,17 @@ class PlaybackService : MediaSessionService() {
         const val ACTION_WIDGET_COMMAND = "sonance.widget.service_command"
 
         /** @return 命令是否真的送到了播放器 */
-        fun executeWidgetCommand(command: String): Boolean {
-            val player = liveService?.playerOrNull() ?: return false
-            PlaybackCommands.execute(player, command)
-            return true
+        fun executeWidgetCommand(command: String): Boolean =
+            liveService?.executeWithTransitionReset(command) ?: false
+
+        internal fun switchTrackWithFade(index: Int, fadeMs: Long): Boolean =
+            liveService?.switchTrackWithFade(index, fadeMs) ?: false
+
+        internal fun cancelSwitchFade(): Boolean =
+            liveService?.cancelSwitchFade() ?: false
+
+        internal fun syncUserVolume(volume: Float) {
+            liveService?.syncUserVolume(volume)
         }
 
         internal fun playerOrNull(): Player? = liveService?.playerOrNull()
@@ -318,7 +350,7 @@ class PlaybackService : MediaSessionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_WIDGET_COMMAND) {
             intent.getStringExtra(WidgetCommandReceiver.EXTRA_COMMAND)?.let { command ->
-                playerOrNull()?.let { PlaybackCommands.execute(it, command) }
+                executeWithTransitionReset(command)
             }
         }
         return super.onStartCommand(intent, flags, startId)
@@ -329,6 +361,50 @@ class PlaybackService : MediaSessionService() {
     /** 进程内命令通道取播放器，不把整个 session 暴露出去。 */
     internal fun playerOrNull(): Player? = mediaSession?.player
 
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
+        }
+    }
+
+    private fun executeWithTransitionReset(command: String): Boolean {
+        val player = playerOrNull() ?: return false
+        runOnMain {
+            transitions?.cancelSwitchFade(restoreVolume = true)
+            PlaybackCommands.execute(player, command)
+        }
+        return true
+    }
+
+    /** 由服务端 TransitionEffects 原子执行切歌淡出与切轨，防止跨线程/轮询污染 userVolume。 */
+    internal fun switchTrackWithFade(index: Int, fadeMs: Long): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) return false
+        val player = playerOrNull() ?: return false
+        val fx = transitions ?: return false
+        if (index !in 0 until player.mediaItemCount) return false
+        fx.beginSwitchFade(fadeMs) {
+            if (index in 0 until player.mediaItemCount) {
+                player.seekToDefaultPosition(index)
+                if (player.playbackState == Player.STATE_IDLE) player.prepare()
+                player.play()
+            }
+        }
+        return true
+    }
+
+    internal fun cancelSwitchFade(): Boolean {
+        val fx = transitions ?: return false
+        runOnMain { fx.cancelSwitchFade(restoreVolume = true) }
+        return true
+    }
+
+    internal fun syncUserVolume(volume: Float) {
+        val fx = transitions ?: return
+        runOnMain { fx.setUserVolume(volume) }
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
         if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
@@ -337,6 +413,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         mediaSession?.run {
             transitions?.let {
                 player.removeListener(it)

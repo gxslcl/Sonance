@@ -126,6 +126,10 @@
       "type": "STRING",
       "value": ""
     },
+    "sound_auto_route": {
+      "type": "BOOLEAN",
+      "value": false
+    },
     "lyrics_t2s": {
       "type": "BOOLEAN",
       "value": true

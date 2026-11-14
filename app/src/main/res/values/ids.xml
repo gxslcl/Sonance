@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 可选装饰/歌词子视图统一 ID（各布局按需引用，未用到者由 RemoteViews 安全忽略） -->
+    <item name="widget_cover_mini" type="id" />
+    <item name="widget_lyric_song_title" type="id" />
+    <item name="widget_lyric_song_artist" type="id" />
+    <item name="widget_brand_pill_wrap" type="id" />
+    <item name="widget_brand_dot" type="id" />
+    <item name="widget_lyric_header_wrap" type="id" />
+    <item name="widget_minimal_accent" type="id" />
+    <item name="widget_hq_badge" type="id" />
+</resources>

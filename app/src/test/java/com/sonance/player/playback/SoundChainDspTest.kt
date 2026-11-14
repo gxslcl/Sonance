@@ -25,7 +25,7 @@ class SoundChainDspTest {
         assertTrue(SoundPresets.OFF.eqDb.all { it == 0f })
         SoundPresets.ALL.filter { it.id != SoundPresets.OFF.id }.forEach { preset ->
             val response = EqResponse(preset.eqDb, sr)
-            val auto = eqAutoPreampDb(response.maxBoostDb())
+            val auto = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, 2))
             // 旧版每个预设都被前置增益整体压低 2~3 dB，用户点下去只听到"变小"。
             fun net(hz: Double) = response.dbAt(hz) + auto
             assertTrue(
@@ -49,7 +49,7 @@ class SoundChainDspTest {
     fun `each preset is voiced in the direction its name promises`() {
         fun net(preset: SoundPreset, hz: Double): Float {
             val response = EqResponse(preset.eqDb, sr)
-            return response.dbAt(hz) + eqAutoPreampDb(response.maxBoostDb())
+            return response.dbAt(hz) + eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, 2))
         }
         // 通透：高频抬起来、低中频让路
         assertTrue(net(SoundPresets.CLEAR, 4000.0) - net(SoundPresets.CLEAR, 250.0) > 3f)
@@ -60,16 +60,99 @@ class SoundChainDspTest {
         assertTrue(net(SoundPresets.BASS, 62.0) > 1.5f)
         // 深夜：高频收钝
         assertTrue(net(SoundPresets.NIGHT, 4000.0) < -1f)
-        // 外放：切掉放不出的超低频，补中低频厚度
-        assertTrue(net(SoundPresets.DUAL_SPEAKER, 31.0) < -3f)
-        assertTrue(net(SoundPresets.DUAL_SPEAKER, 500.0) > 0.5f)
+        // 手机外放沿用旧版温和饱满调音：切 31 Hz 防破音、补 500 Hz 厚度、柔化 2 kHz；平板保留 48 Hz 高通与宽声场
+        assertTrue("手机外放 31 Hz 应被切低: ${net(SoundPresets.PHONE_SPEAKER, 31.0)}", net(SoundPresets.PHONE_SPEAKER, 31.0) < -3f)
+        assertTrue("手机外放 500 Hz 保持厚度: ${net(SoundPresets.PHONE_SPEAKER, 500.0)}", net(SoundPresets.PHONE_SPEAKER, 500.0) > 2f)
+        assertTrue("手机外放柔化 2 kHz 毛刺: ${net(SoundPresets.PHONE_SPEAKER, 2000.0)}", net(SoundPresets.PHONE_SPEAKER, 2000.0) < -1f)
+        assertEquals(0f, SoundPresets.PHONE_SPEAKER.fx.speakerHpfHz, 0f)
+        assertTrue(SoundPresets.TABLET_SPEAKER.fx.speakerHpfHz > 40f)
         // 空间档的混响与宽度递增，日常档保持纯净无混响
         assertTrue(SoundPresets.CINEMA.fx.reverbWet > SoundPresets.LIVE.fx.reverbWet)
-        listOf(SoundPresets.CLEAR, SoundPresets.VOCAL, SoundPresets.BASS, SoundPresets.NIGHT)
+        listOf(SoundPresets.EXTREME_HIFI, SoundPresets.CLEAR, SoundPresets.VOCAL, SoundPresets.BASS, SoundPresets.NIGHT)
             .forEach { assertEquals("${it.id} 不应默认增加混响", 0f, it.fx.reverbWet, 0f) }
         // 低频档与外放档都应启用虚拟低音谐波合成
         assertTrue(SoundPresets.BASS.fx.virtualBass > 0.3f)
-        assertTrue(SoundPresets.DUAL_SPEAKER.fx.virtualBass > SoundPresets.BASS.fx.virtualBass)
+        assertTrue(SoundPresets.PHONE_SPEAKER.fx.virtualBass >= SoundPresets.BASS.fx.virtualBass)
+    }
+
+    @Test
+    fun `phone speaker and featured presets audibly upgrade multi-band music over raw without thinning`() {
+        val frames = sr // 1 秒信号，前 0.4s 让斜坡与滤波器稳态；后 0.6s 是 5 Hz 公倍周期，零频谱泄漏
+        val start = (sr * 0.4).toInt()
+        val dry = FloatArray(frames * 2)
+        val phoneDry = FloatArray(frames * 2)
+        for (i in 0 until frames) {
+            val t = i.toDouble() / sr
+            val mid = 0.22 * sin(2.0 * PI * 55.0 * t) +
+                0.20 * sin(2.0 * PI * 95.0 * t) +
+                0.22 * sin(2.0 * PI * 1850.0 * t)
+            val side = 0.12 * sin(2.0 * PI * 3500.0 * t) +
+                0.08 * sin(2.0 * PI * 7500.0 * t)
+            dry[2 * i] = (mid + side).toFloat()
+            dry[2 * i + 1] = (mid - side).toFloat()
+
+            // 单独构造含 400 Hz 中低频的多音信号验证旧版手机外放，保持 55/95 Hz 幅度与总峰值在 SoftLimiter 阈值之下
+            val phoneMid = 0.22 * sin(2.0 * PI * 55.0 * t) +
+                0.20 * sin(2.0 * PI * 95.0 * t) +
+                0.15 * sin(2.0 * PI * 400.0 * t) +
+                0.12 * sin(2.0 * PI * 1850.0 * t)
+            val phoneSide = 0.09 * sin(2.0 * PI * 3500.0 * t) +
+                0.06 * sin(2.0 * PI * 7500.0 * t)
+            phoneDry[2 * i] = (phoneMid + phoneSide).toFloat()
+            phoneDry[2 * i + 1] = (phoneMid - phoneSide).toFloat()
+        }
+
+        fun render(preset: SoundPreset, source: FloatArray = dry): FloatArray {
+            val out = source.copyOf()
+            SoundChainDsp(sr, 2).also {
+                it.setTarget(true, preset.eqDb, preset.fx)
+                it.process(out, frames)
+            }
+            return out
+        }
+
+        fun bandMid(buf: FloatArray, hz: Double): Double {
+            val mono = FloatArray(frames - start) { idx ->
+                val p = (idx + start) * 2
+                (buf[p] + buf[p + 1]) * 0.5f
+            }
+            return toneAmplitude(mono, hz)
+        }
+
+        fun bandSide(buf: FloatArray, hz: Double): Double {
+            val side = FloatArray(frames - start) { idx ->
+                val p = (idx + start) * 2
+                (buf[p] - buf[p + 1]) * 0.5f
+            }
+            return toneAmplitude(side, hz)
+        }
+
+        val phoneDryRms = rms(phoneDry.copyOfRange(start * 2, phoneDry.size))
+        val phone = render(SoundPresets.PHONE_SPEAKER, phoneDry)
+        val phoneRms = rms(phone.copyOfRange(start * 2, phone.size))
+        val p110 = bandMid(phone, 110.0)
+        val d110 = bandMid(phoneDry, 110.0)
+        val p150 = bandMid(phone, 150.0)
+        val d150 = bandMid(phoneDry, 150.0)
+        assertTrue("手机外放保持合理响度不塌陷: phone=$phoneRms dry=$phoneDryRms", phoneRms >= phoneDryRms * 0.90)
+        assertTrue("手机外放应明显增强低音二次/和频谐波(110Hz=$p110, 150Hz=$p150, dry=$d110/$d150)", (p110 + p150) > (d110 + d150) + 0.015)
+        assertTrue("手机外放 400 Hz 中低频胸腔厚度应明显增强", bandMid(phone, 400.0) > bandMid(phoneDry, 400.0) * 1.15)
+        assertTrue("手机外放极高频空气声场宽度应明显大于原声", bandSide(phone, 7500.0) > bandSide(phoneDry, 7500.0) * 1.15)
+
+        val dryRms = rms(dry.copyOfRange(start * 2, dry.size))
+        val tablet = render(SoundPresets.TABLET_SPEAKER)
+        val tabletRms = rms(tablet.copyOfRange(start * 2, tablet.size))
+        assertTrue("平板外放总体响度保持饱满不虚弱: tablet=$tabletRms dry=$dryRms", tabletRms >= dryRms * 0.96)
+        assertTrue("平板外放 95 Hz 真实鼓点肉感保持充沛", bandMid(tablet, 95.0) >= bandMid(dry, 95.0) * 0.95)
+        assertTrue("平板外放人声 1.85 kHz 应明确亮出原声", bandMid(tablet, 1850.0) > bandMid(dry, 1850.0) * 1.05)
+        assertTrue("平板外放中高频声场宽度应显著大于原声", bandSide(tablet, 3500.0) > bandSide(dry, 3500.0) * 1.25)
+
+        val bass = render(SoundPresets.BASS)
+        assertTrue("低频档 55 Hz 应实实在在比原声更澎湃", bandMid(bass, 55.0) > bandMid(dry, 55.0) * 1.35)
+        assertTrue("低频档不应过度压低人声中频", bandMid(bass, 1850.0) >= bandMid(dry, 1850.0) * 0.85)
+
+        val panorama = render(SoundPresets.PANORAMA)
+        assertTrue("全景环绕侧向声场应显著拉开", bandSide(panorama, 3500.0) > bandSide(dry, 3500.0) * 1.40)
     }
 
     @Test
@@ -89,17 +172,32 @@ class SoundChainDspTest {
             virtualBass = 0.7f, reverbWet = 0.06f, reverbDecay = 0.2f,
             stereoWidth = 1.18f, preampDb = -4f, limiter = true
         )
-        val migrated = SoundPresets.restoreFx(SoundPresets.DUAL_SPEAKER, SoundFxParams.toStore(legacy))
+        val migrated = SoundPresets.restoreFx(SoundPresets.PHONE_SPEAKER, SoundFxParams.toStore(legacy))
         assertFalse(migrated.custom)
-        assertEquals(SoundPresets.DUAL_SPEAKER.fx, migrated.params)
+        assertEquals(SoundPresets.PHONE_SPEAKER.fx, migrated.params)
+        assertEquals(SoundPresets.PHONE_SPEAKER, SoundPresets.fromId("dual_speaker"))
 
         val custom = legacy.copy(stereoWidth = 1.23f)
-        val restored = SoundPresets.restoreFx(SoundPresets.DUAL_SPEAKER, SoundFxParams.toStore(custom))
+        val restored = SoundPresets.restoreFx(SoundPresets.PHONE_SPEAKER, SoundFxParams.toStore(custom))
         assertTrue(restored.custom)
         assertEquals(custom, restored.params)
-        // 第二代老配方（前置增益过重）同样要当成内置参数迁移掉，否则老用户永远听旧味道
+        // 第二代/上一代老配方同样要当成内置参数迁移掉，否则更新后仍听旧干瘪参数
         val secondGen = SoundFxParams(stereoWidth = 1.04f, preampDb = -1.5f, limiter = true)
         assertFalse(SoundPresets.restoreFx(SoundPresets.CLEAR, SoundFxParams.toStore(secondGen)).custom)
+        val prevPhoneSpeaker = SoundFxParams(
+            virtualBass = 0.68f, stereoWidth = 1.16f, limiter = true,
+            limiterThresholdDb = -1.2f, speakerHpfHz = 115f
+        )
+        val migratedPhone = SoundPresets.restoreFx(SoundPresets.PHONE_SPEAKER, SoundFxParams.toStore(prevPhoneSpeaker))
+        assertFalse(migratedPhone.custom)
+        assertEquals(SoundPresets.PHONE_SPEAKER.fx, migratedPhone.params)
+        val prevPhoneSpeaker65 = SoundFxParams(
+            virtualBass = 0.70f, stereoWidth = 1.24f, limiter = true,
+            limiterThresholdDb = -0.5f, speakerHpfHz = 65f
+        )
+        val migratedPhone65 = SoundPresets.restoreFx(SoundPresets.PHONE_SPEAKER, SoundFxParams.toStore(prevPhoneSpeaker65))
+        assertFalse(migratedPhone65.custom)
+        assertEquals(SoundPresets.PHONE_SPEAKER.fx, migratedPhone65.params)
         assertFalse(SoundPresets.restoreFx(SoundPresets.CLEAR, null).custom)
         assertEquals(SoundPresets.BASS, SoundPresets.eqPresetFromStore(SoundPresets.eqStoreName(SoundPresets.BASS)))
         assertEquals(null, SoundPresets.eqPresetFromStore("sound:unknown"))
@@ -306,6 +404,25 @@ class SoundChainDspTest {
             EqBus.reset()
             SoundFxBus.reset()
         }
+    }
+
+    @Test
+    fun `high sample rate 192kHz 31Hz peaking filter tracks target boost without precision drift`() {
+        val hiSr = 192_000
+        val gains = FloatArray(EQ_BAND_COUNT).also { it[0] = 6f }
+        val cas = EqCascade(EQ_BAND_COUNT, 1)
+        cas.design(EQ_CENTER_FREQS, gains, hiSr)
+        val flat = EqCascade(EQ_BAND_COUNT, 1)
+        flat.design(EQ_CENTER_FREQS, FloatArray(EQ_BAND_COUNT), hiSr)
+        val frames = hiSr / 2
+        val boosted = FloatArray(frames) { (0.3 * sin(2.0 * PI * 31.0 * it / hiSr)).toFloat() }
+        val ref = boosted.copyOf()
+        cas.process(boosted, frames)
+        flat.process(ref, frames)
+        val boostDb = 20.0 * kotlin.math.log10(
+            rms(boosted.copyOfRange(frames / 2, frames)) / rms(ref.copyOfRange(frames / 2, frames))
+        )
+        assertEquals("192 kHz 下 31 Hz 极点不应出现双精度前的截断误差", 6.0, boostDb, 0.7)
     }
 
     private fun stereoSignal(frames: Int): FloatArray = FloatArray(frames * 2) { i ->

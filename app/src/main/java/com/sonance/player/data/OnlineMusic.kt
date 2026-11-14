@@ -342,7 +342,7 @@ fun RemoteTrack.toStored(source: String): StoredOnlineSong = StoredOnlineSong(
  */
 fun Song.toStoredOrNull(): StoredOnlineSong? {
     val rid = remoteId ?: return null
-    if (isLocal) return null
+    if (isLocal || isDlna) return null
     return StoredOnlineSong(source, rid, title, artist, album, durationMs, coverUrl, true, false)
 }
 

@@ -1225,9 +1225,13 @@ fun RecentScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
             actions = if (list.isNotEmpty()) {
                 { m ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                        QuickActions(songs = list, vm = vm, modifier = m)
-                        PillButton(label = "清空", onClick = { vm.clearRecent() }, filled = false)
+                    Row(
+                        modifier = m,
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        QuickActions(songs = list, vm = vm)
+                        RecentClearButton(onClick = { vm.clearRecent() })
                     }
                 }
             } else null
@@ -1889,14 +1893,22 @@ fun LibraryPagerScreen(
                                 subtitle = "播几首歌，这里会按最近听的顺序排出来"
                             )
                         } else {
-                            SongList(
-                                songs = recent,
-                                vm = vm,
-                                playerState = playerState,
-                                scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                listState = pageState,
-                                reportCurrentVisibility = realIndex(page) == liveIndex
-                            )
+                            Column(Modifier.fillMaxSize()) {
+                                RecentClearStrip(
+                                    count = recent.size,
+                                    onClear = { vm.clearRecent() }
+                                )
+                                Box(Modifier.weight(1f).fillMaxWidth()) {
+                                    SongList(
+                                        songs = recent,
+                                        vm = vm,
+                                        playerState = playerState,
+                                        scrollToCurrentSignal = vm.scrollToCurrentSignal,
+                                        listState = pageState,
+                                        reportCurrentVisibility = realIndex(page) == liveIndex
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -1987,6 +1999,62 @@ fun LibraryPagerScreen(
         }
     }
 
+}
+
+/** 「最近」列表右侧的轻量一键清空胶囊，视觉与顶部操作条保持统一。 */
+@Composable
+private fun RecentClearButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier = modifier
+            .clip(shape)
+            .background(skin.surface2.copy(alpha = if (skin.isLight) 0.82f else 0.58f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(
+            imageVector = SonanceIcons.Trash,
+            contentDescription = null,
+            tint = skin.textDim,
+            modifier = Modifier.size(13.dp)
+        )
+        Text(
+            text = "一键清空",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            color = skin.textDim,
+            maxLines = 1
+        )
+    }
+}
+
+/** 「最近」页顶部的直达操作条：统计最近听过的曲目数并支持一键清空。 */
+@Composable
+private fun RecentClearStrip(
+    count: Int,
+    onClear: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = "最近播放 · 共 $count 首",
+            style = MaterialTheme.typography.labelMedium,
+            color = skin.textMuted
+        )
+        RecentClearButton(onClick = onClear)
+    }
 }
 
 /**

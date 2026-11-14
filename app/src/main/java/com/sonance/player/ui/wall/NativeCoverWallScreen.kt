@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
@@ -35,6 +36,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
@@ -64,8 +67,10 @@ import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -155,13 +160,26 @@ fun NativeCoverWallScreen(
     var resumed by remember {
         mutableStateOf(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
-    // 状态栏在本页隐藏，卡片内容冲顶；图标仍按状态栏/刘海高度落位。
+    // 状态栏在本页隐藏，卡片内容冲顶；图标仍按状态栏/刘海高度落位，横屏并同时纳入左右异形屏/导航栏安全边距。
+    val layoutDir = LocalLayoutDirection.current
     val top = 0f
     val barsTop = max(
         WindowInsets.statusBarsIgnoringVisibility.getTop(density),
         WindowInsets.displayCutout.getTop(density)
     ).toFloat()
+    val barsTopLandscape = max(
+        WindowInsets.statusBars.getTop(density),
+        WindowInsets.displayCutout.getTop(density)
+    ).toFloat()
     val bottom = WindowInsets.navigationBars.getBottom(density).toFloat()
+    val safeLeft = max(
+        WindowInsets.navigationBars.getLeft(density, layoutDir),
+        WindowInsets.displayCutout.getLeft(density, layoutDir)
+    ).toFloat()
+    val safeRight = max(
+        WindowInsets.navigationBars.getRight(density, layoutDir),
+        WindowInsets.displayCutout.getRight(density, layoutDir)
+    ).toFloat()
     var tuning by remember { mutableStateOf(false) }
     var spinning by remember { mutableStateOf(false) }
     var mini by remember { mutableStateOf(false) }
@@ -542,14 +560,16 @@ fun NativeCoverWallScreen(
         }
     }
 
-    LaunchedEffect(wallAlbums, viewport, tune.gap, tune.seed, d) {
+    val isTablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    LaunchedEffect(wallAlbums, viewport, tune.gap, tune.seed, d, isTablet) {
         if (viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
         val next = buildWallLayout(
             wallAlbums,
             viewport.width / d,
             viewport.height / d,
             tune.gap,
-            tune.seed
+            tune.seed,
+            isTablet = isTablet
         )
         engine.scrollY = clamp(engine.scrollY, 0f, next.maxY)
         for (t in next.tiles)
@@ -697,23 +717,24 @@ fun NativeCoverWallScreen(
 
     val width = viewport.width.toFloat()
     val height = viewport.height.toFloat()
-    val available = height - top - bottom
-    // 播放页「小封面 + 默认歌词 + 底部控件」纵向布局：
-    // 封面从顶角图标行（barsTop+10dp、按钮 38dp）下方起步，不再压在图标上；
-    // 控件区按内容实际高度取值并贴底 —— 原来取 42% 屏高，内容填不满，
-    // 底部留一大块空白、视觉重心偏上。省出的空间归歌词（三行歌词垂直居中），
-    // 整块内容上下撑满，重心自然落到屏幕中部。
-    val heroSize = min(width * 0.62f, available * 0.34f).coerceAtLeast(1f)
-    val heroX = (width - heroSize) / 2f
-    val heroY = max(top + 54f * d, barsTop + 56f * d)
-    val coverBottom = heroY + heroSize
-    val lyricsTop = coverBottom + 10f * d
-    val controlsHeight = (306f * d).coerceAtMost(available * 0.5f).coerceAtLeast(1f)
-    val controlsTop = height - bottom - controlsHeight
-    val lyricsHeight = (controlsTop - lyricsTop - 6f * d).coerceAtLeast(1f)
-    val backSize = min(width - 36f * d, available - 100f * d).coerceAtLeast(1f)
-    val backX = (width - backSize) / 2
-    val backY = top + (available - backSize) / 2
+    val focusLayout = computeWallFocusLayout(
+        width = width,
+        height = height,
+        density = d,
+        barsTopPortrait = barsTop,
+        barsTopLandscape = barsTopLandscape,
+        bottom = bottom,
+        safeLeft = safeLeft,
+        safeRight = safeRight,
+        vinylEnabled = tune.vinyl,
+        isTablet = isTablet
+    )
+    val heroSize = focusLayout.heroSize
+    val heroX = focusLayout.heroX
+    val heroY = focusLayout.heroY
+    val backSize = focusLayout.backSize
+    val backX = focusLayout.backX
+    val backY = focusLayout.backY
     // 自动滚动开始后顶角图标渐隐到 0.2（仍可点）；任何操作重置空闲计时后渐变恢复。
     val iconsAlpha by animateFloatAsState(if (drifting) 0.2f else 1f, tween(600), label = "wallIcons")
 
@@ -855,8 +876,9 @@ fun NativeCoverWallScreen(
                         if (sy > engine.heightCss + 260f || sy + t.size < -260f) continue
                         val p = poses[t.album.key] ?: continue
                         visibleTiles.add(t)
-                        p.x = (t.x + engine.gxR * t.span / 6f * 16f) * d
-                        p.y = (sy + engine.gyR * t.span / 6f * 16f) * d
+                        val spanNorm = t.span / l.cols.toFloat()
+                        p.x = (t.x + engine.gxR * spanNorm * 16f) * d
+                        p.y = (sy + engine.gyR * spanNorm * 16f) * d
                         p.size = t.size * d
                         val ny = clamp((p.y + p.size / 2 - size.height / 2) / (size.height / 2), -1.7f, 1.7f)
                         val ang = ny * tune.maxAngle * 0.017453293f * engine.curve
@@ -900,9 +922,9 @@ fun NativeCoverWallScreen(
                             engine.gyR + t.pressGy,
                             glow,
                             when {
-                                t.span >= 6 -> 1.4f
-                                t.span >= 4 -> 1f
-                                else -> 0.65f
+                                spanNorm >= 0.75f -> 1.4f
+                                spanNorm >= 0.36f -> 1f
+                                else -> 0.7f
                             }
                         )
                     }
@@ -919,7 +941,11 @@ fun NativeCoverWallScreen(
             Modifier
                 .fillMaxWidth()
                 .graphicsLayer { alpha = iconsAlpha }
-                .padding(top = with(density) { barsTop.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
+                .padding(
+                    top = with(density) { focusLayout.topBarPaddingPx.toDp() },
+                    start = with(density) { safeLeft.toDp() } + 14.dp,
+                    end = with(density) { safeRight.toDp() } + 14.dp
+                ),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1139,78 +1165,138 @@ fun NativeCoverWallScreen(
                         onClose = { flipFocus(false) }
                     )
                 }
-            // 默认显示歌词：封面与底部控件之间，随飞行淡入；翻到曲目背面时隐藏。
+            // 默认显示歌词：封面与底部控件之间（或横屏/平板右侧统一分栏），随飞行淡入；翻到曲目背面时隐藏。
             val focusSong = if (preview || !state.hasItem) tile.album.tracks.firstOrNull()
                 else tile.album.tracks.firstOrNull { it.id == state.mediaId }
                     ?: songs.firstOrNull { it.id == state.mediaId }
-            Box(
-                Modifier
-                    .offset(0.dp, with(density) { lyricsTop.toDp() })
-                    .fillMaxWidth()
-                    .height(with(density) { lyricsHeight.toDp() })
-                    .graphicsLayer {
-                        alpha = ((flight.value - 0.64f) / 0.36f).coerceIn(0f, 1f) *
-                            (1f - flip.value) * (1f - pull.value.coerceIn(0f, 1f))
-                        translationY = (1f - flight.value) * 30f * d
-                    }
-            ) {
-                if (!back && !closing && focusSong != null)
-                    InlineLyrics(
-                        song = focusSong,
-                        positionMs = if (preview || !state.hasItem) 0L else state.positionMs,
-                        prefs = prefs,
-                        onSeek = { if (!preview && state.hasItem) cbSeek.value(it) },
-                        isPlaying = state.isPlaybackActive && !preview && state.hasItem,
-                        compact = true,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)
-                    )
+            val playToggleAction = {
+                haptic(2, "播放控制")
+                if (preview) {
+                    preview = false
+                    cbPlay.value(tile.album, 0)
+                } else cbToggle.value()
             }
-            Box(
-                Modifier
-                    .offset(0.dp, with(density) { controlsTop.toDp() })
-                    .fillMaxWidth()
-                    .height(with(density) { controlsHeight.toDp() })
-                    .graphicsLayer {
-                        alpha = ((flight.value - 0.64f) / 0.36f).coerceIn(0f, 1f) *
-                            (1f - flip.value) * (1f - pull.value.coerceIn(0f, 1f))
-                        translationY = (1f - flight.value) * 30f * d
+            val prevAction = {
+                haptic(2, "上一首")
+                cbPrev.value()
+            }
+            val nextAction = {
+                haptic(2, "下一首")
+                val tracks = tile.album.tracks
+                val idx = tracks.indexOfFirst { it.id == state.mediaId }
+                if (idx < 0 || idx >= tracks.size - 1) leaveToRandom() else cbNext.value()
+            }
+            val seekAction: (Long) -> Unit = {
+                haptic(1, "进度", 7)
+                cbSeek.value(it)
+            }
+            if (focusLayout.isWallWide) {
+                Column(
+                    Modifier
+                        .offset(
+                            with(density) { focusLayout.rightPaneX.toDp() },
+                            with(density) { focusLayout.rightPaneTop.toDp() }
+                        )
+                        .width(with(density) { focusLayout.rightPaneW.toDp() })
+                        .height(with(density) { focusLayout.rightPaneH.toDp() })
+                        .graphicsLayer {
+                            alpha = ((flight.value - 0.64f) / 0.36f).coerceIn(0f, 1f) *
+                                (1f - flip.value) * (1f - pull.value.coerceIn(0f, 1f))
+                            translationY = (1f - flight.value) * 30f * d
+                        }
+                ) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(
+                                start = if (focusLayout.isCompactLandscape) 4.dp else 12.dp,
+                                end = if (focusLayout.isCompactLandscape) 46.dp else 12.dp
+                            )
+                    ) {
+                        if (!back && !closing && focusSong != null)
+                            InlineLyrics(
+                                song = focusSong,
+                                positionMs = if (preview || !state.hasItem) 0L else state.positionMs,
+                                prefs = prefs,
+                                onSeek = { if (!preview && state.hasItem) cbSeek.value(it) },
+                                isPlaying = state.isPlaybackActive && !preview && state.hasItem,
+                                compact = true,
+                                modifier = Modifier.fillMaxSize()
+                            )
                     }
-            ) {
-                if (!back && !closing)
-                    WallPlaybackControls(
-                        state,
-                        tile.album,
-                        preview,
-                        coverColor = Color(tile.spec.mainColor),
-                        onToggle = {
-                            haptic(2, "播放控制")
-                            if (preview) {
-                                preview = false
-                                cbPlay.value(tile.album, 0)
-                            } else cbToggle.value()
-                        },
-                        onPrev = {
-                            haptic(2, "上一首")
-                            cbPrev.value()
-                        },
-                        onNext = {
-                            haptic(2, "下一首")
-                            val tracks = tile.album.tracks
-                            val idx = tracks.indexOfFirst { it.id == state.mediaId }
-                            if (idx < 0 || idx >= tracks.size - 1) leaveToRandom() else cbNext.value()
-                        },
-                        onSeek = {
-                            haptic(1, "进度", 7)
-                            cbSeek.value(it)
-                        },
-                        onTracks = { flipFocus(true) }
-                    )
+                    if (!back && !closing)
+                        WallPlaybackControls(
+                            state = state,
+                            album = tile.album,
+                            preview = preview,
+                            coverColor = Color(tile.spec.mainColor),
+                            compact = focusLayout.isCompactLandscape,
+                            wide = !focusLayout.isCompactLandscape,
+                            onToggle = playToggleAction,
+                            onPrev = prevAction,
+                            onNext = nextAction,
+                            onSeek = seekAction,
+                            onTracks = { flipFocus(true) }
+                        )
+                }
+            } else {
+                Box(
+                    Modifier
+                        .offset(with(density) { focusLayout.rightPaneX.toDp() }, with(density) { focusLayout.lyricsTop.toDp() })
+                        .width(with(density) { focusLayout.rightPaneW.toDp() })
+                        .height(with(density) { focusLayout.lyricsHeight.toDp() })
+                        .graphicsLayer {
+                            alpha = ((flight.value - 0.64f) / 0.36f).coerceIn(0f, 1f) *
+                                (1f - flip.value) * (1f - pull.value.coerceIn(0f, 1f))
+                            translationY = (1f - flight.value) * 30f * d
+                        }
+                ) {
+                    if (!back && !closing && focusSong != null)
+                        InlineLyrics(
+                            song = focusSong,
+                            positionMs = if (preview || !state.hasItem) 0L else state.positionMs,
+                            prefs = prefs,
+                            onSeek = { if (!preview && state.hasItem) cbSeek.value(it) },
+                            isPlaying = state.isPlaybackActive && !preview && state.hasItem,
+                            compact = true,
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)
+                        )
+                }
+                Box(
+                    Modifier
+                        .offset(with(density) { focusLayout.rightPaneX.toDp() }, with(density) { focusLayout.controlsTop.toDp() })
+                        .width(with(density) { focusLayout.rightPaneW.toDp() })
+                        .height(with(density) { focusLayout.controlsHeight.toDp() })
+                        .graphicsLayer {
+                            alpha = ((flight.value - 0.64f) / 0.36f).coerceIn(0f, 1f) *
+                                (1f - flip.value) * (1f - pull.value.coerceIn(0f, 1f))
+                            translationY = (1f - flight.value) * 30f * d
+                        }
+                ) {
+                    if (!back && !closing)
+                        WallPlaybackControls(
+                            state = state,
+                            album = tile.album,
+                            preview = preview,
+                            coverColor = Color(tile.spec.mainColor),
+                            onToggle = playToggleAction,
+                            onPrev = prevAction,
+                            onNext = nextAction,
+                            onSeek = seekAction,
+                            onTracks = { flipFocus(true) }
+                        )
+                }
             }
             Row(
                 Modifier
                     .fillMaxWidth()
                     .graphicsLayer { alpha = iconsAlpha }
-                    .padding(top = with(density) { barsTop.toDp() } + 10.dp, start = 14.dp, end = 14.dp),
+                    .padding(
+                        top = with(density) { focusLayout.topBarPaddingPx.toDp() },
+                        start = with(density) { safeLeft.toDp() } + 14.dp,
+                        end = with(density) { safeRight.toDp() } + 14.dp
+                    ),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {

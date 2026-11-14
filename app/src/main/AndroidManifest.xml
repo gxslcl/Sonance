@@ -28,6 +28,8 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- 后台播放与通知 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -189,12 +191,7 @@
             android:exported="false" />
 
         <!--
-          ===== 桌面小组件：五种样式，各自是一个独立的 receiver =====
-
-          之所以拆成五个而不是一个带参数的 provider：系统的小组件选择器是按
-          `<receiver>` + `<meta-data>` 一条条列出来的，用户看到的就是五条
-          「横向控制条 / 封面卡片 / 信息宽卡 / 极简横条 / 大幅卡片」，
-          可以按桌面空间和喜好各挑一个。渲染逻辑全部共用基类。
+          ===== 桌面小组件：5 列保留（5 套）+ 4 列新增（5 套），共计 10 套独立样式 =====
         -->
         <receiver
             android:name=".widget.SonanceWidgetBar"
@@ -254,6 +251,67 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_large_info" />
+        </receiver>
+
+        <!-- 新增 4 列系列（2×1 / 4×1 / 2×2 / 4×2 / 4×4） -->
+        <receiver
+            android:name=".widget.SonanceWidgetBar4"
+            android:exported="false"
+            android:label="@string/widget_label_bar_4">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_bar_4_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetCard4"
+            android:exported="false"
+            android:label="@string/widget_label_card_4">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_card_4_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetWide4"
+            android:exported="false"
+            android:label="@string/widget_label_wide_4">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_wide_4_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetMinimal4"
+            android:exported="false"
+            android:label="@string/widget_label_minimal_4">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_minimal_4_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.SonanceWidgetLarge4"
+            android:exported="false"
+            android:label="@string/widget_label_large_4">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_large_4_info" />
         </receiver>
     <!-- ===== 应用图标变体：同一 MainActivity 的多个别名，运行时只启用一个 ===== -->
         <!-- 均衡器 · 圆弧波形 -->

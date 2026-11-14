@@ -667,11 +667,13 @@ internal class WallLayout(
     val tiles: List<WallTile>,
     val blockEdges: FloatArray,
     val contentH: Float,
-    val maxY: Float
+    val maxY: Float,
+    val cols: Int = 6
 )
 
-private class Tpl(val id: Char, val w: Float, val h: Float, val big: Boolean, val s: Array<IntArray>)
+internal class Tpl(val id: Char, val w: Float, val h: Float, val big: Boolean, val s: Array<IntArray>)
 
+/** 6 列手机竖屏模板（保留经典杂志网格排布）。 */
 private val TPL = arrayOf(
     Tpl('A', 3f, 4f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 2), intArrayOf(4, 2, 2))),
     Tpl('B', 3f, 4f, true, arrayOf(intArrayOf(2, 0, 4), intArrayOf(0, 0, 2), intArrayOf(0, 2, 2))),
@@ -683,19 +685,71 @@ private val TPL = arrayOf(
     Tpl('J', 1f, 6f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 2), intArrayOf(4, 2, 2), intArrayOf(4, 4, 2), intArrayOf(0, 4, 2), intArrayOf(2, 4, 2)))
 )
 
+/** 10 列平板竖屏 / 中等宽屏模板：每行 2–5 张封面，兼顾主视觉大卡与紧凑密度。 */
+private val TPL_10_TABLET = arrayOf(
+    Tpl('P', 3.4f, 2f, false, arrayOf(intArrayOf(0, 0, 2), intArrayOf(2, 0, 2), intArrayOf(4, 0, 2), intArrayOf(6, 0, 2), intArrayOf(8, 0, 2))),
+    Tpl('Q', 2.6f, 4f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 4), intArrayOf(8, 0, 2), intArrayOf(8, 2, 2))),
+    Tpl('R', 2.6f, 4f, true, arrayOf(intArrayOf(2, 0, 4), intArrayOf(6, 0, 4), intArrayOf(0, 0, 2), intArrayOf(0, 2, 2))),
+    Tpl('S', 1.8f, 5f, false, arrayOf(intArrayOf(0, 0, 5), intArrayOf(5, 0, 5))),
+    Tpl('H', 1.1f, 6f, true, arrayOf(intArrayOf(0, 0, 6), intArrayOf(6, 0, 2), intArrayOf(8, 0, 2), intArrayOf(6, 2, 2), intArrayOf(8, 2, 2), intArrayOf(6, 4, 2), intArrayOf(8, 4, 2))),
+    Tpl('K', 1.1f, 6f, true, arrayOf(intArrayOf(4, 0, 6), intArrayOf(0, 0, 2), intArrayOf(2, 0, 2), intArrayOf(0, 2, 2), intArrayOf(2, 2, 2), intArrayOf(0, 4, 2), intArrayOf(2, 4, 2)))
+)
+
+/** 12 列手机横屏矮宽屏模板：单卡最大 4 格，确保任何封面都不超出横屏视口高度，每行 3–6 张。 */
+private val TPL_12_COMPACT = arrayOf(
+    Tpl('U', 3.2f, 3f, false, arrayOf(intArrayOf(0, 0, 3), intArrayOf(3, 0, 3), intArrayOf(6, 0, 3), intArrayOf(9, 0, 3))),
+    Tpl('V', 2.4f, 4f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 4), intArrayOf(8, 0, 4))),
+    Tpl('X', 2.8f, 2f, false, arrayOf(intArrayOf(0, 0, 2), intArrayOf(2, 0, 2), intArrayOf(4, 0, 2), intArrayOf(6, 0, 2), intArrayOf(8, 0, 2), intArrayOf(10, 0, 2))),
+    Tpl('Y', 2.2f, 4f, true, arrayOf(intArrayOf(0, 0, 4), intArrayOf(4, 0, 2), intArrayOf(6, 0, 2), intArrayOf(4, 2, 2), intArrayOf(6, 2, 2), intArrayOf(8, 0, 4))),
+    Tpl('Z', 1.9f, 4f, true, arrayOf(intArrayOf(4, 0, 4), intArrayOf(0, 0, 2), intArrayOf(2, 0, 2), intArrayOf(0, 2, 2), intArrayOf(2, 2, 2), intArrayOf(8, 0, 2), intArrayOf(10, 0, 2), intArrayOf(8, 2, 2), intArrayOf(10, 2, 2))),
+    Tpl('M', 1.6f, 6f, true, arrayOf(
+        intArrayOf(0, 0, 4), intArrayOf(0, 4, 2), intArrayOf(2, 4, 2),
+        intArrayOf(4, 0, 2), intArrayOf(6, 0, 2), intArrayOf(4, 2, 4),
+        intArrayOf(8, 0, 4), intArrayOf(8, 4, 2), intArrayOf(10, 4, 2)
+    ))
+)
+
+/** 12 列平板横屏 / 桌面宽屏模板：每行 3–6 张，穿插少量 6×6 半屏大主图，错落感与信息量兼得。 */
+private val TPL_12_WIDE = arrayOf(
+    *TPL_12_COMPACT,
+    Tpl('E', 1.2f, 6f, true, arrayOf(intArrayOf(0, 0, 6), intArrayOf(6, 0, 3), intArrayOf(9, 0, 3), intArrayOf(6, 3, 3), intArrayOf(9, 3, 3))),
+    Tpl('W', 1.2f, 6f, true, arrayOf(intArrayOf(6, 0, 6), intArrayOf(0, 0, 3), intArrayOf(3, 0, 3), intArrayOf(0, 3, 3), intArrayOf(3, 3, 3))),
+    Tpl('N', 0.9f, 6f, true, arrayOf(intArrayOf(3, 0, 6), intArrayOf(0, 0, 3), intArrayOf(0, 3, 3), intArrayOf(9, 0, 3), intArrayOf(9, 3, 3)))
+)
+
+internal class WallGridSpec(
+    val cols: Int,
+    val pad: Float,
+    val bigSpanCutoff: Int,
+    val templates: Array<Tpl>
+)
+
+internal fun resolveWallGrid(widthCss: Float, heightCss: Float, isTablet: Boolean = false): WallGridSpec {
+    val landscape = widthCss > heightCss
+    val compactLandscape = widthCss >= 560f && landscape && heightCss < 520f
+    return when {
+        compactLandscape -> WallGridSpec(cols = 12, pad = 16f, bigSpanCutoff = 4, templates = TPL_12_COMPACT)
+        widthCss >= 900f -> WallGridSpec(cols = 12, pad = 22f, bigSpanCutoff = 4, templates = TPL_12_WIDE)
+        isTablet || widthCss >= 560f -> WallGridSpec(cols = 10, pad = 16f, bigSpanCutoff = 4, templates = TPL_10_TABLET)
+        else -> WallGridSpec(cols = 6, pad = 10f, bigSpanCutoff = 4, templates = TPL)
+    }
+}
+
 /** 在 CSS 像素空间铺墙（widthCss / heightCss 均为 CSS px），卡片自顶部冲顶铺满。 */
 internal fun buildWallLayout(
     albums: List<WallAlbum>,
     widthCss: Float,
     heightCss: Float,
     gapCss: Float,
-    seed: Int
+    seed: Int,
+    isTablet: Boolean = false
 ): WallLayout {
-    val pad = 10f
+    val grid = resolveWallGrid(widthCss, heightCss, isTablet)
+    val pad = grid.pad
     val gap = gapCss
     val top = 0f
     val bottom = 150f
-    val unit = (widthCss - pad * 2f + gap) / 6f
+    val unit = (widthCss - pad * 2f + gap) / grid.cols.toFloat()
     val r = WallRng(seed)
     fun shuffle(list: MutableList<WallAlbum>): MutableList<WallAlbum> {
         for (i in list.size - 1 downTo 1) {
@@ -714,15 +768,16 @@ internal fun buildWallLayout(
     val edges = ArrayList<Float>()
     var y = top
     var last: Tpl? = null
-    var lastE = -99
+    var lastHero = -99
     var bi = 0
     val specs = HashMap<String, CoverSpec>()
+    fun isRareHero(id: Char) = id == 'E' || id == 'H' || id == 'K' || id == 'W' || id == 'N'
     while (fav.size + nor.size > 0) {
         val remain = fav.size + nor.size
-        var c = TPL.filter { it.s.size <= remain && (last == null || it.id != last!!.id) }
-        if (last != null && last!!.big) c = c.filter { it.id != 'E' }
-        if (bi - lastE < 5) c = c.filter { it.id != 'E' }
-        if (c.isEmpty()) c = TPL.filter { it.s.size <= remain }
+        var c = grid.templates.filter { it.s.size <= remain && (last == null || it.id != last!!.id) }
+        if (last != null && last!!.big) c = c.filter { !isRareHero(it.id) }
+        if (bi - lastHero < 4) c = c.filter { !isRareHero(it.id) }
+        if (c.isEmpty()) c = grid.templates.filter { it.s.size <= remain }
         if (c.isEmpty()) break
         val tot = c.sumOf { it.w.toDouble() }.toFloat()
         var x = r.next() * tot
@@ -730,19 +785,42 @@ internal fun buildWallLayout(
         for (t in c) { x -= t.w; if (x <= 0f) { tp = t; break } }
         edges.add(y)
         for (cell in tp.s) {
-            val a = take(cell[2] >= 4) ?: break
+            val a = take(cell[2] >= grid.bigSpanCutoff) ?: break
             val spec = specs.getOrPut(a.key) { decorateCover(a.name, a.artist) }
             tiles.add(WallTile(a, spec, pad + cell[0] * unit, y + cell[1] * unit, cell[2] * unit - gap, cell[2]))
         }
         y += tp.h * unit
-        if (tp.id == 'E') lastE = bi
+        if (isRareHero(tp.id)) lastHero = bi
         last = tp
         bi++
+    }
+    // 若最后剩余数量少于最小模板块数（例如 10/12 列仅余 1~2 张），排成一行居中等分封面，不丢专辑
+    val leftoverCount = fav.size + nor.size
+    if (leftoverCount > 0) {
+        edges.add(y)
+        val spanUnits = (grid.cols / leftoverCount).coerceIn(2, 4)
+        val totalUnits = leftoverCount * spanUnits
+        val startOffsetUnits = (grid.cols - totalUnits) / 2f
+        for (i in 0 until leftoverCount) {
+            val a = take(spanUnits >= grid.bigSpanCutoff) ?: break
+            val spec = specs.getOrPut(a.key) { decorateCover(a.name, a.artist) }
+            tiles.add(
+                WallTile(
+                    a,
+                    spec,
+                    pad + (startOffsetUnits + i * spanUnits) * unit,
+                    y,
+                    spanUnits * unit - gap,
+                    spanUnits
+                )
+            )
+        }
+        y += spanUnits * unit
     }
     edges.add(y)
     val contentH = y - gap + bottom
     val maxY = max(0f, contentH - heightCss)
-    return WallLayout(tiles, edges.toFloatArray(), contentH, maxY)
+    return WallLayout(tiles, edges.toFloatArray(), contentH, maxY, grid.cols)
 }
 
 // ===== 调参（snapshot 支撑，滑杆即时生效） =====

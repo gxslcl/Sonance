@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -134,7 +135,7 @@ fun OnlinePlaylistScreen(
         // 只有"这轮下载属于本歌单"才显示进度条：下载跨页面存活，用户可能已经翻到
         // 别的歌单，把上一个歌单的进度摆在这里会让人以为在下这一个
         if (vm.playlistDownloadActive && vm.playlistDownloadOwner == playlist.remoteId) {
-            DownloadProgress(
+            OnlineDownloadProgressBanner(
                 done = vm.playlistDownloadDone,
                 total = vm.playlistDownloadTotal,
                 saved = vm.playlistDownloadSaved,
@@ -148,7 +149,7 @@ fun OnlinePlaylistScreen(
         if (ready && tracks.isNotEmpty() && !loading) {
             val allSelected = selectedIds.size >= tracks.size
             val selectedDownloadable = selectedTracks.count { it.playable && !vm.isDownloaded(it) }
-            TrackListToolbar(
+            OnlineTrackListToolbar(
                 selectionMode = selectionMode,
                 selectedCount = selectedTracks.size,
                 totalCount = tracks.size,
@@ -253,8 +254,8 @@ fun OnlinePlaylistScreen(
     }
 
     pendingDownloadTracks?.let { targetTracks ->
-        DownloadConfirmDialog(
-            playlist = playlist,
+        OnlineDownloadConfirmDialog(
+            collectionTitle = "「${playlist.name}」",
             tracks = targetTracks,
             isPartial = selectionMode && targetTracks.size < tracks.size,
             vm = vm,
@@ -269,13 +270,16 @@ fun OnlinePlaylistScreen(
 }
 
 @Composable
-private fun TrackListToolbar(
+internal fun OnlineTrackListToolbar(
     selectionMode: Boolean,
     selectedCount: Int,
     totalCount: Int,
     downloadableCount: Int,
     allSelected: Boolean,
     downloading: Boolean,
+    hintText: String? = null,
+    leadingNote: String? = null,
+    trailingContent: (@Composable RowScope.() -> Unit)? = null,
     onEnterSelect: () -> Unit,
     onToggleSelectAll: () -> Unit,
     onDownloadSelected: () -> Unit,
@@ -287,21 +291,48 @@ private fun TrackListToolbar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
+                .padding(horizontal = 16.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             if (!selectionMode) {
-                SmallToolbarButton(
-                    label = "多选",
-                    icon = SonanceIcons.Check,
-                    onClick = onEnterSelect
-                )
-                Text(
-                    text = "共 $totalCount 首",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textDim
-                )
+                Row(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SmallToolbarButton(
+                        label = "多选",
+                        icon = SonanceIcons.Check,
+                        accentIconTint = true,
+                        onClick = onEnterSelect
+                    )
+                    if (!leadingNote.isNullOrBlank()) {
+                        Text(
+                            text = leadingNote,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.textDim,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (trailingContent != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        content = trailingContent
+                    )
+                } else {
+                    Text(
+                        text = hintText ?: "共 $totalCount 首",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textDim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             } else {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -309,11 +340,12 @@ private fun TrackListToolbar(
                 ) {
                     SmallToolbarButton(
                         label = if (allSelected) "全不选" else "全选",
-                        highlighted = allSelected,
+                        tonal = allSelected,
                         onClick = onToggleSelectAll
                     )
                     SmallToolbarButton(
                         label = "取消",
+                        mutedText = true,
                         onClick = onCancel
                     )
                     if (selectedCount > 0) {
@@ -345,11 +377,13 @@ private fun TrackListToolbar(
                 }
             }
         }
-        HorizontalDivider(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            thickness = 0.5.dp,
-            color = skin.border
-        )
+        if (selectionMode) {
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                thickness = 0.5.dp,
+                color = skin.border.copy(alpha = 0.4f)
+            )
+        }
     }
 }
 
@@ -358,41 +392,53 @@ private fun SmallToolbarButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     highlighted: Boolean = false,
+    tonal: Boolean = false,
+    accentIconTint: Boolean = false,
+    mutedText: Boolean = false,
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val skin = LocalSkin.current
-    val shape = RoundedCornerShape(7.dp)
+    val shape = RoundedCornerShape(16.dp)
     val bg = when {
         highlighted && enabled -> skin.accent
-        else -> skin.surface2.copy(alpha = 0.72f)
+        tonal && enabled -> skin.accentGlow
+        else -> skin.surface2.copy(alpha = if (skin.isLight) 0.85f else 0.72f)
     }
     val fg = when {
         highlighted && enabled -> skin.onAccent
-        else -> skin.text
+        tonal && enabled -> skin.accent
+        mutedText -> skin.textMuted
+        else -> skin.textDim
     }
     Row(
         modifier = Modifier
             .clip(shape)
             .background(bg)
-            .border(0.8.dp, if (highlighted && enabled) skin.accent else skin.border, shape)
+            .then(
+                if (tonal && enabled) {
+                    Modifier.border(0.8.dp, skin.accent.copy(alpha = 0.45f), shape)
+                } else {
+                    Modifier
+                }
+            )
             .alpha(if (enabled) 1f else 0.36f)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 11.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         if (icon != null) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = fg,
-                modifier = Modifier.size(15.dp)
+                tint = if (accentIconTint && !highlighted && enabled) skin.accent else fg,
+                modifier = Modifier.size(13.dp)
             )
         }
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Medium,
             color = fg,
             maxLines = 1
@@ -549,7 +595,7 @@ private fun PlaylistActionButton(
  * 自绘能避开这个版本坑，样式也和皮肤一致。
  */
 @Composable
-private fun DownloadProgress(
+internal fun OnlineDownloadProgressBanner(
     done: Int,
     total: Int,
     saved: Int,
@@ -617,8 +663,8 @@ private fun DownloadProgress(
  * 弹窗把「下几首、跳过几首、为什么跳过」讲清楚，用户才好决定。
  */
 @Composable
-private fun DownloadConfirmDialog(
-    playlist: RemotePlaylist,
+internal fun OnlineDownloadConfirmDialog(
+    collectionTitle: String,
     tracks: List<RemoteTrack>,
     isPartial: Boolean,
     vm: SonanceViewModel,
@@ -637,7 +683,7 @@ private fun DownloadConfirmDialog(
         containerColor = skin.surface2,
         title = {
             Text(
-                text = if (isPartial) "下载所选曲目" else "下载整个歌单",
+                text = if (isPartial) "下载所选曲目" else "下载全部曲目",
                 style = MaterialTheme.typography.titleMedium,
                 color = skin.text
             )
@@ -645,7 +691,7 @@ private fun DownloadConfirmDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    text = "「${playlist.name}」",
+                    text = collectionTitle,
                     style = MaterialTheme.typography.bodyMedium,
                     color = skin.text,
                     maxLines = 2,

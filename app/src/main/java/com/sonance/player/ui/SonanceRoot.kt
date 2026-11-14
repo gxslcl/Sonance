@@ -1,5 +1,8 @@
 package com.sonance.player.ui
 
+import com.sonance.player.ui.screens.DlnaCastSheet
+import com.sonance.player.ui.screens.DlnaHubScreen
+
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
@@ -125,7 +128,7 @@ import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
 import com.sonance.player.ui.screens.SongsScreen
 import com.sonance.player.ui.screens.inPager
-import com.sonance.player.ui.sheets.EqualizerSheet
+import com.sonance.player.ui.sheets.EqualizerStudioScreen
 import com.sonance.player.ui.sheets.QueueSheet
 import com.sonance.player.ui.sheets.SleepTimerSheet
 import com.sonance.player.ui.theme.GlassStyle
@@ -202,6 +205,9 @@ sealed interface Detail {
      */
     data object BiliCache : Detail
 
+    /** D-LAN（DLNA / UPnP 局域网曲库与无线投屏） */
+    data object Dlna : Detail
+
     /**
      * 在线歌单详情。
      *
@@ -235,7 +241,16 @@ fun SonanceRoot(vm: SonanceViewModel) {
     }
 
     SonanceTheme(vm.skin) {
-        val playerState by vm.player.state.collectAsStateWithLifecycle()
+        val rawPlayerState by vm.player.state.collectAsStateWithLifecycle()
+        val playerState = remember(
+            rawPlayerState,
+            vm.dlnaActiveRenderer,
+            vm.dlnaTransportState,
+            vm.dlnaCastPositionMs,
+            vm.dlnaCastDurationMs
+        ) {
+            vm.effectivePlayerState(rawPlayerState)
+        }
         PermissionGate(vm) {
             Shell(vm, playerState)
         }
@@ -579,6 +594,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
     var eqOpen by remember { mutableStateOf(false) }
     var sleepOpen by remember { mutableStateOf(false) }
+    var dlnaCastSheetOpen by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Detail?>(null) }
 
     /**
@@ -642,7 +658,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     // onlineRevision / externalRevision 是必须的 key：在线歌与外部直开歌不在 vm.songs 里，
     // 队列页 / 播放页要按 id 反查它们，映射必须重建。
-    val songMap = remember(vm.songs, vm.onlineRevision, vm.externalRevision) { vm.songMap() }
+    val songMap = remember(vm.songs, vm.onlineRevision, vm.externalRevision, vm.dlnaRevision) { vm.songMap() }
 
     // 分页器的数据源必须和播放器时间轴严格 1:1：
     // `queueIds` 里可能有被隐藏/清理、或扫描后已不在 songs 里的曲目，
@@ -928,17 +944,19 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onClose = {
                     fullPlayerOpen = false
                 },
-                onPlayAt = { vm.player.playAt(it, toggleIfCurrent = false) },
+                onPlayAt = { vm.dispatchPlayAt(it, toggleIfCurrent = false) },
                 onToggleFavorite = { vm.toggleFavorite(it) },
                 onCyclePlayMode = { vm.cyclePlayMode() },
-                onPrev = { vm.previousOrRandom() },
-                onPlayPause = { vm.player.togglePlay() },
-                onNext = { vm.nextOrRandom() },
-                onSeek = { vm.player.seekTo(it) },
+                onPrev = { vm.dispatchPrevious(allowRandomFallback = true) },
+                onPlayPause = { vm.dispatchPlayPause() },
+                onNext = { vm.dispatchNext(allowRandomFallback = true) },
+                onSeek = { vm.dispatchSeekTo(it) },
                 onVolume = { vm.player.setVolume(it) },
                 onOpenQueue = { queueOpen = true },
                 onOpenCover = { vm.openCoverPicker(playerState.mediaId) },
                 onOpenEqualizer = openEqualizer,
+                dlnaActive = vm.dlnaActiveRenderer != null,
+                onOpenDlna = { dlnaCastSheetOpen = true },
                 onOpenSleepTimer = { sleepOpen = true },
                 onOpenVinyl = { vinylOpen = true },
                 coveredByVinyl = suppressVinylUnderlay,
@@ -980,9 +998,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 queue = queue,
                 onClose = { vinylOpen = false },
                 // 唱臂抬起时 150ms 极短淡出，音频渐弱与「啪嗒」机械声衔接更温润
-                onPlayAt = { vm.player.playAt(it, fadeMs = 150) },
-                onTogglePlay = { vm.player.togglePlay() },
-                onSeek = { vm.player.seekTo(it) },
+                onPlayAt = { vm.dispatchPlayAt(it, fadeMs = 150) },
+                onTogglePlay = { vm.dispatchPlayPause() },
+                onSeek = { vm.dispatchSeekTo(it) },
                 onVolume = { vm.player.setVolume(it) },
                 // 黑胶页模式按钮走主界面同一套三态逻辑；页面自己弹风格化 toast，抑制原生 toast
                 onPlayMode = { vm.cyclePlayMode(quiet = true) }
@@ -1009,11 +1027,23 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                     if (song != null) vm.playOrdered(wa.tracks, song)
                 },
                 onQueueAlbum = { wa -> wa.tracks.asReversed().forEach { vm.player.playNext(it) } },
-                onTogglePlay = { vm.player.togglePlay() },
-                onPrev = { vm.player.previous() },
-                onNext = { vm.player.next() },
-                onSeek = { vm.player.seekTo(it) }
+                onTogglePlay = { vm.dispatchPlayPause() },
+                onPrev = { vm.dispatchPrevious() },
+                onNext = { vm.dispatchNext() },
+                onSeek = { vm.dispatchSeekTo(it) }
             )
+        }
+
+        // ===== 全屏音效工作室（位于播放页 zIndex(20) 之上、轻提示 zIndex(30) 之下） =====
+        AnimatedVisibility(
+            visible = eqOpen,
+            enter = slideInVertically(tween(260)) { it / 6 } + fadeIn(tween(220)),
+            exit = slideOutVertically(tween(210)) { it / 8 } + fadeOut(tween(180)),
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(26f)
+        ) {
+            EqualizerStudioScreen(vm = vm, onDismiss = { eqOpen = false })
         }
 
         // ===== 轻提示 =====
@@ -1058,7 +1088,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             queue = queue,
             state = playerState,
             onDismiss = { queueOpen = false },
-            onPlayAt = { vm.player.playAt(it) },
+            onPlayAt = { vm.dispatchPlayAt(it) },
             onRemoveAt = { vm.player.removeAt(it) },
             onShuffle = { vm.toggleShuffle() },
             onClear = {
@@ -1068,12 +1098,19 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         )
     }
 
-    if (eqOpen) {
-        EqualizerSheet(vm = vm, onDismiss = { eqOpen = false })
-    }
-
     if (sleepOpen) {
         SleepTimerSheet(vm = vm, onDismiss = { sleepOpen = false })
+    }
+
+    if (dlnaCastSheetOpen) {
+        DlnaCastSheet(
+            vm = vm,
+            onOpenDlnaHub = {
+                fullPlayerOpen = false
+                detail = Detail.Dlna
+            },
+            onDismiss = { dlnaCastSheetOpen = false }
+        )
     }
 
     // 打开专辑详情时收起全屏播放页
@@ -1107,9 +1144,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
 /**
  * 悬浮迷你播放条占掉的那一条高度（内容要给它让出来）。
- * 卡片 62dp 内容 + 10dp 下边距，留 76dp 刚好不压住列表最后一行。
+ * 含独立时间行后初始预留 86dp（后续由 onSizeChanged 实时量取），避免第一帧压住列表底行。
  */
-private val MINI_FLOAT_RESERVE = 76.dp
+private val MINI_FLOAT_RESERVE = 86.dp
 
 /* ============================================================
  * 手机布局：顶栏 + 内容 + 迷你播放条 + 底部导航
@@ -1301,9 +1338,9 @@ private fun CompactLayout(
                     state = playerState,
                     song = null,
                     onOpen = onOpenFullPlayer,
-                    onPlayPause = { vm.player.togglePlay() },
-                    onNext = { vm.player.next() },
-                    onPrev = { vm.player.previous() },
+                    onPlayPause = { vm.dispatchPlayPause() },
+                    onNext = { vm.dispatchNext() },
+                    onPrev = { vm.dispatchPrevious() },
                     style = vm.miniPlayerStyle,
                     glass = vm.miniGlassStyle,
                     glassBlur = vm.miniGlassBlur,
@@ -1337,6 +1374,10 @@ private fun CompactLayout(
                 onOpenWall = {
                     showViewSheet = false
                     onOpenCoverWall()
+                },
+                onOpenDlna = {
+                    showViewSheet = false
+                    onOpenDetail(Detail.Dlna)
                 }
             )
         }
@@ -1357,7 +1398,8 @@ private fun CompactLayout(
 private fun ViewPickerSheet(
     current: LibraryTab,
     onPick: (LibraryTab) -> Unit,
-    onOpenWall: () -> Unit
+    onOpenWall: () -> Unit,
+    onOpenDlna: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val options = listOf(
@@ -1438,6 +1480,33 @@ private fun ViewPickerSheet(
                 )
             }
         }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenDlna() }
+                .padding(horizontal = 24.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Cast,
+                contentDescription = null,
+                tint = skin.textDim,
+                modifier = Modifier.size(20.dp)
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "D-LAN 共享与投屏",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    color = skin.text
+                )
+                Text(
+                    text = "浏览局域网曲库并投屏到音箱或电视",
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
+        }
     }
 }
 
@@ -1472,6 +1541,9 @@ private fun MediumLayout(
             storageFraction = 0f,
             // 沉浸皮肤下侧栏也半透明，与右侧面板同一层背景；系统栏内边距由侧栏内部处理
             translucent = skin.immersive,
+            dlnaVisible = true,
+            dlnaSelected = detail is Detail.Dlna,
+            onOpenDlna = { onOpenDetail(Detail.Dlna) },
             modifier = Modifier
         )
         Row(Modifier.width(1.dp).fillMaxHeight().background(skin.border)) {}
@@ -1518,9 +1590,9 @@ private fun MediumLayout(
                     state = playerState,
                     song = null,
                     onOpen = onOpenFullPlayer,
-                    onPlayPause = { vm.player.togglePlay() },
-                    onNext = { vm.player.next() },
-                    onPrev = { vm.player.previous() },
+                    onPlayPause = { vm.dispatchPlayPause() },
+                    onNext = { vm.dispatchNext() },
+                    onPrev = { vm.dispatchPrevious() },
                     style = vm.miniPlayerStyle,
                     glass = vm.miniGlassStyle,
                     glassBlur = vm.miniGlassBlur,
@@ -1589,6 +1661,9 @@ private fun ExpandedLayout(
             biliVisible = true,
             biliSelected = detail is Detail.BiliCache,
             onOpenBili = { onOpenDetail(Detail.BiliCache) },
+            dlnaVisible = true,
+            dlnaSelected = detail is Detail.Dlna,
+            onOpenDlna = { onOpenDetail(Detail.Dlna) },
             appName = vm.appDisplayName,
             logoId = vm.topBarLogoId,
             onBrandDoubleTap = { showBrandEditor = true },
@@ -1674,9 +1749,9 @@ private fun ExpandedLayout(
                                 state = playerState,
                                 song = null,
                                 onOpen = onOpenFullPlayer,
-                                onPlayPause = { vm.player.togglePlay() },
-                                onNext = { vm.player.next() },
-                                onPrev = { vm.player.previous() },
+                                onPlayPause = { vm.dispatchPlayPause() },
+                                onNext = { vm.dispatchNext() },
+                                onPrev = { vm.dispatchPrevious() },
                                 style = vm.miniPlayerStyle,
                                 glass = vm.miniGlassStyle,
                                 glassBlur = vm.miniGlassBlur,
@@ -1705,11 +1780,11 @@ private fun ExpandedLayout(
                     // 原来这里传 null，导致只能展示封面
                     song = vm.songById(playerState.mediaId),
                     onCyclePlayMode = { vm.cyclePlayMode() },
-                    onPrev = { vm.previousOrRandom() },
-                    onPlayPause = { vm.player.togglePlay() },
-                    onNext = { vm.nextOrRandom() },
+                    onPrev = { vm.dispatchPrevious(allowRandomFallback = true) },
+                    onPlayPause = { vm.dispatchPlayPause() },
+                    onNext = { vm.dispatchNext(allowRandomFallback = true) },
                     onVolume = { vm.player.setVolume(it) },
-                    onSeek = { vm.player.seekTo(it) },
+                    onSeek = { vm.dispatchSeekTo(it) },
                     onOpenQueue = onOpenQueue,
                     onFavorite = {
                         vm.songById(playerState.mediaId)?.let { vm.toggleFavorite(it.id) }
@@ -1734,11 +1809,11 @@ private fun ExpandedLayout(
                     song = null,
                     onOpen = onOpenFullPlayer,
                     onCyclePlayMode = { vm.cyclePlayMode() },
-                    onPrev = { vm.player.previous() },
-                    onPlayPause = { vm.player.togglePlay() },
-                    onNext = { vm.player.next() },
+                    onPrev = { vm.dispatchPrevious() },
+                    onPlayPause = { vm.dispatchPlayPause() },
+                    onNext = { vm.dispatchNext() },
                     onVolume = { vm.player.setVolume(it) },
-                    onSeek = { vm.player.seekTo(it) },
+                    onSeek = { vm.dispatchSeekTo(it) },
                     onOpenQueue = onOpenQueue,
                     modifier = Modifier.navigationBarsPadding()
                 )
@@ -1867,6 +1942,7 @@ private fun ScreenBody(
             )
 
             Detail.BiliCache -> BiliCacheScreen()
+            Detail.Dlna -> DlnaHubScreen(vm = vm)
         }
         return
     }
@@ -1916,7 +1992,8 @@ private fun ScreenBody(
 
         LibraryTab.SETTINGS -> SettingsScreen(
             vm = vm,
-            onOpenEqualizer = onOpenEqualizer
+            onOpenEqualizer = onOpenEqualizer,
+            onOpenDlna = { onOpenDetail(Detail.Dlna) }
         )
     }
 }
@@ -1951,6 +2028,7 @@ private fun detailTitle(vm: SonanceViewModel, detail: Detail): String = when (de
     is Detail.FolderDetail -> vm.folderByPath(detail.path)?.name ?: "文件夹"
     is Detail.PlaylistDetail -> detail.playlist.name
     Detail.BiliCache -> "B站缓存"
+    Detail.Dlna -> "D-LAN 共享与投屏"
 }
 
 private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when (detail) {
@@ -1966,6 +2044,7 @@ private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when 
     }
 
     Detail.BiliCache -> "本机离线缓存"
+    Detail.Dlna -> vm.dlnaActiveRenderer?.let { "当前投屏：${it.friendlyName}" } ?: "局域网 DLNA / UPnP 媒体库与音箱投屏"
 }
 
 /**

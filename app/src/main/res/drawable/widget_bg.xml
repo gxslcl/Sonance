@@ -1,19 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  小组件通用底：大圆角（24dp）+ 酷狗概念版风格清透青蓝渐变。
-  只用于「刚放上去、还没拿到 RemoteViews 更新」的预览；真正显示时会被
-  WidgetRenderer 画的取色渐变位图替换。
+  STYLE A 小组件预览底：克制深色烟熏磨砂玻璃 + 22dp 圆角 + 内敛 1dp 玻璃边。
+  刚拖放上去或桌面选择器预览时使用，真正刷新后由 WidgetRenderer 绘制封面氛围底图替换。
 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <gradient
         android:angle="315"
-        android:centerColor="#FF1BB8D8"
-        android:endColor="#FF1C8CD6"
-        android:startColor="#FF35D8EB"
+        android:centerColor="#EB20232B"
+        android:endColor="#F2161920"
+        android:startColor="#E8282C36"
         android:type="linear" />
-    <corners android:radius="24dp" />
+    <corners android:radius="22dp" />
     <stroke
         android:width="1dp"
-        android:color="#48FFFFFF" />
+        android:color="#26FFFFFF" />
 </shape>

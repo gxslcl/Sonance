@@ -232,6 +232,8 @@ fun FullPlayer(
     onOpenCover: () -> Unit = {},
     /** 打开均衡器面板 */
     onOpenEqualizer: () -> Unit = {},
+    dlnaActive: Boolean = false,
+    onOpenDlna: () -> Unit = {},
     /** 打开睡眠定时器面板 */
     onOpenSleepTimer: () -> Unit = {},
     /** 打开沉浸式黑胶播放模式 */
@@ -971,6 +973,8 @@ fun FullPlayer(
                         onOpenQueue = onOpenQueue,
                         onOpenCover = onOpenCover,
                         onOpenEqualizer = onOpenEqualizer,
+                        dlnaActive = dlnaActive,
+                        onOpenDlna = onOpenDlna,
                         eqEnabled = eqEnabled,
                         playbackSpeed = playbackSpeed,
                         onSetSpeed = onSetSpeed,
@@ -2009,6 +2013,8 @@ private fun PlayerPage(
     onOpenCover: () -> Unit,
     /** 打开均衡器面板 */
     onOpenEqualizer: () -> Unit,
+    dlnaActive: Boolean = false,
+    onOpenDlna: () -> Unit = {},
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean,
     /** 当前播放速度（0.5–2.5 倍） */
@@ -2062,6 +2068,8 @@ private fun PlayerPage(
         val boxW = maxWidth
         val boxH = maxHeight
         val isWide = boxW >= 620.dp && boxW > boxH
+        val isTablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        val isLandscapeWindow = boxW > boxH
         /**
          * 手机横屏细长屏（20:9 转过来那种）。这个形态高度特别矮，
          * 沿用通用横屏参数会让封面几乎撑满整屏、内容重心偏下。
@@ -2096,7 +2104,7 @@ private fun PlayerPage(
                     ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(
-                    if (compactPhone) 56.dp else 40.dp
+                    if (compactPhone) 56.dp else 48.dp
                 )
             ) {
                 Box(
@@ -2190,18 +2198,22 @@ private fun PlayerPage(
                             )
                         }
                     }
-                    // 静止放在封面外右下角正下方，脱离 coverScale 缩放层以消除呼吸抖动
+                    // 横屏 / 宽屏模式：静止放在封面外右边靠底部，脱离 coverScale 缩放层以消除呼吸抖动
                     if (!lyricsExpanded && showHiResBadge) {
                         val density = LocalDensity.current
-                        val badgeOffsetY = with(density) {
-                            -COVER_LIFT_PX + hiResBadgeTotalDp(hiResBadgeSize).toPx() + 10.dp.toPx()
-                        }
+                        val badgeGapPx = with(density) { 8.dp.toPx() }
+                        val badgeTotalPx = with(density) { hiResBadgeTotalDp(hiResBadgeSize).toPx() }
+                        val badgeOffsetX = badgeTotalPx + badgeGapPx
+                        val badgeOffsetY = -COVER_LIFT_PX
                         Box(Modifier.size(landscapeSide)) {
                             HiResGoldBadge(
                                 badgeSize = hiResBadgeSize,
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
-                                    .graphicsLayer { translationY = badgeOffsetY }
+                                    .graphicsLayer {
+                                        translationX = badgeOffsetX
+                                        translationY = badgeOffsetY
+                                    }
                             )
                         }
                     }
@@ -2250,7 +2262,9 @@ private fun PlayerPage(
                     Spacer(Modifier.height(16.dp))
                     BottomRow(
                         volume, onVolume,
-                        onOpenEqualizer
+                        onOpenEqualizer,
+                        dlnaActive,
+                        onOpenDlna
                     )
                     }
                 }
@@ -2263,6 +2277,7 @@ private fun PlayerPage(
                     .padding(horizontal = 26.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                var portraitAreaWidthPx by remember { mutableIntStateOf(0) }
                 var portraitAreaHeightPx by remember { mutableIntStateOf(0) }
                 Box(
                     modifier = Modifier
@@ -2276,6 +2291,7 @@ private fun PlayerPage(
                         // 竖屏这里可以直接报主区域矩形：封面被分页内容的
                         // min constraints 撑满了这一块，两者是同一个矩形。
                         .onGloballyPositioned {
+                            portraitAreaWidthPx = it.size.width
                             portraitAreaHeightPx = it.size.height
                             onCoverBounds(it.boundsInRoot().translate(Offset(0f, -COVER_LIFT_PX)))
                         },
@@ -2343,7 +2359,7 @@ private fun PlayerPage(
                             }
                         }
                     }
-                    // 静止放在封面外右下角正下方（不进入 CoverLift / coverScale，杜绝呼吸抖动）
+                    // 手机竖屏：放在封面外右下角正下方；平板 / 横向容器且右侧余量充足时：移动到封面右边靠底部
                     if (!lyricsExpanded && showHiResBadge) {
                         val density = LocalDensity.current
                         val coverSidePx = with(density) { portraitSide.toPx() }
@@ -2365,10 +2381,20 @@ private fun PlayerPage(
                                             alpha = 0f
                                         } else {
                                             val h = portraitAreaHeightPx.toFloat()
+                                            val w = portraitAreaWidthPx.toFloat()
                                             val side = minOf(coverSidePx, h)
-                                            val desiredY = (h - side) * 0.41f - COVER_LIFT_PX + side + gapPx
+                                            val coverBottomY = (h - side) * 0.41f - COVER_LIFT_PX + side
                                             val maxY = (h - badgeTotalPx - bottomMarginPx).coerceAtLeast(0f)
-                                            translationY = desiredY.coerceIn(0f, maxY)
+                                            val sideMarginPx = ((w - coverSidePx) / 2f).coerceAtLeast(0f)
+                                            val placeAtRightBottom = (isTablet || isLandscapeWindow) &&
+                                                sideMarginPx >= badgeTotalPx + gapPx
+                                            if (placeAtRightBottom) {
+                                                translationX = badgeTotalPx + gapPx
+                                                translationY = (coverBottomY - badgeTotalPx).coerceIn(0f, maxY)
+                                            } else {
+                                                translationX = 0f
+                                                translationY = (coverBottomY + gapPx).coerceIn(0f, maxY)
+                                            }
                                         }
                                     }
                             )
@@ -2415,7 +2441,9 @@ private fun PlayerPage(
                 Spacer(Modifier.height(12.dp))
                 BottomRow(
                     volume, onVolume,
-                    onOpenEqualizer
+                    onOpenEqualizer,
+                    dlnaActive,
+                    onOpenDlna
                 )
                 }
                 // 距底部 20dp（再叠加系统导航栏安全区）
@@ -2658,26 +2686,58 @@ private fun formatSpeed(v: Float): String =
 private fun BottomRow(
     volume: Float,
     onVolume: (Float) -> Unit,
-    onOpenEqualizer: () -> Unit
+    onOpenEqualizer: () -> Unit,
+    dlnaActive: Boolean = false,
+    onOpenDlna: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     Row(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        verticalAlignment = Alignment.CenterVertically
     ) {
         VolumeSlider(
             volume = volume,
             onVolumeChange = onVolume,
             modifier = Modifier.weight(1f)
         )
-        IconAction(
-            icon = SonanceIcons.Equalizer,
-            contentDescription = "均衡器",
-            onClick = onOpenEqualizer,
-            iconSize = 20.dp,
-            tint = skin.accent
-        )
+        Spacer(Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .clickable {
+                    hapticTick(ctx)
+                    onOpenEqualizer()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Equalizer,
+                contentDescription = "均衡器",
+                tint = skin.accent,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(Modifier.width(4.dp))
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(if (dlnaActive) skin.accentDim else Color.Transparent)
+                .clickable {
+                    hapticTick(ctx)
+                    onOpenDlna()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Cast,
+                contentDescription = "D-LAN 无线投屏",
+                tint = if (dlnaActive) skin.accent else skin.textDim,
+                modifier = Modifier.size(20.dp)
+            )
+        }
     }
 }
 

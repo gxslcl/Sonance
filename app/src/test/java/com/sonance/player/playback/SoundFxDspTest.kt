@@ -1,5 +1,9 @@
 package com.sonance.player.playback
 
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -27,19 +31,28 @@ class SoundFxDspTest {
             assertTrue(p.id.isNotBlank())
             assertTrue(p.description.isNotBlank())
         }
-        // 双扬外放档必须真的开了虚拟低音和限幅，否则"专门处理"就是空话
-        val speaker = SoundPresets.DUAL_SPEAKER
-        assertTrue(speaker.fx.virtualBass > 0f && speaker.fx.virtualBass <= 0.7f)
-        assertTrue(speaker.fx.limiter)
-        // 外放档不再靠前置增益"变小声"，而是靠切掉放不出的超低频腾余量
-        assertTrue(speaker.eqDb[0] < -3f)
+        // 手机外放恢复为原始温和饱满曲线与效果参数，其它档位保持不变
+        val speaker = SoundPresets.PHONE_SPEAKER
+        assertEquals(
+            SoundFxParams(virtualBass = 0.65f, stereoWidth = 1.18f, limiter = true),
+            speaker.fx
+        )
+        assertTrue(speaker.eqDb.contentEquals(floatArrayOf(-4.5f, -1.5f, 1.2f, 3.2f, 3.6f, 1.2f, -1.8f, -1.2f, 1.5f, 2.2f)))
+        // 新增耳机、平板、车载与全景预设检查（适度 BS2B 避免挤压声场）
+        assertTrue(SoundPresets.IN_EAR.fx.crossfeed in 0.12f..0.25f)
+        assertTrue(SoundPresets.OVER_EAR.fx.crossfeed > SoundPresets.IN_EAR.fx.crossfeed)
+        assertTrue(SoundPresets.TABLET_SPEAKER.fx.speakerHpfHz in 42f..60f)
+        assertTrue(SoundPresets.CAR_AUDIO.fx.speakerHpfHz in 30f..60f)
+        assertTrue(SoundPresets.PANORAMA.fx.stereoWidth > 1.4f)
+        assertEquals(0f, SoundPresets.EXTREME_HIFI.fx.reverbWet, 0f)
     }
 
     @Test
     fun `store round trip and dirty data clamp`() {
         val p = SoundFxParams(
             virtualBass = 0.7f, reverbWet = 0.2f, reverbDecay = 0.4f,
-            stereoWidth = 1.2f, preampDb = -4f, limiter = true
+            stereoWidth = 1.2f, preampDb = -4f, limiter = true,
+            crossfeed = 0.42f, speakerHpfHz = 115f
         )
         val back = SoundFxParams.fromStore(SoundFxParams.toStore(p))
         assertEquals(p.virtualBass, back.virtualBass, 0.001f)
@@ -47,13 +60,18 @@ class SoundFxDspTest {
         assertEquals(p.stereoWidth, back.stereoWidth, 0.001f)
         assertEquals(p.preampDb, back.preampDb, 0.001f)
         assertEquals(p.limiter, back.limiter)
+        assertEquals(p.crossfeed, back.crossfeed, 0.001f)
+        assertEquals(p.speakerHpfHz, back.speakerHpfHz, 0.001f)
 
         assertEquals(SoundFxParams.NEUTRAL, SoundFxParams.fromStore(null))
         assertEquals(SoundFxParams.NEUTRAL, SoundFxParams.fromStore("1,2"))
-        val dirty = SoundFxParams.fromStore("99,99,99,99,99,1,99")
+        val dirty = SoundFxParams.fromStore("99,99,99,99,99,1,99,5,999")
         assertEquals(1f, dirty.virtualBass, 0.001f)
         assertEquals(0.6f, dirty.reverbWet, 0.001f)
         assertEquals(0f, dirty.preampDb, 0.001f)
+        assertEquals(1f, dirty.crossfeed, 0.001f)
+        assertEquals(160f, dirty.speakerHpfHz, 0.001f)
+        assertEquals(0f, SoundFxParams(speakerHpfHz = 10f).clamp().speakerHpfHz, 0f)
     }
 
     @Test
@@ -153,6 +171,153 @@ class SoundFxDspTest {
         assertTrue(buf.all { it.isFinite() && abs(it) <= 1.01f })
         dsp.reset()
         assertTrue(buf.all { it.isFinite() })
+    }
+
+    @Test
+    fun `virtual bass decays cleanly without negative dc thump`() {
+        val sr = 48_000
+        val burstFrames = sr / 5
+        val silenceFrames = sr / 5
+        val total = burstFrames + silenceFrames
+        val buf = FloatArray(total) { i ->
+            if (i < burstFrames) (0.7f * sin(2.0 * PI * 60.0 * i / sr)).toFloat() else 0f
+        }
+        val orig = buf.copyOf()
+        VirtualBass(sr).process(buf, total, 1, 0.9f)
+        // 验证纯衰减末尾几乎无残余负偏置，无轰头直流台阶
+        val tailDiff = FloatArray(silenceFrames / 2) { buf[burstFrames + silenceFrames / 2 + it] - orig[burstFrames + silenceFrames / 2 + it] }
+        val maxAbsTail = tailDiff.maxOf { abs(it) }
+        assertTrue("虚拟低音在鼓点衰减后不应残留负向直流偏移: $maxAbsTail", maxAbsTail < 0.006f)
+    }
+
+    @Test
+    fun `binaural crossfeed bleeds opposite bass subtly without smearing centered voice`() {
+        val sr = 48_000
+        val frames = sr / 4
+        val cf = BinauralCrossfeed(sr)
+        val hardLeft = FloatArray(frames * 2) { i ->
+            if (i % 2 == 0) (0.6f * sin(2.0 * PI * 250.0 * (i / 2) / sr)).toFloat() else 0f
+        }
+        for (f in 0 until frames) cf.processFrame(hardLeft, f * 2, 0.8f)
+        val rightBleed = FloatArray(frames / 2) { hardLeft[(frames / 2 + it) * 2 + 1] }
+        assertTrue("交叉馈送应把低频软串入对侧耳朵: ${rms(rightBleed)}", rms(rightBleed) > 0.04)
+
+        cf.reset()
+        val centered = FloatArray(frames * 2) { i ->
+            (0.5f * sin(2.0 * PI * 1000.0 * (i / 2) / sr)).toFloat()
+        }
+        for (f in 0 until frames) cf.processFrame(centered, f * 2, 0.8f)
+        val midOut = FloatArray(frames / 2) { centered[(frames / 2 + it) * 2] }
+        assertEquals("正中人声能量不应被大幅改变", 0.5 / sqrt(2.0), rms(midOut), 0.03)
+    }
+
+    @Test
+    fun `speaker protection HPF cuts sub-bass after extracting virtual bass harmonics`() {
+        val sr = 48_000
+        val frames = sr
+        val dsp = SoundFxDsp(sr, 2)
+        dsp.setTarget(SoundFxParams(virtualBass = 0.7f, speakerHpfHz = 115f))
+        val buf = FloatArray(frames * 2) { i ->
+            (0.6f * sin(2.0 * PI * 50.0 * (i / 2) / sr)).toFloat()
+        }
+        dsp.process(buf, frames)
+        val monoTail = FloatArray(frames / 2) { buf[(frames / 2 + it) * 2] }
+        val amp50 = toneAmplitude(monoTail, sr, 50.0, 0)
+        val amp100 = toneAmplitude(monoTail, sr, 100.0, 0)
+        val amp150 = toneAmplitude(monoTail, sr, 150.0, 0)
+        assertTrue("115 Hz 高通应大幅衰减 50 Hz 打底超低频: $amp50", amp50 < 0.16)
+        assertTrue("高通前提取的 2f/3f 谐波应被保留: ${amp100 + amp150}", amp100 + amp150 > 0.01)
+    }
+
+    @Test
+    fun `speaker 65Hz HPF cuts 31Hz rumble while preserving 85Hz chest punch`() {
+        val sr = 48_000
+        val frames = sr
+        val dsp = SoundFxDsp(sr, 2)
+        val params = SoundFxParams(virtualBass = 0.70f, stereoWidth = 1.18f, limiter = true, speakerHpfHz = 65f)
+        dsp.setTarget(params)
+        val sub = FloatArray(frames * 2) { (0.5f * sin(2.0 * PI * 31.0 * (it / 2) / sr)).toFloat() }
+        dsp.process(sub, frames)
+        val subTail = FloatArray(frames / 2) { sub[(frames / 2 + it) * 2] }
+        val amp31 = toneAmplitude(subTail, sr, 31.0, 0)
+        assertTrue("65 Hz 高通应明显拦截 31 Hz 伤喇叭共振: $amp31", amp31 < 0.15)
+
+        dsp.reset()
+        dsp.setTarget(params)
+        val punch = FloatArray(frames * 2) { (0.5f * sin(2.0 * PI * 85.0 * (it / 2) / sr)).toFloat() }
+        dsp.process(punch, frames)
+        val punchTail = FloatArray(frames / 2) { punch[(frames / 2 + it) * 2] }
+        val amp85 = toneAmplitude(punchTail, sr, 85.0, 0)
+        assertTrue("实际能发出的 85 Hz 鼓点肉感不应被误切: $amp85", amp85 > 0.35)
+    }
+
+    @Test
+    fun `karaoke keeps bass kick and mono compatibility while attenuating centered vocals`() {
+        val sr = 48_000
+        val frames = sr / 2
+        KaraokeBus.enabled = true
+        try {
+            val kp = KaraokeProcessor()
+            kp.configure(AudioProcessor.AudioFormat(sr, 2, C.ENCODING_PCM_16BIT))
+            kp.flush()
+            val input = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
+            for (f in 0 until frames) {
+                val bass = 0.35 * sin(2.0 * PI * 75.0 * f / sr)
+                val vocal = 0.35 * sin(2.0 * PI * 900.0 * f / sr)
+                val pannedGuitar = 0.25 * sin(2.0 * PI * 2200.0 * f / sr)
+                val l = ((bass + vocal + pannedGuitar) * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                val r = ((bass + vocal) * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                input.putShort(l)
+                input.putShort(r)
+            }
+            input.flip()
+            kp.queueInput(input)
+            val out = kp.output.order(ByteOrder.nativeOrder())
+            val lOut = FloatArray(frames)
+            val monoOut = FloatArray(frames)
+            for (f in 0 until frames) {
+                val l = out.short / 32768f
+                val r = out.short / 32768f
+                lOut[f] = l
+                monoOut[f] = (l + r) * 0.5f
+            }
+            val start = frames / 4
+            val bassLeft = toneAmplitude(lOut, sr, 75.0, start)
+            val vocalLeft = toneAmplitude(lOut, sr, 900.0, start)
+            val guitarLeft = toneAmplitude(lOut, sr, 2200.0, start)
+            val guitarMono = toneAmplitude(monoOut, sr, 2200.0, start)
+            assertTrue("底鼓 75 Hz 不应被卡拉OK 模式砍空: $bassLeft", bassLeft > 0.28)
+            assertTrue("居中 900 Hz 人声应显著削弱: $vocalLeft", vocalLeft < 0.08)
+            assertTrue("左声道偏置吉他应清晰保留: $guitarLeft", guitarLeft > 0.12)
+            assertTrue("单声道和声不能抵消成静音，吉他在单声道亦保留: $guitarMono", guitarMono > 0.05)
+            kp.reset()
+        } finally {
+            KaraokeBus.enabled = false
+        }
+    }
+
+    @Test
+    fun `pcm codec supports 24bit and 32bit hi-res pcm round trip`() {
+        val samples = 16
+        val src = FloatArray(samples) { (it - 8) * 0.1f }
+        // 24-bit packed
+        val buf24 = ByteBuffer.allocateDirect(samples * 3).order(ByteOrder.LITTLE_ENDIAN)
+        val out24 = ByteBuffer.allocateDirect(samples * 3).order(ByteOrder.LITTLE_ENDIAN)
+        PcmCodec.writeFromFloat(src, buf24, samples * 3, samples, C.ENCODING_PCM_24BIT, ShortArray(0), IntArray(0), applyDither = false, ditherSeed = 1)
+        val decoded24 = FloatArray(samples)
+        PcmCodec.readToFloat(buf24, decoded24, samples, C.ENCODING_PCM_24BIT)
+        for (i in 0 until samples) assertEquals(src[i], decoded24[i], 1e-5f)
+
+        // 32-bit int
+        val buf32 = ByteBuffer.allocateDirect(samples * 4).order(ByteOrder.LITTLE_ENDIAN)
+        PcmCodec.writeFromFloat(src, buf32, samples * 4, samples, C.ENCODING_PCM_32BIT, ShortArray(0), IntArray(samples), applyDither = false, ditherSeed = 1)
+        val decoded32 = FloatArray(samples)
+        PcmCodec.readToFloat(buf32, decoded32, samples, C.ENCODING_PCM_32BIT)
+        for (i in 0 until samples) assertEquals(src[i], decoded32[i], 1e-6f)
+
+        assertTrue(PcmCodec.isSupportedEncoding(C.ENCODING_PCM_24BIT))
+        assertTrue(PcmCodec.isSupportedEncoding(C.ENCODING_PCM_32BIT))
+        assertTrue(out24.capacity() == samples * 3)
     }
 
     private fun rms(a: FloatArray): Double =

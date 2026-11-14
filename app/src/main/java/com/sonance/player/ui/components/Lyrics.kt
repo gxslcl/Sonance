@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -85,6 +86,7 @@ import com.sonance.player.data.LyricsResult
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
+import com.sonance.player.data.formatDuration
 import com.sonance.player.data.indexAt
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.icon.SonanceIcons
@@ -141,6 +143,13 @@ fun LyricsOverlay(
     var showSearch by remember { mutableStateOf(false) }
     var searching by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
+
+    // 导入 / 删除等成功提示 1 秒后自动收起，错误提示稍多停留方便看清原因
+    LaunchedEffect(notice) {
+        val current = notice ?: return@LaunchedEffect
+        delay(if (current.startsWith("已")) 1_000L else 2_800L)
+        if (notice == current) notice = null
+    }
 
     /**
      * 「外观」面板是否展开。
@@ -664,6 +673,7 @@ fun LyricsOverlay(
             initialArtist = song.artist,
             onlineEnabled = onlineEnabled,
             hasLyrics = lyrics != null,
+            durationMs = song.durationMs,
             onDismiss = { showSearch = false },
             onConfirm = { title, artist ->
                 showSearch = false
@@ -1940,12 +1950,42 @@ private fun EmptyLyrics(song: Song, onlineEnabled: Boolean, onManualSearch: () -
  * 手动搜索对话框
  * ============================================================ */
 
+/** 生成可直接粘贴给 AI 的 LRC 歌词生成提示词（带歌名、歌手与时长约束）。 */
+internal fun buildAiLrcPrompt(
+    title: String,
+    artist: String,
+    durationMs: Long = 0L
+): String = buildString {
+    val cleanTitle = title.trim().ifBlank { "未知歌曲" }
+    val cleanArtist = artist.trim()
+    appendLine("请帮我为下面这首歌曲生成标准 LRC 格式（含准确或合理节奏时间轴）的歌词：")
+    appendLine("- 歌曲名称：$cleanTitle")
+    if (cleanArtist.isNotBlank()) appendLine("- 歌手/艺术家：$cleanArtist")
+    if (durationMs > 0L) appendLine("- 歌曲总时长：${formatDuration(durationMs)}")
+    appendLine()
+    appendLine("格式要求（非常重要，请严格遵守）：")
+    appendLine("1. 时间轴：必须使用标准 LRC 时间标签 `[mm:ss.xx]`（例如 `[00:11.20]`），所有时间轴严格递增，且最后一句时间不超过歌曲总时长。")
+    val arTag = if (cleanArtist.isNotBlank()) "、`[ar:$cleanArtist]`" else ""
+    appendLine("2. 元数据：可在开头包含 `[ti:$cleanTitle]`$arTag，每行只放一句歌词。")
+    appendLine("3. 双语歌词规范（若为外文歌曲需要翻译）：原文和翻译必须放在同一行，中文翻译前面绝对不要单独换行或再加 `[mm:ss.xx]` 时间标签；原文与译文之间只留一个空格，不要加破折号（-）、斜杠（/）或竖线（|）等分隔符。")
+    appendLine("4. 标点符号：歌词及中文翻译的句尾绝对不要加句号或逗号。")
+    appendLine("5. 输出纯净度：不要输出任何解释说明、标题或 Markdown 代码块，只直接输出纯 LRC 文本内容，方便我一键复制粘贴导入播放器。")
+    appendLine()
+    appendLine("标准双语 LRC 示例格式如下：")
+    appendLine("[00:11.20]When I was young I'd listen to the radio 当我年少时，我会聆听收音机")
+    appendLine("[00:18.50]Waiting for my favorite songs 等待我最爱的歌曲")
+    appendLine("[00:25.80]When they played I'd sing along 当它们播放时，我会跟着一起唱")
+    appendLine("[00:32.60]It made me smile 那让我微笑")
+    appendLine("[00:39.50]But it's just like yesterday 但这一切恍如昨日")
+}.trimEnd()
+
 @Composable
 private fun LyricsSearchDialog(
     initialTitle: String,
     initialArtist: String,
     onlineEnabled: Boolean,
     hasLyrics: Boolean,
+    durationMs: Long = 0L,
     onDismiss: () -> Unit,
     onConfirm: (title: String, artist: String) -> Unit,
     onImportFile: () -> Unit,
@@ -2047,6 +2087,13 @@ private fun LyricsSearchDialog(
                         style = MaterialTheme.typography.labelSmall,
                         color = skin.textMuted
                     )
+                    val clipboard = LocalClipboardManager.current
+                    var aiPromptCopied by remember { mutableStateOf(false) }
+                    LaunchedEffect(aiPromptCopied) {
+                        if (!aiPromptCopied) return@LaunchedEffect
+                        delay(1_200L)
+                        aiPromptCopied = false
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2064,6 +2111,25 @@ private fun LyricsSearchDialog(
                             skin = skin
                         )
                     }
+                    Spacer(Modifier.height(8.dp))
+                    DialogActionChip(
+                        label = if (aiPromptCopied) "已复制 AI 生成词提示词 ✓" else "一键复制 AI 提示词（生成 LRC）",
+                        onClick = {
+                            clipboard.setText(
+                                AnnotatedString(
+                                    buildAiLrcPrompt(
+                                        title = title.trim().ifBlank { initialTitle },
+                                        artist = artist.trim().ifBlank { initialArtist },
+                                        durationMs = durationMs
+                                    )
+                                )
+                            )
+                            aiPromptCopied = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        highlighted = aiPromptCopied,
+                        skin = skin
+                    )
                     if (hasLyrics) {
                         DialogActionChip(
                             label = if (confirmDelete) "再点一次确认删除当前歌词" else "删除当前歌词",

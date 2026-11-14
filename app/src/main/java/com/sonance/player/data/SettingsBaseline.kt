@@ -92,6 +92,7 @@ object SettingsBaseline {
         Spec("sound_fx_enabled", Type.BOOLEAN),
         Spec("sound_preset_id", Type.STRING),
         Spec("sound_fx_params", Type.STRING),
+        Spec("sound_auto_route", Type.BOOLEAN),
 
         // ---- 歌词 ----
         Spec("lyrics_t2s", Type.BOOLEAN),

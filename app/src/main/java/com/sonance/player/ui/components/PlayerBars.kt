@@ -307,6 +307,7 @@ fun MiniPlayer(
             // 环形进度只给悬浮卡片（经典贴底那条通栏本来就只有线），
             // 具体显示环还是线由用户在设置里定，见 MiniProgressStyle
             progressRing = style == MiniPlayerStyle.FLOAT && progressStyle.showsRing,
+            showTime = style == MiniPlayerStyle.FLOAT,
             onPrev = onPrev,
             onPlayPause = onPlayPause,
             onNext = onNext
@@ -579,6 +580,8 @@ private fun RowScope.MiniPlayerBody(
     coverScale: Float = 1f,
     /** 播放键外圈套环形进度（悬浮玻璃卡片专用） */
     progressRing: Boolean = false,
+    /** 在歌手行下方独立显示当前进度 / 总时长（悬浮卡片专用） */
+    showTime: Boolean = false,
     onPrev: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit
@@ -613,6 +616,26 @@ private fun RowScope.MiniPlayerBody(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        if (showTime && state.hasItem) {
+            Spacer(Modifier.height(2.dp))
+            val totalMs = if (state.durationMs > 0L) state.durationMs else (song?.durationMs ?: 0L)
+            val timeText = if (totalMs > 0L) {
+                "${formatDuration(state.positionMs)} / ${formatDuration(totalMs)}"
+            } else {
+                formatDuration(state.positionMs)
+            }
+            Text(
+                text = timeText,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = skin.accent.copy(alpha = 0.90f),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip
+            )
+        }
     }
     CtrlButton(
         icon = SonanceIcons.Prev,

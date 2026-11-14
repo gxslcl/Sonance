@@ -73,6 +73,15 @@ import com.sonance.player.data.IndexKey
 import com.sonance.player.data.IndexKeys
 import com.sonance.player.data.PinyinIndex
 import com.sonance.player.data.ScanFilters
+import com.sonance.player.data.dlna.DlnaAudioItem
+import com.sonance.player.data.dlna.DlnaBrowseEntry
+import com.sonance.player.data.dlna.DlnaClient
+import com.sonance.player.data.dlna.DlnaContainer
+import com.sonance.player.data.dlna.DlnaDevice
+import com.sonance.player.data.dlna.DlnaHttpMediaServer
+import com.sonance.player.data.dlna.DlnaTransportState
+import com.sonance.player.data.dlna.guessAudioMimeType
+import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.data.decodeSongsFromJson
 import com.sonance.player.data.findDuplicates
 import com.sonance.player.data.encodeSongsToJson
@@ -88,7 +97,9 @@ import com.sonance.player.data.netease.NeteaseAccount
 import com.sonance.player.data.netease.NeteaseAuth
 import com.sonance.player.data.netease.NeteaseExplore
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import android.content.ContentUris
 import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.netease.NeteaseQuality
 import com.sonance.player.data.netease.NeteaseStream
@@ -109,6 +120,8 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqBus
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.playback.AudioOutputRoute
+import com.sonance.player.playback.OutputAudioRouter
 import com.sonance.player.playback.SoundFxBus
 import com.sonance.player.playback.SoundFxParams
 import com.sonance.player.playback.SoundPreset
@@ -635,6 +648,64 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private var externalRequestSeq = 0L
 
+    // ===== D-LAN（DLNA / UPnP 局域网媒体库 + 投屏控制）=====
+
+    data class DlnaBreadcrumb(val objectId: String, val title: String)
+
+    private val dlnaClient by lazy { DlnaClient(getApplication()) }
+    private val dlnaMediaServer by lazy { DlnaHttpMediaServer(getApplication()) }
+
+    /** 局域网 DLNA 曲目 id → [Song]。声明在 init 前，与 [onlineSongMap] 同理。 */
+    private val dlnaSongMap = mutableStateMapOf<Long, Song>()
+    private val dlnaMimeMap = HashMap<Long, String>()
+
+    /** DLNA 曲目映射版本号，驱动 `SonanceRoot` 中 `songMap` 重建 */
+    var dlnaRevision by mutableIntStateOf(0)
+        private set
+
+    var dlnaScanning by mutableStateOf(false)
+        private set
+    var dlnaManualAdding by mutableStateOf(false)
+        private set
+    var dlnaHasScannedOnce by mutableStateOf(false)
+        private set
+    var dlnaDevices by mutableStateOf<List<DlnaDevice>>(emptyList())
+        private set
+    var dlnaSelectedServer by mutableStateOf<DlnaDevice?>(null)
+        private set
+    var dlnaBrowseStack by mutableStateOf<List<DlnaBreadcrumb>>(emptyList())
+        private set
+    var dlnaEntries by mutableStateOf<List<DlnaBrowseEntry>>(emptyList())
+        private set
+    var dlnaBrowseLoading by mutableStateOf(false)
+        private set
+    var dlnaError by mutableStateOf<String?>(null)
+        private set
+
+    /** 当前已连接的 DLNA 投屏渲染器（null = 本机播放） */
+    var dlnaActiveRenderer by mutableStateOf<DlnaDevice?>(null)
+        private set
+    var dlnaTransportState by mutableStateOf(DlnaTransportState.STOPPED)
+        private set
+    var dlnaCastPositionMs by mutableLongStateOf(0L)
+        private set
+    var dlnaCastDurationMs by mutableLongStateOf(0L)
+        private set
+    var dlnaCastVolume by mutableIntStateOf(-1)
+        private set
+    var dlnaBusy by mutableStateOf(false)
+        private set
+
+    private var dlnaDiscoverJob: Job? = null
+    private var dlnaBrowseJob: Job? = null
+    private var dlnaPollJob: Job? = null
+    private var dlnaCastJob: Job? = null
+    private var dlnaVolumeJob: Job? = null
+    private var dlnaObservedPlayingForCurrent = false
+    private var dlnaUserPausedOrStopped = false
+    private var dlnaLastCastAtMs = 0L
+    private var dlnaLastPollRelMs = 0L
+
     /**
      * 当前登录的网易云账号；null = 未登录。
      *
@@ -697,7 +768,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
         // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
         player.onPlaybackEnded = {
-            if (player.state.value.queueIds.size <= 1) randomListenLikeWall()
+            if (dlnaActiveRenderer == null && player.state.value.queueIds.size <= 1) {
+                randomListenLikeWall()
+            }
         }
         player.onSongStarted = { id ->
             // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
@@ -705,6 +778,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             songStartedJob?.cancel()
             songStartedJob = viewModelScope.launch {
                 delay(360)
+                val startedSong = songById(id)
+                val isDlnaTrack = startedSong?.isDlna == true
                 // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
                 // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
                 if (prefs.playToastEnabled) {
@@ -721,9 +796,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     // 不清的话恢复时会读到一份过期的在线现场，走错分支
                     prefs.lastOnlineSongJson = null
                     prefs.onlineQueueJson = null
-                } else if (isRemoteSongId(id)) {
+                } else if (isRemoteSongId(id) && !isDlnaTrack) {
                     // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
-                    songById(id)?.toStoredOrNull()?.let { stored ->
+                    startedSong?.toStoredOrNull()?.let { stored ->
                         prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
                         prefs.lastPlayedOnline = true
                         prefs.playPositionMs = 0L
@@ -731,7 +806,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 recentEntries = prefs.recentEntries()
                 val st = player.state.value
-                if (st.queueIds.isNotEmpty() && !isExternalSongId(st.mediaId) && st.queueIds.none { isExternalSongId(it) }) {
+                val queueHasTransient = isExternalSongId(st.mediaId) ||
+                    isDlnaTrack ||
+                    st.queueIds.any { isExternalSongId(it) || songById(it)?.isDlna == true }
+                if (st.queueIds.isNotEmpty() && !queueHasTransient) {
                     if (isRemoteSongId(st.mediaId)) {
                         val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
                         if (stored.isNotEmpty()) {
@@ -745,20 +823,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         prefs.playQueueIndex = st.queueIndex
                     }
                 }
-                if (!isExternalSongId(id)) prefs.playPositionMs = 0L
+                if (!isExternalSongId(id) && !isDlnaTrack) prefs.playPositionMs = 0L
                 // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
                 // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
-                songById(id)?.let {
-                    player.refreshCurrentArtwork(it)
-                    ensureCover(it)
+                startedSong?.let { song ->
+                    player.refreshCurrentArtwork(song)
+                    ensureCover(song)
                     // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
-                    maybeDownload(it)
+                    maybeDownload(song)
                     // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
-                    resolveStreamIfMissing(it)
+                    resolveStreamIfMissing(song)
                     // 顺带预取队列后续曲目的真实流地址，避免切歌时 ExoPlayer 预加载兜底 30s 外链
-                    prefetchNextOnlineStreams(it)
+                    prefetchNextOnlineStreams(song)
                     // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
-                    publishLockScreenLyrics(it)
+                    publishLockScreenLyrics(song)
+                    // 若正处于 D-LAN 远端投屏会话，自动把当前曲目推到远端设备并保持本机静音
+                    dlnaActiveRenderer?.let { renderer ->
+                        if (player.state.value.isPlaying) player.pause()
+                        castSongToDlnaInternal(song, renderer, notifyConnected = false)
+                    }
                 }
             }
         }
@@ -3939,8 +4022,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 所以「多等一下」就能出声，而不是弹「找不到文件」。
      */
     private fun resolveStreamIfMissing(song: Song) {
-        if (song.isLocal) {
-            // 本地歌没有"在线音质"这回事；不清会把上一首的标签留在播放页上
+        if (song.isLocal || song.isDlna) {
+            // 本地与 D-LAN 局域网曲目不走在线音质档位标签
             nowPlayingQuality = null
             return
         }
@@ -4598,12 +4681,51 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 可播的、没存过的才下；VIP / 下架的跳过并计数，不报错（它们本来也播不了）。
      */
     fun downloadPlaylistTracks(tracks: List<RemoteTrack> = playlistTracks) {
+        startTrackDownloadBatch(tracks = tracks, ownerKey = playlistDetail?.remoteId)
+    }
+
+    /** 在线搜索多选批量下载。 */
+    fun downloadSearchTracks(tracks: List<RemoteTrack>) {
+        startTrackDownloadBatch(tracks = tracks, ownerKey = DOWNLOAD_OWNER_SEARCH)
+    }
+
+    /** 长按在线搜索单曲时立即触发单曲下载到本地。 */
+    fun downloadSingleOnlineTrack(track: RemoteTrack) {
+        val src = onlineSource ?: run {
+            showToast("请先开启在线音乐")
+            return
+        }
+        if (!track.playable) {
+            showToast("「${track.title}」暂无可播音源，无法下载")
+            return
+        }
+        val key = OnlineDownloader.downloadKeyOf(src.id, track.remoteId)
+        if (key != null && key in prefs.downloadedKeys()) {
+            showToast("「${track.title}」已保存到本地曲库")
+            return
+        }
+        startTrackDownloadBatch(
+            tracks = listOf(track),
+            ownerKey = DOWNLOAD_OWNER_SEARCH,
+            singleLabel = track.title
+        )
+    }
+
+    private fun startTrackDownloadBatch(
+        tracks: List<RemoteTrack>,
+        ownerKey: String?,
+        singleLabel: String? = null
+    ) {
         val src = onlineSource ?: return
         if (playlistDownloadActive) {
             showToast("正在下载队列中的歌曲，请稍候")
             return
         }
         if (tracks.isEmpty()) return
+
+        if (singleLabel != null) {
+            showToast("开始下载「$singleLabel」")
+        }
 
         playlistDownloadJob = viewModelScope.launch {
             val app = getApplication<Application>()
@@ -4619,8 +4741,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             playlistDownloadSkipped = tracks.size - targets.size
             playlistDownloadFailed = 0
             playlistDownloadActive = true
-            // 记下"这轮属于哪个歌单"。取的是发起时的那个，之后用户翻到别的歌单也不受影响
-            playlistDownloadOwner = playlistDetail?.remoteId
+            // 记下"这轮属于哪个歌单 / 搜索列表"。取的是发起时的 owner，切页不会串台
+            playlistDownloadOwner = ownerKey
             try {
                 for (track in targets) {
                     if (!isActive) break
@@ -4666,14 +4788,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 playlistDownloadOwner = null
                 // 有东西落盘才重扫 —— 全跳过时扫一次纯属浪费
                 if (playlistDownloadSaved > 0) rescanAfterDownload()
-                val tail = buildString {
-                    if (playlistDownloadSkipped > 0) append(" · 跳过 ${playlistDownloadSkipped}")
-                    if (playlistDownloadFailed > 0) append(" · 失败 ${playlistDownloadFailed}")
+                if (singleLabel != null) {
+                    val msg = when {
+                        !isActive -> "已取消下载「$singleLabel」"
+                        playlistDownloadSaved > 0 -> "已保存「$singleLabel」到本地"
+                        playlistDownloadFailed > 0 -> "下载「$singleLabel」失败，请稍后重试"
+                        else -> "「$singleLabel」暂无可保存音源"
+                    }
+                    showToast(msg)
+                } else {
+                    val tail = buildString {
+                        if (playlistDownloadSkipped > 0) append(" · 跳过 ${playlistDownloadSkipped}")
+                        if (playlistDownloadFailed > 0) append(" · 失败 ${playlistDownloadFailed}")
+                    }
+                    showToast(
+                        if (!isActive) "已取消 · 新存 ${playlistDownloadSaved} 首$tail"
+                        else "下载完成 · 新存 ${playlistDownloadSaved} 首$tail"
+                    )
                 }
-                showToast(
-                    if (!isActive) "已取消 · 新存 ${playlistDownloadSaved} 首$tail"
-                    else "歌单下载完成 · 新存 ${playlistDownloadSaved} 首$tail"
-                )
             }
         }
     }
@@ -4789,7 +4921,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun songById(id: Long): Song? =
-        songs.firstOrNull { it.id == id } ?: onlineSongMap[id] ?: externalSongMap[id]
+        songs.firstOrNull { it.id == id } ?: onlineSongMap[id] ?: externalSongMap[id] ?: dlnaSongMap[id]
 
     fun albumById(albumId: Long): Album? = albums.firstOrNull { it.albumId == albumId }
 
@@ -4950,6 +5082,30 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var soundFxBypassed by mutableStateOf(false)
         private set
 
+    var currentOutputRoute by mutableStateOf(OutputAudioRouter.detectCurrentRoute(app))
+        private set
+
+    var autoPresetByOutputEnabled by mutableStateOf(prefs.autoPresetByOutputEnabled)
+        private set
+
+    private val outputAudioRouter = OutputAudioRouter(app) { route ->
+        currentOutputRoute = route
+        if (autoPresetByOutputEnabled) {
+            val savedId = prefs.presetIdForRoute(route.id)
+            val targetPreset = if (savedId != null) {
+                SoundPresets.fromId(savedId)
+            } else {
+                recommendedPresetForRoute(route)
+            }
+            if (targetPreset.id != soundPreset.id ||
+                (targetPreset.id != SoundPresets.OFF.id && !soundFxEnabled)
+            ) {
+                applySoundPreset(targetPreset, saveToRoute = false)
+                showToast("${route.label} · ${targetPreset.name}")
+            }
+        }
+    }
+
     // 又一个独立 init：必须放在上面几个属性之后，否则会被初值覆盖（和 EQ 那段同理）。
     init {
         soundPreset = SoundPresets.fromId(prefs.soundPresetId)
@@ -4959,10 +5115,37 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         soundFxEnabled = prefs.soundFxEnabled
         if (!restored.custom) prefs.soundFxParams = SoundFxParams.toStore(restored.params)
         pushSoundFx()
+        runCatching { outputAudioRouter.start() }
+        currentOutputRoute = outputAudioRouter.currentRoute()
+    }
+
+    private fun recommendedPresetForRoute(route: AudioOutputRoute): SoundPreset = when (route) {
+        AudioOutputRoute.PHONE_SPEAKER -> SoundPresets.PHONE_SPEAKER
+        AudioOutputRoute.TABLET_SPEAKER -> SoundPresets.TABLET_SPEAKER
+        AudioOutputRoute.WIRED_HEADPHONE -> SoundPresets.IN_EAR
+        AudioOutputRoute.BLUETOOTH -> SoundPresets.OFF
+        AudioOutputRoute.USB_DAC -> SoundPresets.OFF
+    }
+
+    fun toggleAutoPresetByOutput(on: Boolean) {
+        autoPresetByOutputEnabled = on
+        prefs.autoPresetByOutputEnabled = on
+        if (on) {
+            val activeId = if (soundFxEnabled) soundPreset.id else SoundPresets.OFF.id
+            prefs.setPresetIdForRoute(currentOutputRoute.id, activeId)
+            showToast("已开启按输出设备自动记忆（当前：${currentOutputRoute.label}）")
+        } else {
+            showToast("已关闭按设备自动切换")
+        }
     }
 
     /** 选中一套音效：同时写入 EQ 曲线与效果参数 */
     fun chooseSoundPreset(preset: SoundPreset) {
+        applySoundPreset(preset, saveToRoute = true)
+        showToast(if (soundFxEnabled) "音效 · ${preset.name}" else "已切回原声")
+    }
+
+    private fun applySoundPreset(preset: SoundPreset, saveToRoute: Boolean) {
         resumeSoundAfterComparison()
         soundPreset = preset
         soundFxParams = preset.fx.clamp()
@@ -4981,9 +5164,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.soundPresetId = preset.id
         prefs.soundFxParams = SoundFxParams.toStore(soundFxParams)
         prefs.soundFxEnabled = soundFxEnabled
+        if (saveToRoute && autoPresetByOutputEnabled) {
+            prefs.setPresetIdForRoute(currentOutputRoute.id, preset.id)
+        }
         pushEq()
         pushSoundFx()
-        showToast(if (soundFxEnabled) "音效 · ${preset.name}" else "已切回原声")
     }
 
     fun toggleSoundFx(on: Boolean) {
@@ -4994,6 +5179,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         soundFxEnabled = on
         prefs.soundFxEnabled = on
+        if (autoPresetByOutputEnabled) {
+            prefs.setPresetIdForRoute(
+                currentOutputRoute.id,
+                if (on) soundPreset.id else SoundPresets.OFF.id
+            )
+        }
         // 只联动预设自己的 EQ；用户另选的曲风或自定义 EQ 不受此开关影响。
         if (eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
             eqEnabled = on
@@ -5206,6 +5397,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         var merged = if (all.isEmpty()) base else all + base
         if (onlineSongMap.isNotEmpty()) merged = merged + onlineSongMap
         if (externalSongMap.isNotEmpty()) merged = merged + externalSongMap
+        if (dlnaSongMap.isNotEmpty()) merged = merged + dlnaSongMap
         return merged
     }
 
@@ -5521,9 +5713,569 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         playOrdered(target.tracks, song)
     }
 
+    // ===== D-LAN（DLNA / UPnP 局域网发现、浏览与投屏）=====
+
+    fun ensureDlnaDiscovered() {
+        if (!dlnaHasScannedOnce && !dlnaScanning && dlnaDevices.isEmpty()) {
+            scanDlnaDevices()
+        }
+    }
+
+    fun scanDlnaDevices() {
+        dlnaDiscoverJob?.cancel()
+        dlnaScanning = true
+        dlnaError = null
+        dlnaDiscoverJob = viewModelScope.launch {
+            try {
+                val ssdpDeferred = viewModelScope.async { dlnaClient.discoverDevices() }
+                val manualHosts = prefs.dlnaManualHosts()
+                val manualDevices = coroutineScope {
+                    manualHosts.map { host ->
+                        async {
+                            dlnaClient.probeManualDevice(host).getOrNull().orEmpty()
+                        }
+                    }.awaitAll().flatten()
+                }
+                val discovered = ssdpDeferred.await()
+                val merged = mergeDlnaDevices(discovered, manualDevices)
+                dlnaDevices = merged
+                dlnaHasScannedOnce = true
+
+                // 若之前选中的媒体服务器已失效，清除残留引用；若只有一个服务器且未选中，自动展开根目录
+                val currentServer = dlnaSelectedServer
+                if (currentServer != null) {
+                    val refreshed = merged.firstOrNull { it.udn == currentServer.udn && it.isMediaServer }
+                    if (refreshed == null) {
+                        dlnaSelectedServer = null
+                        dlnaBrowseStack = emptyList()
+                        dlnaEntries = emptyList()
+                    } else {
+                        dlnaSelectedServer = refreshed
+                    }
+                }
+            } catch (t: Throwable) {
+                dlnaError = t.message ?: "局域网设备扫描失败"
+            } finally {
+                dlnaScanning = false
+            }
+        }
+    }
+
+    fun addDlnaManualHost(rawHost: String, onResult: (Boolean) -> Unit = {}) {
+        val clean = rawHost.trim()
+        if (clean.isEmpty()) {
+            showToast("请输入设备 IP 或 XML 描述地址")
+            onResult(false)
+            return
+        }
+        dlnaManualAdding = true
+        dlnaError = null
+        viewModelScope.launch {
+            val result = dlnaClient.probeManualDevice(clean)
+            dlnaManualAdding = false
+            result.onSuccess { added ->
+                prefs.addDlnaManualHost(clean)
+                dlnaDevices = mergeDlnaDevices(dlnaDevices, added)
+                val firstServer = added.firstOrNull { it.isMediaServer }
+                if (dlnaSelectedServer == null && firstServer != null) {
+                    selectDlnaServer(firstServer)
+                }
+                showToast("已添加设备：${added.joinToString("、") { it.friendlyName }}")
+                onResult(true)
+            }.onFailure { err ->
+                val msg = err.message ?: "无法连接到 $clean"
+                dlnaError = msg
+                showToast(msg)
+                onResult(false)
+            }
+        }
+    }
+
+    fun dlnaSavedManualHosts(): List<String> = prefs.dlnaManualHosts()
+
+    fun removeDlnaManualHost(host: String) {
+        prefs.removeDlnaManualHost(host)
+    }
+
+    private fun mergeDlnaDevices(
+        primary: List<DlnaDevice>,
+        secondary: List<DlnaDevice>
+    ): List<DlnaDevice> {
+        val map = LinkedHashMap<String, DlnaDevice>()
+        for (d in primary) map[d.udn] = d
+        for (d in secondary) {
+            if (d.udn !in map) map[d.udn] = d
+        }
+        return map.values.sortedWith(
+            compareBy<DlnaDevice> { if (it.isMediaServer) 0 else 1 }
+                .thenBy { it.friendlyName.lowercase() }
+        )
+    }
+
+    fun clearDlnaError() {
+        dlnaError = null
+    }
+
+    fun selectDlnaServer(device: DlnaDevice) {
+        if (!device.isMediaServer) {
+            showToast("该设备不支持媒体目录浏览")
+            return
+        }
+        dlnaSelectedServer = device
+        dlnaBrowseStack = listOf(DlnaBreadcrumb("0", device.friendlyName))
+        browseDlnaObject("0")
+    }
+
+    fun clearDlnaServerSelection() {
+        dlnaBrowseJob?.cancel()
+        dlnaSelectedServer = null
+        dlnaBrowseStack = emptyList()
+        dlnaEntries = emptyList()
+        dlnaBrowseLoading = false
+    }
+
+    fun openDlnaContainer(container: DlnaContainer) {
+        if (dlnaSelectedServer == null) return
+        dlnaBrowseStack = dlnaBrowseStack + DlnaBreadcrumb(container.id, container.title)
+        browseDlnaObject(container.id)
+    }
+
+    fun popDlnaBreadcrumb(index: Int) {
+        if (index !in dlnaBrowseStack.indices) return
+        val nextStack = dlnaBrowseStack.take(index + 1)
+        dlnaBrowseStack = nextStack
+        browseDlnaObject(nextStack.last().objectId)
+    }
+
+    fun navigateDlnaUp(): Boolean {
+        val stack = dlnaBrowseStack
+        if (stack.size > 1) {
+            popDlnaBreadcrumb(stack.lastIndex - 1)
+            return true
+        }
+        if (dlnaSelectedServer != null) {
+            clearDlnaServerSelection()
+            return true
+        }
+        return false
+    }
+
+    fun refreshCurrentDlnaFolder() {
+        val targetId = dlnaBrowseStack.lastOrNull()?.objectId ?: return
+        browseDlnaObject(targetId)
+    }
+
+    private fun browseDlnaObject(objectId: String) {
+        val server = dlnaSelectedServer ?: return
+        dlnaBrowseJob?.cancel()
+        dlnaBrowseLoading = true
+        dlnaError = null
+        dlnaBrowseJob = viewModelScope.launch {
+            val result = dlnaClient.browse(server, objectId)
+            dlnaBrowseLoading = false
+            result.onSuccess { res ->
+                val folders = res.entries.filterIsInstance<DlnaContainer>()
+                val tracks = res.entries.filterIsInstance<DlnaAudioItem>()
+                dlnaEntries = folders + tracks
+            }.onFailure { err ->
+                dlnaError = err.message ?: "读取局域网目录失败"
+            }
+        }
+    }
+
+    fun dlnaAudioItemToSong(server: DlnaDevice, item: DlnaAudioItem): Song {
+        val id = remoteSongId(Song.DLNA_SOURCE, "${server.udn}/${item.id}")
+        dlnaMimeMap[id] = item.mimeType
+        return Song(
+            id = id,
+            title = item.title,
+            artist = item.artist,
+            album = item.album,
+            albumId = -1L,
+            durationMs = item.durationMs,
+            uri = Uri.parse(item.resourceUrl),
+            folderPath = server.udn,
+            folderName = server.friendlyName,
+            displayName = item.title,
+            sizeBytes = item.sizeBytes,
+            dateAddedSec = 0L,
+            track = 0,
+            source = Song.DLNA_SOURCE,
+            remoteId = "${server.udn}/${item.id}",
+            coverUrl = item.albumArtUri
+        )
+    }
+
+    fun playDlnaFolderItem(clicked: DlnaAudioItem) {
+        val server = dlnaSelectedServer ?: return
+        val items = dlnaEntries.filterIsInstance<DlnaAudioItem>()
+        if (items.isEmpty()) return
+        val songsList = items.map { dlnaAudioItemToSong(server, it) }
+        var changed = false
+        songsList.forEach { s ->
+            if (dlnaSongMap.put(s.id, s) != s) changed = true
+        }
+        if (changed) dlnaRevision++
+        val target = dlnaAudioItemToSong(server, clicked)
+        playFrom(songsList, target)
+    }
+
+    fun playAllDlnaFolderTracks() {
+        val first = dlnaEntries.filterIsInstance<DlnaAudioItem>().firstOrNull() ?: return
+        playDlnaFolderItem(first)
+    }
+
+    fun enqueueDlnaTrack(item: DlnaAudioItem) {
+        val server = dlnaSelectedServer ?: return
+        val s = dlnaAudioItemToSong(server, item)
+        if (dlnaSongMap.put(s.id, s) != s) dlnaRevision++
+        playNext(s)
+    }
+
+    // ===== 投屏渲染器控制（Sonance -> DMR）=====
+
+    fun selectDlnaRenderer(device: DlnaDevice) {
+        if (!device.isMediaRenderer) {
+            showToast("该设备不支持投屏控制")
+            return
+        }
+        dlnaActiveRenderer = device
+        player.blockAutoplayForCast = true
+        player.pause()
+        dlnaUserPausedOrStopped = false
+        dlnaObservedPlayingForCurrent = false
+        dlnaTransportState = DlnaTransportState.TRANSITIONING
+        val current = songById(player.state.value.mediaId)
+        dlnaCastPositionMs = 0L
+        dlnaCastDurationMs = current?.durationMs ?: player.state.value.durationMs
+        dlnaLastPollRelMs = 0L
+        startDlnaPolling(device)
+
+        viewModelScope.launch {
+            dlnaClient.getVolume(device)
+                .onSuccess { vol -> dlnaCastVolume = vol }
+                .onFailure { dlnaCastVolume = -1 }
+        }
+
+        if (current != null) {
+            castSongToDlnaInternal(current, device, notifyConnected = true)
+        } else {
+            dlnaTransportState = DlnaTransportState.STOPPED
+            showToast("已连接投屏设备 · ${device.friendlyName}")
+        }
+    }
+
+    fun disconnectDlnaRenderer(stopRemote: Boolean = false) {
+        val renderer = dlnaActiveRenderer
+        val resumePos = dlnaCastPositionMs
+        dlnaCastJob?.cancel()
+        dlnaPollJob?.cancel()
+        dlnaVolumeJob?.cancel()
+        dlnaActiveRenderer = null
+        player.blockAutoplayForCast = false
+        dlnaTransportState = DlnaTransportState.STOPPED
+        dlnaCastPositionMs = 0L
+        dlnaCastDurationMs = 0L
+        dlnaCastVolume = -1
+        dlnaBusy = false
+        dlnaObservedPlayingForCurrent = false
+        dlnaUserPausedOrStopped = false
+        dlnaLastPollRelMs = 0L
+
+        if (resumePos > 0L && player.state.value.hasItem) {
+            player.seekTo(resumePos)
+        }
+        if (stopRemote && renderer != null) {
+            viewModelScope.launch { dlnaClient.stop(renderer) }
+        }
+        showToast("已切回本机播放")
+    }
+
+    fun setDlnaVolume(percent: Int) {
+        val renderer = dlnaActiveRenderer ?: return
+        val clamped = percent.coerceIn(0, 100)
+        dlnaCastVolume = clamped
+        dlnaVolumeJob?.cancel()
+        dlnaVolumeJob = viewModelScope.launch {
+            delay(80L)
+            dlnaClient.setVolume(renderer, clamped)
+        }
+    }
+
+    fun effectivePlayerState(raw: PlayerUiState): PlayerUiState {
+        if (dlnaActiveRenderer == null) return raw
+        return raw.copy(
+            isPlaying = dlnaTransportState.isActivePlaying,
+            positionMs = dlnaCastPositionMs,
+            durationMs = maxOf(dlnaCastDurationMs, raw.durationMs)
+        )
+    }
+
+    fun dispatchPlayPause() {
+        val renderer = dlnaActiveRenderer
+        if (renderer == null) {
+            player.togglePlay()
+            return
+        }
+        player.pause()
+        val currentlyPlaying = dlnaTransportState.isActivePlaying
+        dlnaUserPausedOrStopped = currentlyPlaying
+        dlnaTransportState = if (currentlyPlaying) DlnaTransportState.PAUSED_PLAYBACK else DlnaTransportState.PLAYING
+        viewModelScope.launch {
+            val res = if (currentlyPlaying) dlnaClient.pause(renderer) else dlnaClient.play(renderer)
+            res.onFailure { err ->
+                showToast(err.message ?: "投屏控制失败")
+            }
+        }
+    }
+
+    fun dispatchSeekTo(positionMs: Long) {
+        val renderer = dlnaActiveRenderer
+        if (renderer == null) {
+            player.seekTo(positionMs)
+            return
+        }
+        val clamped = positionMs.coerceAtLeast(0L)
+        dlnaCastPositionMs = clamped
+        dlnaLastPollRelMs = clamped
+        player.seekTo(clamped)
+        viewModelScope.launch {
+            dlnaClient.seek(renderer, clamped).onFailure { err ->
+                showToast(err.message ?: "远端设备不支持定位进度")
+            }
+        }
+    }
+
+    fun dispatchPlayAt(index: Int, fadeMs: Long = 0L, toggleIfCurrent: Boolean = true) {
+        if (dlnaActiveRenderer != null &&
+            toggleIfCurrent &&
+            index == player.state.value.queueIndex
+        ) {
+            dispatchPlayPause()
+            return
+        }
+        player.playAt(index, fadeMs, toggleIfCurrent)
+    }
+
+    fun dispatchNext(allowRandomFallback: Boolean = false) {
+        if (allowRandomFallback) nextOrRandom() else player.next()
+    }
+
+    fun dispatchPrevious(allowRandomFallback: Boolean = false) {
+        if (allowRandomFallback) previousOrRandom() else player.previous()
+    }
+
+    private fun castSongToDlnaInternal(
+        song: Song,
+        renderer: DlnaDevice,
+        notifyConnected: Boolean
+    ) {
+        dlnaCastJob?.cancel()
+        dlnaBusy = true
+        dlnaUserPausedOrStopped = false
+        dlnaObservedPlayingForCurrent = false
+        dlnaLastPollRelMs = 0L
+        dlnaLastCastAtMs = android.os.SystemClock.elapsedRealtime()
+        dlnaCastJob = viewModelScope.launch {
+            try {
+                val hosted = withContext(Dispatchers.IO) { resolveCastResource(song) }
+                if (dlnaActiveRenderer?.udn != renderer.udn) return@launch
+                if (hosted == null) {
+                    dlnaTransportState = DlnaTransportState.STOPPED
+                    if (DlnaHttpMediaServer.findLanIpv4Address(getApplication()) == null && song.isLocal) {
+                        showToast("请先连接 Wi-Fi 或局域网再使用 D-LAN 投屏")
+                    } else {
+                        showToast("无法获取可投屏的音频地址")
+                    }
+                    return@launch
+                }
+
+                val res = dlnaClient.castMedia(
+                    device = renderer,
+                    mediaUrl = hosted.mediaUrl,
+                    title = song.title,
+                    artist = song.artist,
+                    album = song.album,
+                    mimeType = hosted.mimeType,
+                    durationMs = song.durationMs,
+                    sizeBytes = hosted.sizeBytes,
+                    coverUrl = hosted.coverUrl
+                )
+                if (dlnaActiveRenderer?.udn != renderer.udn) return@launch
+                res.onSuccess {
+                    dlnaTransportState = DlnaTransportState.PLAYING
+                    dlnaCastPositionMs = 0L
+                    dlnaCastDurationMs = song.durationMs
+                    if (notifyConnected) {
+                        showToast("已投屏到 ${renderer.friendlyName} · ${song.title}")
+                    }
+                }.onFailure { err ->
+                    dlnaTransportState = DlnaTransportState.STOPPED
+                    showToast(err.message ?: "投屏启动失败")
+                }
+            } finally {
+                dlnaBusy = false
+            }
+        }
+    }
+
+    private suspend fun resolveCastResource(song: Song): DlnaHttpMediaServer.HostedTrackUrls? {
+        val currentUri = song.uri
+        val scheme = currentUri.scheme.orEmpty()
+        if (scheme.equals("http", ignoreCase = true) || scheme.equals("https", ignoreCase = true)) {
+            val urlStr = currentUri.toString()
+            return DlnaHttpMediaServer.HostedTrackUrls(
+                mediaUrl = urlStr,
+                coverUrl = song.coverUrl,
+                mimeType = dlnaMimeMap[song.id] ?: guessAudioMimeType(urlStr, null),
+                sizeBytes = song.sizeBytes
+            )
+        }
+
+        // 在线歌若尚未解析真实流地址，先通过插件源解析后再投屏
+        if (!song.isLocal && !song.isDlna) {
+            val localCopy = localCopyOf(song)
+            if (localCopy != null && localCopy.uri != Uri.EMPTY) {
+                return resolveLocalCastResource(localCopy)
+            }
+            val src = OnlineSources.byId(song.source)
+            val rid = song.remoteId
+            if (src != null && rid != null) {
+                val url = src.resolveStream(rid, song.durationMs)
+                if (!url.isNullOrBlank()) {
+                    val parsed = Uri.parse(url)
+                    onlineSongMap[song.id]?.let { onlineSongMap[song.id] = it.copy(uri = parsed) }
+                    return DlnaHttpMediaServer.HostedTrackUrls(
+                        mediaUrl = url,
+                        coverUrl = song.coverUrl,
+                        mimeType = guessAudioMimeType(url, null),
+                        sizeBytes = song.sizeBytes
+                    )
+                }
+            }
+            return null
+        }
+
+        return resolveLocalCastResource(song)
+    }
+
+    private fun resolveLocalCastResource(song: Song): DlnaHttpMediaServer.HostedTrackUrls? {
+        val uri = song.uri
+        if (uri == Uri.EMPTY) return null
+        val mime = guessAudioMimeType(song.displayName.ifBlank { uri.toString() }, null)
+        val coverBytes = loadCastCoverBytes(song)
+        val coverMime = coverBytes?.let { DlnaHttpMediaServer.detectImageMime(it) } ?: "image/jpeg"
+        return dlnaMediaServer.registerTrackForCasting(
+            songId = song.id,
+            uri = uri,
+            mimeType = mime,
+            fileSizeHint = song.sizeBytes,
+            coverBytes = coverBytes,
+            coverMime = coverMime
+        )
+    }
+
+    private fun loadCastCoverBytes(song: Song): ByteArray? {
+        val app = getApplication<Application>()
+        CoverCache.lookupSelected(app, song.id, song.uri)?.let { return it }
+        (CoverCache.lookup(app, OnlineCover.keyOf(song.title, song.artist)) as? CoverCache.Lookup.Hit)
+            ?.bytes?.let { return it }
+
+        val mmr = android.media.MediaMetadataRetriever()
+        val embedded = try {
+            mmr.setDataSource(app, song.uri)
+            mmr.embeddedPicture
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { mmr.release() }
+        }
+        if (embedded != null && embedded.isNotEmpty()) return embedded
+
+        if (song.albumId <= 0L) return null
+        val artUri = ContentUris.withAppendedId(
+            Uri.parse("content://media/external/audio/albumart"),
+            song.albumId
+        )
+        return runCatching {
+            app.contentResolver.openInputStream(artUri)?.use { it.readBytes() }
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun startDlnaPolling(renderer: DlnaDevice) {
+        dlnaPollJob?.cancel()
+        dlnaPollJob = viewModelScope.launch {
+            while (isActive && dlnaActiveRenderer?.udn == renderer.udn) {
+                delay(1_000L)
+                if (dlnaActiveRenderer?.udn != renderer.udn) break
+                val tRes = dlnaClient.getTransportInfo(renderer)
+                val pRes = dlnaClient.getPositionInfo(renderer)
+
+                pRes.onSuccess { pos ->
+                    if (pos.trackDurationMs > 0L) dlnaCastDurationMs = pos.trackDurationMs
+                    // 避免远端刚停止并把 RelTime 清零时把最后进度抹掉
+                    if (pos.relTimeMs > 0L || dlnaTransportState.isActivePlaying) {
+                        dlnaCastPositionMs = pos.relTimeMs
+                        if (pos.relTimeMs > 0L) dlnaLastPollRelMs = pos.relTimeMs
+                    }
+                }
+
+                tRes.onSuccess { info ->
+                    val prev = dlnaTransportState
+                    dlnaTransportState = info.state
+                    if (info.state == DlnaTransportState.PLAYING) {
+                        dlnaObservedPlayingForCurrent = true
+                    }
+                    val sinceCast = android.os.SystemClock.elapsedRealtime() - dlnaLastCastAtMs
+                    val finishedNaturally = dlnaObservedPlayingForCurrent &&
+                        !dlnaUserPausedOrStopped &&
+                        sinceCast > 4_000L &&
+                        prev == DlnaTransportState.PLAYING &&
+                        (info.state == DlnaTransportState.STOPPED || info.state == DlnaTransportState.NO_MEDIA_PRESENT) &&
+                        (dlnaCastDurationMs <= 0L || dlnaLastPollRelMs >= dlnaCastDurationMs - 8_000L)
+                    if (finishedNaturally) {
+                        handleDlnaTrackCompleted()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleDlnaTrackCompleted() {
+        val renderer = dlnaActiveRenderer ?: return
+        val st = player.state.value
+        val current = songById(st.mediaId)
+        dlnaObservedPlayingForCurrent = false
+        when (st.repeat) {
+            RepeatMode.ONE -> {
+                if (current != null) castSongToDlnaInternal(current, renderer, notifyConnected = false)
+            }
+            else -> {
+                if (st.queueIds.size <= 1) {
+                    if (st.repeat == RepeatMode.ALL) {
+                        if (current != null) castSongToDlnaInternal(current, renderer, notifyConnected = false)
+                    } else {
+                        randomListenLikeWall()
+                    }
+                } else if (st.queueIndex < st.queueIds.lastIndex) {
+                    player.playAt(st.queueIndex + 1)
+                } else if (st.repeat == RepeatMode.ALL) {
+                    player.playAt(0)
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
+        dlnaDiscoverJob?.cancel()
+        dlnaBrowseJob?.cancel()
+        dlnaPollJob?.cancel()
+        dlnaCastJob?.cancel()
+        dlnaVolumeJob?.cancel()
+        runCatching { dlnaMediaServer.stop() }
         com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = null
         com.sonance.player.widget.WidgetCommandReceiver.onCyclePlayMode = null
+        runCatching { outputAudioRouter.release() }
         player.release()
         super.onCleared()
     }
@@ -5572,5 +6324,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          * 等够 8 秒说明他确实在听这一首。太短会把翻过的歌全存下来，太长则要等半天。
          */
         private const val DOWNLOAD_ARM_DELAY_MS = 8_000L
+        internal const val DOWNLOAD_OWNER_SEARCH = "__online_search__"
     }
 }

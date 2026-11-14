@@ -3,20 +3,33 @@
     <string name="app_name">山水有清音</string>
     <string name="app_slogan">本地音乐播放器</string>
 
-    <!-- ===== 桌面小组件 ===== -->
-    <!-- 样式名（会显示在系统的小组件选择列表里，所以名字要短且能一眼区分） -->
+    <!-- ===== 桌面小组件（共 10 套：5 列保留 + 4 列新增） ===== -->
+    <!-- 5 列系列（保留） -->
     <string name="widget_label_bar">山水有清音 · 横向控制条 5×1</string>
     <string name="widget_label_card">山水有清音 · 封面卡片 3×2</string>
     <string name="widget_label_wide">山水有清音 · 信息宽卡 5×2</string>
     <string name="widget_label_minimal">山水有清音 · 极简横条 3×1</string>
     <string name="widget_label_large">山水有清音 · 大幅卡片 5×4</string>
 
+    <!-- 4 列系列（新增） -->
+    <string name="widget_label_bar_4">山水有清音 · 横向控制条 4×1（4列）</string>
+    <string name="widget_label_card_4">山水有清音 · 封面方卡 2×2（4列）</string>
+    <string name="widget_label_wide_4">山水有清音 · 信息宽卡 4×2（4列）</string>
+    <string name="widget_label_minimal_4">山水有清音 · 极简条 2×1（4列）</string>
+    <string name="widget_label_large_4">山水有清音 · 大幅卡片 4×4（4列）</string>
+
     <!-- 系统选择器里的描述文案（Android 12+ 显示） -->
-    <string name="widget_desc_bar">取色渐变卡片 + 圆形唱片，歌名、切歌与歌词键一排铺开</string>
-    <string name="widget_desc_card">大圆形唱片居中，歌名与播控键，可切换成三行歌词</string>
-    <string name="widget_desc_wide">左唱片右信息，带真实进度条、上下曲与歌词切换</string>
-    <string name="widget_desc_minimal">不显示封面，只留歌名与四个控制键，最省资源</string>
-    <string name="widget_desc_large">大尺寸圆形唱片 + 三行歌词 + 进度条，桌面上的完整播放器</string>
+    <string name="widget_desc_bar">莫兰迪克制氛围玻璃 + 圆角方图封面与底缘进度线，适合一行 5 格桌面</string>
+    <string name="widget_desc_card">圆角方图封面 + 胶囊播放键，切歌词仍保留小封面，适合一行 5 格桌面</string>
+    <string name="widget_desc_wide">左方图右歌名与真实进度条，克制陪衬让封面纯净突出，适合一行 5 格桌面</string>
+    <string name="widget_desc_minimal">单行极简流光胶囊，带调性细光柱与播放/上下曲/歌词切换，最省资源</string>
+    <string name="widget_desc_large">大圆角专辑主视觉 + 品牌徽标 + 三行歌词切换 + 进度条，完整桌面播放器</string>
+
+    <string name="widget_desc_bar_4">专为一行 4 格满行打造的克制氛围控制条，圆角方图 + 底缘细进度线</string>
+    <string name="widget_desc_card_4">专为一行 4 格打造的 2×2 对称方卡，可并排 2×2 应用图标不留空</string>
+    <string name="widget_desc_wide_4">专为一行 4 格定制的 4×2 宽卡，莫兰迪柔雾背景衬托专辑封面</string>
+    <string name="widget_desc_minimal_4">专为一行 4 格打造的 2×1 极简条，保留播放与下一首，旁边可摆两个 App</string>
+    <string name="widget_desc_large_4">专为一行 4 格优化的 4×4 大幅卡片，全幅居中呈现专辑封面与三行歌词</string>
 
     <!-- 空态、歌词与无障碍 -->
     <string name="widget_idle_title">未在播放</string>

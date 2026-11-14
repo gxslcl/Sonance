@@ -48,8 +48,12 @@ data class Song(
     /** 是不是本地文件。用它来决定要不要走「最近播放 / 播放次数 / 封面补全」这些本地逻辑 */
     val isLocal: Boolean get() = source == LOCAL_SOURCE
 
+    /** 是不是局域网 DLNA / UPnP 媒体服务器上的曲目（临时会话流，不写入离线在线歌存档） */
+    val isDlna: Boolean get() = source == DLNA_SOURCE
+
     companion object {
         const val LOCAL_SOURCE = "local"
+        const val DLNA_SOURCE = "dlna"
     }
 }
 

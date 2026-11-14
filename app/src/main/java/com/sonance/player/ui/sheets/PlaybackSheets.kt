@@ -133,7 +133,35 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             CurrentSoundCard(vm)
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(skin.surface2)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "当前输出 · ${vm.currentOutputRoute.label}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = skin.text
+                    )
+                    Text(
+                        "开启后为外放、有线耳机、蓝牙、USB DAC 分别记住音色",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+                ToggleSwitch(
+                    checked = vm.autoPresetByOutputEnabled,
+                    onChange = { vm.toggleAutoPresetByOutput(it) },
+                    label = "按输出设备自动记忆音色"
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("挑选音色", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = skin.text)
                 Spacer(Modifier.weight(1f))
@@ -162,7 +190,7 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "选择预设会载入它的 EQ 曲线，替换当前曲风曲线。不同耳机和手机听感会有差异。",
+                "选择预设会载入它的 EQ 曲线，替换当前曲风曲线。不同耳机和扬声器声学特性各异，可在此基础上继续微调。",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textMuted
             )
@@ -170,25 +198,39 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
             Spacer(Modifier.height(20.dp))
             SectionToggle(
                 title = "音效微调",
-                subtitle = "低频、空间、宽度与峰值保护",
+                subtitle = "低频谐波、交叉馈送、护喇叭高通与峰值保护",
                 expanded = effectsExpanded,
                 onClick = { effectsExpanded = !effectsExpanded }
             )
             if (effectsExpanded) {
                 Column(Modifier.padding(horizontal = 4.dp, vertical = 12.dp)) {
-                    FxSliderRow("虚拟低音", "轻补低频谐波，适合外放；过强可能增加失真", vm.soundFxParams.virtualBass, 0f, 1f, percent(vm.soundFxParams.virtualBass)) {
+                    FxSliderRow("虚拟低音", "无直流抽吸谐波增强，外放时在高通截止前提取基波", vm.soundFxParams.virtualBass, 0f, 1f, percent(vm.soundFxParams.virtualBass)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(virtualBass = it))
                     }
-                    FxSliderRow("空间混响", "少量即可增加空间感，太多会模糊人声", vm.soundFxParams.reverbWet, 0f, 0.6f, percent(vm.soundFxParams.reverbWet)) {
+                    FxSliderRow("双耳交叉馈送", "BS2B 头影串扰模型：减弱耳机头中压迫，贴近音箱听感；外放建议关闭", vm.soundFxParams.crossfeed, 0f, 1f, percent(vm.soundFxParams.crossfeed)) {
+                        vm.updateSoundFx(vm.soundFxParams.copy(crossfeed = it))
+                    }
+                    FxSliderRow(
+                        label = "外放高通保护",
+                        hint = "切掉小喇叭放不出且易破音的超低频（手机约 65 Hz，平板约 48 Hz，拉至最左关闭）",
+                        value = vm.soundFxParams.speakerHpfHz,
+                        min = 0f,
+                        max = 160f,
+                        valueLabel = if (vm.soundFxParams.speakerHpfHz < 20f) "关闭" else "${vm.soundFxParams.speakerHpfHz.roundToInt()} Hz"
+                    ) {
+                        val snapped = if (it < 20f) 0f else it.coerceIn(30f, 160f)
+                        vm.updateSoundFx(vm.soundFxParams.copy(speakerHpfHz = snapped))
+                    }
+                    FxSliderRow("空间混响", "早期反射 + 互质抽头长尾空间感，过多会稀释人声", vm.soundFxParams.reverbWet, 0f, 0.6f, percent(vm.soundFxParams.reverbWet)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(reverbWet = it))
                     }
                     FxSliderRow("混响余韵", "调整衰减长短；混响为零时无影响", vm.soundFxParams.reverbDecay, 0f, 1f, percent(vm.soundFxParams.reverbDecay)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(reverbDecay = it))
                     }
-                    FxSliderRow("立体声宽度", "100% 为原始宽度；仅对双声道生效", vm.soundFxParams.stereoWidth, 0f, 2f, percent(vm.soundFxParams.stereoWidth)) {
+                    FxSliderRow("立体声宽度", "210 Hz 以下低音锁定单声道稳固；100% 为原始宽度（仅双声道生效）", vm.soundFxParams.stereoWidth, 0f, 2f, percent(vm.soundFxParams.stereoWidth)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(stereoWidth = it))
                     }
-                    FxSliderRow("手动预留", "只在极端曲线或手调 EQ 时让路，日常预设基本不会整体变小", vm.soundFxParams.preampDb, -12f, 0f, "%.1f dB".format(vm.soundFxParams.preampDb)) {
+                    FxSliderRow("手动预留", "只在极端手调正增益时补偿余量，日常预设自动轻量化预留", vm.soundFxParams.preampDb, -12f, 0f, "%.1f dB".format(vm.soundFxParams.preampDb)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(preampDb = it))
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -198,7 +240,7 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                         }
                         ToggleSwitch(vm.soundFxParams.limiter, { vm.updateSoundFx(vm.soundFxParams.copy(limiter = it)) }, "峰值保护")
                     }
-                    Text("虚拟低音与混响仅处理单、双声道；多声道仍支持 EQ。", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+                    Text("空间与谐波效果处理单/双声道 PCM；多声道音轨仍保留完整 EQ 与峰值保护。", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
                 }
             }
 
@@ -264,13 +306,13 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
             Spacer(Modifier.height(10.dp))
             SectionToggle(
                 title = "人声与伴奏",
-                subtitle = if (vm.karaokeEnabled) "伴奏模式 · 中置声道消除" else "原唱",
+                subtitle = if (vm.karaokeEnabled) "伴奏模式 · 频带中置人声消除" else "原唱",
                 expanded = karaokeExpanded,
                 onClick = { karaokeExpanded = !karaokeExpanded }
             )
             if (karaokeExpanded) {
                 Column(Modifier.padding(horizontal = 4.dp, vertical = 12.dp)) {
-                    Text("伴奏通过中置声道消除实现，效果因歌曲而异；单声道无变化。", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+                    Text("仅抵消 160 Hz–4.8 kHz 居中主唱频段，保留底鼓贝斯厚度与高频立体声伴奏；单声道输入自动直通。", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         PresetChip("原唱", !vm.karaokeEnabled) { vm.setKaraoke(false) }
@@ -344,8 +386,12 @@ private fun CurrentSoundCard(vm: SonanceViewModel) {
         val tone = remember(vm.soundPreset.id) { presetToneBands(vm.soundPreset) }
         val toneLine = when {
             !vm.soundFxEnabled || vm.eqCustom || vm.soundPreset.id == SoundPresets.OFF.id -> null
-            vm.soundPreset.id == SoundPresets.DUAL_SPEAKER.id ->
-                "手机喇叭放不出的超低频已切除，低音靠谐波补回；中频补厚度、高频去尖锐"
+            vm.soundPreset.id == SoundPresets.PHONE_SPEAKER.id ->
+                "31 Hz 切超低防破音 + 250~500 Hz 胸腔厚度与 0.65x 低音谐波重建，温和饱满"
+            vm.soundPreset.id == SoundPresets.TABLET_SPEAKER.id ->
+                "48 Hz 温和保护留住平板浑厚低音，宽距横向展宽与轻早期空间同步生效"
+            vm.soundPreset.fx.speakerHpfHz >= 20f ->
+                "相对原声（${vm.soundPreset.fx.speakerHpfHz.roundToInt()} Hz 高通）· 低 ${signedDb(tone[0])}  中 ${signedDb(tone[1])}  高 ${signedDb(tone[2])}"
             else -> "相对原声 · 低 ${signedDb(tone[0])}  中 ${signedDb(tone[1])}  高 ${signedDb(tone[2])}"
         }
         if (toneLine != null) {

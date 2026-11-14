@@ -7,9 +7,9 @@ import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Shader
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -21,45 +21,107 @@ import com.sonance.player.data.CoverCache
 import com.sonance.player.data.isRemoteUrl
 
 /**
- * 给桌面小组件准备封面位图。
+ * STYLE A 桌面小组件封面加载与圆角方图渲染。
  *
- * 三条来源，按「快 → 慢」的顺序试：
- * 1. [CoverCache] 里已经下载好的封面（应用内搜过封面的歌，这里直接命中）
- * 2. MediaStore 的 `albumart` URI
- * 3. 音频文件里的内嵌封面（`MediaMetadataRetriever.embeddedPicture`）
- *
- * 三条都拿不到就返回 null，渲染层会画一张同款圆形占位图。
- *
- * ⚠️ 结果是**圆形裁切 + 外侧发光圆环**的位图：`RemoteViews` 用不了
- * `clipToOutline`，圆形和光晕都只能在位图层面画掉。透明边角由位图自己负责。
- * 圆环颜色用调用方传入的**样式固定色**（与卡片渐变同色系），不从封面取色。
+ * 与旧版「厚发光霓虹彩胶圆环」不同，STYLE A 坚持「专辑封面是唯一视觉主角」：
+ * - 按中心裁切并画成利落圆角方图（微弱环境投影 + 1px 玻璃细边）；
+ * - 解码封面时顺手采样代表色，经 [WidgetAuraPalette] 克制压缩成低饱和莫兰迪氛围底。
  */
 internal object WidgetCover {
 
     private const val TAG = "SonanceWidget"
+    private const val SAMPLE_SIDE = 24
 
-    /** 位图缓存：跨进程传的是副本，本地留一份避免每次刷新都重新解码 */
-    private val cache = LruCache<String, Bitmap>(8)
+    data class CoverBundle(
+        val bitmap: Bitmap?,
+        val rawRgb: Int?
+    )
+
+    private data class CachedRgb(val rgb: Int?)
+
+    private val bitmapCache = LruCache<String, Bitmap>(16)
+    private val rgbCache = LruCache<String, CachedRgb>(24)
 
     private val ALBUM_ART_BASE: Uri = Uri.parse("content://media/external/audio/albumart")
 
-    /**
-     * @param targetPx 目标边长（像素），包含发光圆环。务必别太大 ——
-     *                 `RemoteViews` 走 Binder，单个位图超过 1MB 会抛异常。
-     * @param seed 样式固定种子色，决定圆环与光晕的色相。
-     */
-    fun load(context: Context, snap: WidgetState.Snapshot, targetPx: Int, seed: Int): Bitmap? {
-        val key = "${snap.coverKey}|${snap.albumId}|${snap.sourceUri}|$targetPx|$seed"
-        cache.get(key)?.let { return it }
-
-        val raw = decodeRaw(context, snap, targetPx) ?: return null
-        val out = circularWithGlow(raw, targetPx, seed)
-        if (out !== raw) raw.recycle()
-        cache.put(key, out)
-        return out
+    fun clear() {
+        bitmapCache.evictAll()
+        rgbCache.evictAll()
     }
 
-    fun clear() = cache.evictAll()
+    /**
+     * 仅供「无封面显示（如极简条 2×1 / 3×1）」或实时刷新读取封面代表色，
+     * 不向桌面传大图，仅提取一次 RGB 后缓存在内存与 SharedPreferences 中。
+     */
+    fun extractRawRgb(context: Context, snap: WidgetState.Snapshot): Int? {
+        if (!snap.hasSong) return null
+        val sig = WidgetState.artworkSignature(snap)
+        rgbCache.get(sig)?.let { return it.rgb }
+
+        val (savedHit, savedRgb) = WidgetState.readExtractedRgb(context, sig)
+        if (savedHit) {
+            rgbCache.put(sig, CachedRgb(savedRgb))
+            return savedRgb
+        }
+
+        val sample = decodeRaw(context, snap, 72)
+        val rgb = sample?.let { sampleRawRgb(it) }
+        sample?.recycle()
+        rgbCache.put(sig, CachedRgb(rgb))
+        WidgetState.writeExtractedRgb(context, sig, rgb)
+        return rgb
+    }
+
+    /**
+     * 加载并画成 STYLE A 圆角方图封面（含轻微阴影与玻璃描边），顺带返回封面代表色。
+     */
+    fun loadRoundedCover(
+        context: Context,
+        snap: WidgetState.Snapshot,
+        targetPx: Int,
+        cornerRadiusRatio: Float,
+        strokeColor: Int
+    ): CoverBundle {
+        if (!snap.hasSong || targetPx <= 0) return CoverBundle(null, null)
+        val sig = WidgetState.artworkSignature(snap)
+        val key = "$sig|$targetPx|$cornerRadiusRatio|$strokeColor"
+
+        bitmapCache.get(key)?.let { cachedBmp ->
+            val rgb = extractRawRgb(context, snap)
+            return CoverBundle(cachedBmp, rgb)
+        }
+
+        val raw = decodeRaw(context, snap, targetPx) ?: run {
+            rgbCache.put(sig, CachedRgb(null))
+            WidgetState.writeExtractedRgb(context, sig, null)
+            return CoverBundle(null, null)
+        }
+
+        val rawRgb = rgbCache.get(sig)?.rgb ?: run {
+            val sampled = sampleRawRgb(raw)
+            rgbCache.put(sig, CachedRgb(sampled))
+            WidgetState.writeExtractedRgb(context, sig, sampled)
+            sampled
+        }
+
+        val out = roundedSquareCover(raw, targetPx, cornerRadiusRatio, strokeColor)
+        if (out !== raw) raw.recycle()
+        bitmapCache.put(key, out)
+        return CoverBundle(out, rawRgb)
+    }
+
+    private fun sampleRawRgb(src: Bitmap): Int? {
+        val small = runCatching {
+            Bitmap.createScaledBitmap(src, SAMPLE_SIDE, SAMPLE_SIDE, true)
+        }.getOrNull() ?: return null
+        val pixels = IntArray(SAMPLE_SIDE * SAMPLE_SIDE)
+        val ok = runCatching {
+            small.getPixels(pixels, 0, SAMPLE_SIDE, 0, 0, SAMPLE_SIDE, SAMPLE_SIDE)
+        }.isSuccess
+        if (small !== src) small.recycle()
+        if (!ok) return null
+        return WidgetAuraPalette.extractRawColorFromPixels(pixels)
+    }
 
     private fun decodeRaw(context: Context, snap: WidgetState.Snapshot, targetPx: Int): Bitmap? {
         // 1) 下载好的封面
@@ -73,10 +135,7 @@ internal object WidgetCover {
             fromAlbumArt(context, snap.albumId, targetPx)?.let { return it }
         }
 
-        // 3) 文件内嵌封面
-        //
-        // ⚠️ 必须排除 http(s)：在线歌的 sourceUri 是**取流地址**，
-        // `MediaMetadataRetriever.setDataSource(url)` 会真的把整个音频流拉下来。
+        // 3) 本地文件内嵌封面（严格跳过 http(s) 流地址）
         val uriStr = snap.sourceUri
         if (!uriStr.isNullOrBlank() && !isRemoteUrl(uriStr)) {
             fromEmbedded(uriStr, targetPx)?.let { return it }
@@ -108,8 +167,6 @@ internal object WidgetCover {
             Log.d(TAG, "读内嵌封面失败: ${t.message}")
             null
         } finally {
-            // 不能写 `retriever.use {}`：AutoCloseable 是 API 29 才加到
-            // MediaMetadataRetriever 上的，minSdk 24 上会抛 NoSuchMethodError
             runCatching { retriever.release() }
         }
     }
@@ -140,118 +197,68 @@ internal object WidgetCover {
     }
 
     /**
-     * 画「酷狗概念版同款：立体半透明霓虹发光黑胶外环 + 纹理沟槽 + 圆形封面」。
-     *
-     * 结构拆解（对齐参考图）：
-     * - 最外层（`0.88r ~ 0.96r`）：柔和环境投影与霓虹光晕，让胶片从渐变底卡上浮起；
-     * - 立体彩胶外圈（`0.61r ~ 0.89r`）：果冻感高明度半透明渐变环，叠加 2 道精细同心声槽纹、
-     *   外沿高光白边与内沿立体描边；
-     * - 中心专辑封面（`0 ~ 0.61r`）：居中圆裁切，边缘紧贴一圈清脆细白环。
+     * STYLE A 利落圆角方图封面：
+     * 铺满画布 94% 主体区域，周围留细微阴影与 1px 内敛玻璃细描边。
      */
-    private fun circularWithGlow(src: Bitmap, targetPx: Int, seed: Int): Bitmap {
+    private fun roundedSquareCover(
+        src: Bitmap,
+        targetPx: Int,
+        cornerRadiusRatio: Float,
+        strokeColor: Int
+    ): Bitmap {
         val out = Bitmap.createBitmap(targetPx, targetPx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
-        val r = targetPx / 2f
-        val discRadius = r * 0.615f
-        val ringOuterRadius = r * 0.895f
-        val ringMidRadius = (discRadius + ringOuterRadius) * 0.5f
-        val ringWidth = ringOuterRadius - discRadius
 
-        val hsv = FloatArray(3)
-        Color.colorToHSV(seed, hsv)
+        val padSide = maxOf(2f, targetPx * 0.032f)
+        val padTop = maxOf(1.5f, targetPx * 0.020f)
+        val padBottom = maxOf(3f, targetPx * 0.044f)
+        val rect = RectF(padSide, padTop, targetPx - padSide, targetPx - padBottom)
+        val side = minOf(rect.width(), rect.height())
+        val cx = rect.centerX()
+        val cy = rect.centerY()
+        val sq = RectF(cx - side / 2f, cy - side / 2f, cx + side / 2f, cy + side / 2f)
+        val radius = (side * cornerRadiusRatio).coerceIn(4f, side * 0.42f)
 
-        // 1) 底部柔和立体阴影 + 霓虹外发光
-        val glowColor = Color.HSVToColor(
-            floatArrayOf(hsv[0], (hsv[1] * 0.72f).coerceIn(0.35f, 0.82f), 1f)
-        )
-        val ambientShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-            color = Color.argb(68, 0, 12, 32)
-            maskFilter = BlurMaskFilter(targetPx * 0.045f, BlurMaskFilter.Blur.NORMAL)
+        // 柔和底阴影（使专辑像贴在磨砂琉璃上浮起）
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x48000000
+            maskFilter = BlurMaskFilter(maxOf(2f, targetPx * 0.026f), BlurMaskFilter.Blur.NORMAL)
         }
-        canvas.drawCircle(r, r + targetPx * 0.015f, ringOuterRadius, ambientShadow)
+        val shadowRect = RectF(sq.left, sq.top + targetPx * 0.014f, sq.right, sq.bottom + targetPx * 0.014f)
+        canvas.drawRoundRect(shadowRect, radius, radius, shadowPaint)
 
-        val outerNeonGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = targetPx * 0.055f
-            color = Color.argb(145, Color.red(glowColor), Color.green(glowColor), Color.blue(glowColor))
-            maskFilter = BlurMaskFilter(targetPx * 0.032f, BlurMaskFilter.Blur.NORMAL)
-        }
-        canvas.drawCircle(r, r, ringOuterRadius - targetPx * 0.01f, outerNeonGlow)
-
-        // 2) 果冻感宽边彩胶环（左上亮、右下润的斜向流光渐变）
-        val rimLight = Color.HSVToColor(
-            235,
-            floatArrayOf((hsv[0] - 6f + 360f) % 360f, (hsv[1] * 0.46f).coerceIn(0.24f, 0.58f), 1f)
-        )
-        val rimMid = Color.HSVToColor(
-            220,
-            floatArrayOf(hsv[0], (hsv[1] * 0.68f).coerceIn(0.38f, 0.76f), 0.98f)
-        )
-        val rimDeep = Color.HSVToColor(
-            230,
-            floatArrayOf((hsv[0] + 8f) % 360f, (hsv[1] * 0.82f).coerceIn(0.45f, 0.85f), 0.90f)
-        )
-        val vinylRimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = ringWidth
-            shader = android.graphics.LinearGradient(
-                r - ringOuterRadius, r - ringOuterRadius,
-                r + ringOuterRadius, r + ringOuterRadius,
-                intArrayOf(rimLight, rimMid, rimDeep),
-                floatArrayOf(0f, 0.52f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawCircle(r, r, ringMidRadius, vinylRimPaint)
-
-        // 3) 彩胶环上的两道同心声槽细纹 + 外圈高光玻璃边
-        val groovePaint1 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = maxOf(1f, targetPx * 0.0045f)
-            color = 0x48FFFFFF
-        }
-        canvas.drawCircle(r, r, discRadius + ringWidth * 0.36f, groovePaint1)
-
-        val groovePaint2 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = maxOf(1f, targetPx * 0.004f)
-            color = 0x2E000000
-        }
-        canvas.drawCircle(r, r, discRadius + ringWidth * 0.68f, groovePaint2)
-
-        val outerRimHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = maxOf(1.2f, targetPx * 0.008f)
-            color = 0x88FFFFFF.toInt()
-        }
-        canvas.drawCircle(r, r, ringOuterRadius - outerRimHighlight.strokeWidth * 0.5f, outerRimHighlight)
-
-        // 4) 圆形唱片封面本体
-        val side = minOf(src.width, src.height)
-        val scale = (discRadius * 2f) / side
+        // 中心裁切铺图
+        val srcMin = minOf(src.width, src.height).coerceAtLeast(1)
+        val scale = side / srcMin.toFloat()
         val matrix = Matrix().apply {
             setScale(scale, scale)
             postTranslate(
-                r - (src.width / 2f) * scale,
-                r - (src.height / 2f) * scale
+                cx - (src.width * 0.5f) * scale,
+                cy - (src.height * 0.5f) * scale
             )
         }
         val shader = BitmapShader(src, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
             setLocalMatrix(matrix)
         }
-        val disc = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+        val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             this.shader = shader
         }
-        canvas.drawCircle(r, r, discRadius, disc)
+        canvas.drawRoundRect(sq, radius, radius, artPaint)
 
-        // 5) 封面与彩胶环交界处的亮白内环，让层次干净利落
-        val innerEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // 1px 内敛玻璃边框
+        val strokeW = maxOf(1.2f, targetPx * 0.010f)
+        val strokeRect = RectF(
+            sq.left + strokeW * 0.5f,
+            sq.top + strokeW * 0.5f,
+            sq.right - strokeW * 0.5f,
+            sq.bottom - strokeW * 0.5f
+        )
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = maxOf(1.2f, targetPx * 0.008f)
-            color = 0x99FFFFFF.toInt()
+            strokeWidth = strokeW
+            color = strokeColor
         }
-        canvas.drawCircle(r, r, discRadius, innerEdge)
+        canvas.drawRoundRect(strokeRect, (radius - strokeW * 0.5f).coerceAtLeast(2f), (radius - strokeW * 0.5f).coerceAtLeast(2f), strokePaint)
 
         return out
     }

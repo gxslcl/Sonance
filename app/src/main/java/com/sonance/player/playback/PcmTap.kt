@@ -1,7 +1,6 @@
 package com.sonance.player.playback
 
 import android.util.Log
-import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
@@ -108,8 +107,7 @@ class PcmTapProcessor : BaseAudioProcessor() {
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val enc = inputAudioFormat.encoding
-        val supported = enc == C.ENCODING_PCM_16BIT || enc == C.ENCODING_PCM_FLOAT
-        if (!supported) {
+        if (!PcmCodec.isSupportedEncoding(enc)) {
             scratch = FloatArray(0)
             Log.w(TAG, "PCM tap: 暂不支持的编码 $enc，可视化将没有数据")
             return inputAudioFormat
@@ -173,23 +171,7 @@ class PcmTapProcessor : BaseAudioProcessor() {
         var counted = 0
         while (done < frames) {
             val n = minOf(scratch.size, frames - done)
-            var i = 0
-            while (i < n) {
-                var sum = 0f
-                var c = 0
-                while (c < ch) {
-                    sum += when (enc) {
-                        C.ENCODING_PCM_16BIT -> buffer.short / 32768f
-                        C.ENCODING_PCM_FLOAT -> buffer.float
-                        else -> 0f
-                    }
-                    c++
-                }
-                val mono = sum / ch
-                scratch[i] = mono
-                sumSq += mono * mono
-                i++
-            }
+            sumSq += PcmCodec.readChunkToMonoAndSumSq(buffer, scratch, n, ch, enc)
             PcmBus.ring.write(scratch, n)
             counted += n
             done += n

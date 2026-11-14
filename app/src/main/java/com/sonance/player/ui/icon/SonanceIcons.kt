@@ -79,6 +79,15 @@ object SonanceIcons {
         return builder.build()
     }
 
+    /** D-LAN / DLNA 无线投屏与局域网共享图标 */
+    val Cast by o(
+        "cast",
+        "M2 8V6C2 4.9 2.9 4 4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H14",
+        "M2 12C6.42 12 10 15.58 10 20",
+        "M2 16C4.21 16 6 17.79 6 20",
+        "M2 20H2.01"
+    )
+
     private fun o(name: String, vararg d: String) = lazy { build(name, d.toList(), emptyList()) }
     private fun ow(name: String, width: Float, vararg d: String) =
         lazy { build(name, d.toList(), emptyList(), width) }
