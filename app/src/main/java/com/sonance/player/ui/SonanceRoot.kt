@@ -290,7 +290,7 @@ private fun PermissionGate(vm: SonanceViewModel, content: @Composable () -> Unit
         }
     }
 
-    if (granted) {
+    if (granted || vm.externalSessionActive) {
         content()
     } else {
         PermissionScreen(
@@ -640,9 +640,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     val dense = configuration.screenHeightDp < 520
 
-    // onlineRevision 是必须的 key：在线歌不在 vm.songs 里，搜一次之后
+    // onlineRevision / externalRevision 是必须的 key：在线歌与外部直开歌不在 vm.songs 里，
     // 队列页 / 播放页要按 id 反查它们，映射必须重建。
-    val songMap = remember(vm.songs, vm.onlineRevision) { vm.songMap() }
+    val songMap = remember(vm.songs, vm.onlineRevision, vm.externalRevision) { vm.songMap() }
 
     // 分页器的数据源必须和播放器时间轴严格 1:1：
     // `queueIds` 里可能有被隐藏/清理、或扫描后已不在 songs 里的曲目，
@@ -1079,6 +1079,20 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 打开专辑详情时收起全屏播放页
     LaunchedEffect(detail) {
         if (detail != null) fullPlayerOpen = false
+    }
+
+    // 从文件管理器等外部意图打开单曲：收起弹层并展开播放页，立即显示并播放新打开的歌曲
+    LaunchedEffect(vm.externalOpenSignal) {
+        if (vm.externalOpenSignal > 0) {
+            detail = null
+            queueOpen = false
+            eqOpen = false
+            sleepOpen = false
+            vinylOpen = false
+            nativeWallOpen = false
+            dismissInput()
+            fullPlayerOpen = true
+        }
     }
 
     // 播放失败时明确告知原因，而不是静默跳过

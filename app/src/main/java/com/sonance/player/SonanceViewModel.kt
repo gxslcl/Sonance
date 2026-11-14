@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.content.IntentSender
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
@@ -44,7 +45,9 @@ import com.sonance.player.data.recognition.AudioFingerprinter
 import com.sonance.player.data.recognition.NeteaseRecognizer
 import com.sonance.player.data.recognition.PcmExtractor
 import com.sonance.player.data.RemotePlaylist
+import com.sonance.player.data.ExternalAudioResolver
 import com.sonance.player.data.hasCjkText
+import com.sonance.player.data.isExternalSongId
 import com.sonance.player.data.isRemoteSongId
 import org.json.JSONObject
 import com.sonance.player.data.storedOnlineSongFromJson
@@ -615,6 +618,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineRevision by mutableIntStateOf(0)
         private set
 
+    /** 从文件管理器等外部临时打开的歌曲 id → [Song]。声明在 init 前，原因同 [onlineSongMap]。 */
+    private val externalSongMap = mutableStateMapOf<Long, Song>()
+
+    /** 外部临时歌集合的版本号，驱动 [songMap] 重建 */
+    var externalRevision by mutableIntStateOf(0)
+        private set
+
+    /** 收到「打开外部音频」意图时递增，通知界面立即收起弹层并展开播放页 */
+    var externalOpenSignal by mutableIntStateOf(0)
+        private set
+
+    /** 是否已通过外部文件意图进入会话（未授予全盘存储权限时也能放开播放页） */
+    var externalSessionActive by mutableStateOf(false)
+        private set
+
+    private var externalRequestSeq = 0L
+
     /**
      * 当前登录的网易云账号；null = 未登录。
      *
@@ -691,7 +711,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     val title = player.state.value.title
                     if (title.isNotBlank()) showToast("正在播放 · $title")
                 }
-                if (!isRemoteSongId(id)) {
+                if (!isRemoteSongId(id) && !isExternalSongId(id)) {
                     prefs.pushRecentLocal(id)
                     prefs.bumpPlayCount(id)
                     recentIds = prefs.recentIds()
@@ -701,7 +721,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     // 不清的话恢复时会读到一份过期的在线现场，走错分支
                     prefs.lastOnlineSongJson = null
                     prefs.onlineQueueJson = null
-                } else {
+                } else if (isRemoteSongId(id)) {
                     // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
                     songById(id)?.toStoredOrNull()?.let { stored ->
                         prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
@@ -711,7 +731,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 recentEntries = prefs.recentEntries()
                 val st = player.state.value
-                if (st.queueIds.isNotEmpty()) {
+                if (st.queueIds.isNotEmpty() && !isExternalSongId(st.mediaId) && st.queueIds.none { isExternalSongId(it) }) {
                     if (isRemoteSongId(st.mediaId)) {
                         val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
                         if (stored.isNotEmpty()) {
@@ -725,7 +745,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         prefs.playQueueIndex = st.queueIndex
                     }
                 }
-                prefs.playPositionMs = 0L
+                if (!isExternalSongId(id)) prefs.playPositionMs = 0L
                 // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
                 // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
                 songById(id)?.let {
@@ -899,7 +919,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val st = player.state.value
         // 什么都没加载时**一个字段都不要写** —— 否则「打开就立刻关掉」这种操作
         // 会把上次存好的进度抹成 0（那一刻播放器还没连上，positionMs 是 0）。
-        if (st.mediaId > 0L) {
+        if (st.mediaId > 0L && !isExternalSongId(st.mediaId)) {
             prefs.lastSongId = st.mediaId
             prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
             prefs.lastPlayedOnline = false
@@ -925,7 +945,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 网易云的取流地址支持 Range 请求，恢复时可以直接摆回这个位置。
             prefs.playPositionMs = st.positionMs.coerceAtLeast(0L)
         }
-        if (st.queueIds.isNotEmpty()) {
+        if (st.queueIds.isNotEmpty() && !isExternalSongId(st.mediaId) && st.queueIds.none { isExternalSongId(it) }) {
             if (isRemoteSongId(st.mediaId)) {
                 val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
                 if (stored.isNotEmpty()) {
@@ -3079,6 +3099,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             showToast("在线歌不能收藏")
             return false
         }
+        if (isExternalSongId(id)) {
+            showToast("外部临时音频暂未入库，无法添加到收藏")
+            return false
+        }
         val liked = prefs.toggleFavorite(id)
         favorites = prefs.favorites
         com.sonance.player.widget.SonanceWidgets.onFavoriteOrModeChanged(getApplication())
@@ -4764,7 +4788,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         return MediaRepository.sortSongs(searched, sortField, sortAscending, songStats(), sortKeys)
     }
 
-    fun songById(id: Long): Song? = songs.firstOrNull { it.id == id } ?: onlineSongMap[id]
+    fun songById(id: Long): Song? =
+        songs.firstOrNull { it.id == id } ?: onlineSongMap[id] ?: externalSongMap[id]
 
     fun albumById(albumId: Long): Album? = albums.firstOrNull { it.albumId == albumId }
 
@@ -5178,9 +5203,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 这里把上一次扫描的全量结果并进来，保证 queueIds 都能解析到对象，
         // 否则分页器页号会和播放器索引错位（切歌后信息停在上一首的根因之一）。
         val all = lastScanOutcome?.songs?.associateBy { it.id }.orEmpty()
-        val merged = if (all.isEmpty()) base else all + base
-        if (onlineSongMap.isEmpty()) return merged
-        return merged + onlineSongMap
+        var merged = if (all.isEmpty()) base else all + base
+        if (onlineSongMap.isNotEmpty()) merged = merged + onlineSongMap
+        if (externalSongMap.isNotEmpty()) merged = merged + externalSongMap
+        return merged
     }
 
     // ===== 随机播放 =====
@@ -5359,6 +5385,71 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ===== 播放入口 =====
+
+    /**
+     * 从文件管理器 / 第三方应用通过 ACTION_VIEW / ACTION_SEND 打开一首音频并立即播放。
+     *
+     * - 同步阶段：立即占住 [playbackRestored] 并清空冷启动待恢复队列，避免旧曲库恢复或扫描完成把这次打开顶掉；
+     * - 异步阶段（IO）：优先绑定曲库已有曲目，其次直查 MediaStore，再兜底解析 FileProvider URI 的标签与时长；
+     * - 播放与选中态：命中或新查到的本地歌立刻亮起列表选中状态，同时递增 [externalOpenSignal] 展开全屏播放页。
+     */
+    fun openExternalAudio(uri: Uri, mimeType: String? = null) {
+        val seq = ++externalRequestSeq
+        playbackRestored = true
+        pendingStartupScroll = false
+        externalSessionActive = true
+        player.clearPendingRequest()
+
+        val librarySnapshot = songs
+        viewModelScope.launch {
+            val resolved = withContext(Dispatchers.IO) {
+                ExternalAudioResolver.resolve(
+                    context = getApplication(),
+                    uri = uri,
+                    mimeType = mimeType,
+                    librarySongs = librarySnapshot,
+                    repo = repo
+                )
+            }
+            if (seq != externalRequestSeq) return@launch
+            if (resolved == null) {
+                showToast("无法读取该音频文件")
+                return@launch
+            }
+
+            val target = resolved.song
+            if (hasAudioPermission() && (resolved.matchedInLibrary || resolved.discoveredFromMediaStore)) {
+                val current = songs
+                val inCurrent = current.firstOrNull { it.id == target.id }
+                val activeSong = inCurrent ?: target.also { fresh ->
+                    if (!prefs.isFolderExcluded(fresh.folderPath) && fresh.id !in prefs.hiddenIdSet()) {
+                        val updated = listOf(fresh) + current
+                        songs = updated
+                        rebuildPinyinIndex(updated)
+                        albums = MediaRepository.groupAlbums(updated)
+                        artists = MediaRepository.groupArtists(updated)
+                        folders = MediaRepository.groupFolders(updated)
+                    }
+                }
+                val queueSource = songs.ifEmpty { listOf(activeSong) }
+                val idx = queueSource.indexOfFirst { it.id == activeSong.id }
+                if (idx >= 0) {
+                    playFrom(queueSource, queueSource[idx])
+                    requestScrollToCurrent()
+                } else {
+                    externalSongMap[activeSong.id] = activeSong
+                    externalRevision++
+                    player.play(listOf(activeSong), 0, autoplay = true, startPositionMs = 0L, notifyStart = true)
+                }
+            } else {
+                val playSong = if (target.uri == uri) target else target.copy(uri = uri)
+                externalSongMap[playSong.id] = playSong
+                externalRevision++
+                player.play(listOf(playSong), 0, autoplay = true, startPositionMs = 0L, notifyStart = true)
+            }
+            externalOpenSignal++
+        }
+    }
 
     fun playFrom(list: List<Song>, song: Song) {
         val idx = list.indexOfFirst { it.id == song.id }.coerceAtLeast(0)

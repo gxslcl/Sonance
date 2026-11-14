@@ -1000,7 +1000,18 @@ object ArtworkLoader {
     private fun readEmbeddedPicture(context: Context, sourceUri: Uri, size: Int): Bitmap? {
         val mmr = MediaMetadataRetriever()
         return try {
-            mmr.setDataSource(context, sourceUri)
+            val ok = runCatching {
+                mmr.setDataSource(context, sourceUri)
+                true
+            }.getOrElse {
+                runCatching {
+                    context.contentResolver.openFileDescriptor(sourceUri, "r")?.use { pfd ->
+                        mmr.setDataSource(pfd.fileDescriptor)
+                        true
+                    } ?: false
+                }.getOrDefault(false)
+            }
+            if (!ok) return null
             mmr.embeddedPicture?.let { decodeSampled(it, size) }
         } catch (t: Throwable) {
             null

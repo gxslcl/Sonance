@@ -2586,21 +2586,30 @@ private fun ProgressBlock(
             inactiveColor = skin.surface3,
             thumbHalo = true
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Box(Modifier.fillMaxWidth()) {
             Text(
                 formatDuration(positionMs),
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                color = skin.textMuted
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 11.sp,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = skin.textMuted,
+                modifier = Modifier.align(Alignment.CenterStart)
             )
             // 播放速度胶囊：**点一下切到下一档**（0.5× → 0.75× → 1× → … 循环），不弹菜单。
             // 非 1.0× 时亮主题色，一眼能看出"正在快进/慢放"。
             // 每次切换给一次短震动，闭着眼睛点也能确认"档位变了"。
+            // 用 Box(Center) + tnum 等宽数字固定水平中心，避免左侧时间跳动时导致胶囊左右抖动。
             Text(
                 text = formatSpeed(playbackSpeed),
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 11.sp,
+                    fontFeatureSettings = "tnum"
+                ),
                 fontWeight = FontWeight.Medium,
                 color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
                 modifier = Modifier
+                    .align(Alignment.Center)
                     .clip(RoundedCornerShape(8.dp))
                     .clickable {
                         hapticTick(context)
@@ -2610,8 +2619,12 @@ private fun ProgressBlock(
             )
             Text(
                 formatDuration(durationMs),
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                color = skin.textMuted
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 11.sp,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = skin.textMuted,
+                modifier = Modifier.align(Alignment.CenterEnd)
             )
         }
     }

@@ -2,11 +2,15 @@ package com.sonance.player.data
 
 import android.content.ContentUris
 import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +69,7 @@ class MediaRepository(private val context: Context) {
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         }
 
+        val hasRecordingCol = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
         val projection = buildList {
             add(MediaStore.Audio.Media._ID)
             add(MediaStore.Audio.Media.TITLE)
@@ -76,22 +81,28 @@ class MediaRepository(private val context: Context) {
             add(MediaStore.Audio.Media.SIZE)
             add(MediaStore.Audio.Media.DATE_ADDED)
             add(MediaStore.Audio.Media.TRACK)
-            add(MediaStore.Audio.Media.IS_MUSIC)
             add(MediaStore.Audio.Media.IS_RINGTONE)
             add(MediaStore.Audio.Media.IS_NOTIFICATION)
             add(MediaStore.Audio.Media.IS_ALARM)
+            @Suppress("DEPRECATION")
+            add(MediaStore.Audio.Media.DATA)
+            if (hasRecordingCol) {
+                add(MediaStore.Audio.AudioColumns.IS_RECORDING)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.Audio.Media.RELATIVE_PATH)
-            } else {
-                @Suppress("DEPRECATION")
-                add(MediaStore.Audio.Media.DATA)
             }
         }.toTypedArray()
 
-        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+        // 不再用 `IS_MUSIC != 0` 当 SQL 前置条件：Download、第三方下载或无标签音频
+        // 常被系统标记为 IS_MUSIC = 0，后续已有专门的铃声/录音与目录规则过滤。
+        val selection: String? = null
         val out = ArrayList<Song>(512)
         // 可疑项：名字带加密标记、或时长解析不出来。留到第二轮读文件头确认。
         val suspicious = ArrayList<Pair<Song, Long>>()
+        val seenIds = HashSet<Long>()
+        val seenPathKeys = HashSet<String>()
+        val seenRawPaths = HashSet<String>()
 
         var excludedLocked = 0
         var excludedUnsupported = 0
@@ -117,11 +128,15 @@ class MediaRepository(private val context: Context) {
                 val iRing = cursor.getColumnIndex(MediaStore.Audio.Media.IS_RINGTONE)
                 val iNoti = cursor.getColumnIndex(MediaStore.Audio.Media.IS_NOTIFICATION)
                 val iAlarm = cursor.getColumnIndex(MediaStore.Audio.Media.IS_ALARM)
+                val iRecording = if (hasRecordingCol) {
+                    cursor.getColumnIndex(MediaStore.Audio.AudioColumns.IS_RECORDING)
+                } else -1
+                @Suppress("DEPRECATION")
+                val iData = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
                 val iPath = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
                 } else {
-                    @Suppress("DEPRECATION")
-                    cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                    iData
                 }
 
                 while (cursor.moveToNext()) {
@@ -132,17 +147,20 @@ class MediaRepository(private val context: Context) {
                     val id = cursor.getLong(iId)
                     val rawTitle = cursor.getString(iTitle)?.trim().orEmpty()
                     val displayName = cursor.getString(iName)?.trim().orEmpty()
+                    val sizeBytes = cursor.getLong(iSize)
+                    if (displayName.isEmpty() || displayName.startsWith(".") || sizeBytes <= 0L) continue
                     val path = if (iPath >= 0) cursor.getString(iPath).orEmpty() else ""
-                    val title = rawTitle.ifBlank { displayName.substringBeforeLast('.') }
+                    val rawDataPath = if (iData >= 0) cursor.getString(iData).orEmpty() else ""
+                    val title = ExternalAudioResolver.sanitizeTitle(rawTitle, displayName)
                     val artist = sanitize(cursor.getString(iArtist))
                     val album = sanitize(cursor.getString(iAlbum))
 
-                    val folder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        path.trimEnd('/')
-                    } else {
-                        path.substringBeforeLast('/', "")
-                    }
+                    val folder = folderOf(path)
                     val folderName = folder.substringAfterLast('/').ifBlank { "根目录" }
+
+                    seenIds += id
+                    seenPathKeys += pathKeyOf(folder, displayName)
+                    if (rawDataPath.isNotBlank()) seenRawPaths += rawDataPath.lowercase()
 
                     // 限定扫描范围：不在所选目录里的条目直接跳过（不参与任何排除计数）
                     if (folderPaths != null && folder !in folderPaths) continue
@@ -154,7 +172,7 @@ class MediaRepository(private val context: Context) {
 
                     val song = Song(
                         id = id,
-                        title = title.ifBlank { "未知曲目" },
+                        title = title,
                         artist = artist,
                         album = album,
                         albumId = cursor.getLong(iAlbumId),
@@ -163,7 +181,7 @@ class MediaRepository(private val context: Context) {
                         folderPath = folder,
                         folderName = folderName,
                         displayName = displayName,
-                        sizeBytes = cursor.getLong(iSize),
+                        sizeBytes = sizeBytes,
                         dateAddedSec = cursor.getLong(iDate),
                         track = cursor.getInt(iTrack)
                     )
@@ -171,7 +189,8 @@ class MediaRepository(private val context: Context) {
                     // ---- 过滤 1：系统提示音 / 录音目录 ----
                     val systemSound = (iRing >= 0 && cursor.getInt(iRing) == 1) ||
                         (iNoti >= 0 && cursor.getInt(iNoti) == 1) ||
-                        (iAlarm >= 0 && cursor.getInt(iAlarm) == 1)
+                        (iAlarm >= 0 && cursor.getInt(iAlarm) == 1) ||
+                        (iRecording >= 0 && cursor.getInt(iRecording) == 1)
                     if (filters.excludeNonSongFolders &&
                         (systemSound || LockedFormat.isNonSongFolder(folder))
                     ) {
@@ -206,6 +225,166 @@ class MediaRepository(private val context: Context) {
             // 权限缺失或媒体库异常时返回空表
         }
 
+        // 兜底 Pass 2：MediaStore.Files（捕获系统未归类进 Audio.Media 的 .opus/.oga/.mka/.flac 等音频）
+        val filesUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Files.getContentUri("external")
+        }
+        try {
+            val filesProjection = buildList {
+                add(MediaStore.Files.FileColumns._ID)
+                add(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                add(MediaStore.MediaColumns.DISPLAY_NAME)
+                add(MediaStore.MediaColumns.TITLE)
+                add(MediaStore.MediaColumns.SIZE)
+                add(MediaStore.MediaColumns.DATE_ADDED)
+                add(MediaStore.MediaColumns.MIME_TYPE)
+                @Suppress("DEPRECATION")
+                add(MediaStore.MediaColumns.DATA)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add(MediaStore.MediaColumns.RELATIVE_PATH)
+                    add(MediaStore.MediaColumns.DURATION)
+                }
+            }.toTypedArray()
+            val filesSelection =
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE} != ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} AND " +
+                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} != ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
+            context.contentResolver.query(
+                filesUri, filesProjection, filesSelection, null, null
+            )?.use { cursor ->
+                val iId = cursor.getColumnIndex(MediaStore.Files.FileColumns._ID)
+                val iMediaType = cursor.getColumnIndex(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                val iName = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                val iTitle = cursor.getColumnIndex(MediaStore.MediaColumns.TITLE)
+                val iSize = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                val iDate = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+                val iMime = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                @Suppress("DEPRECATION")
+                val iData = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                val iPath = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else {
+                    iData
+                }
+                val iDur = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.MediaColumns.DURATION)
+                } else -1
+
+                while (cursor.moveToNext()) {
+                    coroutineContext.ensureActive()
+                    if (iId < 0 || iName < 0) continue
+                    val id = cursor.getLong(iId)
+                    if (id in seenIds) continue
+                    val displayName = cursor.getString(iName)?.trim().orEmpty()
+                    if (displayName.isEmpty() || displayName.startsWith(".")) continue
+                    val sizeBytes = if (iSize >= 0) cursor.getLong(iSize) else 0L
+                    if (sizeBytes <= 0L) continue
+                    val mimeType = if (iMime >= 0) cursor.getString(iMime) else null
+                    val mediaType = if (iMediaType >= 0) cursor.getInt(iMediaType) else null
+                    if (!ExternalAudioResolver.isScannableMediaFileCandidate(
+                            displayName = displayName,
+                            mimeType = mimeType,
+                            mediaType = mediaType,
+                            audioMediaTypeValue = MediaStore.Files.FileColumns.MEDIA_TYPE_AUDIO
+                        )
+                    ) continue
+
+                    val rawPath = if (iPath >= 0) cursor.getString(iPath).orEmpty() else ""
+                    val rawDataPath = if (iData >= 0) cursor.getString(iData).orEmpty() else ""
+                    val folder = folderOf(rawPath)
+                    val pk = pathKeyOf(folder, displayName)
+                    if (pk in seenPathKeys || (rawDataPath.isNotBlank() && rawDataPath.lowercase() in seenRawPaths)) {
+                        continue
+                    }
+
+                    scanned++
+                    if (scanned % 64 == 0) onProgress?.invoke(scanned)
+                    seenIds += id
+                    seenPathKeys += pk
+                    if (rawDataPath.isNotBlank()) seenRawPaths += rawDataPath.lowercase()
+
+                    if (folderPaths != null && folder !in folderPaths) continue
+                    if (filters.excludedDirs.isNotEmpty() &&
+                        filters.excludedDirs.any { ex -> folder == ex || folder.startsWith("$ex/") }
+                    ) continue
+                    if (filters.excludeNonSongFolders && LockedFormat.isNonSongFolder(folder)) {
+                        excludedNonSong++
+                        continue
+                    }
+                    if (filters.excludeUnsupported && LockedFormat.isPlainUnsupported(displayName)) {
+                        excludedUnsupported++
+                        continue
+                    }
+
+                    val uri = ContentUris.withAppendedId(filesUri, id)
+                    val initialDuration = if (iDur >= 0) cursor.getLong(iDur) else 0L
+                    val meta = probeAudioMetadata(uri, rawDataPath)
+                    val duration = if (initialDuration > 0L) initialDuration else meta.durationMs
+                    if (filterShortAudio && duration in 1..14_000) {
+                        excludedShort++
+                        continue
+                    }
+
+                    val rawTitle = if (iTitle >= 0) cursor.getString(iTitle)?.trim().orEmpty() else ""
+                    val song = Song(
+                        id = id,
+                        title = ExternalAudioResolver.sanitizeTitle(meta.title ?: rawTitle, displayName),
+                        artist = sanitize(meta.artist),
+                        album = sanitize(meta.album),
+                        albumId = -1L,
+                        durationMs = duration,
+                        uri = uri,
+                        folderPath = folder,
+                        folderName = folder.substringAfterLast('/').ifBlank { "根目录" },
+                        displayName = displayName,
+                        sizeBytes = sizeBytes,
+                        dateAddedSec = if (iDate >= 0) cursor.getLong(iDate) else 0L,
+                        track = meta.track
+                    )
+                    val suspiciousName = LockedFormat.looksLikeLockedContainer(displayName)
+                    if (filters.excludeLocked && (suspiciousName || duration <= 0)) {
+                        suspicious += song to duration
+                    } else {
+                        out += song
+                    }
+                }
+            }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            // 个别机型对 MediaStore.Files 限制较严时静默退化，不影响 Pass 1/Pass 3 结果
+        }
+
+        // 兜底 Pass 3：扫描共享存储中尚未入库（MediaScanner 延迟 / .nomedia 音乐目录）的本地音频
+        val fsFoundPathsToIndex = ArrayList<String>()
+        scanUnindexedFilesystem(
+            filterShortAudio = filterShortAudio,
+            filters = filters,
+            folderPaths = folderPaths,
+            seenPathKeys = seenPathKeys,
+            seenRawPaths = seenRawPaths,
+            onScannedStep = {
+                scanned++
+                if (scanned % 64 == 0) onProgress?.invoke(scanned)
+            },
+            onExcludedUnsupported = { excludedUnsupported++ },
+            onExcludedShort = { excludedShort++ },
+            out = out,
+            suspicious = suspicious,
+            toMediaScan = fsFoundPathsToIndex
+        )
+        if (fsFoundPathsToIndex.isNotEmpty()) {
+            runCatching {
+                MediaScannerConnection.scanFile(
+                    context,
+                    fsFoundPathsToIndex.toTypedArray(),
+                    null,
+                    null
+                )
+            }
+        }
+
         // 第二轮：只对可疑项读 64 字节文件头，按魔数定生死。
         // 名字带加密标记但能正常解出时长（= 已转换的成品）会被放行。
         for ((song, duration) in suspicious) {
@@ -226,10 +405,9 @@ class MediaRepository(private val context: Context) {
     }
 
     /**
-     * 列出 MediaStore 里已有的音频目录，按目录聚合并统计曲目数。
+     * 列出设备上的音频目录，按目录聚合并统计曲目数。
      *
-     * 只作为「扫描范围」的候选列表，不读取文件、不写库；权限缺失时返回空表，
-     * 由面板提示用户检查读取音乐权限。
+     * 移除 IS_MUSIC != 0 限制并补充 MediaStore.Files 中的音频目录，确保「下载」等目录完整可见。
      */
     suspend fun listFolders(): List<ScanFolderInfo> = withContext(Dispatchers.IO) {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -244,19 +422,44 @@ class MediaRepository(private val context: Context) {
             MediaStore.Audio.Media.DATA
         }
         val counts = LinkedHashMap<String, Int>()
+        val seenIds = HashSet<Long>()
+        val seenKeys = HashSet<String>()
         try {
+            val proj = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.IS_RINGTONE,
+                MediaStore.Audio.Media.IS_NOTIFICATION,
+                MediaStore.Audio.Media.IS_ALARM,
+                pathColumn
+            )
             context.contentResolver.query(
                 collection,
-                arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.IS_MUSIC, pathColumn),
-                "${MediaStore.Audio.Media.IS_MUSIC} != 0",
+                proj,
+                null,
                 null,
                 null
             )?.use { cursor ->
+                val iId = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
+                val iName = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                val iRing = cursor.getColumnIndex(MediaStore.Audio.Media.IS_RINGTONE)
+                val iNoti = cursor.getColumnIndex(MediaStore.Audio.Media.IS_NOTIFICATION)
+                val iAlarm = cursor.getColumnIndex(MediaStore.Audio.Media.IS_ALARM)
                 val iPath = cursor.getColumnIndex(pathColumn)
                 if (iPath >= 0) {
                     while (cursor.moveToNext()) {
                         coroutineContext.ensureActive()
+                        if ((iRing >= 0 && cursor.getInt(iRing) == 1) ||
+                            (iNoti >= 0 && cursor.getInt(iNoti) == 1) ||
+                            (iAlarm >= 0 && cursor.getInt(iAlarm) == 1)
+                        ) continue
                         val folder = folderOf(cursor.getString(iPath).orEmpty())
+                        if (LockedFormat.isNonSongFolder(folder)) continue
+                        if (iId >= 0) seenIds += cursor.getLong(iId)
+                        if (iName >= 0) {
+                            val name = cursor.getString(iName).orEmpty()
+                            if (name.isNotBlank()) seenKeys += pathKeyOf(folder, name)
+                        }
                         counts[folder] = (counts[folder] ?: 0) + 1
                     }
                 }
@@ -266,6 +469,71 @@ class MediaRepository(private val context: Context) {
         } catch (_: Exception) {
             // 权限缺失或媒体库异常时返回空表
         }
+
+        // 补充 MediaStore.Files 中的音频目录
+        try {
+            val filesUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            } else {
+                MediaStore.Files.getContentUri("external")
+            }
+            val filesPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.MediaColumns.RELATIVE_PATH
+            } else {
+                @Suppress("DEPRECATION")
+                MediaStore.MediaColumns.DATA
+            }
+            val filesSel =
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE} != ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE} AND " +
+                    "${MediaStore.Files.FileColumns.MEDIA_TYPE} != ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
+            context.contentResolver.query(
+                filesUri,
+                arrayOf(
+                    MediaStore.Files.FileColumns._ID,
+                    MediaStore.Files.FileColumns.MEDIA_TYPE,
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.MIME_TYPE,
+                    MediaStore.MediaColumns.SIZE,
+                    filesPathCol
+                ),
+                filesSel,
+                null,
+                null
+            )?.use { cursor ->
+                val iId = cursor.getColumnIndex(MediaStore.Files.FileColumns._ID)
+                val iType = cursor.getColumnIndex(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                val iName = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                val iMime = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                val iSize = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                val iPath = cursor.getColumnIndex(filesPathCol)
+                while (cursor.moveToNext()) {
+                    coroutineContext.ensureActive()
+                    if (iId < 0 || iName < 0 || iPath < 0) continue
+                    val id = cursor.getLong(iId)
+                    if (id in seenIds) continue
+                    val name = cursor.getString(iName)?.trim().orEmpty()
+                    if (name.isEmpty() || name.startsWith(".")) continue
+                    if (iSize >= 0 && cursor.getLong(iSize) <= 0L) continue
+                    val mime = if (iMime >= 0) cursor.getString(iMime) else null
+                    val mType = if (iType >= 0) cursor.getInt(iType) else null
+                    if (!ExternalAudioResolver.isScannableMediaFileCandidate(
+                            name, mime, mType, MediaStore.Files.FileColumns.MEDIA_TYPE_AUDIO
+                        )
+                    ) continue
+                    val folder = folderOf(cursor.getString(iPath).orEmpty())
+                    if (LockedFormat.isNonSongFolder(folder)) continue
+                    val pk = pathKeyOf(folder, name)
+                    if (pk in seenKeys) continue
+                    seenIds += id
+                    seenKeys += pk
+                    counts[folder] = (counts[folder] ?: 0) + 1
+                }
+            }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+        }
+
         counts.map { (path, count) ->
             ScanFolderInfo(
                 path = path,
@@ -273,6 +541,314 @@ class MediaRepository(private val context: Context) {
                 songCount = count
             )
         }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.path })
+    }
+
+    /** 按外部 URI 提供的线索从 MediaStore 直接查找单首歌曲（曲库缓存过旧时兜底）。 */
+    fun findSingleSong(
+        mediaId: Long?,
+        pathHint: String?,
+        displayName: String?,
+        sizeBytes: Long
+    ): Song? {
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        }
+        val projection = buildList {
+            add(MediaStore.Audio.Media._ID)
+            add(MediaStore.Audio.Media.TITLE)
+            add(MediaStore.Audio.Media.ARTIST)
+            add(MediaStore.Audio.Media.ALBUM)
+            add(MediaStore.Audio.Media.ALBUM_ID)
+            add(MediaStore.Audio.Media.DURATION)
+            add(MediaStore.Audio.Media.DISPLAY_NAME)
+            add(MediaStore.Audio.Media.SIZE)
+            add(MediaStore.Audio.Media.DATE_ADDED)
+            add(MediaStore.Audio.Media.TRACK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.Audio.Media.RELATIVE_PATH)
+            } else {
+                @Suppress("DEPRECATION")
+                add(MediaStore.Audio.Media.DATA)
+            }
+        }.toTypedArray()
+
+        fun cursorToSongs(uri: Uri, sel: String?, args: Array<String>?): List<Song> {
+            val found = ArrayList<Song>()
+            runCatching {
+                context.contentResolver.query(uri, projection, sel, args, null)?.use { cursor ->
+                    val iId = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
+                    val iTitle = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE)
+                    val iArtist = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST)
+                    val iAlbum = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM)
+                    val iAlbumId = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
+                    val iDur = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
+                    val iName = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val iSize = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
+                    val iDate = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
+                    val iTrack = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
+                    val iPath = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                    }
+                    while (cursor.moveToNext()) {
+                        if (iId < 0) continue
+                        val id = cursor.getLong(iId)
+                        val name = if (iName >= 0) cursor.getString(iName)?.trim().orEmpty() else ""
+                        val rawTitle = if (iTitle >= 0) cursor.getString(iTitle)?.trim().orEmpty() else ""
+                        val folder = folderOf(if (iPath >= 0) cursor.getString(iPath).orEmpty() else "")
+                        found += Song(
+                            id = id,
+                            title = ExternalAudioResolver.sanitizeTitle(rawTitle, name),
+                            artist = sanitize(if (iArtist >= 0) cursor.getString(iArtist) else null),
+                            album = sanitize(if (iAlbum >= 0) cursor.getString(iAlbum) else null),
+                            albumId = if (iAlbumId >= 0) cursor.getLong(iAlbumId) else -1L,
+                            durationMs = if (iDur >= 0) cursor.getLong(iDur) else 0L,
+                            uri = ContentUris.withAppendedId(collection, id),
+                            folderPath = folder,
+                            folderName = folder.substringAfterLast('/').ifBlank { "根目录" },
+                            displayName = name,
+                            sizeBytes = if (iSize >= 0) cursor.getLong(iSize) else 0L,
+                            dateAddedSec = if (iDate >= 0) cursor.getLong(iDate) else 0L,
+                            track = if (iTrack >= 0) cursor.getInt(iTrack) else 0
+                        )
+                    }
+                }
+            }
+            return found
+        }
+
+        if (mediaId != null && mediaId > 0L) {
+            val byId = cursorToSongs(collection, "${MediaStore.Audio.Media._ID} = ?", arrayOf(mediaId.toString()))
+            if (byId.isNotEmpty()) return byId.first()
+        }
+
+        val targetName = displayName?.takeIf { it.isNotBlank() }
+            ?: ExternalAudioResolver.normalizeHintFolderAndName(pathHint)?.second
+        if (!targetName.isNullOrBlank()) {
+            val candidates = cursorToSongs(
+                collection,
+                "${MediaStore.Audio.Media.DISPLAY_NAME} = ?",
+                arrayOf(targetName)
+            )
+            val idx = ExternalAudioResolver.matchLibrarySongIndex(
+                entries = candidates,
+                entryOf = { LibraryMatchEntry(it.id, it.folderPath, it.displayName, it.sizeBytes) },
+                mediaId = mediaId,
+                pathHint = pathHint,
+                displayName = targetName,
+                sizeBytes = sizeBytes
+            )
+            if (idx >= 0) return candidates[idx]
+        }
+        return null
+    }
+
+    private fun pathKeyOf(folder: String, displayName: String): String =
+        "${folder.trim('/').lowercase()}/${displayName.trim().lowercase()}"
+
+    private fun probeAudioMetadata(uri: Uri, rawPath: String?): ExternalAudioResolver.AudioMetadata {
+        if (!rawPath.isNullOrBlank()) {
+            val fromPath = ExternalAudioResolver.readMetadataFromPath(rawPath)
+            if (fromPath.durationMs > 0L || !fromPath.title.isNullOrBlank() || !fromPath.artist.isNullOrBlank()) {
+                return fromPath
+            }
+        }
+        val mmr = MediaMetadataRetriever()
+        return try {
+            val ok = runCatching {
+                mmr.setDataSource(context, uri)
+                true
+            }.getOrElse {
+                runCatching {
+                    context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                        mmr.setDataSource(pfd.fileDescriptor)
+                        true
+                    } ?: false
+                }.getOrDefault(false)
+            }
+            if (!ok) ExternalAudioResolver.AudioMetadata()
+            else ExternalAudioResolver.AudioMetadata(
+                title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.trim(),
+                artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.trim()
+                    ?: mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST)?.trim(),
+                album = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.trim(),
+                durationMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L,
+                track = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
+                    ?.substringBefore('/')?.trim()?.toIntOrNull() ?: 0
+            )
+        } catch (_: Throwable) {
+            ExternalAudioResolver.AudioMetadata()
+        } finally {
+            runCatching { mmr.release() }
+        }
+    }
+
+    private suspend fun scanUnindexedFilesystem(
+        filterShortAudio: Boolean,
+        filters: ScanFilters,
+        folderPaths: Set<String>?,
+        seenPathKeys: HashSet<String>,
+        seenRawPaths: HashSet<String>,
+        onScannedStep: () -> Unit,
+        onExcludedUnsupported: () -> Unit,
+        onExcludedShort: () -> Unit,
+        out: MutableList<Song>,
+        suspicious: MutableList<Pair<Song, Long>>,
+        toMediaScan: MutableList<String>
+    ) {
+        val roots = storageRoots()
+        if (roots.isEmpty()) return
+
+        val seenCanonicalDirs = HashSet<String>()
+        var visitedDirs = 0
+
+        for (root in roots) {
+            val rootPath = root.absolutePath.trimEnd('/')
+            val stack = ArrayDeque<Pair<File, Int>>()
+            if (folderPaths != null) {
+                for (fp in folderPaths) {
+                    val target = if (fp.isBlank()) root else if (fp.startsWith("/")) File(fp) else File(root, fp)
+                    if (target.isDirectory && target.canRead()) {
+                        stack.addLast(target to 0)
+                    }
+                }
+            } else {
+                stack.addLast(root to 0)
+            }
+
+            while (stack.isNotEmpty() && visitedDirs < FS_MAX_DIRS) {
+                coroutineContext.ensureActive()
+                val (dir, depth) = stack.removeLast()
+                if (depth > FS_MAX_DEPTH || !dir.canRead()) continue
+                val canonical = runCatching { dir.canonicalPath }.getOrNull() ?: dir.absolutePath
+                if (!seenCanonicalDirs.add(canonical)) continue
+                visitedDirs++
+
+                val relFolder = filesystemFolderOf(dir.absolutePath, rootPath)
+                if (relFolder.isNotEmpty()) {
+                    val leaf = dir.name.lowercase()
+                    if (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES) continue
+                    if (filters.excludedDirs.isNotEmpty() &&
+                        filters.excludedDirs.any { ex -> relFolder == ex || relFolder.startsWith("$ex/") }
+                    ) continue
+                    if (filters.excludeNonSongFolders && LockedFormat.isNonSongFolder(relFolder)) continue
+                }
+
+                val children = dir.listFiles() ?: continue
+                val hasNoMedia = children.any { it.name == ".nomedia" }
+                if (hasNoMedia && !hasMusicFolderHint(relFolder)) continue
+
+                for (child in children) {
+                    coroutineContext.ensureActive()
+                    val name = child.name
+                    if (name.startsWith(".")) continue
+                    if (child.isDirectory) {
+                        if (folderPaths == null && depth < FS_MAX_DEPTH) {
+                            stack.addLast(child to (depth + 1))
+                        }
+                        continue
+                    }
+                    if (!child.isFile || !child.canRead()) continue
+                    val size = child.length()
+                    if (size <= 0L) continue
+
+                    val ext = LockedFormat.extensionOf(name)
+                    val isCandidateExt = ext in LockedFormat.strictAudioExtensions ||
+                        ext in LockedFormat.plainUnsupportedExtensions ||
+                        LockedFormat.looksLikeLockedContainer(name)
+                    if (!isCandidateExt) continue
+
+                    val absPath = child.absolutePath
+                    val pk = pathKeyOf(relFolder, name)
+                    if (pk in seenPathKeys || absPath.lowercase() in seenRawPaths) continue
+
+                    onScannedStep()
+                    seenPathKeys += pk
+                    seenRawPaths += absPath.lowercase()
+
+                    if (folderPaths != null && relFolder !in folderPaths) continue
+                    if (filters.excludeUnsupported && LockedFormat.isPlainUnsupported(name)) {
+                        onExcludedUnsupported()
+                        continue
+                    }
+
+                    val meta = ExternalAudioResolver.readMetadataFromPath(absPath)
+                    val duration = meta.durationMs
+                    if (filterShortAudio && duration in 1..14_000) {
+                        onExcludedShort()
+                        continue
+                    }
+
+                    if (toMediaScan.size < 512) toMediaScan += absPath
+
+                    val song = Song(
+                        id = unindexedSongId(absPath),
+                        title = ExternalAudioResolver.sanitizeTitle(meta.title, name),
+                        artist = sanitize(meta.artist),
+                        album = sanitize(meta.album),
+                        albumId = -1L,
+                        durationMs = duration,
+                        uri = Uri.fromFile(child),
+                        folderPath = relFolder,
+                        folderName = relFolder.substringAfterLast('/').ifBlank { "根目录" },
+                        displayName = name,
+                        sizeBytes = size,
+                        dateAddedSec = child.lastModified() / 1000L,
+                        track = meta.track
+                    )
+                    val suspiciousName = LockedFormat.looksLikeLockedContainer(name)
+                    if (filters.excludeLocked && (suspiciousName || duration <= 0L)) {
+                        suspicious += song to duration
+                    } else {
+                        out += song
+                    }
+                }
+            }
+        }
+    }
+
+    private fun storageRoots(): List<File> {
+        val roots = LinkedHashSet<File>()
+        runCatching { Environment.getExternalStorageDirectory() }
+            .getOrNull()
+            ?.takeIf { it.isDirectory && it.canRead() }
+            ?.let { roots += it }
+        runCatching { context.getExternalFilesDirs(null) }
+            .getOrNull()
+            ?.forEach { appDir ->
+                if (appDir == null) return@forEach
+                val marker = "${File.separator}Android${File.separator}data${File.separator}"
+                val p = appDir.absolutePath
+                val idx = p.indexOf(marker)
+                if (idx > 0) {
+                    val root = File(p.substring(0, idx))
+                    if (root.isDirectory && root.canRead()) roots += root
+                }
+            }
+        return roots.toList()
+    }
+
+    private fun filesystemFolderOf(dirPath: String, rootPath: String): String {
+        val cleanDir = dirPath.trimEnd('/')
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            when {
+                cleanDir == rootPath -> ""
+                cleanDir.startsWith("$rootPath/") -> cleanDir.substring(rootPath.length + 1)
+                else -> cleanDir
+            }
+        } else {
+            cleanDir
+        }
+    }
+
+    private fun hasMusicFolderHint(relFolder: String): Boolean {
+        val lower = relFolder.lowercase()
+        return FS_MUSIC_NOMEDIA_WHITELIST.any { lower.contains(it) }
     }
 
     /** 与 [scan] 中曲目目录计算保持完全一致的归一化（扫描范围用它做匹配） */
@@ -313,6 +889,17 @@ class MediaRepository(private val context: Context) {
     }
 
     companion object {
+        private const val FS_MAX_DEPTH = 8
+        private const val FS_MAX_DIRS = 4_000
+        private val FS_PRUNED_DIR_NAMES = setOf(
+            "android", "dcim", "pictures", "movies", "backups",
+            "cache", "log", "logs", "tmp", "temp", "lost+found"
+        )
+        private val FS_MUSIC_NOMEDIA_WHITELIST = listOf(
+            "music", "song", "songs", "audio", "flac", "mp3", "lossless",
+            "netease", "cloudmusic", "qqmusic", "kgmusic", "kuwo", "音乐", "歌曲", "无损"
+        )
+
         fun groupAlbums(songs: List<Song>): List<Album> =
             songs.groupBy { it.albumId to it.album }
                 .map { (key, list) ->

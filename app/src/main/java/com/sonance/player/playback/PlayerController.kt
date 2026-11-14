@@ -569,6 +569,11 @@ class PlayerController(private val context: Context) {
 
     // ===== 对外操作 =====
 
+    /** 清掉尚未连上 MediaController 时排队的待起播请求（例如冷启动恢复被外部音频意图顶掉）。 */
+    fun clearPendingRequest() {
+        pendingRequest = null
+    }
+
     fun play(
         songs: List<Song>,
         index: Int,

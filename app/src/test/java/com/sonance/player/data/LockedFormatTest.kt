@@ -55,6 +55,10 @@ class LockedFormatTest {
         assertFalse(LockedFormat.isNonSongFolder("/storage/emulated/0/Music"))
         assertFalse(LockedFormat.isNonSongFolder("/storage/emulated/0/Music/周杰伦"))
         assertFalse(LockedFormat.isNonSongFolder("/storage/emulated/0/Download/专辑"))
+        // 音乐专辑目录常带 Live Recordings / Recording Studio / The Alarm 等词，不应误杀
+        assertFalse(LockedFormat.isNonSongFolder("Music/Live Recordings/Coldplay"))
+        assertFalse(LockedFormat.isNonSongFolder("Music/Sun Recording Studio"))
+        assertFalse(LockedFormat.isNonSongFolder("Music/The Alarm"))
         assertFalse(LockedFormat.isNonSongFolder(""))
     }
 

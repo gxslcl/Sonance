@@ -1,5 +1,7 @@
 package com.sonance.player
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -22,9 +24,58 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestHighRefreshRate()
         enableEdgeToEdge()
+        if (savedInstanceState == null) {
+            handleIncomingAudioIntent(intent)
+        }
         setContent {
             SonanceRoot(vm)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingAudioIntent(intent)
+    }
+
+    private fun handleIncomingAudioIntent(incoming: Intent?) {
+        if (incoming == null || incoming.getBooleanExtra(EXTRA_INTENT_CONSUMED, false)) return
+        val uri = extractPlayableAudioUri(incoming) ?: return
+        incoming.putExtra(EXTRA_INTENT_CONSUMED, true)
+        if (uri.scheme == "content") {
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+        vm.openExternalAudio(uri, incoming.type)
+    }
+
+    private fun extractPlayableAudioUri(incoming: Intent): Uri? {
+        val raw = when (incoming.action) {
+            Intent.ACTION_VIEW -> {
+                incoming.data ?: incoming.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            }
+            Intent.ACTION_SEND -> {
+                val streamUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    incoming.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    incoming.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                streamUri ?: incoming.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            }
+            else -> null
+        } ?: return null
+        val scheme = raw.scheme?.lowercase() ?: return null
+        return if (scheme in PLAYABLE_URI_SCHEMES) raw else null
+    }
+
+    companion object {
+        private const val EXTRA_INTENT_CONSUMED = "sonance.extra.intent_consumed"
+        private val PLAYABLE_URI_SCHEMES = setOf("content", "file", "http", "https")
     }
 
     override fun onStop() {

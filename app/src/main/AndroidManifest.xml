@@ -77,6 +77,39 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="audio/*" />
+                <data android:mimeType="application/ogg" />
+                <data android:mimeType="application/x-ogg" />
+                <data android:mimeType="application/flac" />
+                <data android:mimeType="application/x-flac" />
+                <data android:mimeType="application/itunes" />
+            </intent-filter>
+            <!-- 兜底：部分文件管理器不带 MIME type，直接用 file/content + 扩展名打开音频 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.mp3" />
+                <data android:pathPattern=".*\\.MP3" />
+                <data android:pathPattern=".*\\.flac" />
+                <data android:pathPattern=".*\\.FLAC" />
+                <data android:pathPattern=".*\\.m4a" />
+                <data android:pathPattern=".*\\.M4A" />
+                <data android:pathPattern=".*\\.m4b" />
+                <data android:pathPattern=".*\\.aac" />
+                <data android:pathPattern=".*\\.AAC" />
+                <data android:pathPattern=".*\\.ogg" />
+                <data android:pathPattern=".*\\.OGG" />
+                <data android:pathPattern=".*\\.oga" />
+                <data android:pathPattern=".*\\.opus" />
+                <data android:pathPattern=".*\\.OPUS" />
+                <data android:pathPattern=".*\\.wav" />
+                <data android:pathPattern=".*\\.WAV" />
+                <data android:pathPattern=".*\\.amr" />
+                <data android:pathPattern=".*\\.mka" />
+                <data android:pathPattern=".*\\.weba" />
             </intent-filter>
         </activity>
 
