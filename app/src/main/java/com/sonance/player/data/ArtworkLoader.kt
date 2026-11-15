@@ -191,6 +191,22 @@ object ArtworkLoader {
     private fun cacheFor(size: Int): LruCache<Key, ImageBitmap> =
         if (size <= THUMB_BUCKET) thumbCache else largeCache
 
+    private fun findCached(
+        cache: LruCache<Key, ImageBitmap>,
+        albumId: Long,
+        size: Int,
+        sourceUri: Uri?,
+        localKey: Key,
+        key: Key
+    ): ImageBitmap? {
+        // 先查单曲内嵌 URI 键，避免未知专辑/合集复用另一首歌的专辑缓存键而短暂闪封面
+        sourceUri?.takeUnless { it.isRemote() }?.let {
+            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return image }
+        }
+        cache.get(localKey)?.let { return it }
+        return cache.get(key)
+    }
+
     /**
      * 确认过没有封面的条目，避免重复走一遍失败的 IPC / 文件解析。
      * 键与 [Key] 同构，未知专辑按 URI 区分，不会"一首没封面 = 全都没封面"。
@@ -579,13 +595,15 @@ object ArtworkLoader {
     ): ImageBitmap? {
         if (albumId <= 0 && sourceUri == null && coverKey == null) return null
         val size = bucketOf(sizePx)
-        val cache = cacheFor(size)
-        // 先查本地键（同专辑共用），再查带 coverKey 的完整键
-        cache.get(localKeyOf(albumId, size, sourceUri))?.let { return it }
-        sourceUri?.takeUnless { it.isRemote() }?.let {
-            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return image }
-        }
-        return cache.get(keyOf(albumId, size, sourceUri, coverKey))
+        // 先查精准的单曲 URI 嵌入键，再查同专辑共用键，避免同 albumId 多首不同封面的歌曲在闪屏前命中旧封面
+        return findCached(
+            cache = cacheFor(size),
+            albumId = albumId,
+            size = size,
+            sourceUri = sourceUri,
+            localKey = localKeyOf(albumId, size, sourceUri),
+            key = keyOf(albumId, size, sourceUri, coverKey)
+        )
     }
 
     fun peekSelected(albumId: Long, sizePx: Int, sourceUri: Uri?, songId: Long): ImageBitmap? {
@@ -742,12 +760,7 @@ object ArtworkLoader {
         val cache = cacheFor(size)
 
         // 缓存命中直接返回，不切线程、不看 paused。
-        // 先查**本地键**：同专辑的第二首歌起就能直接命中，不必再探一次 MediaStore。
-        cache.get(localKey)?.let { return it }
-        sourceUri?.takeUnless { it.isRemote() }?.let {
-            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return image }
-        }
-        cache.get(key)?.let { return it }
+        findCached(cache, albumId, size, sourceUri, localKey, key)?.let { return it }
 
         // 两条都确认过"没有"才短路：本地没有 + 磁盘缓存也没有。
         // 少了第二条判断，同专辑里第一首失败就会把整张专辑的下载封面一起挡掉。
@@ -792,11 +805,9 @@ object ArtworkLoader {
                         if (!ArtworkThumbCache.awaitGeneration(generation)) return@withDecodeGate null
                         val cache = cacheFor(size)
                         // 排队期间可能已经被别人解好了，再查一次
-                        cache.get(localKey)?.let { return@withDecodeGate it }
-                        sourceUri?.takeUnless { it.isRemote() }?.let {
-                            cache.get(sourceKeyOf(albumId, size, it))?.let { image -> return@withDecodeGate image }
+                        findCached(cache, albumId, size, sourceUri, localKey, key)?.let {
+                            return@withDecodeGate it
                         }
-                        cache.get(key)?.let { return@withDecodeGate it }
                         decode(context, albumId, size, key, localKey, sourceUri, coverKey, generation, coverGeneration)
                     }
                 } finally {

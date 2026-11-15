@@ -310,7 +310,11 @@ internal class TransitionEffects internal constructor(
             gapRunnable = r
             scheduler.postDelayed(r, GAP_MS)
         }
-        if (config.crossfadeEnabled && player.playWhenReady) {
+        // 同曲单曲循环重头再来时不做交叉淡入，避免循环瞬间音量骤降
+        if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+            config.crossfadeEnabled &&
+            player.playWhenReady
+        ) {
             writeVolume(0f)
             beginFade(0f, userVolume, config.crossfadeSec * 1000L, out = false)
         }

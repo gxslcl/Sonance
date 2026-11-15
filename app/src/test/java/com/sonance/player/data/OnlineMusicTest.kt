@@ -444,6 +444,7 @@ class OnlineMusicTest {
     @Test
     fun `默认音源是网易云`() {
         // Prefs.onlineSourceId 取不到时回落到清单第一个，它得是能用的那个
-        assertEquals("netease", OnlineSources.all.first().id)
+        assertEquals(listOf("netease"), OnlineSources.all.map { it.id })
+        assertEquals(null, OnlineSources.byId("plugin:kg"))
     }
 }

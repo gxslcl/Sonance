@@ -120,7 +120,19 @@ class PlaybackService : MediaSessionService() {
             it.start()
         }
         UsbExclusive.syncWithPrefs(this)
+        SystemAudioEffects.syncSession(this, Prefs(this).systemAudioEffectEnabled, player.audioSessionId)
         player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioSessionIdChanged(
+                eventTime: AnalyticsListener.EventTime,
+                audioSessionId: Int
+            ) {
+                SystemAudioEffects.syncSession(
+                    this@PlaybackService,
+                    Prefs(this@PlaybackService).systemAudioEffectEnabled,
+                    audioSessionId
+                )
+            }
+
             override fun onAudioInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime,
                 format: Format,
@@ -202,6 +214,17 @@ class PlaybackService : MediaSessionService() {
         }
 
         internal fun playerOrNull(): Player? = liveService?.playerOrNull()
+
+        internal fun currentAudioSessionId(): Int {
+            val exo = liveService?.playerOrNull() as? ExoPlayer
+            return exo?.audioSessionId?.takeIf { it > 0 } ?: SystemAudioEffects.latestPlayerSessionId
+        }
+
+        internal fun syncSystemAudioEffects() {
+            val svc = liveService ?: return
+            val exo = svc.playerOrNull() as? ExoPlayer ?: return
+            SystemAudioEffects.syncSession(svc, Prefs(svc).systemAudioEffectEnabled, exo.audioSessionId)
+        }
 
         /**
          * 带浏览器 UA 去请求在线音源。
@@ -414,6 +437,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        SystemAudioEffects.releaseSession(this)
         mediaSession?.run {
             transitions?.let {
                 player.removeListener(it)

@@ -210,6 +210,7 @@ private fun PlayModeCtrlButton(
                     PlayMode.SHUFFLE -> SonanceIcons.Shuffle
                     PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
                     PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
+                    PlayMode.SEQUENTIAL -> SonanceIcons.Sequential
                 },
                 contentDescription = mode.label,
                 tint = skin.accent,
@@ -279,6 +280,8 @@ fun MiniPlayer(
     cardOpacity: Int = 100,
     /** 悬浮卡片上进度用环还是用线（见 [MiniProgressStyle]） */
     progressStyle: MiniProgressStyle = MiniProgressStyle.RING,
+    /** 悬浮卡片歌手行下方是否显示「当前进度 / 总时长」数字时间 */
+    showTime: Boolean = true,
     /** 悬浮卡片左右滑动切歌动效（整卡滑动 / 槽内滑动） */
     swipeStyle: MiniSwipeStyle = MiniSwipeStyle.WHOLE_CARD,
     /** 左滑（下一首）阈值，百分比卡宽 */
@@ -307,7 +310,7 @@ fun MiniPlayer(
             // 环形进度只给悬浮卡片（经典贴底那条通栏本来就只有线），
             // 具体显示环还是线由用户在设置里定，见 MiniProgressStyle
             progressRing = style == MiniPlayerStyle.FLOAT && progressStyle.showsRing,
-            showTime = style == MiniPlayerStyle.FLOAT,
+            showTime = style == MiniPlayerStyle.FLOAT && showTime,
             onPrev = onPrev,
             onPlayPause = onPlayPause,
             onNext = onNext

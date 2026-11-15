@@ -346,6 +346,9 @@ class BiliVideoSession private constructor(private val app: Context) {
             PlayMode.REPEAT_ALL -> {
                 if (items.size > 1) switchTo((index + 1) % items.size)
             }
+            PlayMode.SEQUENTIAL -> {
+                if (index + 1 < items.size) switchTo(index + 1)
+            }
         }
     }
 
@@ -495,6 +498,9 @@ class BiliVideoSession private constructor(private val app: Context) {
     fun onAppForeground() {
         if (!pausedByBackground) return
         pausedByBackground = false
+        // 若音乐服务正在后台播放，切回前台时不自动续播之前暂停的视频，避免抢占音频焦点打断音乐
+        val musicActive = PlaybackService.playerOrNull()?.let { it.isPlaying || it.playWhenReady } == true
+        if (musicActive) return
         play()
     }
 

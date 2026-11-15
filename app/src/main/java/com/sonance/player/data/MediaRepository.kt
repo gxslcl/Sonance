@@ -6,11 +6,12 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -61,7 +62,9 @@ class MediaRepository(private val context: Context) {
         /** 只扫描这些目录（路径与 [ScanFolderInfo.path] 一致）；null = 全量扫描 */
         folderPaths: Set<String>? = null,
         /** 已检查的 MediaStore 行数，用于面板进度显示 */
-        onProgress: ((Int) -> Unit)? = null
+        onProgress: ((Int) -> Unit)? = null,
+        /** 已通过 SAF 授权的外置/U 盘目录列表 */
+        safTrees: List<SafScanTree> = ExternalStoragePaths.parseSafScanTrees(Prefs(context).safScanTrees)
     ): ScanOutcome = withContext(Dispatchers.IO) {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -385,6 +388,27 @@ class MediaRepository(private val context: Context) {
             }
         }
 
+        // 兜底 Pass 4：扫描用户通过 SAF（OpenDocumentTree）授权的 U 盘 / 外置目录
+        if (safTrees.isNotEmpty()) {
+            scanSafTrees(
+                safTrees = safTrees,
+                filterShortAudio = filterShortAudio,
+                filters = filters,
+                folderPaths = folderPaths,
+                seenPathKeys = seenPathKeys,
+                seenRawPaths = seenRawPaths,
+                onScannedStep = {
+                    scanned++
+                    if (scanned % 64 == 0) onProgress?.invoke(scanned)
+                },
+                onExcludedUnsupported = { excludedUnsupported++ },
+                onExcludedShort = { excludedShort++ },
+                onExcludedNonSong = { excludedNonSong++ },
+                out = out,
+                suspicious = suspicious
+            )
+        }
+
         // 第二轮：只对可疑项读 64 字节文件头，按魔数定生死。
         // 名字带加密标记但能正常解出时长（= 已转换的成品）会被放行。
         for ((song, duration) in suspicious) {
@@ -409,7 +433,9 @@ class MediaRepository(private val context: Context) {
      *
      * 移除 IS_MUSIC != 0 限制并补充 MediaStore.Files 中的音频目录，确保「下载」等目录完整可见。
      */
-    suspend fun listFolders(): List<ScanFolderInfo> = withContext(Dispatchers.IO) {
+    suspend fun listFolders(
+        safTrees: List<SafScanTree> = ExternalStoragePaths.parseSafScanTrees(Prefs(context).safScanTrees)
+    ): List<ScanFolderInfo> = withContext(Dispatchers.IO) {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
@@ -534,13 +560,61 @@ class MediaRepository(private val context: Context) {
         } catch (_: Exception) {
         }
 
-        counts.map { (path, count) ->
+        // 补充当前可直接访问的外置 USB / OTG 目录（若 MediaStore 未索引也能在扫描范围中看到）
+        val roots = storageRoots()
+        for (rootInfo in roots) {
+            if (!rootInfo.isExternalVolume) continue
+            val rootPath = rootInfo.dir.absolutePath.trimEnd('/')
+            val stack = ArrayDeque<Pair<File, Int>>()
+            stack.addLast(rootInfo.dir to 0)
+            var visitedDirs = 0
+            var countedFiles = 0
+            while (stack.isNotEmpty() && visitedDirs < 300 && countedFiles < 2_000) {
+                coroutineContext.ensureActive()
+                val (dir, depth) = stack.removeLast()
+                if (depth > FS_MAX_DEPTH || !dir.canRead()) continue
+                visitedDirs++
+                val folder = filesystemFolderOf(dir.absolutePath, rootPath, rootInfo.volumeLabel, isExternalVolume = true)
+                val leaf = dir.name.lowercase()
+                if (depth > 0 && (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES)) continue
+                if (LockedFormat.isNonSongFolder(folder)) continue
+                val children = dir.listFiles() ?: continue
+                for (child in children) {
+                    coroutineContext.ensureActive()
+                    val name = child.name
+                    if (name.startsWith(".")) continue
+                    if (child.isDirectory) {
+                        if (depth < FS_MAX_DEPTH) stack.addLast(child to (depth + 1))
+                        continue
+                    }
+                    if (!child.isFile || !child.canRead() || child.length() <= 0L) continue
+                    if (!isAudioCandidate(name, null)) continue
+                    val pk = pathKeyOf(folder, name)
+                    if (seenKeys.add(pk)) {
+                        counts[folder] = (counts[folder] ?: 0) + 1
+                        countedFiles++
+                    }
+                }
+            }
+        }
+
+        val safFolders = safTrees.map { tree ->
+            ScanFolderInfo(
+                path = ExternalStoragePaths.safScopePathOf(tree.uriString),
+                name = "外置 · ${tree.label}",
+                songCount = countSafTreeAudioFiles(tree)
+            )
+        }
+
+        val regularFolders = counts.map { (path, count) ->
             ScanFolderInfo(
                 path = path,
                 name = path.substringAfterLast('/').ifBlank { "根目录" },
                 songCount = count
             )
         }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.path })
+
+        safFolders + regularFolders
     }
 
     /** 按外部 URI 提供的线索从 MediaStore 直接查找单首歌曲（曲库缓存过旧时兜底）。 */
@@ -688,6 +762,20 @@ class MediaRepository(private val context: Context) {
         }
     }
 
+    private data class ScanStorageRoot(
+        val dir: File,
+        val isExternalVolume: Boolean,
+        val volumeLabel: String
+    )
+
+    private fun isAudioCandidate(name: String, mimeType: String?): Boolean {
+        val ext = LockedFormat.extensionOf(name)
+        return ext in LockedFormat.strictAudioExtensions ||
+            ext in LockedFormat.plainUnsupportedExtensions ||
+            LockedFormat.looksLikeLockedContainer(name) ||
+            (mimeType?.startsWith("audio/", ignoreCase = true) == true)
+    }
+
     private suspend fun scanUnindexedFilesystem(
         filterShortAudio: Boolean,
         filters: ScanFilters,
@@ -707,12 +795,14 @@ class MediaRepository(private val context: Context) {
         val seenCanonicalDirs = HashSet<String>()
         var visitedDirs = 0
 
-        for (root in roots) {
+        for (rootInfo in roots) {
+            val root = rootInfo.dir
             val rootPath = root.absolutePath.trimEnd('/')
             val stack = ArrayDeque<Pair<File, Int>>()
             if (folderPaths != null) {
                 for (fp in folderPaths) {
-                    val target = if (fp.isBlank()) root else if (fp.startsWith("/")) File(fp) else File(root, fp)
+                    if (fp.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX)) continue
+                    val target = resolveScopedTargetDir(root, rootPath, rootInfo, fp) ?: continue
                     if (target.isDirectory && target.canRead()) {
                         stack.addLast(target to 0)
                     }
@@ -729,10 +819,15 @@ class MediaRepository(private val context: Context) {
                 if (!seenCanonicalDirs.add(canonical)) continue
                 visitedDirs++
 
-                val relFolder = filesystemFolderOf(dir.absolutePath, rootPath)
+                val relFolder = filesystemFolderOf(
+                    dirPath = dir.absolutePath,
+                    rootPath = rootPath,
+                    volumeLabel = rootInfo.volumeLabel,
+                    isExternalVolume = rootInfo.isExternalVolume
+                )
+                val leaf = dir.name.lowercase()
+                if (dir != root && (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES)) continue
                 if (relFolder.isNotEmpty()) {
-                    val leaf = dir.name.lowercase()
-                    if (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES) continue
                     if (filters.excludedDirs.isNotEmpty() &&
                         filters.excludedDirs.any { ex -> relFolder == ex || relFolder.startsWith("$ex/") }
                     ) continue
@@ -741,7 +836,7 @@ class MediaRepository(private val context: Context) {
 
                 val children = dir.listFiles() ?: continue
                 val hasNoMedia = children.any { it.name == ".nomedia" }
-                if (hasNoMedia && !hasMusicFolderHint(relFolder)) continue
+                if (hasNoMedia && !rootInfo.isExternalVolume && !hasMusicFolderHint(relFolder)) continue
 
                 for (child in children) {
                     coroutineContext.ensureActive()
@@ -757,11 +852,7 @@ class MediaRepository(private val context: Context) {
                     val size = child.length()
                     if (size <= 0L) continue
 
-                    val ext = LockedFormat.extensionOf(name)
-                    val isCandidateExt = ext in LockedFormat.strictAudioExtensions ||
-                        ext in LockedFormat.plainUnsupportedExtensions ||
-                        LockedFormat.looksLikeLockedContainer(name)
-                    if (!isCandidateExt) continue
+                    if (!isAudioCandidate(name, null)) continue
 
                     val absPath = child.absolutePath
                     val pk = pathKeyOf(relFolder, name)
@@ -812,12 +903,261 @@ class MediaRepository(private val context: Context) {
         }
     }
 
-    private fun storageRoots(): List<File> {
-        val roots = LinkedHashSet<File>()
-        runCatching { Environment.getExternalStorageDirectory() }
-            .getOrNull()
-            ?.takeIf { it.isDirectory && it.canRead() }
-            ?.let { roots += it }
+    private fun resolveScopedTargetDir(
+        root: File,
+        rootPath: String,
+        rootInfo: ScanStorageRoot,
+        scopePath: String
+    ): File? {
+        if (scopePath.startsWith("/")) {
+            return if (scopePath == rootPath || scopePath.startsWith("$rootPath/")) File(scopePath) else null
+        }
+        if (rootInfo.isExternalVolume) {
+            val label = rootInfo.volumeLabel
+            return when {
+                scopePath == label -> root
+                scopePath.startsWith("$label/") -> File(root, scopePath.removePrefix("$label/"))
+                else -> null
+            }
+        }
+        return if (scopePath.isBlank()) root else File(root, scopePath)
+    }
+
+    private suspend fun scanSafTrees(
+        safTrees: List<SafScanTree>,
+        filterShortAudio: Boolean,
+        filters: ScanFilters,
+        folderPaths: Set<String>?,
+        seenPathKeys: HashSet<String>,
+        seenRawPaths: HashSet<String>,
+        onScannedStep: () -> Unit,
+        onExcludedUnsupported: () -> Unit,
+        onExcludedShort: () -> Unit,
+        onExcludedNonSong: () -> Unit,
+        out: MutableList<Song>,
+        suspicious: MutableList<Pair<Song, Long>>
+    ) {
+        val primaryRootPath = ExternalStoragePaths.defaultPrimaryRoot()?.absolutePath?.trimEnd('/')
+        for (tree in safTrees) {
+            val treeScopePath = ExternalStoragePaths.safScopePathOf(tree.uriString)
+            val baseFolder = ExternalStoragePaths.safFolderPath(tree.label, "")
+            val entireTreeSelected = folderPaths == null || treeScopePath in folderPaths
+            if (!entireTreeSelected) {
+                val anySubSelected = folderPaths.orEmpty().any { it == baseFolder || it.startsWith("$baseFolder/") }
+                if (!anySubSelected) continue
+            }
+
+            traverseSafTree(
+                tree = tree,
+                maxDirs = FS_MAX_DIRS,
+                shouldEnterDir = { relSubDir ->
+                    val folderPath = ExternalStoragePaths.safFolderPath(tree.label, relSubDir)
+                    val excludedByUser = filters.excludedDirs.isNotEmpty() &&
+                        filters.excludedDirs.any { ex -> folderPath == ex || folderPath.startsWith("$ex/") }
+                    val excludedNonSong = relSubDir.isNotEmpty() &&
+                        filters.excludeNonSongFolders &&
+                        LockedFormat.isNonSongFolder(relSubDir)
+                    if (excludedNonSong) onExcludedNonSong()
+                    !excludedByUser && !excludedNonSong
+                }
+            ) { authority, childDocId, docUri, name, rawSize, lastModifiedMs, relSubDir ->
+                val folderPath = ExternalStoragePaths.safFolderPath(tree.label, relSubDir)
+                val docUriKey = docUri.toString().lowercase()
+                if (docUriKey in seenRawPaths) return@traverseSafTree true
+                if (isDuplicateOfIndexedDocument(
+                        authority = authority,
+                        docId = childDocId,
+                        displayName = name,
+                        primaryRootPath = primaryRootPath,
+                        seenPathKeys = seenPathKeys,
+                        seenRawPaths = seenRawPaths
+                    )
+                ) return@traverseSafTree true
+
+                val pk = pathKeyOf(folderPath, name)
+                if (pk in seenPathKeys) return@traverseSafTree true
+
+                onScannedStep()
+                seenPathKeys += pk
+                seenRawPaths += docUriKey
+
+                if (!entireTreeSelected && folderPath !in folderPaths.orEmpty()) {
+                    return@traverseSafTree true
+                }
+                if (filters.excludeUnsupported && LockedFormat.isPlainUnsupported(name)) {
+                    onExcludedUnsupported()
+                    return@traverseSafTree true
+                }
+
+                val meta = probeAudioMetadata(docUri, null)
+                val duration = meta.durationMs
+                if (filterShortAudio && duration in 1..14_000) {
+                    onExcludedShort()
+                    return@traverseSafTree true
+                }
+
+                val song = Song(
+                    id = unindexedSongId("saf:$docUriKey"),
+                    title = ExternalAudioResolver.sanitizeTitle(meta.title, name),
+                    artist = sanitize(meta.artist),
+                    album = sanitize(meta.album),
+                    albumId = -1L,
+                    durationMs = duration,
+                    uri = docUri,
+                    folderPath = folderPath,
+                    folderName = folderPath.substringAfterLast('/').ifBlank { tree.label },
+                    displayName = name,
+                    sizeBytes = rawSize.coerceAtLeast(0L),
+                    dateAddedSec = (lastModifiedMs / 1000L).coerceAtLeast(0L),
+                    track = meta.track
+                )
+                val suspiciousName = LockedFormat.looksLikeLockedContainer(name)
+                if (filters.excludeLocked && (suspiciousName || duration <= 0L)) {
+                    suspicious += song to duration
+                } else {
+                    out += song
+                }
+                true
+            }
+        }
+    }
+
+    private suspend fun countSafTreeAudioFiles(tree: SafScanTree): Int {
+        var count = 0
+        traverseSafTree(tree = tree, maxDirs = 300) { _, _, _, _, _, _, _ ->
+            count++
+            count < 5_000
+        }
+        return count
+    }
+
+    private suspend fun traverseSafTree(
+        tree: SafScanTree,
+        maxDirs: Int,
+        shouldEnterDir: (relSubDir: String) -> Boolean = { true },
+        onCandidate: suspend (
+            authority: String?,
+            childDocId: String,
+            docUri: Uri,
+            name: String,
+            sizeBytes: Long,
+            lastModifiedMs: Long,
+            relSubDir: String
+        ) -> Boolean
+    ) {
+        val treeUri = runCatching { Uri.parse(tree.uriString) }.getOrNull() ?: return
+        val rootDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return
+        val stack = ArrayDeque<Triple<String, String, Int>>()
+        stack.addLast(Triple(rootDocId, "", 0))
+        var visitedDirs = 0
+
+        while (stack.isNotEmpty() && visitedDirs < maxDirs) {
+            coroutineContext.ensureActive()
+            val (docId, relSubDir, depth) = stack.removeLast()
+            if (depth > FS_MAX_DEPTH) continue
+            visitedDirs++
+            if (!shouldEnterDir(relSubDir)) continue
+
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            try {
+                context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                    ),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    val iId = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val iName = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val iMime = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val iSize = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                    val iMod = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+
+                    while (cursor.moveToNext()) {
+                        coroutineContext.ensureActive()
+                        if (iId < 0 || iName < 0) continue
+                        val childDocId = cursor.getString(iId)?.trim().orEmpty()
+                        val name = cursor.getString(iName)?.trim().orEmpty()
+                        if (childDocId.isEmpty() || name.isEmpty() || name.startsWith(".")) continue
+                        val mime = if (iMime >= 0) cursor.getString(iMime) else null
+
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            if (name.lowercase() !in FS_PRUNED_DIR_NAMES && depth < FS_MAX_DEPTH) {
+                                val childSub = if (relSubDir.isEmpty()) name else "$relSubDir/$name"
+                                stack.addLast(Triple(childDocId, childSub, depth + 1))
+                            }
+                            continue
+                        }
+
+                        val rawSize = if (iSize >= 0 && !cursor.isNull(iSize)) cursor.getLong(iSize) else -1L
+                        if (rawSize == 0L) continue
+                        if (!isAudioCandidate(name, mime)) continue
+
+                        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childDocId)
+                        val lastMod = if (iMod >= 0 && !cursor.isNull(iMod)) cursor.getLong(iMod) else 0L
+                        val keepGoing = onCandidate(
+                            treeUri.authority,
+                            childDocId,
+                            docUri,
+                            name,
+                            rawSize,
+                            lastMod,
+                            relSubDir
+                        )
+                        if (!keepGoing) return
+                    }
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                // 外置存储被拔出或权限被收回时静默跳过，保留其它可用目录
+            }
+        }
+    }
+
+    private fun isDuplicateOfIndexedDocument(
+        authority: String?,
+        docId: String,
+        displayName: String,
+        primaryRootPath: String?,
+        seenPathKeys: Set<String>,
+        seenRawPaths: Set<String>
+    ): Boolean {
+        if (authority != "com.android.externalstorage.documents" || !docId.contains(':')) return false
+        val volId = docId.substringBefore(':')
+        val relPath = docId.substringAfter(':').trimStart('/')
+        if (relPath.isEmpty()) return false
+        if (volId.equals("primary", ignoreCase = true)) {
+            val folder = relPath.substringBeforeLast('/', "")
+            if (pathKeyOf(folder, displayName) in seenPathKeys) return true
+            if (!primaryRootPath.isNullOrBlank() && "$primaryRootPath/$relPath".lowercase() in seenRawPaths) return true
+        } else if (volId.isNotBlank()) {
+            if ("/storage/$volId/$relPath".lowercase() in seenRawPaths) return true
+        }
+        return false
+    }
+
+    private fun storageRoots(): List<ScanStorageRoot> {
+        val roots = ArrayList<ScanStorageRoot>()
+        val seenCanonical = HashSet<String>()
+        fun addReadable(dir: File?, isExternal: Boolean) {
+            if (dir == null || !dir.isDirectory || !dir.canRead()) return
+            val canonical = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }.trimEnd('/')
+            if (!seenCanonical.add(canonical)) return
+            roots += ScanStorageRoot(
+                dir = dir,
+                isExternalVolume = isExternal,
+                volumeLabel = if (isExternal) dir.name.ifBlank { "外置存储" } else ""
+            )
+        }
+        val primary = ExternalStoragePaths.defaultPrimaryRoot()
+        addReadable(primary, isExternal = false)
         runCatching { context.getExternalFilesDirs(null) }
             .getOrNull()
             ?.forEach { appDir ->
@@ -825,22 +1165,27 @@ class MediaRepository(private val context: Context) {
                 val marker = "${File.separator}Android${File.separator}data${File.separator}"
                 val p = appDir.absolutePath
                 val idx = p.indexOf(marker)
-                if (idx > 0) {
-                    val root = File(p.substring(0, idx))
-                    if (root.isDirectory && root.canRead()) roots += root
-                }
+                if (idx > 0) addReadable(File(p.substring(0, idx)), isExternal = true)
             }
-        return roots.toList()
+        ExternalStoragePaths.discoverReadableExternalRoots(context, primary)
+            .forEach { addReadable(it, isExternal = true) }
+        return roots
     }
 
-    private fun filesystemFolderOf(dirPath: String, rootPath: String): String {
+    private fun filesystemFolderOf(
+        dirPath: String,
+        rootPath: String,
+        volumeLabel: String,
+        isExternalVolume: Boolean
+    ): String {
         val cleanDir = dirPath.trimEnd('/')
+        val relative = when {
+            cleanDir == rootPath -> ""
+            cleanDir.startsWith("$rootPath/") -> cleanDir.substring(rootPath.length + 1)
+            else -> cleanDir
+        }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            when {
-                cleanDir == rootPath -> ""
-                cleanDir.startsWith("$rootPath/") -> cleanDir.substring(rootPath.length + 1)
-                else -> cleanDir
-            }
+            ExternalStoragePaths.formatVolumeRelativeFolder(relative, volumeLabel, isExternalVolume)
         } else {
             cleanDir
         }
@@ -900,30 +1245,45 @@ class MediaRepository(private val context: Context) {
             "netease", "cloudmusic", "qqmusic", "kgmusic", "kuwo", "音乐", "歌曲", "无损"
         )
 
+        private fun <T, K : Comparable<K>> sortWithKeys(
+            items: List<T>,
+            ascending: Boolean = true,
+            keyOf: (T) -> K
+        ): List<T> {
+            if (items.size <= 1) return items
+            val keyed = items.map { it to keyOf(it) }
+            val cmp = Comparator<Pair<T, K>> { a, b -> a.second.compareTo(b.second) }
+            val ordered = if (ascending) keyed.sortedWith(cmp) else keyed.sortedWith(cmp.reversed())
+            return ordered.map { it.first }
+        }
+
         fun groupAlbums(songs: List<Song>): List<Album> =
-            songs.groupBy { it.albumId to it.album }
-                .map { (key, list) ->
-                    Album(
-                        albumId = key.first,
-                        name = key.second,
-                        artist = list.groupingBy { it.artist }.eachCount()
-                            .maxByOrNull { it.value }?.key ?: UNKNOWN_ARTIST,
-                        songs = list.sortedBy { it.track }
-                    )
-                }
-                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            sortWithKeys(
+                songs.groupBy { it.albumId to it.album }
+                    .map { (key, list) ->
+                        Album(
+                            albumId = key.first,
+                            name = key.second,
+                            artist = list.groupingBy { it.artist }.eachCount()
+                                .maxByOrNull { it.value }?.key ?: UNKNOWN_ARTIST,
+                            songs = list.sortedBy { it.track }
+                        )
+                    }
+            ) { it.name.lowercase(Locale.ROOT) }
 
         fun groupArtists(songs: List<Song>): List<Artist> =
-            songs.groupBy { it.artist }
-                .map { (name, list) ->
-                    Artist(name = name, songs = list, albumCount = list.map { it.albumId }.distinct().size)
-                }
-                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            sortWithKeys(
+                songs.groupBy { it.artist }
+                    .map { (name, list) ->
+                        Artist(name = name, songs = list, albumCount = list.map { it.albumId }.distinct().size)
+                    }
+            ) { it.name.lowercase(Locale.ROOT) }
 
         fun groupFolders(songs: List<Song>): List<MusicFolder> =
-            songs.groupBy { it.folderPath }
-                .map { (path, list) -> MusicFolder(path = path, name = list.first().folderName, songs = list) }
-                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            sortWithKeys(
+                songs.groupBy { it.folderPath }
+                    .map { (path, list) -> MusicFolder(path = path, name = list.first().folderName, songs = list) }
+            ) { it.name.lowercase(Locale.ROOT) }
 
         /**
          * 行为类排序字段（播放次数 / 最近播放）的排序键。
@@ -944,23 +1304,109 @@ class MediaRepository(private val context: Context) {
             }
 
         /**
-         * 文本字段比较：优先用后台预构建的归一化键（汉字转拼音、小写、去符号），
-         * 这样「列表顺序」和「字母条分组」严格同源。
+         * 单首歌提取出的不可变排序键。
          *
-         * [keys] 为空（冷启动索引还没建好）时退回原来的码点序，行为零回归 ——
-         * 那一小段时间右侧本来也会降级显示滑块，不会露出不一致的字母表。
+         * 在排序前为每个元素一次性物化后再比较，避免排序过程中查表出现
+         * 「有键走拼音、缺键退回码点」的混合比较而破坏全序传递性导致 `TimSort` 崩溃。
          */
-        private fun compareText(
-            a: Song,
-            b: Song,
+        internal data class SongSortKey(
+            val primaryLong: Long = 0L,
+            val primaryText: String = "",
+            val secondaryLong: Long = 0L,
+            val secondaryText: String = ""
+        ) : Comparable<SongSortKey> {
+            override fun compareTo(other: SongSortKey): Int {
+                val p1 = primaryLong.compareTo(other.primaryLong)
+                if (p1 != 0) return p1
+                val p2 = primaryText.compareTo(other.primaryText)
+                if (p2 != 0) return p2
+                val s1 = secondaryLong.compareTo(other.secondaryLong)
+                if (s1 != 0) return s1
+                return secondaryText.compareTo(other.secondaryText)
+            }
+        }
+
+        internal data class SongSortDescriptor(
+            val id: Long,
+            val title: String,
+            val artist: String,
+            val album: String,
+            val displayName: String,
+            val track: Int,
+            val durationMs: Long,
+            val dateAddedSec: Long
+        )
+
+        private fun resolveTextSortKey(
+            songId: Long,
+            raw: String,
             keys: Map<Long, IndexKeys>,
-            raw: (Song) -> String,
             pick: (IndexKeys) -> String
-        ): Int {
-            val ka = keys[a.id]?.let(pick)
-            val kb = keys[b.id]?.let(pick)
-            return if (ka != null && kb != null) ka.compareTo(kb)
-            else raw(a).compareTo(raw(b), ignoreCase = true)
+        ): String {
+            if (keys.isEmpty()) return raw.lowercase(Locale.ROOT)
+            return keys[songId]?.let(pick) ?: IndexKey.of(raw)
+        }
+
+        internal fun songSortKey(
+            id: Long,
+            title: String,
+            artist: String,
+            album: String,
+            displayName: String,
+            track: Int,
+            durationMs: Long,
+            dateAddedSec: Long,
+            field: SortField,
+            stats: SongStats,
+            keys: Map<Long, IndexKeys>
+        ): SongSortKey = when (field) {
+            SortField.TITLE -> SongSortKey(
+                primaryText = resolveTextSortKey(id, title, keys) { it.title }
+            )
+
+            SortField.ARTIST -> SongSortKey(
+                primaryText = resolveTextSortKey(id, artist, keys) { it.artist },
+                secondaryText = album.lowercase(Locale.ROOT)
+            )
+
+            SortField.ALBUM -> SongSortKey(
+                primaryText = resolveTextSortKey(id, album, keys) { it.album },
+                secondaryLong = track.toLong()
+            )
+
+            SortField.DURATION -> SongSortKey(primaryLong = durationMs)
+            SortField.DATE_ADDED -> SongSortKey(primaryLong = dateAddedSec)
+            SortField.FILE_NAME -> SongSortKey(
+                primaryText = resolveTextSortKey(id, displayName, keys) { it.fileName }
+            )
+
+            SortField.PLAY_COUNT,
+            SortField.RECENT_PLAYED -> SongSortKey(
+                primaryLong = statsSortKey(id, field, stats),
+                secondaryText = title.lowercase(Locale.ROOT)
+            )
+        }
+
+        internal fun sortDescriptors(
+            items: List<SongSortDescriptor>,
+            field: SortField,
+            ascending: Boolean,
+            stats: SongStats = SongStats(),
+            keys: Map<Long, IndexKeys> = emptyMap()
+        ): List<SongSortDescriptor> = sortWithKeys(items, ascending) { d ->
+            songSortKey(
+                id = d.id,
+                title = d.title,
+                artist = d.artist,
+                album = d.album,
+                displayName = d.displayName,
+                track = d.track,
+                durationMs = d.durationMs,
+                dateAddedSec = d.dateAddedSec,
+                field = field,
+                stats = stats,
+                keys = keys
+            )
         }
 
         fun sortSongs(
@@ -970,42 +1416,20 @@ class MediaRepository(private val context: Context) {
             stats: SongStats = SongStats(),
             /** songId → 四个文本字段的归一化排序键；为空则退回码点序 */
             keys: Map<Long, IndexKeys> = emptyMap()
-        ): List<Song> {
-            val cmp: Comparator<Song> = when (field) {
-                SortField.TITLE -> Comparator { a, b ->
-                    compareText(a, b, keys, { it.title }) { it.title }
-                }
-
-                SortField.ARTIST -> Comparator { a, b ->
-                    val r = compareText(a, b, keys, { it.artist }) { it.artist }
-                    if (r != 0) r else a.album.compareTo(b.album, ignoreCase = true)
-                }
-
-                SortField.ALBUM -> Comparator { a, b ->
-                    val r = compareText(a, b, keys, { it.album }) { it.album }
-                    if (r != 0) r else a.track.compareTo(b.track)
-                }
-
-                SortField.DURATION -> Comparator { a, b -> a.durationMs.compareTo(b.durationMs) }
-                SortField.DATE_ADDED -> Comparator { a, b -> a.dateAddedSec.compareTo(b.dateAddedSec) }
-                SortField.FILE_NAME -> Comparator { a, b ->
-                    compareText(a, b, keys, { it.displayName }) { it.fileName }
-                }
-
-                SortField.PLAY_COUNT -> Comparator { a, b ->
-                    val ca = statsSortKey(a.id, field, stats)
-                    val cb = statsSortKey(b.id, field, stats)
-                    // 键相同的按标题，避免顺序每次刷新都乱跳
-                    if (ca != cb) ca.compareTo(cb) else a.title.compareTo(b.title, ignoreCase = true)
-                }
-
-                SortField.RECENT_PLAYED -> Comparator { a, b ->
-                    val ia = statsSortKey(a.id, field, stats)
-                    val ib = statsSortKey(b.id, field, stats)
-                    if (ia != ib) ia.compareTo(ib) else a.title.compareTo(b.title, ignoreCase = true)
-                }
-            }
-            return if (ascending) songs.sortedWith(cmp) else songs.sortedWith(cmp.reversed())
+        ): List<Song> = sortWithKeys(songs, ascending) { s ->
+            songSortKey(
+                id = s.id,
+                title = s.title,
+                artist = s.artist,
+                album = s.album,
+                displayName = s.displayName,
+                track = s.track,
+                durationMs = s.durationMs,
+                dateAddedSec = s.dateAddedSec,
+                field = field,
+                stats = stats,
+                keys = keys
+            )
         }
 
         fun search(

@@ -93,6 +93,7 @@ object SettingsBaseline {
         Spec("sound_preset_id", Type.STRING),
         Spec("sound_fx_params", Type.STRING),
         Spec("sound_auto_route", Type.BOOLEAN),
+        Spec("system_audio_effect_enabled", Type.BOOLEAN),
 
         // ---- 歌词 ----
         Spec("lyrics_t2s", Type.BOOLEAN),
@@ -124,6 +125,7 @@ object SettingsBaseline {
         Spec("mini_glass_visibility", Type.INT),
         Spec("mini_card_opacity", Type.INT),
         Spec("mini_progress_style", Type.INT),
+        Spec("mini_show_time", Type.BOOLEAN),
         Spec("mini_swipe_left_pct", Type.INT),
         Spec("mini_swipe_right_pct", Type.INT),
         Spec("mini_height_scale", Type.INT),

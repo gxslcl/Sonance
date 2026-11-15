@@ -1,5 +1,8 @@
 package com.sonance.player.ui.sheets
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -28,10 +31,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.ExternalStoragePaths
 import com.sonance.player.data.ScanFolderInfo
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.components.SelectionCircle
@@ -39,9 +45,8 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.solidSurface
 
 /**
- * 「扫描范围」面板：多选 MediaStore 已索引的目录，只重扫所选目录。
+ * 「扫描范围」面板：多选 MediaStore / 外置卷已发现目录，并支持通过 SAF 选择车机 U 盘或外置文件夹。
  *
- * 曲库本来就来自 MediaStore，所以这里不给用户手填路径，也不做 SAF 任意目录导入；
  * 目录列表按目录聚合、带曲目数，扫描结果会与现有曲库合并去重。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -139,6 +144,30 @@ private fun Header(vm: SonanceViewModel) {
 @Composable
 private fun ScanScopeList(vm: SonanceViewModel) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val fallback = uri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.let { seg -> seg.substringAfter(':', "").trim('/').ifBlank { seg.trimEnd(':') } }
+                ?.takeIf { it.isNotBlank() }
+            val label = runCatching { DocumentFile.fromTreeUri(context, uri)?.name }
+                .getOrNull()
+                ?.trimEnd(':')
+                ?.takeIf { it.isNotBlank() }
+                ?: fallback
+                ?: "U盘 / 外置目录"
+            vm.addSafScanTree(uri, label)
+        }
+    }
 
     if (vm.scanFoldersLoading) {
         Text(
@@ -152,7 +181,7 @@ private fun ScanScopeList(vm: SonanceViewModel) {
 
     if (vm.scanFolders.isEmpty()) {
         Text(
-            text = "没有读到任何音频目录。\n请确认已授予「读取音乐文件」权限后重试。",
+            text = "没有读到任何音频目录。\n如在车机中扫描 U 盘或外置目录，请点击下方「选择 U 盘 / 外置文件夹」。",
             style = MaterialTheme.typography.bodyMedium,
             color = skin.textDim,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp)
@@ -160,25 +189,29 @@ private fun ScanScopeList(vm: SonanceViewModel) {
     } else {
         LazyColumn(Modifier.heightIn(max = 360.dp)) {
             items(vm.scanFolders, key = { it.path }) { folder ->
+                val isSaf = folder.path.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX)
                 FolderRow(
                     folder = folder,
                     selected = folder.path in vm.scanScopeSelection,
-                    onClick = { vm.toggleScanScope(folder.path) }
+                    isSaf = isSaf,
+                    onClick = { vm.toggleScanScope(folder.path) },
+                    onRemove = if (isSaf) {
+                        { vm.removeSafScanTree(folder.path.removePrefix(ExternalStoragePaths.SAF_SCOPE_PREFIX)) }
+                    } else null
                 )
             }
         }
     }
 
-    // 扩展位：后续要支持 SAF 任意目录（含 MediaStore 尚未索引的）时接在这里
     TextButton(
-        enabled = false,
-        onClick = {},
+        enabled = !vm.scopedScanRunning,
+        onClick = { folderPicker.launch(null) },
         modifier = Modifier.padding(horizontal = 12.dp)
     ) {
         Text(
-            text = "选择其他文件夹（即将支持）",
+            text = "+ 选择 U 盘 / 外置文件夹",
             style = MaterialTheme.typography.labelMedium,
-            color = skin.textMuted
+            color = skin.accent
         )
     }
 
@@ -216,7 +249,13 @@ private fun ScanScopeList(vm: SonanceViewModel) {
 }
 
 @Composable
-private fun FolderRow(folder: ScanFolderInfo, selected: Boolean, onClick: () -> Unit) {
+private fun FolderRow(
+    folder: ScanFolderInfo,
+    selected: Boolean,
+    isSaf: Boolean = false,
+    onClick: () -> Unit,
+    onRemove: (() -> Unit)? = null
+) {
     val skin = LocalSkin.current
     Row(
         Modifier
@@ -236,16 +275,25 @@ private fun FolderRow(folder: ScanFolderInfo, selected: Boolean, onClick: () -> 
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = if (folder.path.isBlank()) {
-                    "${folder.songCount} 首"
-                } else {
-                    "${folder.path} · ${folder.songCount} 首"
+                text = when {
+                    isSaf -> "已授权外置目录 · ${folder.songCount} 首"
+                    folder.path.isBlank() -> "${folder.songCount} 首"
+                    else -> "${folder.path} · ${folder.songCount} 首"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textMuted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+        if (onRemove != null) {
+            TextButton(onClick = onRemove) {
+                Text(
+                    text = "移除",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
         }
     }
 }

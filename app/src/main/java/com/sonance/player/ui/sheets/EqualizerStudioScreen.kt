@@ -464,6 +464,7 @@ private fun PresetsTabContent(
 ) {
     StudioHeroCard(vm = vm)
     OutputRouteAutoCard(vm = vm)
+    SystemAudioEffectBridgeCard(vm = vm)
     PresetFilterBar(selected = filter, onSelect = onFilterChange)
 
     val presets = remember(filter) {
@@ -709,6 +710,105 @@ private fun OutputRouteAutoCard(vm: SonanceViewModel) {
             onChange = { vm.toggleAutoPresetByOutput(it) },
             label = "按输出设备自动记忆"
         )
+    }
+}
+
+/**
+ * 手机 / 平板自带系统音效接入卡片（杜比全景声 / 小米音效 / OReality / SoundAlive / Histen 等）。
+ * 在全屏音效工作室与轻量弹窗面板间复用。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun SystemAudioEffectBridgeCard(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val hasInternalProcessing = vm.eqEnabled || vm.soundFxEnabled
+    val hasPanel = remember(context) { vm.hasDedicatedSystemAudioEffectPanel() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(skin.surface2.copy(alpha = 0.85f))
+            .border(
+                width = 1.dp,
+                color = if (vm.systemAudioEffectEnabled && !vm.usbExclusiveEnabled) {
+                    skin.accent.copy(alpha = 0.30f)
+                } else {
+                    skin.border
+                },
+                shape = RoundedCornerShape(18.dp)
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(skin.accent.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = SonanceIcons.Equalizer,
+                    contentDescription = null,
+                    tint = skin.accent,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "系统音效（杜比 / 本机音效）",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = skin.text
+                )
+                Text(
+                    text = when {
+                        vm.usbExclusiveEnabled ->
+                            "USB 独占直通模式开启中，音频绕过系统混音与系统音效"
+                        !vm.systemAudioEffectEnabled ->
+                            "已关闭系统音频会话开放，仅走内置 DSP 或原声直出"
+                        hasInternalProcessing ->
+                            "已接入系统音效会话 · 内置音效同时开启会叠加，可一键切为仅用系统音效"
+                        else ->
+                            "已向系统开放音频会话 · 手机/平板杜比音效等可正常生效"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            StudioSwitch(
+                checked = vm.systemAudioEffectEnabled,
+                onChange = { vm.changeSystemAudioEffect(it) },
+                label = "系统音效接入"
+            )
+        }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PillButton(
+                label = if (hasPanel) "打开系统音效面板" else "前往系统声音设置",
+                onClick = { vm.openSystemAudioEffectPanel(context) },
+                filled = true
+            )
+            if (hasInternalProcessing) {
+                PillButton(
+                    label = "仅用系统音效",
+                    onClick = { vm.useSystemAudioEffectOnly() },
+                    filled = false
+                )
+            }
+        }
     }
 }
 

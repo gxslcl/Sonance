@@ -1033,6 +1033,9 @@
     html[data-mode="warm-light"] .time-label { text-shadow: none; }
     html[data-mode="warm-light"] #btn-zoom svg { filter: none; opacity: .75; }
     html[data-mode="warm-light"] .primary-play-btn svg { filter: none; }
+    #app-viewport.hide-song-title #song-title,
+    #app-viewport.hide-song-title #song-artist { display: none; }
+    #app-viewport.hide-status-pill #btn-view-toggle { display: none; }
   </style>
 </head>
 <body>
@@ -1145,6 +1148,12 @@
               <path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
               <text x="12" y="13.5" text-anchor="middle" font-size="9" font-weight="700" fill="currentColor" stroke="none">1</text>
             </svg>
+            <svg id="mode-icon-sequential" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+              <path d="M4 8h15"></path>
+              <path d="m16.5 5.2 3 2.8-3 2.8"></path>
+              <path d="M4 16h15"></path>
+              <path d="m16.5 13.2 3 2.8-3 2.8"></path>
+            </svg>
           </button>
 
           <button class="sec-btn" id="btn-prev" title="上一张唱片">
@@ -1210,6 +1219,23 @@
         </svg>
         <span class="more-item-label">远视角</span>
         <span class="lyric-toggle-btn more-toggle" id="toggle-zoom"><span class="lyric-toggle-dot"></span></span>
+      </button>
+      <button class="more-item" id="menu-hide-title" title="显示 / 隐藏歌曲名与歌手">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7V4h16v3"></path>
+          <path d="M9 20h6"></path>
+          <path d="M12 4v16"></path>
+        </svg>
+        <span class="more-item-label">隐藏歌曲名</span>
+        <span class="lyric-toggle-btn more-toggle" id="toggle-hide-title"><span class="lyric-toggle-dot"></span></span>
+      </button>
+      <button class="more-item" id="menu-hide-pill" title="显示 / 隐藏顶部状态胶囊">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="8" width="16" height="8" rx="4"></rect>
+          <circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"></circle>
+        </svg>
+        <span class="more-item-label">隐藏状态胶囊</span>
+        <span class="lyric-toggle-btn more-toggle" id="toggle-hide-pill"><span class="lyric-toggle-dot"></span></span>
       </button>
       <button class="more-item" id="menu-theme" title="选择主题" aria-expanded="false" aria-controls="theme-options">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
@@ -1465,7 +1491,7 @@
       },
 
       // 原生推真实播放状态（500ms 校准 + 状态突变即时推）
-      // mode：播放模式 'shuffle' | 'repeat_all' | 'repeat_one'（旧调用不传则保留现值）
+      // mode：播放模式 'shuffle' | 'repeat_all' | 'repeat_one' | 'sequential'（旧调用不传则保留现值）
       syncPlayback(idx, isPlaying, buffering, posSec, durSec, mode) {
         if (!SONGS.length) return;
         const i = Math.max(0, Math.min(SONGS.length - 1, idx));
@@ -1562,7 +1588,7 @@
       viewState: "PlayingView", // 'Browse' | 'PlayingView' | 'Transitioning'
       audioState: "Paused",     // 'Playing' | 'Paused' | 'Buffering'
       deckCollapsed: true,      // 底部现代控制栏默认收起（纯净观赏，手柄可展开）
-      playMode: "repeat_all",   // 播放模式：'shuffle' | 'repeat_all' | 'repeat_one'（原生经 syncPlayback 推送）
+      playMode: "repeat_all",   // 播放模式：'shuffle' | 'repeat_all' | 'repeat_one' | 'sequential'（原生经 syncPlayback 推送）
 
       selectedSongId: 0,
       playingSongId: 0,
@@ -3363,14 +3389,14 @@
       triggerPlayCeremony(nextId, e.clientX, e.clientY);
     });
 
-    // ===== 播放模式按钮：随机 → 列表循环 → 单曲循环 三态循环 =====
+    // ===== 播放模式按钮：随机 → 列表循环 → 单曲循环 → 顺序播放 四态循环 =====
     // 图标由原生 syncPlayback 推送驱动（500ms 校准自愈）；点击只上抛请求，
-    // 由原生 VM 与主界面同一套三态逻辑切换（洗牌袋/队列重排保持一致）
-    const MODE_LABELS = { shuffle: "随机播放", repeat_all: "列表循环", repeat_one: "单曲循环" };
-    const MODE_NEXT = { shuffle: "repeat_all", repeat_all: "repeat_one", repeat_one: "shuffle" };
+    // 由原生 VM 与主界面同一套四态逻辑切换（洗牌袋/队列重排保持一致）
+    const MODE_LABELS = { shuffle: "随机播放", repeat_all: "列表循环", repeat_one: "单曲循环", sequential: "顺序播放" };
+    const MODE_NEXT = { shuffle: "repeat_all", repeat_all: "repeat_one", repeat_one: "sequential", sequential: "shuffle" };
 
     function updateModeBtn() {
-      const icons = { shuffle: "mode-icon-shuffle", repeat_all: "mode-icon-repeat-all", repeat_one: "mode-icon-repeat-one" };
+      const icons = { shuffle: "mode-icon-shuffle", repeat_all: "mode-icon-repeat-all", repeat_one: "mode-icon-repeat-one", sequential: "mode-icon-sequential" };
       Object.keys(icons).forEach((m) => {
         const el = document.getElementById(icons[m]);
         if (el) el.style.display = m === state.playMode ? "" : "none";
@@ -3481,6 +3507,48 @@
     document.getElementById("btn-view-toggle").addEventListener("click", () => {
       setViewMode(state.viewState === "Browse" ? "PlayingView" : "Browse");
     });
+
+    // 独立控制隐藏「歌曲名」与顶部「状态胶囊」，记忆进 localStorage
+    (function setupVinylVisibilityToggles() {
+      const viewport = document.getElementById("app-viewport");
+      const titleBtn = document.getElementById("menu-hide-title");
+      const titleToggle = document.getElementById("toggle-hide-title");
+      const pillBtn = document.getElementById("menu-hide-pill");
+      const pillToggle = document.getElementById("toggle-hide-pill");
+      let hideTitle = false;
+      let hidePill = false;
+      try {
+        hideTitle = localStorage.getItem("vinyl_hide_song_title") === "1";
+        hidePill = localStorage.getItem("vinyl_hide_status_pill") === "1";
+      } catch (e) {}
+      function applyVisibilityFlags() {
+        if (viewport) {
+          viewport.classList.toggle("hide-song-title", hideTitle);
+          viewport.classList.toggle("hide-status-pill", hidePill);
+        }
+        if (titleToggle) titleToggle.classList.toggle("on", hideTitle);
+        if (pillToggle) pillToggle.classList.toggle("on", hidePill);
+        if (titleBtn) titleBtn.setAttribute("aria-pressed", String(hideTitle));
+        if (pillBtn) pillBtn.setAttribute("aria-pressed", String(hidePill));
+      }
+      applyVisibilityFlags();
+      if (titleBtn) {
+        titleBtn.addEventListener("click", () => {
+          hideTitle = !hideTitle;
+          try { localStorage.setItem("vinyl_hide_song_title", hideTitle ? "1" : "0"); } catch (e) {}
+          applyVisibilityFlags();
+          hapticTick();
+        });
+      }
+      if (pillBtn) {
+        pillBtn.addEventListener("click", () => {
+          hidePill = !hidePill;
+          try { localStorage.setItem("vinyl_hide_status_pill", hidePill ? "1" : "0"); } catch (e) {}
+          applyVisibilityFlags();
+          hapticTick();
+        });
+      }
+    })();
 
     // 切主题时只立即更新主碟和正在飞行的碟片；队列按可见范围惰性更新。
     function refreshThemeRecords() {

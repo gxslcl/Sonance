@@ -334,7 +334,7 @@ private fun VideoStage(
         )
     }
 
-    /** 三态播放模式，存的是 ordinal，取的时候夹范围防止读到脏值 */
+    /** 四态播放模式，存的是 ordinal，取的时候夹范围防止读到脏值 */
     var modeOrdinal by remember {
         mutableIntStateOf(prefs.biliPlayMode.coerceIn(0, PlayMode.entries.size - 1))
     }
@@ -1321,6 +1321,7 @@ private fun ControlPanel(
         PlayMode.SHUFFLE -> SonanceIcons.Shuffle
         PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
         PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
+        PlayMode.SEQUENTIAL -> SonanceIcons.Sequential
     }
 
     Row(

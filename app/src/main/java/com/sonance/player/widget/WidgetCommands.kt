@@ -75,8 +75,11 @@ class WidgetCommandReceiver : BroadcastReceiver() {
                     val cur = PlayMode.entries.firstOrNull { it.name == prefs.playMode } ?: PlayMode.REPEAT_ALL
                     val next = cur.next()
                     prefs.playMode = next.name
-                    PlaybackService.playerOrNull()?.repeatMode =
-                        if (next == PlayMode.REPEAT_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
+                    PlaybackService.playerOrNull()?.repeatMode = when (next) {
+                        PlayMode.REPEAT_ONE -> Player.REPEAT_MODE_ONE
+                        PlayMode.SEQUENTIAL -> Player.REPEAT_MODE_OFF
+                        PlayMode.SHUFFLE, PlayMode.REPEAT_ALL -> Player.REPEAT_MODE_ALL
+                    }
                     val snap = WidgetState.read(app)
                     WidgetState.write(app, snap.copy(playMode = next.name))
                     val pending = goAsync()

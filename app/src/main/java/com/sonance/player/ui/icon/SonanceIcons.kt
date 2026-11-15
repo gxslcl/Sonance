@@ -583,6 +583,45 @@ object SonanceIcons {
     )
     val RepeatOne: ImageVector get() = pick(repeatOneSets)
 
+    // 顺序播放：两条平行向右直箭头，与随机（交叉）和循环（折返）明确区分
+    private val sequentialSets = listOf(
+        ow(
+            "Sequential0",
+            1.9f,
+            "M4 8h15",
+            "M16.5 5.2L19.5 8l-3 2.8",
+            "M4 16h15",
+            "M16.5 13.2L19.5 16l-3 2.8"
+        ),
+        lazy {
+            build(
+                "Sequential1",
+                listOf(
+                    "M4 8.5h15.5",
+                    "M17 6l3 2.5-3 2.5",
+                    "M4 15.5h15.5",
+                    "M17 13l3 2.5-3 2.5"
+                ),
+                emptyList(),
+                1.4f
+            )
+        },
+        lazy {
+            buildW(
+                "Sequential2",
+                stroked = listOf(
+                    "M4 8h12.8" to 2.8f,
+                    "M4 16h12.8" to 2.8f
+                ),
+                filled = listOf(
+                    "M16 4.4l4.4 3.6-4.4 3.6z",
+                    "M16 12.4l4.4 3.6-4.4 3.6z"
+                )
+            )
+        }
+    )
+    val Sequential: ImageVector get() = pick(sequentialSets)
+
     /**
      * 播放队列：三横线 + 音符（原型：横线长 4.5→14.5 / 12 / 10，音符 x16.5）。
      *

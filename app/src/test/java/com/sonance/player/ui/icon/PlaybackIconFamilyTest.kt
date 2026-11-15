@@ -12,6 +12,7 @@ class PlaybackIconFamilyTest {
                 IconSetState.set(style)
                 val icons = listOf(SonanceIcons.ChevronDown, SonanceIcons.Maximize, SonanceIcons.Timer,
                     SonanceIcons.Search, SonanceIcons.Layers, SonanceIcons.Prev, SonanceIcons.Next,
+                    SonanceIcons.Shuffle, SonanceIcons.Repeat, SonanceIcons.RepeatOne, SonanceIcons.Sequential,
                     SonanceIcons.Equalizer, SonanceIcons.Queue)
                 icons.forEach {
                     assertTrue("${it.name} did not follow style $style", it.name.endsWith(style.toString()))

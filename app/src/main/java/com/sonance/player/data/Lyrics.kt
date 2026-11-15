@@ -86,10 +86,16 @@ object LyricsRepository {
         /** 这首歌的时长（毫秒）。**匹配网易云时必须用** —— 见 [NeteaseMatch] 的说明 */
         durationMs: Long = 0L,
         /** 是否允许用网易云兜底（用户开了「网易云补全」才为 true） */
-        neteaseEnabled: Boolean = false
+        neteaseEnabled: Boolean = false,
+        /** 在线曲目的来源标识（如 `"lx:kw"`），用于直取洛雪对应平台官方歌词 */
+        remoteSource: String = "",
+        /** 在线曲目的远端 id */
+        remoteId: String? = null
     ): LyricsResult {
-        // 缓存键带服务地址：换了歌词源就自然走新命名空间，不会读到旧源的结果
-        val cacheKey = LyricsCache.keyOf(title, artist, apiBase) ?: "id:$songId"
+        val lxPlatform = com.sonance.player.data.lx.LxPlatform.platformIdFromSource(remoteSource)
+        // 缓存键带服务地址（洛雪平台曲目隔离独立命名空间，避免被本地 LrcAPI 哨兵短路）
+        val effectiveBase = if (lxPlatform != null) "$apiBase|$remoteSource" else apiBase
+        val cacheKey = LyricsCache.keyOf(title, artist, effectiveBase) ?: "id:$songId"
         val scopedKey = "$cacheKey|id:$songId"
         cache.get(scopedKey)?.let { return it }
 
@@ -152,9 +158,22 @@ object LyricsRepository {
             }
 
             // ---- 3) 在线（用户开启时才走，一次只请求这一首）----
-            if (source == null && onlineEnabled && apiBase.isNotBlank()) {
-                // 先问 LrcAPI
-                var online = OnlineLyrics.fetch(apiBase, title, artist, album)
+            val canFetchLx = onlineEnabled && lxPlatform != null && !remoteId.isNullOrBlank()
+            if (source == null && onlineEnabled && (apiBase.isNotBlank() || canFetchLx)) {
+                var online: String? = null
+                if (canFetchLx) {
+                    online = com.sonance.player.data.lx.LxCatalogProvider.fetchLyric(
+                        platform = lxPlatform!!,
+                        remoteId = remoteId!!,
+                        title = title,
+                        artist = artist,
+                        durationMs = durationMs
+                    )
+                }
+                if (online.isNullOrBlank() && apiBase.isNotBlank()) {
+                    // 洛雪平台无结果或普通曲目，走 LrcAPI
+                    online = OnlineLyrics.fetch(apiBase, title, artist, album)
+                }
 
                 // 没拿到就用网易云兜底（用户开了「网易云补全」时）。
                 // 两个源互补：实测 LrcAPI 偶发没有的歌，网易云那边是有的。

@@ -1,6 +1,7 @@
 package com.sonance.player.ui.components
 
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -160,10 +161,11 @@ fun LyricsOverlay(
      */
     var showAppearance by remember { mutableStateOf(false) }
 
-    // 打开「隐藏状态栏」后，顶栏图标 5 秒后淡到几乎不可见（alpha 0.15），但仍可点击。
+    // 打开「隐藏状态栏」后，顶栏图标 5 秒后淡到几乎不可见（alpha 0.15），但仍可点击；
+    // 打开外观面板期间保持高亮可见，方便点击右上角叉号收起。
     var chromeDimmed by remember { mutableStateOf(false) }
-    LaunchedEffect(hideStatusBar) {
-        if (hideStatusBar) {
+    LaunchedEffect(hideStatusBar, showAppearance) {
+        if (hideStatusBar && !showAppearance) {
             delay(5000)
             chromeDimmed = true
         } else {
@@ -200,6 +202,8 @@ fun LyricsOverlay(
 
     // 全屏展现模式：全局设置，页内切换即时生效
     var style by remember { mutableStateOf(prefs.lyricsStyle) }
+    // 手动滑动歌词跨行轻震：全局设置，页内开关即时生效
+    var scrollHaptic by remember { mutableStateOf(prefs.lyricsScrollHapticEnabled) }
 
     // 歌词进度偏移：**按歌记忆**。页内 ± 调整即时生效并写回 prefs，
     // 换歌时回到这首歌自己的偏移值
@@ -240,7 +244,9 @@ fun LyricsOverlay(
             convertToSimplified = convertT2S,
             // 匹配网易云要靠时长排除同名翻唱 / Live 版
             durationMs = song.durationMs,
-            neteaseEnabled = neteaseFill
+            neteaseEnabled = neteaseFill,
+            remoteSource = song.source,
+            remoteId = song.remoteId
         )
         loading = false
     }
@@ -343,8 +349,8 @@ fun LyricsOverlay(
                 // 收起播放页可以左右滑动切层、也可以按系统返回键（[FullPlayer] 里有
                 // BackHandler），顶栏没必要再占一格。
                 IconAction(
-                    icon = SonanceIcons.Layers,
-                    contentDescription = "外观（背景与字号）",
+                    icon = if (showAppearance) SonanceIcons.Close else SonanceIcons.Layers,
+                    contentDescription = if (showAppearance) "关闭外观设置" else "外观（背景与字号）",
                     onClick = { showAppearance = !showAppearance },
                     iconSize = 19.dp,
                     tint = if (showAppearance) skin.accent else skin.textDim
@@ -411,7 +417,8 @@ fun LyricsOverlay(
                             onSeek = seekFromLyric,
                             bgProfile = bgProfile,
                             adaptMode = adaptMode,
-                            timelineOffsetMs = offsetMs
+                            timelineOffsetMs = offsetMs,
+                            scrollHaptic = scrollHaptic
                         )
                         LyricStyle.VERTICAL -> VerticalSyncedLyrics(
                             lines = lyrics.lines,
@@ -437,7 +444,8 @@ fun LyricsOverlay(
                             onSeek = seekFromLyric,
                             bgProfile = bgProfile,
                             adaptMode = adaptMode,
-                            skin = skin
+                            skin = skin,
+                            scrollHaptic = scrollHaptic
                         )
                     }
 
@@ -476,6 +484,7 @@ fun LyricsOverlay(
                     glassVisibility = prefs.miniGlassVisibility,
                     cardOpacity = prefs.miniCardOpacity,
                     progressStyle = MiniProgressStyle.of(prefs.miniProgressStyle),
+                    showTime = prefs.miniShowTime,
                     swipeLeftPct = prefs.miniSwipeLeftPct,
                     swipeRightPct = prefs.miniSwipeRightPct,
                     heightScale = prefs.miniHeightScale / 100f,
@@ -546,20 +555,20 @@ fun LyricsOverlay(
             )
         }
 
+        BackHandler(enabled = showAppearance) { showAppearance = false }
+
         if (showAppearance) {
             Column(
                 Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
-                    .padding(top = 54.dp, start = 12.dp, end = 12.dp)
+                    .padding(top = 50.dp, start = 12.dp, end = 12.dp, bottom = 12.dp)
                     .fillMaxWidth()
-                    .heightIn(max = maxHeight * 0.72f)
                     .shadow(12.dp, RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
                     .background(skin.surface.copy(alpha = 0.97f))
                     .border(1.dp, skin.border, RoundedCornerShape(16.dp))
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 6.dp)
+                    .padding(vertical = 8.dp)
             ) {
                 GlassControls(
                     style = glassStyle,
@@ -607,9 +616,21 @@ fun LyricsOverlay(
                     },
                     skin = skin
                 )
-                StatusBarRow(
-                    hide = hideStatusBar,
-                    onHideChange = onHideStatusBarChange,
+                ToggleSettingRow(
+                    title = "隐藏状态栏",
+                    subtitle = "仅对全屏歌词页生效；下拉可临时呼出",
+                    checked = hideStatusBar,
+                    onCheckedChange = onHideStatusBarChange,
+                    skin = skin
+                )
+                ToggleSettingRow(
+                    title = "滚动歌词震动",
+                    subtitle = "手动上下滑动歌词跨行时轻震反馈",
+                    checked = scrollHaptic,
+                    onCheckedChange = {
+                        scrollHaptic = it
+                        prefs.lyricsScrollHapticEnabled = it
+                    },
                     skin = skin
                 )
                 OffsetRow(
@@ -875,10 +896,10 @@ private fun FontSizeRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(skin.surface2)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -945,11 +966,11 @@ fun AdaptModeRow(
     Column(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(skin.surface2)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         ChipsRow(
             chips = LyricAdaptMode.entries.map { it.label to (it == mode) },
@@ -976,28 +997,57 @@ private fun StyleRow(
     skin: Skin,
     modifier: Modifier = Modifier
 ) {
+    val rows = remember {
+        listOf(
+            listOf(
+                LyricStyle.CLASSIC to 0.72f,
+                LyricStyle.VERTICAL to 1.0f,
+                LyricStyle.FLUID to 1.28f
+            ),
+            listOf(
+                LyricStyle.VINYL to 1f,
+                LyricStyle.SPATIAL to 1f
+            )
+        )
+    }
     Column(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(skin.surface2)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 长模式名逐行展示，避免四个选项在手机宽度下被挤掉。
-        LyricStyle.entries.forEach { entry ->
-            Text(
-                text = entry.label,
-                color = if (entry == style) skin.accent else skin.textDim,
-                fontWeight = if (entry == style) FontWeight.SemiBold else FontWeight.Normal,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (entry == style) skin.accent.copy(alpha = 0.12f) else Color.Transparent)
-                    .clickable { onStyleChange(entry) }
-                    .padding(horizontal = 12.dp, vertical = 12.dp)
-            )
+        // 两排自适应胶囊栅格，兼顾长模式名展示与整张外观弹窗无滚动条高度。
+        rows.forEach { rowEntries ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                rowEntries.forEach { (entry, weight) ->
+                    val selected = entry == style
+                    Box(
+                        Modifier
+                            .weight(weight)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) skin.accent.copy(alpha = 0.14f) else skin.surface3)
+                            .clickable { onStyleChange(entry) }
+                            .padding(horizontal = 6.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = entry.label,
+                            color = if (selected) skin.accent else skin.textDim,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
         }
         Text(
             when (style) {
@@ -1015,44 +1065,42 @@ private fun StyleRow(
 }
 
 /**
- * 「隐藏状态栏」开关行：全屏歌词页顶到屏幕上沿，纯沉浸浏览。
- *
- * 状态落地在 SonanceRoot（`PlayerStatusBarImmersive`），这里只上报开关值 ——
- * 因为隐藏/恢复状态栏要在**播放页外层**做，歌词页自己管不了窗口 insets。
- * 开关即时生效；下拉屏幕仍能临时呼出状态栏看时间/通知。
+ * 弹窗里的通用开关行（隐藏状态栏 / 滚动歌词震动），统一视觉节奏与 Switch 配色。
  */
 @Composable
-private fun StatusBarRow(
-    hide: Boolean,
-    onHideChange: (Boolean) -> Unit,
+private fun ToggleSettingRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
     skin: Skin,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(skin.surface2)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                "隐藏状态栏",
+                title,
                 style = MaterialTheme.typography.labelLarge,
                 color = skin.text
             )
             Text(
-                "仅对全屏歌词页生效；下拉可临时呼出",
+                subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textMuted,
                 fontSize = 10.sp
             )
         }
         androidx.compose.material3.Switch(
-            checked = hide,
-            onCheckedChange = onHideChange,
+            checked = checked,
+            onCheckedChange = onCheckedChange,
             modifier = Modifier.height(24.dp),
             colors = androidx.compose.material3.SwitchDefaults.colors(
                 checkedThumbColor = skin.onAccent,
@@ -1080,10 +1128,10 @@ private fun OffsetRow(
     Row(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(skin.surface2)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -1351,7 +1399,9 @@ fun InlineLyrics(
             apiBase = apiBase,
             convertToSimplified = convertT2S,
             durationMs = song.durationMs,
-            neteaseEnabled = neteaseFill
+            neteaseEnabled = neteaseFill,
+            remoteSource = song.source,
+            remoteId = song.remoteId
         )
         loading = false
     }
@@ -1534,7 +1584,8 @@ internal fun SyncedLyrics(
      * 点某一行是否跳转进度。面板同样只做展示，传 false 后整行不再挂 clickable。
      */
     seekEnabled: Boolean = true,
-    timelineOffsetMs: Long = 0L
+    timelineOffsetMs: Long = 0L,
+    scrollHaptic: Boolean = true
 ) {
     val skin = LocalSkin.current
     val density = LocalDensity.current
@@ -1562,6 +1613,7 @@ internal fun SyncedLyrics(
     // 用普通数组而不是 state —— 只有下面的定时循环读它，重绘没有意义。
     val needsReturn = remember { booleanArrayOf(false) }
     val latestCurrent by rememberUpdatedState(current)
+    val latestScrollHaptic by rememberUpdatedState(scrollHaptic)
 
     // 当前行变化时滚到中间（contentPadding 让首尾也能居中），但用户正在浏览时不打扰
     LaunchedEffect(current) {
@@ -1590,7 +1642,7 @@ internal fun SyncedLyrics(
         snapshotFlow { listState.firstVisibleItemIndex }.collect { index ->
             if (index != previous) {
                 previous = index
-                if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < SCROLL_HAPTIC_WINDOW_MS) {
+                if (latestScrollHaptic && android.os.SystemClock.uptimeMillis() - lastTouch[0] < SCROLL_HAPTIC_WINDOW_MS) {
                     hapticTick(context)
                 }
             }
@@ -1831,7 +1883,9 @@ fun PanelLyrics(
             apiBase = apiBase,
             convertToSimplified = convertT2S,
             durationMs = song.durationMs,
-            neteaseEnabled = neteaseFill
+            neteaseEnabled = neteaseFill,
+            remoteSource = song.source,
+            remoteId = song.remoteId
         )
         loading = false
     }
@@ -2279,7 +2333,9 @@ fun LyricStrip(
             apiBase = apiBase,
             convertToSimplified = convertT2S,
             durationMs = song.durationMs,
-            neteaseEnabled = neteaseFill
+            neteaseEnabled = neteaseFill,
+            remoteSource = song.source,
+            remoteId = song.remoteId
         )
         lines = (loaded?.lyrics as? Lyrics.Synced)?.lines
     }

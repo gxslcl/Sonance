@@ -644,6 +644,7 @@ internal object WidgetRenderer {
         val modeIcon = when (modeName) {
             "SHUFFLE" -> R.drawable.widget_ic_mode_shuffle
             "REPEAT_ONE" -> R.drawable.widget_ic_mode_repeat_one
+            "SEQUENTIAL" -> R.drawable.widget_ic_mode_sequential
             else -> R.drawable.widget_ic_mode_repeat_all
         }
         views.setImageViewBitmap(

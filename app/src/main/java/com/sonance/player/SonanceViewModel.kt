@@ -2,6 +2,8 @@ package com.sonance.player
 
 import android.Manifest
 import android.app.Application
+import android.content.Context
+import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -27,17 +29,28 @@ import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTagWriter
+import com.sonance.player.data.ExternalStoragePaths
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.MediaFileDeleter
-import com.sonance.player.data.plugin.PluginOnlineSource
-import com.sonance.player.data.plugin.PluginRecord
-import com.sonance.player.data.plugin.PluginRepository
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.NeteaseSource
+import com.sonance.player.data.OnlineMode
 import com.sonance.player.data.OnlineSource
 import com.sonance.player.data.OnlineSources
+import com.sonance.player.data.SafScanTree
+import com.sonance.player.data.lx.LxBoard
+import com.sonance.player.data.lx.LxCatalogProvider
+import com.sonance.player.data.lx.LxPlatform
+import com.sonance.player.data.lx.LxQuality
+import com.sonance.player.data.lx.LxRepository
+import com.sonance.player.data.lx.LxScriptRecord
+import com.sonance.player.data.lx.LxSearchMode
+import com.sonance.player.data.lx.LxSheetDetailTarget
+import com.sonance.player.data.lx.LxSheetSummary
+import com.sonance.player.data.lx.LxSheetTag
+import com.sonance.player.data.lx.LxTopListGroup
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.ShuffleOrder
 import com.sonance.player.data.SongMetaEditor
@@ -128,8 +141,10 @@ import com.sonance.player.playback.SoundPreset
 import com.sonance.player.playback.SoundPresets
 import com.sonance.player.playback.KaraokeBus
 import com.sonance.player.playback.PlayMode
+import com.sonance.player.playback.PlaybackService
 import com.sonance.player.playback.PlayerController
 import com.sonance.player.playback.RepeatMode
+import com.sonance.player.playback.SystemAudioEffects
 import com.sonance.player.ui.icon.IconSetState
 import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.HiResBadgeSize
@@ -144,6 +159,7 @@ import com.sonance.player.ui.wall.buildWallAlbums
 import com.sonance.player.ui.wall.pickRandomWallAlbum
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -157,6 +173,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = Prefs(app)
     private val repo = MediaRepository(app)
     val player = PlayerController(app)
+    private val lxRepo = LxRepository.get(app)
 
     // ===== 媒体库 =====
     var songs by mutableStateOf<List<Song>>(emptyList())
@@ -293,6 +310,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var scanFoldersLoading by mutableStateOf(false)
         private set
 
+    /** 用户通过 SAF（OpenDocumentTree）授权的 U 盘 / 外置文件夹列表 */
+    var safScanTrees by mutableStateOf(ExternalStoragePaths.parseSafScanTrees(prefs.safScanTrees))
+        private set
+
     /** 上次勾选的目录；从 Prefs 读，默认空集合 */
     var scanScopeSelection by mutableStateOf(
         prefs.scanScopePaths.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
@@ -328,19 +349,70 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun loadScanFolders() {
         if (scanFoldersLoading) return
         scanFoldersLoading = true
+        val currentSafTrees = safScanTrees
         viewModelScope.launch {
-            val listed = withContext(Dispatchers.IO) { repo.listFolders() }
+            val listed = withContext(Dispatchers.IO) { repo.listFolders(currentSafTrees) }
             val known = listed.mapTo(HashSet()) { it.path }
-            val missing = scanScopeSelection.filter { it !in known }.map {
-                ScanFolderInfo(
-                    path = it,
-                    name = it.substringAfterLast('/').ifBlank { "根目录" },
-                    songCount = 0
-                )
-            }
+            val missing = scanScopeSelection
+                .filter { it !in known && !it.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX) }
+                .map {
+                    ScanFolderInfo(
+                        path = it,
+                        name = it.substringAfterLast('/').ifBlank { "根目录" },
+                        songCount = 0
+                    )
+                }
             scanFolders = listed + missing
             scanFoldersLoading = false
         }
+    }
+
+    /** 新增并持久化一个 SAF 授权的外置/U 盘目录，并立即触发该目录的增量扫描 */
+    fun addSafScanTree(uri: Uri, label: String) {
+        val uriString = uri.toString()
+        val nextRaw = ExternalStoragePaths.addSafTree(prefs.safScanTrees, uriString, label)
+        prefs.safScanTrees = nextRaw
+        safScanTrees = ExternalStoragePaths.parseSafScanTrees(nextRaw)
+        val scopePath = ExternalStoragePaths.safScopePathOf(uriString)
+        updateScanScopeSelection(scanScopeSelection + scopePath)
+        loadScanFolders()
+        startScopedScan(setOf(scopePath))
+    }
+
+    /** 移除已授权的 SAF 外置目录，并清理来自该授权目录的缓存曲目 */
+    fun removeSafScanTree(uriString: String) {
+        val treeToRemove = safScanTrees.firstOrNull { it.uriString == uriString }
+        runCatching {
+            getApplication<Application>().contentResolver.releasePersistableUriPermission(
+                Uri.parse(uriString),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val nextRaw = ExternalStoragePaths.removeSafTree(prefs.safScanTrees, uriString)
+        prefs.safScanTrees = nextRaw
+        safScanTrees = ExternalStoragePaths.parseSafScanTrees(nextRaw)
+        val scopePath = ExternalStoragePaths.safScopePathOf(uriString)
+        if (scopePath in scanScopeSelection) {
+            updateScanScopeSelection(scanScopeSelection - scopePath)
+        }
+        if (treeToRemove != null) {
+            val baseFolder = ExternalStoragePaths.safFolderPath(treeToRemove.label, "")
+            val remaining = (lastScanOutcome?.songs ?: songs).filterNot { song ->
+                song.uri.toString().startsWith(uriString) ||
+                    song.folderPath == baseFolder ||
+                    song.folderPath.startsWith("$baseFolder/")
+            }
+            if (remaining.size != (lastScanOutcome?.songs ?: songs).size) {
+                songs = filterHidden(remaining)
+                rebuildPinyinIndex(songs)
+                albums = MediaRepository.groupAlbums(songs)
+                artists = MediaRepository.groupArtists(songs)
+                folders = MediaRepository.groupFolders(songs)
+                prefs.songsCacheJson = encodeSongsToJson(remaining)
+                lastScanOutcome = lastScanOutcome?.copy(songs = remaining)
+            }
+        }
+        loadScanFolders()
     }
 
     fun toggleScanScope(path: String) {
@@ -370,7 +442,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             showToast("请先选择要扫描的文件夹")
             return
         }
-        if (!hasAudioPermission()) {
+        val needsAudioPermission = paths.any { !it.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX) }
+        if (needsAudioPermission && !hasAudioPermission()) {
             showToast("没有读取音乐文件的权限，无法扫描")
             return
         }
@@ -379,13 +452,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scopedScanScanned = 0
         scopedScanResult = null
         scopedScanRunning = true
+        val currentSafTrees = safScanTrees
         scopedScanJob = viewModelScope.launch {
             try {
                 val outcome = repo.scan(
                     filterShortAudio = filterShortAudio,
                     filters = currentScanFilters(),
                     folderPaths = paths,
-                    onProgress = { n -> scopedScanScanned = n }
+                    onProgress = { n -> scopedScanScanned = n },
+                    safTrees = currentSafTrees
                 )
                 mergeScopedScan(outcome, paths)
             } catch (c: CancellationException) {
@@ -401,7 +476,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun mergeScopedScan(outcome: ScanOutcome, paths: Set<String>) {
         val existing = songs
         val existingIds = existing.mapTo(HashSet()) { it.id }
-        val kept = existing.filter { it.folderPath !in paths }
+        val currentSafTrees = safScanTrees
+        val kept = existing.filter { !ExternalStoragePaths.matchesScopedPath(it.folderPath, paths, currentSafTrees) }
         // 原来就在库里的歌（同一 MediaStore id）直接保留，避免重扫把老条目当成"新增"
         val reappearing = outcome.songs.filter { it.id in existingIds }
         val fresh = outcome.songs.filter { it.id !in existingIds }
@@ -418,12 +494,19 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             all to unique.size
         }
 
+        val visible = filterHidden(merged)
+        pinyinIndexJob?.cancel()
+        val (pinyin, keys) = withContext(Dispatchers.Default) {
+            computePinyinAndKeys(visible)
+        }
         val removed = (existing.size - kept.size - reappearing.size).coerceAtLeast(0)
-        songs = filterHidden(merged)
+        pinyinIndex = pinyin
+        sortKeys = keys
+        songs = visible
         warmUpCovers()
-        albums = MediaRepository.groupAlbums(songs)
-        artists = MediaRepository.groupArtists(songs)
-        folders = MediaRepository.groupFolders(songs)
+        albums = MediaRepository.groupAlbums(visible)
+        artists = MediaRepository.groupArtists(visible)
+        folders = MediaRepository.groupFolders(visible)
         prefs.songsCacheJson = encodeSongsToJson(merged)
         prefs.lastScanAt = System.currentTimeMillis()
         lastScanOutcome = outcome.copy(songs = merged)
@@ -728,6 +811,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineDownloadEnabled by mutableStateOf(prefs.onlineDownloadEnabled)
         private set
 
+    var lxDownloadEnabled by mutableStateOf(prefs.lxDownloadEnabled)
+        private set
+
     /**
      * 恢复完成、等播放器报出 mediaId 后要请求一次列表定位。
      *
@@ -772,6 +858,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 randomListenLikeWall()
             }
         }
+        player.onShuffleRoundWrapped = { reshuffleQueueKeepingCurrent() }
         player.onSongStarted = { id ->
             // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
             // 通知栏封面替换与锁屏歌词读取；中间划过的曲目 360ms 内即被取消，避免连串 SP/IPC 抢占主线程。
@@ -918,7 +1005,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 把恢复出来的在线歌放进 onlineSongMap 并推进版本号 ——
         // 否则冷启动后 songById() / songMap() 全查不到，播放页与队列页整批显示成「未知歌曲」
         var added = false
-        list.forEach { if (onlineSongMap.put(it.id, it) == null) added = true }
+        list.forEach {
+            lxRepo.rememberSongHint(it)
+            if (onlineSongMap.put(it.id, it) == null) added = true
+        }
         if (added) onlineRevision++
 
         val restoredIndex = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex)
@@ -926,6 +1016,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val activeSong = restoredQueue[restoredIndex]
 
         playbackRestored = true
+        // 若后台播放服务已经在播着（如从桌面小组件/超级岛点回播放器重建 Activity），
+        // 绝不能再下发 autoplay=false 的恢复队列去顶掉正在放的歌或触发暂停；上面已完成元信息映射即可返回。
+        if (PlayerController.hasActiveServicePlayback(player.state.value.hasItem, PlaybackService.playerOrNull())) {
+            return true
+        }
         armStartupScroll()
         // autoplay=false：冷启动就出声很吓人，摆成"暂停在这首歌"等用户按播放。
         // notifyStart=false：这只是把上次的歌摆回来，不该给播放次数 +1。
@@ -936,7 +1031,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 上次停在哪就摆回哪（配合 persistPlayback 对在线歌存进度）。
             // 地址是当场重新取的（带签名会过期）；流不支持 Range 时最坏退化为从头播。
             startPositionMs = prefs.playPositionMs.coerceAtLeast(0L),
-            notifyStart = false
+            notifyStart = false,
+            isRestore = true
         )
         if (isRemoteSongId(activeSong.id)) {
             resolveStreamIfMissing(activeSong)
@@ -947,10 +1043,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private fun restorePlaybackState() {
         if (playbackRestored) return
 
-        // 上次播的是在线歌 → 先走在线恢复。它**不依赖本地曲库** ——
+        // 上次播的是在线歌 → 先走在线恢复（内部已对后台存活服务做保护）。它**不依赖本地曲库** ——
         // 在线歌的 id 是负数，按"在不在曲库里"过滤会把它们整条滤掉，
         // 那是给本地歌设计的规则。
         if (prefs.lastPlayedOnline && restoreOnlinePlayback()) return
+
+        if (PlayerController.hasActiveServicePlayback(player.state.value.hasItem, PlaybackService.playerOrNull())) {
+            playbackRestored = true
+            return
+        }
 
         if (songs.isEmpty()) return
 
@@ -988,7 +1089,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             index = index,
             autoplay = false,
             startPositionMs = position,
-            notifyStart = false
+            notifyStart = false,
+            isRestore = true
         )
     }
 
@@ -1379,7 +1481,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun runScan(clearArtwork: Boolean = true): ScanOutcome {
         if (clearArtwork) ArtworkLoader.clear(getApplication())
-        val outcome = repo.scan(filterShortAudio, currentScanFilters())
+        val outcome = repo.scan(filterShortAudio, currentScanFilters(), safTrees = safScanTrees)
         applyScanOutcome(outcome)
         // 把结果落到 Prefs，下次冷启动直接用、不再扫 MediaStore
         prefs.songsCacheJson = encodeSongsToJson(outcome.songs)
@@ -1387,14 +1489,20 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         return outcome
     }
 
-    private fun applyScanOutcome(outcome: ScanOutcome) {
-        songs = filterHidden(outcome.songs)
-        rebuildPinyinIndex(songs)
+    private suspend fun applyScanOutcome(outcome: ScanOutcome) {
+        val visible = filterHidden(outcome.songs)
+        pinyinIndexJob?.cancel()
+        val (pinyin, keys) = withContext(Dispatchers.Default) {
+            computePinyinAndKeys(visible)
+        }
+        pinyinIndex = pinyin
+        sortKeys = keys
+        songs = visible
         // 扫描会清掉封面缓存，这里重新预热一遍（见 warmUpCovers 的说明）
         warmUpCovers()
-        albums = MediaRepository.groupAlbums(songs)
-        artists = MediaRepository.groupArtists(songs)
-        folders = MediaRepository.groupFolders(songs)
+        albums = MediaRepository.groupAlbums(visible)
+        artists = MediaRepository.groupArtists(visible)
+        folders = MediaRepository.groupFolders(visible)
         lastScanOutcome = outcome
     }
 
@@ -1499,7 +1607,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 一次「等用户点头」的文件删除。
      */
     class PendingSongDelete(
-        /** 计划删除的歌（都已过滤成本地歌） */
+        /** 计划删除的全部歌（用于 API 28 及以下重新触发，或按 id 查原列表） */
         val songs: List<Song>,
         /**
          * 非空 → API 29+ 的系统确认框；**用户同意后文件已被系统删掉**，直接落地即可。
@@ -1507,7 +1615,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
          */
         val intentSender: IntentSender?,
         /** 多选删除：结果提示用「成功 N 首 / 失败 M 首」 */
-        val detailed: Boolean = false
+        val detailed: Boolean = false,
+        /** 经系统弹窗确认后再核验残留的目标曲目子集（如部分已通过直删或 SAF 删掉） */
+        val requestSongs: List<Song> = songs,
+        /** 传给 createDeleteRequest 的标准化 URI（key 为 Song.id） */
+        val requestUris: Map<Long, Uri> = emptyMap(),
+        /** 系统弹窗前已经直删成功或本就已消失的曲目 id */
+        val alreadyDeletedIds: Set<Long> = emptySet(),
+        /** 系统弹窗前已确认失败的条目数 */
+        val preFailedCount: Int = 0
     ) {
         val songIds: Set<Long> = songs.mapTo(HashSet()) { it.id }
     }
@@ -1538,14 +1654,26 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         deleted.mapTo(HashSet()) { it.id },
                         deleted.size,
                         r.failed,
-                        detailed
+                        detailed,
+                        r.failureReason
                     )
                 }
-                is MediaFileDeleter.Result.NeedsPermission ->
-                    pendingSongDelete = PendingSongDelete(targets, r.intentSender, detailed)
-                MediaFileDeleter.Result.Failed -> {
+                is MediaFileDeleter.Result.NeedsPermission -> {
+                    val alreadyIds = targets.filter { it.uri in r.alreadyDeletedUris }
+                        .mapTo(HashSet()) { it.id }
+                    pendingSongDelete = PendingSongDelete(
+                        songs = targets,
+                        intentSender = r.intentSender,
+                        detailed = detailed,
+                        requestSongs = r.requestSongs.ifEmpty { targets },
+                        requestUris = r.requestUris,
+                        alreadyDeletedIds = alreadyIds,
+                        preFailedCount = r.preFailedCount
+                    )
+                }
+                is MediaFileDeleter.Result.Failed -> {
                     clearSelection()
-                    showToast("删除失败：文件可能正被其它应用占用")
+                    showToast(r.reason ?: "删除失败：无权限或文件不存在")
                 }
             }
         }
@@ -1556,7 +1684,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val pending = pendingSongDelete ?: return
         pendingSongDelete = null
         if (!approved) {
-            showToast("已取消删除")
+            if (pending.alreadyDeletedIds.isNotEmpty()) {
+                finalizeSongFileDeletion(
+                    ids = pending.alreadyDeletedIds,
+                    success = pending.alreadyDeletedIds.size,
+                    failed = (pending.songs.size - pending.alreadyDeletedIds.size).coerceAtLeast(0),
+                    detailed = pending.detailed
+                )
+            } else {
+                showToast("已取消删除")
+            }
             return
         }
         if (pending.intentSender == null) {
@@ -1565,39 +1702,51 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         // createDeleteRequest 路径：用户同意时系统已经把文件删掉了。
-        // 系统只回「同意/取消」，没有逐个结果，所以再查一遍哪些还在，给用户准确的成败数。
+        // 结合前置已删（如 SAF/失效行）与标准化 URI 核验结果，给出准确的成败数。
         viewModelScope.launch {
             val app = getApplication<Application>()
-            val remaining = withContext(Dispatchers.IO) { MediaFileDeleter.remaining(app, pending.songs) }
-            val deleted = pending.songs.filterNot { it in remaining }
+            val remaining = withContext(Dispatchers.IO) {
+                MediaFileDeleter.remaining(app, pending.requestSongs, pending.requestUris)
+            }
+            val confirmedDeleted = pending.requestSongs.filterNot { it in remaining }
+            val deletedIds = HashSet<Long>(pending.alreadyDeletedIds.size + confirmedDeleted.size).apply {
+                addAll(pending.alreadyDeletedIds)
+                confirmedDeleted.forEach { add(it.id) }
+            }
+            val totalFailed = remaining.size + pending.preFailedCount
             finalizeSongFileDeletion(
-                deleted.mapTo(HashSet()) { it.id },
-                deleted.size,
-                remaining.size,
-                pending.detailed
+                ids = deletedIds,
+                success = deletedIds.size,
+                failed = totalFailed,
+                detailed = pending.detailed
             )
         }
     }
 
     /**
-     * 文件删掉之后把曲库收干净。**不走 hiddenSongIds** —— 文件已经不存在，
-     * 把 id 塞进隐藏表只会让「恢复隐藏曲目」的计数说谎。
+     * 文件删掉之后把曲库与当前播放队列一并收干净。**不走 hiddenSongIds** ——
+     * 文件已经不存在，把 id 塞进隐藏表只会让「恢复隐藏曲目」的计数说谎。
      */
     private fun finalizeSongFileDeletion(
         ids: Set<Long>,
         success: Int,
         failed: Int = 0,
-        detailed: Boolean = false
+        detailed: Boolean = false,
+        failureReason: String? = null
     ) {
-        songs = songs.filter { it.id !in ids }
-        albums = MediaRepository.groupAlbums(songs)
-        artists = MediaRepository.groupArtists(songs)
-        folders = MediaRepository.groupFolders(songs)
-        prefs.songsCacheJson = encodeSongsToJson(songs)
+        if (ids.isNotEmpty()) {
+            songs = songs.filter { it.id !in ids }
+            albums = MediaRepository.groupAlbums(songs)
+            artists = MediaRepository.groupArtists(songs)
+            folders = MediaRepository.groupFolders(songs)
+            prefs.songsCacheJson = encodeSongsToJson(songs)
+            player.removeSongIds(ids)
+        }
         duplicateReport = null
         clearSelection()
         showToast(
             when {
+                success == 0 && !failureReason.isNullOrBlank() -> failureReason
                 detailed -> "成功 $success 首 / 失败 $failed 首"
                 failed > 0 -> "删除完成：成功 $success 个 / 失败 $failed 个"
                 else -> "已删除 $success 个文件"
@@ -1692,7 +1841,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshOnStart() {
         if (startupRefreshStarted) return
         startupRefreshStarted = true
-        if (!hasAudioPermission()) return
+        if (!hasAudioPermission() && safScanTrees.isEmpty()) return
         viewModelScope.launch {
             val hadSongs = songs.isNotEmpty()
             if (!hadSongs) scanState = ScanState.SCANNING
@@ -2066,6 +2215,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.miniProgressStyle = value.ordinal
     }
 
+    /** 悬浮卡片歌手下方是否显示「当前进度 / 总时长」数字时间 */
+    var miniShowTime by mutableStateOf(prefs.miniShowTime)
+        private set
+
+    fun changeMiniShowTime(enabled: Boolean) {
+        miniShowTime = enabled
+        prefs.miniShowTime = enabled
+    }
+
     /** 悬浮卡片左右滑动切歌样式（整卡滑动 / 槽内滑动） */
     var miniSwipeStyle by mutableStateOf(MiniSwipeStyle.of(prefs.miniSwipeStyle))
         private set
@@ -2169,7 +2327,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 回来时可能已经换歌了：代次或当前歌对不上就丢弃
             if (gen != lockLyricsGeneration) return@launch
             if (player.state.value.mediaId != song.id) return@launch
-            player.publishLyricsInfo(LockScreenLyrics.buildJson(song, result?.lyrics, gen))
+            player.publishLyricsInfo(LockScreenLyrics.buildJson(song, result?.lyrics, gen), expectedMediaId = song.id)
         }
     }
 
@@ -2649,9 +2807,51 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 下载的是**原图**（不带 `?param=`）：这里是要拿去铺满播放页的大图，
      * 而缩略图那条路是搜索列表专用的，两者不要互相污染。
      */
+    /**
+     * 洛雪歌单 / 榜单 / 搜索单曲缺少初始封面时，按平台兜底补拉封面（例如酷我 `songinfoandlrc`）。
+     */
+    private fun ensureLxFallbackCover(song: Song) {
+        val platform = LxPlatform.platformIdFromSource(song.source) ?: return
+        val remoteId = song.remoteId?.takeIf { it.isNotBlank() } ?: return
+        if (!coverTried.add(song.id)) return
+        val key = OnlineCover.keyOf(song.title, song.artist) ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val hit = withContext(Dispatchers.IO) { CoverCache.lookup(app, key) }
+            if (hit is CoverCache.Lookup.Hit) {
+                ArtworkLoader.putOnline(
+                    song.id,
+                    OnlineCover.decode(hit.bytes, OnlineCover.FULL_PX)?.asImageBitmap()
+                )
+                player.refreshCurrentArtwork(song)
+                return@launch
+            }
+            val fetchedUrl = LxCatalogProvider.fetchCoverUrl(platform, remoteId) ?: return@launch
+            val updated = song.copy(coverUrl = fetchedUrl)
+            onlineSongMap[song.id]?.let { cur ->
+                if (cur.coverUrl.isNullOrBlank()) {
+                    onlineSongMap[song.id] = cur.copy(coverUrl = fetchedUrl)
+                    onlineRevision++
+                }
+            }
+            val bytes = withContext(Dispatchers.IO) {
+                OnlineCover.downloadBytes(fetchedUrl)
+            } ?: return@launch
+            withContext(Dispatchers.IO) { CoverCache.store(app, key, bytes) }
+            ArtworkLoader.putOnline(
+                song.id,
+                OnlineCover.decode(bytes, OnlineCover.FULL_PX)?.asImageBitmap()
+            )
+            player.refreshCurrentArtwork(updated)
+        }
+    }
+
     private fun ensureOnlineSongCover(song: Song) {
         val url = song.coverUrl
-        if (url.isNullOrBlank()) return
+        if (url.isNullOrBlank()) {
+            ensureLxFallbackCover(song)
+            return
+        }
         if (!coverTried.add(song.id)) return
         val key = OnlineCover.keyOf(song.title, song.artist) ?: return
 
@@ -2896,6 +3096,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private fun applySongMetaInMemory(song: Song, title: String, artist: String, album: String) {
         val patched = song.copy(title = title, artist = artist, album = album)
         songs = songs.map { if (it.id == song.id) patched else it }
+        if (pinyinIndex.isNotEmpty()) {
+            pinyinIndex = pinyinIndex + (patched.id to PinyinIndex.build("${patched.title} ${patched.artist} ${patched.album}"))
+        }
+        if (sortKeys.isNotEmpty()) {
+            sortKeys = sortKeys + (patched.id to IndexKey.keysOf(patched))
+        }
         albums = MediaRepository.groupAlbums(songs)
         artists = MediaRepository.groupArtists(songs)
         folders = MediaRepository.groupFolders(songs)
@@ -3218,18 +3424,125 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineMusicEnabled by mutableStateOf(prefs.onlineMusicEnabled)
         private set
 
+    var onlineMode by mutableStateOf(prefs.onlineMode)
+        private set
+
     var onlineSourceId by mutableStateOf(prefs.onlineSourceId)
         private set
 
-    /**
-     * 可选音源的可观察快照。
-     *
-     * `OnlineSources.all` 是普通 getter，插件增删后虽然变了，但 Compose 观察不到，
-     * 结果就是「插件列表里已经出现，上方 chips 却还是只有网易云」。
-     * 所以每次 refreshSources 之后都要把快照重新赋给这个 state。
-     */
-    var onlineSources by mutableStateOf(OnlineSources.all)
+    // ===== 洛雪自定义音源（与内置模式二选一，状态完全隔离）=====
+
+    var lxScripts by mutableStateOf(lxRepo.scripts.value)
         private set
+
+    var lxActiveScriptId by mutableStateOf(lxRepo.activeScript()?.id ?: prefs.lxActiveSourceId)
+        private set
+
+    val lxActiveScript: LxScriptRecord?
+        get() = lxScripts.firstOrNull { it.id == lxActiveScriptId } ?: lxScripts.firstOrNull()
+
+    var lxPlatform by mutableStateOf(prefs.lxPlatform)
+        private set
+
+    var lxQuality by mutableStateOf(prefs.lxQuality)
+        private set
+
+    var lxImporting by mutableStateOf(false)
+        private set
+
+    var lxImportError by mutableStateOf<String?>(null)
+        private set
+
+    var lxQuery by mutableStateOf("")
+        private set
+
+    var lxSearchMode by mutableStateOf(LxSearchMode.SONG)
+        private set
+
+    var lxHistory by mutableStateOf(prefs.lxHistory())
+        private set
+
+    var lxSongResults by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var lxSongSearching by mutableStateOf(false)
+        private set
+
+    var lxSongError by mutableStateOf<String?>(null)
+        private set
+
+    var lxSongTotal by mutableIntStateOf(-1)
+        private set
+
+    var lxSongHasMore by mutableStateOf(false)
+        private set
+
+    var lxSongLoadingMore by mutableStateOf(false)
+        private set
+
+    var lxSheetResults by mutableStateOf<List<LxSheetSummary>>(emptyList())
+        private set
+
+    var lxSheetSearching by mutableStateOf(false)
+        private set
+
+    var lxSheetError by mutableStateOf<String?>(null)
+        private set
+
+    var lxSheetTotal by mutableIntStateOf(-1)
+        private set
+
+    var lxSheetHasMore by mutableStateOf(false)
+        private set
+
+    var lxSheetLoadingMore by mutableStateOf(false)
+        private set
+
+    var lxToplists by mutableStateOf<List<LxTopListGroup>>(emptyList())
+        private set
+
+    var lxToplistsLoading by mutableStateOf(false)
+        private set
+
+    var lxToplistsError by mutableStateOf<String?>(null)
+        private set
+
+    var lxSheetTags by mutableStateOf<List<LxSheetTag>>(emptyList())
+        private set
+
+    var lxSelectedSheetTag by mutableStateOf<LxSheetTag?>(null)
+        private set
+
+    var lxHomeSheets by mutableStateOf<List<LxSheetSummary>>(emptyList())
+        private set
+
+    var lxHomeSheetsLoading by mutableStateOf(false)
+        private set
+
+    var lxHomeSheetsError by mutableStateOf<String?>(null)
+        private set
+
+    var lxHomeSectionTab by mutableIntStateOf(0)
+        private set
+
+    var lxDetailTarget by mutableStateOf<LxSheetDetailTarget?>(null)
+        private set
+
+    var lxDetailTracks by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var lxDetailLoading by mutableStateOf(false)
+        private set
+
+    var lxDetailError by mutableStateOf<String?>(null)
+        private set
+
+    private var lxSearchJob: Job? = null
+    private var lxLoadMoreJob: Job? = null
+    private var lxHomeJob: Job? = null
+    private var lxHomeTagJob: Job? = null
+    private var lxDetailJob: Job? = null
+    private var lxLoadedHomePlatform: String? = null
 
     /**
      * 用网易云补全**本地歌**的封面与歌词。默认关闭。
@@ -3295,10 +3608,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 存的是**和播放同一条流**：档位跟随「播放音质」设置（登录会员时可能就是无损，
      * 落为 flac），不是官方下载接口那一套 —— 那些端点还要额外的权限校验，这里不走。
      */
+    private fun isAutoDownloadEnabledFor(song: Song): Boolean =
+        if (LxPlatform.platformIdFromSource(song.source) != null) lxDownloadEnabled
+        else onlineDownloadEnabled
+
     private fun maybeDownload(song: Song) {
-        if (!onlineDownloadEnabled) return
+        if (!isAutoDownloadEnabledFor(song)) return
         if (song.isLocal) return
+        lxRepo.rememberSongHint(song)
         val src = OnlineSources.byId(song.source) ?: return
+        lxRepo.rememberSongHint(song)
         val remoteId = song.remoteId ?: return
         val key = OnlineDownloader.downloadKeyOf(song.source, remoteId) ?: return
         if (key in prefs.downloadedKeys()) return
@@ -3316,7 +3635,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
             // 等待期间可能已经切歌 / 关掉开关了
             if (player.state.value.mediaId != song.id) return@launch
-            if (!onlineDownloadEnabled) return@launch
+            if (!isAutoDownloadEnabledFor(song)) return@launch
 
             val app = getApplication<Application>()
             // 只在 Wi-Fi 下下载：判断不出来时**跳过**而不是赌一把
@@ -3398,8 +3717,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 当前音源。清单里没有（比如配置被改坏）时返回 null，UI 按"不可用"处理 */
-    val onlineSource: OnlineSource? get() = OnlineSources.byId(onlineSourceId)
+    /** 当前音源。内置模式固定使用网易云，兜底取清单首项 */
+    val onlineSource: OnlineSource?
+        get() = OnlineSources.all.firstOrNull { it.id == onlineSourceId } ?: OnlineSources.all.firstOrNull()
 
     /** 搜索框里的词（受控，输入时就在更新） */
     var onlineQuery by mutableStateOf("")
@@ -3567,78 +3887,490 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeOnlineMusic(enabled: Boolean) {
         onlineMusicEnabled = enabled
         prefs.onlineMusicEnabled = enabled
-        if (!enabled) clearOnlineSearch()
+        if (!enabled) {
+            clearOnlineSearch()
+            clearLxSearch()
+        } else if (onlineMode == OnlineMode.LX) {
+            loadLxHome()
+        }
         showToast(
             if (enabled) "已开启在线音乐（会联网搜索与播放）"
             else "已关闭在线音乐（不再联网）"
         )
     }
 
-    fun changeOnlineSource(id: String) {
-        onlineSourceId = id
-        prefs.onlineSourceId = id
-        // 换音源之后旧结果没意义了（id 是各音源自己的命名空间）
-        clearOnlineSearch()
-        // 推荐也是按音源拉的，一并清掉让界面重新拉一次
+    /**
+     * 在「内置网易云/插件」与「洛雪音源」模式间二选一切换：
+     * - 若当前在播或队列中有来自在线音源的曲目，立即停止并清空上一模式在线队列（本地与 DLNA 不受影响）；
+     * - 清空持久化恢复现场与在途任务，彻底隔离两套模式的数据与 UI。
+     */
+    fun changeOnlineMode(mode: OnlineMode) {
+        if (onlineMode == mode) return
+        onlineSearchJob?.cancel()
+        onlineLoadMoreJob?.cancel()
         recommendedJob?.cancel()
-        recommendedJob = null
         recommendedMoreJob?.cancel()
-        recommendedMoreJob = null
-        recommendedPlaylists = emptyList()
-        recommendedFailed = false
-        recommendedLoading = false
-        recommendedOffset = 0
-        recommendedHasMore = false
-        recommendedLoadingMore = false
-        recommendedLoadMoreFailed = false
+        onlineHomeJob?.cancel()
+        playlistJob?.cancel()
+        prefetchStreamsJob?.cancel()
+        prefetchAdjacentJob?.cancel()
+        lxSearchJob?.cancel()
+        lxLoadMoreJob?.cancel()
+        lxHomeJob?.cancel()
+        lxHomeTagJob?.cancel()
+        lxDetailJob?.cancel()
+
+        val currentId = player.state.value.mediaId
+        val curSong = songById(currentId)
+        val queueHasOnline = player.state.value.queueIds.any { isRemoteSongId(it) } ||
+            (curSong != null && !curSong.isLocal && !curSong.isDlna)
+        if (queueHasOnline) {
+            downloadJob?.cancel()
+            player.clearQueue()
+            nowPlayingQuality = null
+            onlineSongMap.clear()
+            onlineRevision++
+        }
+
+        prefs.lastPlayedOnline = false
+        prefs.lastOnlineSongJson = null
+        prefs.onlineQueueJson = null
+        prefs.onlineQueueIndex = 0
+
+        clearOnlineSearch()
+        clearOnlineHome()
+        clearLxSearch()
+        clearLxHome()
+        lxRepo.runtime.clearCaches()
+
+        onlineMode = mode
+        prefs.onlineMode = mode
+
+        if (mode == OnlineMode.LX) {
+            lxActiveScript?.let { rec ->
+                val supported = rec.supportedCatalogPlatforms().map { it.id }
+                if (supported.isNotEmpty() && lxPlatform !in supported) {
+                    lxPlatform = supported.first()
+                    prefs.lxPlatform = lxPlatform
+                }
+            }
+            if (onlineMusicEnabled) loadLxHome(force = true)
+        } else if (onlineMusicEnabled) {
+            loadOnlineHome(force = true)
+        }
+
+        val label = if (mode == OnlineMode.LX) "洛雪音源" else "内置在线（网易云/插件）"
+        showToast(
+            if (queueHasOnline) "已切换为「$label」，已清空上一模式在线队列"
+            else "已切换为「$label」模式"
+        )
     }
 
-    // ===== 内容源插件 =====
-
-    private val pluginRepo = PluginRepository.get(app)
-
-    /** 已安装插件，界面跟着它刷新 */
-    var pluginRecords by mutableStateOf(pluginRepo.list())
-        private set
-
-    /** 导入/启停的结果提示，只在设置页显示，不弹 toast 打断用户 */
-    var pluginHint by mutableStateOf<String?>(null)
-        private set
-
-    fun importPluginScript(script: String) {
+    fun importLxScriptFromUri(uri: Uri) {
+        if (lxImporting) return
         viewModelScope.launch {
-            pluginHint = "正在校验插件…"
-            pluginRepo.install(script)
-                .onSuccess { record ->
-                    pluginRepo.refreshSources()
-                    onlineSources = OnlineSources.all
-                    pluginRecords = pluginRepo.list()
-                    pluginHint = "已导入「${record.meta.platform}」，可在上方切换"
-                }
-                .onFailure { pluginHint = "导入失败：${it.message}" }
+            lxImporting = true
+            lxImportError = null
+            val res = lxRepo.importFromUri(uri)
+            lxImporting = false
+            res.onSuccess { record ->
+                lxScripts = lxRepo.scripts.value
+                lxActiveScriptId = record.id
+                lxPlatform = prefs.lxPlatform
+                clearLxHome()
+                if (onlineMusicEnabled) loadLxHome(force = true)
+                showToast("已导入洛雪音源：${record.meta.name}")
+            }.onFailure { err ->
+                val msg = err.message ?: "导入洛雪音源失败"
+                lxImportError = msg
+                showToast(msg)
+            }
         }
     }
 
-    fun setPluginEnabled(id: String, enabled: Boolean) {
-        pluginRepo.setEnabled(id, enabled)
-        pluginRepo.refreshSources()
-        onlineSources = OnlineSources.all
-        pluginRecords = pluginRepo.list()
-        // 关掉的正好是当前源时，退回内置源，避免选中一个已不存在的 id
-        if (!enabled && onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
-        pluginHint = if (enabled) "已启用" else "已停用"
+    fun dismissLxImportError() {
+        lxImportError = null
     }
 
-    fun removePlugin(id: String) {
-        if (onlineSourceId == id) changeOnlineSource(OnlineSources.all.first().id)
-        pluginRepo.remove(id)
-        pluginRepo.refreshSources()
-        onlineSources = OnlineSources.all
-        pluginRecords = pluginRepo.list()
-        pluginHint = "已删除"
+    fun selectLxScript(id: String) {
+        val selected = lxRepo.selectScript(id) ?: return
+        lxScripts = lxRepo.scripts.value
+        lxActiveScriptId = selected.id
+        lxPlatform = prefs.lxPlatform
+        if (onlineMusicEnabled && onlineMode == OnlineMode.LX) {
+            loadLxHome(force = true)
+        }
+        showToast("已切换洛雪音源：${selected.meta.name}")
     }
 
-    fun clearPluginHint() { pluginHint = null }
+    fun removeLxScript(id: String) {
+        lxRepo.removeScript(id)
+        lxScripts = lxRepo.scripts.value
+        lxActiveScriptId = prefs.lxActiveSourceId
+        lxPlatform = prefs.lxPlatform
+        showToast("已删除洛雪音源")
+    }
+
+    fun changeLxPlatform(platformId: String) {
+        if (lxPlatform == platformId) return
+        lxPlatform = platformId
+        prefs.lxPlatform = platformId
+        lxSearchJob?.cancel()
+        lxLoadMoreJob?.cancel()
+        clearLxResultsOnly()
+        clearLxHome()
+        if (lxQuery.isNotBlank() && onlineMusicEnabled) {
+            searchLx(lxQuery)
+        }
+        if (onlineMusicEnabled) {
+            loadLxHome(force = true)
+        }
+    }
+
+    fun changeLxQuality(qualityId: String) {
+        val q = LxQuality.byId(qualityId)
+        lxQuality = q.id
+        prefs.lxQuality = q.id
+        lxRepo.runtime.clearCaches()
+        showToast("洛雪优先音质：${q.title}")
+    }
+
+    fun changeLxDownloadEnabled(enabled: Boolean) {
+        lxDownloadEnabled = enabled
+        prefs.lxDownloadEnabled = enabled
+        if (enabled) {
+            val cur = songById(player.state.value.mediaId)
+            if (cur != null && LxPlatform.platformIdFromSource(cur.source) != null) {
+                maybeDownload(cur)
+            }
+        }
+        showToast(
+            if (enabled) "已开启洛雪播放并下载（边听边存）"
+            else "已关闭洛雪播放并下载"
+        )
+    }
+
+    fun changeLxHomeSectionTab(index: Int) {
+        lxHomeSectionTab = index.coerceIn(0, 1)
+    }
+
+    fun updateLxQuery(q: String) {
+        lxQuery = q
+        if (q.isBlank()) {
+            lxSearchJob?.cancel()
+            lxLoadMoreJob?.cancel()
+            clearLxResultsOnly()
+        }
+    }
+
+    fun changeLxSearchMode(mode: LxSearchMode) {
+        if (lxSearchMode == mode) return
+        lxSearchMode = mode
+        lxSearchJob?.cancel()
+        lxLoadMoreJob?.cancel()
+        clearLxResultsOnly()
+        if (lxQuery.isNotBlank() && onlineMusicEnabled) {
+            searchLx(lxQuery)
+        }
+    }
+
+    fun clearLxSearch() {
+        lxQuery = ""
+        lxSearchJob?.cancel()
+        lxLoadMoreJob?.cancel()
+        clearLxResultsOnly()
+    }
+
+    private fun clearLxResultsOnly() {
+        lxSongResults = emptyList()
+        lxSongSearching = false
+        lxSongError = null
+        lxSongTotal = -1
+        lxSongHasMore = false
+        lxSongLoadingMore = false
+        lxSheetResults = emptyList()
+        lxSheetSearching = false
+        lxSheetError = null
+        lxSheetTotal = -1
+        lxSheetHasMore = false
+        lxSheetLoadingMore = false
+    }
+
+    fun searchLx(explicitQuery: String? = null) {
+        val q = (explicitQuery ?: lxQuery).trim()
+        if (explicitQuery != null) lxQuery = explicitQuery
+        if (!onlineMusicEnabled || q.isEmpty()) return
+        lxSearchJob?.cancel()
+        lxLoadMoreJob?.cancel()
+        val platform = lxPlatform
+        val mode = lxSearchMode
+        lxSearchJob = viewModelScope.launch {
+            when (mode) {
+                LxSearchMode.SONG -> {
+                    lxSongSearching = true
+                    lxSongError = null
+                    val page = LxCatalogProvider.searchSongs(platform, q, limit = LX_PAGE_SIZE, offset = 0)
+                    lxSongSearching = false
+                    if (page == null) {
+                        lxSongError = "搜索失败，请检查网络连接"
+                        lxSongResults = emptyList()
+                        lxSongHasMore = false
+                    } else {
+                        lxRepo.rememberTrackHints(platform, page.tracks)
+                        lxSongResults = page.tracks
+                        lxSongTotal = page.total
+                        lxSongHasMore = page.hasMore(0, LX_PAGE_SIZE)
+                        if (page.tracks.isNotEmpty()) pushLxHistory(q)
+                    }
+                }
+                LxSearchMode.SHEET -> {
+                    lxSheetSearching = true
+                    lxSheetError = null
+                    val page = LxCatalogProvider.searchSheets(platform, q, limit = LX_SHEET_PAGE_SIZE, offset = 0)
+                    lxSheetSearching = false
+                    if (page == null) {
+                        lxSheetError = "歌单搜索失败，请检查网络连接"
+                        lxSheetResults = emptyList()
+                        lxSheetHasMore = false
+                    } else {
+                        lxSheetResults = page.sheets
+                        lxSheetTotal = page.total
+                        lxSheetHasMore = page.hasMore(0, LX_SHEET_PAGE_SIZE)
+                        if (page.sheets.isNotEmpty()) pushLxHistory(q)
+                    }
+                }
+            }
+        }
+    }
+
+    fun loadMoreLx() {
+        val q = lxQuery.trim()
+        if (!onlineMusicEnabled || q.isEmpty()) return
+        val platform = lxPlatform
+        when (lxSearchMode) {
+            LxSearchMode.SONG -> {
+                if (lxSongSearching || lxSongLoadingMore || !lxSongHasMore) return
+                val offset = lxSongResults.size
+                lxLoadMoreJob = viewModelScope.launch {
+                    lxSongLoadingMore = true
+                    val page = LxCatalogProvider.searchSongs(platform, q, limit = LX_PAGE_SIZE, offset = offset)
+                    lxSongLoadingMore = false
+                    if (page != null && page.tracks.isNotEmpty()) {
+                        lxRepo.rememberTrackHints(platform, page.tracks)
+                        val seen = lxSongResults.mapTo(HashSet()) { it.remoteId }
+                        lxSongResults = lxSongResults + page.tracks.filter { it.remoteId !in seen }
+                        lxSongTotal = page.total
+                        lxSongHasMore = page.hasMore(offset, LX_PAGE_SIZE)
+                    } else {
+                        lxSongHasMore = false
+                    }
+                }
+            }
+            LxSearchMode.SHEET -> {
+                if (lxSheetSearching || lxSheetLoadingMore || !lxSheetHasMore) return
+                val offset = lxSheetResults.size
+                lxLoadMoreJob = viewModelScope.launch {
+                    lxSheetLoadingMore = true
+                    val page = LxCatalogProvider.searchSheets(platform, q, limit = LX_SHEET_PAGE_SIZE, offset = offset)
+                    lxSheetLoadingMore = false
+                    if (page != null && page.sheets.isNotEmpty()) {
+                        val seen = lxSheetResults.mapTo(HashSet()) { it.id }
+                        lxSheetResults = lxSheetResults + page.sheets.filter { it.id !in seen }
+                        lxSheetTotal = page.total
+                        lxSheetHasMore = page.hasMore(offset, LX_SHEET_PAGE_SIZE)
+                    } else {
+                        lxSheetHasMore = false
+                    }
+                }
+            }
+        }
+    }
+
+    fun searchLxFromHistory(term: String) {
+        if (term.isBlank()) return
+        lxQuery = term
+        searchLx(term)
+    }
+
+    fun removeLxHistory(term: String) {
+        prefs.removeLxHistory(term)
+        lxHistory = prefs.lxHistory()
+    }
+
+    fun clearLxHistory() {
+        prefs.clearLxHistory()
+        lxHistory = emptyList()
+        showToast("已清空洛雪搜索历史")
+    }
+
+    private fun pushLxHistory(term: String) {
+        prefs.pushLxHistory(term)
+        lxHistory = prefs.lxHistory()
+    }
+
+    fun loadLxHome(force: Boolean = false) {
+        if (!onlineMusicEnabled) return
+        val platform = lxPlatform
+        if (!force &&
+            lxLoadedHomePlatform == platform &&
+            (lxToplists.isNotEmpty() || lxHomeSheets.isNotEmpty())
+        ) {
+            return
+        }
+        lxHomeJob?.cancel()
+        lxHomeTagJob?.cancel()
+        lxLoadedHomePlatform = platform
+        lxHomeJob = viewModelScope.launch {
+            lxToplistsLoading = true
+            lxHomeSheetsLoading = true
+            lxToplistsError = null
+            lxHomeSheetsError = null
+
+            val tagsDeferred = async { LxCatalogProvider.fetchSheetTags(platform) }
+            val boardsDeferred = async { LxCatalogProvider.fetchToplists(platform) }
+            val sheetsDeferred = async { LxCatalogProvider.fetchRecommendedSheets(platform, null, limit = 24, page = 1) }
+
+            val tags = tagsDeferred.await()
+            val boards = boardsDeferred.await()
+            val sheets = sheetsDeferred.await()
+
+            if (lxPlatform != platform) return@launch
+            lxSheetTags = tags
+            lxSelectedSheetTag = tags.firstOrNull()
+            lxToplistsLoading = false
+            if (boards == null) {
+                lxToplists = emptyList()
+                lxToplistsError = "排行榜加载失败"
+            } else {
+                lxToplists = boards
+            }
+            lxHomeSheetsLoading = false
+            if (sheets == null) {
+                lxHomeSheets = emptyList()
+                lxHomeSheetsError = "推荐歌单加载失败"
+            } else {
+                lxHomeSheets = sheets
+            }
+        }
+    }
+
+    fun selectLxSheetTag(tag: LxSheetTag) {
+        if (lxSelectedSheetTag == tag && lxHomeSheets.isNotEmpty()) return
+        lxSelectedSheetTag = tag
+        if (!onlineMusicEnabled) return
+        val platform = lxPlatform
+        lxHomeTagJob?.cancel()
+        lxHomeTagJob = viewModelScope.launch {
+            lxHomeSheetsLoading = true
+            lxHomeSheetsError = null
+            val res = LxCatalogProvider.fetchRecommendedSheets(platform, tag, limit = 24, page = 1)
+            if (lxPlatform != platform) return@launch
+            lxHomeSheetsLoading = false
+            if (res == null) {
+                lxHomeSheetsError = "分类歌单加载失败"
+            } else {
+                lxHomeSheets = res
+            }
+        }
+    }
+
+    private fun clearLxHome() {
+        lxHomeJob?.cancel()
+        lxHomeTagJob?.cancel()
+        lxLoadedHomePlatform = null
+        lxToplists = emptyList()
+        lxToplistsLoading = false
+        lxToplistsError = null
+        lxSheetTags = emptyList()
+        lxSelectedSheetTag = null
+        lxHomeSheets = emptyList()
+        lxHomeSheetsLoading = false
+        lxHomeSheetsError = null
+    }
+
+    fun openLxSheetDetail(target: LxSheetDetailTarget) {
+        lxDetailJob?.cancel()
+        lxDetailTarget = target
+        lxDetailTracks = emptyList()
+        lxDetailError = null
+        lxDetailLoading = true
+        lxDetailJob = viewModelScope.launch {
+            val tracks = if (target.isBoard) {
+                LxCatalogProvider.fetchBoardTracks(
+                    LxBoard(
+                        id = target.id,
+                        name = target.title,
+                        platform = target.platform,
+                        coverUrl = target.coverUrl,
+                        intro = target.subtitle,
+                        period = target.boardPeriod
+                    )
+                )
+            } else {
+                LxCatalogProvider.fetchSheetTracks(target.platform, target.id)
+            }
+            lxDetailLoading = false
+            if (tracks == null) {
+                lxDetailError = "曲目加载失败，请检查网络连接"
+            } else {
+                lxRepo.rememberTrackHints(target.platform, tracks)
+                lxDetailTracks = tracks
+            }
+        }
+    }
+
+    fun closeLxSheetDetail() {
+        lxDetailJob?.cancel()
+        lxDetailJob = null
+        lxDetailTarget = null
+        lxDetailTracks = emptyList()
+        lxDetailLoading = false
+        lxDetailError = null
+    }
+
+    fun playLxTrackAt(tracks: List<RemoteTrack>, index: Int, platform: String = lxPlatform) {
+        if (!onlineMusicEnabled) {
+            showToast("请先开启在线音乐")
+            return
+        }
+        if (lxActiveScript == null) {
+            showToast("请先导入洛雪音源脚本")
+            return
+        }
+        val target = tracks.getOrNull(index) ?: return
+        if (!target.playable) {
+            showToast("「${target.title}」${target.unavailableReason ?: "暂无可播音源"}，无法播放")
+            return
+        }
+        val playableTracks = tracks.filter { it.playable }
+        val playIdx = tracks.take(index).count { it.playable }
+        val src = OnlineSources.byId(LxPlatform.sourceIdFor(platform)) ?: return
+        lxRepo.rememberTrackHints(platform, playableTracks)
+        val onlineSongs = playableTracks.map { t ->
+            val mapped = onlineSongMap[remoteSongId(src.id, t.remoteId)] ?: src.toSong(t).also { s ->
+                onlineSongMap[s.id] = s
+            }
+            localCopyOf(mapped) ?: mapped
+        }
+        onlineRevision++
+        viewModelScope.launch {
+            playOnlineQueue(src, onlineSongs, playIdx, target.title)
+        }
+    }
+
+    fun playLxAll(tracks: List<RemoteTrack>, platform: String = lxPlatform) {
+        val firstIdx = tracks.indexOfFirst { it.playable }
+        if (firstIdx < 0) {
+            showToast("当前列表暂无可播歌曲")
+            return
+        }
+        playLxTrackAt(tracks, firstIdx, platform)
+    }
+
+    fun isLxTrackDownloaded(platform: String, remoteId: String): Boolean {
+        val key = OnlineDownloader.downloadKeyOf(LxPlatform.sourceIdFor(platform), remoteId) ?: return false
+        return key in prefs.downloadedKeys()
+    }
 
     /** 正在跑的那次搜索。新的一次会取消它，理由见 [searchOnline] */
     private var onlineSearchJob: Job? = null
@@ -3923,9 +4655,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 在线歌的「点了就播」：解析 [at] 这一首 → 立刻入队播放 → 后台补其余曲目地址。
      *
-     * 对任何音源都适用：内置源和插件源的差别只在 [OnlineSource.resolveStream] 的实现里，
-     * 调用侧不再需要 `as? PluginOnlineSource` 这种类型判断。
-     *
      * @return false 表示当前这首确实拿不到地址（已提示用户），调用方不要再调 [player.play]。
      */
     private suspend fun playOnlineQueue(
@@ -3992,12 +4721,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         queue: List<Song>,
         skipRemoteId: String?,
     ) {
+        // 洛雪中继接口严禁并发批量预取，仅在点播或切歌时即时按需解析当前曲目
+        if (LxPlatform.platformIdFromSource(src.id) != null) return
         prefetchStreamsJob?.cancel()
         prefetchStreamsJob = viewModelScope.launch {
             // 网易云的取流接口有频率限制（实测高频会回 460），整页 20 首一起打没意义：
             // 真正需要的是"下一两首已经就位"。其余的在轮到它们时由
             // [resolveStreamIfMissing] 现取，多等一下但不会卡住播放。
-            // 插件源维持原来的整队预取（它们的调用是本地的 WebView，不受这个限制）。
             val budget = if (src.id == NeteaseSource.id) NET_PREFETCH_BUDGET else Int.MAX_VALUE
             var fetched = 0
             for (s in queue) {
@@ -4028,6 +4758,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val src = OnlineSources.byId(song.source) ?: return
+        lxRepo.rememberSongHint(song)
         val rid = song.remoteId ?: return
         // 预取过的话缓存里已经有实际档位，切歌时直接显示，不必等重新取流
         nowPlayingQuality = src.streamQualityLabel(rid)
@@ -4037,7 +4768,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val url = src.resolveStream(rid, song.durationMs) ?: run {
+            lxRepo.rememberSongHint(song)
+        val url = src.resolveStream(rid, song.durationMs) ?: run {
                 // 轮到它还是取不到：给出具体原因，别让播放器报「找不到文件」
                 src.lastStreamError(rid)?.let { showToast(it) }
                 return@launch
@@ -4057,6 +4789,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun prefetchNextOnlineStreams(currentSong: Song, aheadCount: Int = 2) {
         if (currentSong.isLocal) return
+        if (LxPlatform.platformIdFromSource(currentSong.source) != null) return
         val src = OnlineSources.byId(currentSong.source) ?: return
         val queue = currentQueue()
         val curIdx = queue.indexOfFirst { it.id == currentSong.id }
@@ -4689,6 +5422,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         startTrackDownloadBatch(tracks = tracks, ownerKey = DOWNLOAD_OWNER_SEARCH)
     }
 
+    /** 长按洛雪列表单曲时触发单曲下载到本地。 */
+    fun downloadSingleLxTrack(track: RemoteTrack, platform: String = lxPlatform) {
+        if (!onlineMusicEnabled) {
+            showToast("请先开启在线音乐")
+            return
+        }
+        if (lxActiveScript == null) {
+            showToast("请先导入洛雪音源脚本")
+            return
+        }
+        if (!track.playable) {
+            showToast("「${track.title}」${track.unavailableReason ?: "暂无可播音源"}，无法下载")
+            return
+        }
+        val src = OnlineSources.byId(LxPlatform.sourceIdFor(platform)) ?: return
+        lxRepo.rememberTrackHints(platform, listOf(track))
+        val key = OnlineDownloader.downloadKeyOf(src.id, track.remoteId)
+        if (key != null && key in prefs.downloadedKeys()) {
+            showToast("「${track.title}」已保存到本地曲库")
+            return
+        }
+        startTrackDownloadBatch(
+            tracks = listOf(track),
+            ownerKey = DOWNLOAD_OWNER_SEARCH,
+            singleLabel = track.title,
+            srcOverride = src
+        )
+    }
+
     /** 长按在线搜索单曲时立即触发单曲下载到本地。 */
     fun downloadSingleOnlineTrack(track: RemoteTrack) {
         val src = onlineSource ?: run {
@@ -4714,9 +5476,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private fun startTrackDownloadBatch(
         tracks: List<RemoteTrack>,
         ownerKey: String?,
-        singleLabel: String? = null
+        singleLabel: String? = null,
+        srcOverride: OnlineSource? = null
     ) {
-        val src = onlineSource ?: return
+        val src = srcOverride ?: onlineSource ?: return
         if (playlistDownloadActive) {
             showToast("正在下载队列中的歌曲，请稍候")
             return
@@ -4818,6 +5581,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun enqueueOnlineTracks(tracks: List<RemoteTrack>) {
         val src = onlineSource ?: return
+        enqueueTracksForSource(src, tracks)
+    }
+
+    /** 将洛雪某平台的曲目列表加入当前播放队列。 */
+    fun enqueueLxTracks(tracks: List<RemoteTrack>, platform: String = lxPlatform) {
+        val src = OnlineSources.byId(LxPlatform.sourceIdFor(platform)) ?: return
+        lxRepo.rememberTrackHints(platform, tracks)
+        enqueueTracksForSource(src, tracks)
+    }
+
+    private fun enqueueTracksForSource(src: OnlineSource, tracks: List<RemoteTrack>) {
         val playable = tracks.filter { it.playable }
         if (playable.isEmpty()) {
             showToast("所选曲目暂无可播音源")
@@ -4867,16 +5641,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var sortKeys by mutableStateOf<Map<Long, IndexKeys>>(emptyMap())
         private set
 
+    private var pinyinIndexJob: Job? = null
+
+    private fun computePinyinAndKeys(list: List<Song>): Pair<Map<Long, String>, Map<Long, IndexKeys>> {
+        val p = HashMap<Long, String>(list.size)
+        val k = HashMap<Long, IndexKeys>(list.size)
+        for (song in list) {
+            p[song.id] = PinyinIndex.build("${song.title} ${song.artist} ${song.album}")
+            k[song.id] = IndexKey.keysOf(song)
+        }
+        return p to k
+    }
+
     private fun rebuildPinyinIndex(list: List<Song>) {
-        viewModelScope.launch {
+        pinyinIndexJob?.cancel()
+        pinyinIndexJob = viewModelScope.launch {
             // 搜索用的拼音索引和排序 / 分组用的归一化键一次扫描同时产出，
             // 都跑在后台线程：搜索输入时只是查 Map，不再做 ICU 转写。
             val (pinyin, keys) = withContext(Dispatchers.Default) {
-                val p = list.associate {
-                    it.id to PinyinIndex.build("${it.title} ${it.artist} ${it.album}")
-                }
-                val k = list.associate { it.id to IndexKey.keysOf(it) }
-                p to k
+                computePinyinAndKeys(list)
             }
             pinyinIndex = pinyin
             sortKeys = keys
@@ -5225,6 +6008,61 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         SoundFxBus.update(soundFxEnabled, soundFxParams)
     }
 
+    // ===== 系统音效（杜比音效 / 厂商本机音效）=====
+
+    var systemAudioEffectEnabled by mutableStateOf(prefs.systemAudioEffectEnabled)
+        private set
+
+    fun changeSystemAudioEffect(enabled: Boolean) {
+        systemAudioEffectEnabled = enabled
+        prefs.systemAudioEffectEnabled = enabled
+        PlaybackService.syncSystemAudioEffects()
+        showToast(
+            if (enabled) "已开启系统音效接入（杜比 / 本机音效）"
+            else "已关闭系统音效接入"
+        )
+    }
+
+    /** 一键切回原声直通并保持系统音效接入，避免内置 EQ/DSP 与杜比/厂商音效二次叠加 */
+    fun useSystemAudioEffectOnly() {
+        resumeSoundAfterComparison()
+        if (!systemAudioEffectEnabled) {
+            systemAudioEffectEnabled = true
+            prefs.systemAudioEffectEnabled = true
+            PlaybackService.syncSystemAudioEffects()
+        }
+        soundFxEnabled = false
+        prefs.soundFxEnabled = false
+        eqEnabled = false
+        prefs.eqEnabled = false
+        if (autoPresetByOutputEnabled) {
+            prefs.setPresetIdForRoute(currentOutputRoute.id, SoundPresets.OFF.id)
+        }
+        pushEq()
+        pushSoundFx()
+        showToast("已切回原声直通，由系统音效（如杜比音效）接管")
+    }
+
+    fun hasDedicatedSystemAudioEffectPanel(): Boolean =
+        SystemAudioEffects.detectPanelSupport(getApplication()) == SystemAudioEffects.PanelSupport.DEDICATED_PANEL
+
+    fun openSystemAudioEffectPanel(context: Context) {
+        val outcome = SystemAudioEffects.openEffectPanel(context, PlaybackService.currentAudioSessionId())
+        when (outcome) {
+            SystemAudioEffects.OpenOutcome.OPENED_DEDICATED_PANEL -> {
+                if (usbExclusiveEnabled) {
+                    showToast("提示：USB 独占直通模式下会绕过系统混音与系统音效")
+                }
+            }
+            SystemAudioEffects.OpenOutcome.OPENED_SOUND_SETTINGS -> {
+                showToast("已打开系统声音设置，可在音效 / 杜比中调节")
+            }
+            SystemAudioEffects.OpenOutcome.FAILED -> {
+                showToast("未找到系统音效设置，请前往系统「设置 → 声音与振动」开启")
+            }
+        }
+    }
+
     // ===== 人声/伴奏（卡拉OK）=====
 
     /** true = 伴奏模式（中置消除），false = 原唱直通 */
@@ -5428,24 +6266,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 关闭时用 [preShuffleOrder] 还原原顺序，并把播放位置停在当前这首歌上。
      */
     /**
-     * @param quiet 不弹提示。三态切换（[cyclePlayMode]）内部调它时要传 true ——
-     *   否则会先闪一下"随机播放已开启"再被"列表循环"顶掉，看着像抖了一下。
+     * @param quiet 不弹提示。四态切换（[cyclePlayMode]）内部调它时要传 true ——
+     *   否则会先闪一下"随机播放已开启"再被目标模式顶掉，看着像抖了一下。
      */
-    fun toggleShuffle(quiet: Boolean = false) {
+    fun toggleShuffle(quiet: Boolean = false, targetRepeat: RepeatMode? = null) {
         val st = player.state.value
         if (!st.shuffle) {
             val q = currentQueue()
             if (q.size > 1) {
                 preShuffleOrder = q
-                val idx = st.queueIndex.coerceIn(0, q.lastIndex)
-                val shuffled = ShuffleOrder.build(q, idx, recentWindowFor(q.size))
-                player.setShuffle(true)
-                // 随机必须能无限往下切：repeat 设成 ALL，避免从「单曲循环」切过来时
-                // 随机开着却一直重复当前首。
-                player.setRepeat(RepeatMode.ALL)
+                val idx = (if (st.mediaId != 0L) q.indexOfFirst { it.id == st.mediaId } else -1)
+                    .takeIf { it >= 0 }
+                    ?: st.queueIndex.coerceIn(0, q.lastIndex)
+                val shuffled = buildShuffledOrder(q, idx)
+                val nextRepeat = targetRepeat ?: RepeatMode.ALL
+                // 原子更新模式标志 + 无缝重排队列：不重建当前 MediaPeriod，也不分次发射中间态导致封面闪屏
+                player.reorderQueueKeepingCurrent(shuffled, idx, shuffle = true, repeat = nextRepeat)
                 persistPlayMode(PlayMode.SHUFFLE)
-                // 无缝重排队列：不重建当前 MediaPeriod，不触发音频停顿或重缓冲。
-                player.reorderQueueKeepingCurrent(shuffled, idx)
                 if (!quiet) showToast("随机播放已开启")
                 return
             }
@@ -5453,19 +6290,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val orig = preShuffleOrder
             if (orig != null) {
                 val idx = orig.indexOfFirst { it.id == st.mediaId }.coerceAtLeast(0)
-                player.setShuffle(false)
-                persistPlayMode(PlayMode.of(shuffle = false, repeat = st.repeat))
-                player.reorderQueueKeepingCurrent(orig, idx)
+                val nextRepeat = targetRepeat ?: st.repeat
+                player.reorderQueueKeepingCurrent(orig, idx, shuffle = false, repeat = nextRepeat)
                 preShuffleOrder = null
+                persistPlayMode(PlayMode.of(shuffle = false, repeat = nextRepeat))
                 if (!quiet) showToast("随机播放已关闭")
                 return
             }
         }
-        // 队列只有一首 / 没有记录过原顺序：只切标志
+        // 队列只有一首 / 没有记录过原顺序：只原子切标志
         val on = !st.shuffle
-        player.setShuffle(on)
-        if (on) player.setRepeat(RepeatMode.ALL)
-        persistPlayMode(PlayMode.of(on, if (on) RepeatMode.ALL else st.repeat))
+        val finalRepeat = targetRepeat ?: if (on) RepeatMode.ALL else st.repeat
+        player.setPlayModeState(shuffle = on, repeat = finalRepeat)
+        persistPlayMode(PlayMode.of(on, finalRepeat))
+    }
+
+    /**
+     * 随机播放完一整轮并在回绕点自动从最后一首进入第 0 首时，保留第 0 首正在播的歌曲无缝重洗，
+     * 让下一轮接着按新顺序继续走，而不是按上一轮的固定顺序机械重复。
+     */
+    private fun reshuffleQueueKeepingCurrent() {
+        val st = player.state.value
+        if (PlayMode.of(st.shuffle, st.repeat) != PlayMode.SHUFFLE) return
+        val q = currentQueue()
+        if (q.size < 3) return
+        val idx = (if (st.mediaId != 0L) q.indexOfFirst { it.id == st.mediaId } else -1)
+            .takeIf { it >= 0 }
+            ?: st.queueIndex.coerceIn(0, q.lastIndex)
+        val shuffled = buildShuffledOrder(q, idx)
+        player.reorderQueueKeepingCurrent(shuffled, idx, shuffle = true, repeat = RepeatMode.ALL)
     }
 
     /** 读取上次保存的播放模式；值损坏时退回列表循环（也是 UI 的首个图标） */
@@ -5486,31 +6339,33 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun applyPersistedPlayMode() {
         when (persistedPlayMode()) {
-            PlayMode.SHUFFLE -> {
-                player.setShuffle(true)
-                player.setRepeat(RepeatMode.ALL)
-            }
-            PlayMode.REPEAT_ALL -> {
-                player.setShuffle(false)
-                player.setRepeat(RepeatMode.ALL)
-            }
-            PlayMode.REPEAT_ONE -> {
-                player.setShuffle(false)
-                player.setRepeat(RepeatMode.ONE)
-            }
+            PlayMode.SHUFFLE -> player.setPlayModeState(shuffle = true, repeat = RepeatMode.ALL)
+            PlayMode.REPEAT_ALL -> player.setPlayModeState(shuffle = false, repeat = RepeatMode.ALL)
+            PlayMode.REPEAT_ONE -> player.setPlayModeState(shuffle = false, repeat = RepeatMode.ONE)
+            PlayMode.SEQUENTIAL -> player.setPlayModeState(shuffle = false, repeat = RepeatMode.OFF)
         }
     }
 
     /**
      * 洗牌时要避开的「最近听过」。
      *
-     * 窗口取队列长度的一半（6~60 之间）：太小挡不住刚放过的那几首，
-     * 太大则一轮里「没听过」的歌太少，反而听不出新鲜感。
+     * 窗口取队列长度的一半（8~250 之间）：中等及偏大曲库也能有效避开最近几轮刚播过的歌曲。
      */
-    private fun recentWindowFor(queueSize: Int): Set<Long> {
-        if (recentIds.isEmpty()) return emptySet()
-        val window = (queueSize / 2).coerceIn(6, 60)
-        return recentIds.take(window).toHashSet()
+    private fun recentWindowFor(queueSize: Int): List<Long> {
+        if (recentIds.isEmpty()) return emptyList()
+        val window = (queueSize / 2).coerceIn(8, 250)
+        return recentIds.take(window)
+    }
+
+    private fun buildShuffledOrder(list: List<Song>, keepIndex: Int): List<Song> {
+        val windowList = recentWindowFor(list.size)
+        return ShuffleOrder.build(
+            queue = list,
+            keepIndex = keepIndex,
+            recent = windowList.toHashSet(),
+            recentOrder = windowList,
+            playCounts = prefs.allPlayCounts()
+        )
     }
 
     /**
@@ -5541,14 +6396,20 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 走 [ShuffleOrder] 而不是 [List.shuffled]：后者一轮之内会重复，
             // 和播放页那个模式按钮必须是同一套排序
             val ordered = if (shuffled) {
-                ShuffleOrder.build(list, 0, recentWindowFor(list.size))
+                buildShuffledOrder(list, 0)
             } else {
                 list
             }
             preShuffleOrder = if (shuffled) list else null
             player.play(ordered, 0)
-            player.setShuffle(shuffled)
-            player.setRepeat(if (next == PlayMode.REPEAT_ONE) RepeatMode.ONE else RepeatMode.ALL)
+            player.setPlayModeState(
+                shuffle = shuffled,
+                repeat = when (next) {
+                    PlayMode.REPEAT_ONE -> RepeatMode.ONE
+                    PlayMode.SEQUENTIAL -> RepeatMode.OFF
+                    PlayMode.SHUFFLE, PlayMode.REPEAT_ALL -> RepeatMode.ALL
+                }
+            )
             persistPlayMode(next)
             if (!quiet) showToast(next.label)
             return
@@ -5558,18 +6419,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         when (next) {
             PlayMode.SHUFFLE -> {
                 // 随机也要能一直放下去，所以 repeat 设成 ALL 而不是 OFF
-                if (!st.shuffle) toggleShuffle(quiet = true)
-                player.setRepeat(RepeatMode.ALL)
+                if (!st.shuffle) {
+                    toggleShuffle(quiet = true, targetRepeat = RepeatMode.ALL)
+                } else {
+                    player.setPlayModeState(shuffle = true, repeat = RepeatMode.ALL)
+                }
             }
 
             PlayMode.REPEAT_ALL -> {
-                if (st.shuffle) toggleShuffle(quiet = true)
-                player.setRepeat(RepeatMode.ALL)
+                if (st.shuffle) {
+                    toggleShuffle(quiet = true, targetRepeat = RepeatMode.ALL)
+                } else {
+                    player.setPlayModeState(shuffle = false, repeat = RepeatMode.ALL)
+                }
             }
 
             PlayMode.REPEAT_ONE -> {
-                if (st.shuffle) toggleShuffle(quiet = true)
-                player.setRepeat(RepeatMode.ONE)
+                if (st.shuffle) {
+                    toggleShuffle(quiet = true, targetRepeat = RepeatMode.ONE)
+                } else {
+                    player.setPlayModeState(shuffle = false, repeat = RepeatMode.ONE)
+                }
+            }
+
+            PlayMode.SEQUENTIAL -> {
+                if (st.shuffle) {
+                    toggleShuffle(quiet = true, targetRepeat = RepeatMode.OFF)
+                } else {
+                    player.setPlayModeState(shuffle = false, repeat = RepeatMode.OFF)
+                }
             }
         }
         persistPlayMode(next)
@@ -5648,7 +6526,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 随机开着的时候，点一首歌也要按"洗牌袋"来排 ——
         // 否则队列回到曲库顺序，而模式按钮还亮着"随机"，两边说的不是一回事。
         val on = player.state.value.shuffle
-        val ordered = if (on) ShuffleOrder.build(list, idx, recentWindowFor(list.size)) else list
+        val ordered = if (on) buildShuffledOrder(list, idx) else list
         // 换了播放列表，之前记的原顺序就换成这一份（随机开着时它才是"还原"的基准）
         preShuffleOrder = if (on) list else null
         player.play(ordered, idx)
@@ -5671,7 +6549,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (list.isEmpty()) return
         // 同上：只要最终是随机序，就用洗牌袋而不是 `shuffled()`（后者会重复）
         val on = shuffled || player.state.value.shuffle
-        val ordered = if (on) ShuffleOrder.build(list, 0, recentWindowFor(list.size)) else list
+        val ordered = if (on) buildShuffledOrder(list, 0) else list
         preShuffleOrder = if (on) list else null
         player.play(ordered, 0)
         if (prefs.playToastEnabled) {
@@ -6141,7 +7019,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val src = OnlineSources.byId(song.source)
             val rid = song.remoteId
             if (src != null && rid != null) {
-                val url = src.resolveStream(rid, song.durationMs)
+                lxRepo.rememberSongHint(song)
+        val url = src.resolveStream(rid, song.durationMs)
                 if (!url.isNullOrBlank()) {
                     val parsed = Uri.parse(url)
                     onlineSongMap[song.id]?.let { onlineSongMap[song.id] = it.copy(uri = parsed) }
@@ -6285,6 +7164,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     val totalSizeBytes: Long get() = songs.sumOf { it.sizeBytes }
 
     companion object {
+        /** 洛雪模式单曲与歌单搜索每页条数。 */
+        private const val LX_PAGE_SIZE = 30
+        private const val LX_SHEET_PAGE_SIZE = 20
+
         /** 「关于」里点多少下署名才解锁私有格式还原 */
         private const val AUTHOR_TAP_TARGET = 10
 

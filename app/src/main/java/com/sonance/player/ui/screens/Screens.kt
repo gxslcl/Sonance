@@ -601,6 +601,7 @@ private fun QuickActions(
             PlayMode.SHUFFLE -> SonanceIcons.Shuffle
             PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
             PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
+            PlayMode.SEQUENTIAL -> SonanceIcons.Sequential
         },
         contentDescription = "播放模式：${mode.label}",
         onClick = { vm.cyclePlayMode(songs) },

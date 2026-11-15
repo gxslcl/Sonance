@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -96,7 +97,8 @@ internal fun FullscreenThemedLyrics(
     onSeek: (Long) -> Unit,
     bgProfile: BgProfile?,
     adaptMode: LyricAdaptMode,
-    skin: Skin
+    skin: Skin,
+    scrollHaptic: Boolean = true
 ) {
     if (lines.isEmpty()) return
     // Switching tracks/styles resets the stage and frame clock, not the saved settings.
@@ -118,6 +120,7 @@ internal fun FullscreenThemedLyrics(
         var dragging by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         val context = LocalContext.current
+        val latestScrollHaptic by rememberUpdatedState(scrollHaptic)
         val settleJob = remember { arrayOfNulls<Job>(1) }
         val returnJob = remember { arrayOfNulls<Job>(1) }
 
@@ -324,7 +327,7 @@ internal fun FullscreenThemedLyrics(
                         stage.floatValue = snapped
                         // 每跨过一行给一次轻震：滚动时像经过一格一格的齿槽。
                         // 拖动中途才震，自动跟随 / 点击跳转不震，避免播放时一直嗡嗡响。
-                        if (round(snapped).toInt() != lineBefore) hapticTick(context)
+                        if (latestScrollHaptic && round(snapped).toInt() != lineBefore) hapticTick(context)
                         tracker.addPosition(change.uptimeMillis, change.position)
                         lastTouch[0] = android.os.SystemClock.uptimeMillis()
                     }

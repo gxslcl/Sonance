@@ -3,7 +3,6 @@ package com.sonance.player
 import android.app.Application
 import com.sonance.player.data.AppIconSwitcher
 import com.sonance.player.data.Prefs
-import com.sonance.player.data.plugin.PluginRepository
 import com.sonance.player.ui.icon.IconSetState
 
 class SonanceApplication : Application() {
@@ -17,8 +16,8 @@ class SonanceApplication : Application() {
         AppIconSwitcher.reconcile(this)
         // 默认值改了之后，把老用户已存的旧值也搬过去（只做一次）
         Prefs(this).migrateOnce()
-        // 已启用的内容源插件注册进 OnlineSources，设置页的音源列表才有它们
-        runCatching { PluginRepository.get(this).refreshSources() }
+        // 已导入的洛雪音源按平台注册进 OnlineSources 解析映射（仅用于播/下/恢复，不混入内置源列表）
+        runCatching { com.sonance.player.data.lx.LxRepository.get(this).refreshOnlineSources() }
     }
 
     companion object {

@@ -161,6 +161,9 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                 )
             }
 
+            Spacer(Modifier.height(10.dp))
+            SystemAudioEffectBridgeCard(vm)
+
             Spacer(Modifier.height(18.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("挑选音色", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = skin.text)
@@ -718,6 +721,8 @@ private fun BandRow(
 /** 倒计时可选时长（分钟） */
 private val SLEEP_MINUTES = listOf(5, 10, 15, 30, 45, 60, 90)
 
+internal fun sleepCountdownChipLabel(minutes: Int): String = "$minutes 分钟"
+
 /**
  * 睡眠定时器面板。
  *
@@ -777,7 +782,7 @@ fun SleepTimerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                     val active = vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.COUNTDOWN &&
                         vm.sleepTimerTotalMinutes == m
                     PresetChip(
-                        label = if (m >= 60) "${m / 60} 小时" else "$m 分钟",
+                        label = sleepCountdownChipLabel(m),
                         selected = active
                     ) { vm.setSleepTimer(m) }
                 }

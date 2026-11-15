@@ -495,7 +495,9 @@ private suspend fun pushLyrics(wv: WebView, context: android.content.Context, so
                 apiBase = prefs.lyricsApiBase,
                 convertToSimplified = prefs.lyricsConvertToSimplified,
                 durationMs = song.durationMs,
-                neteaseEnabled = prefs.neteaseFillEnabled
+                neteaseEnabled = prefs.neteaseFillEnabled,
+                remoteSource = song.source,
+                remoteId = song.remoteId
             )
         }.getOrNull()
         val lines = JSONArray()

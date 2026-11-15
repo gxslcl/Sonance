@@ -32,8 +32,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -65,7 +63,6 @@ import androidx.compose.ui.unit.sp
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.SonanceViewModel.OnlineSearchMode
 import com.sonance.player.data.OnlineSource
-import com.sonance.player.data.OnlineSources
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.formatDuration
@@ -198,8 +195,7 @@ fun OnlineScreen(
 
     Column(modifier.fillMaxSize()) {
 
-        // ---- 顶部栏：单曲 / 歌单 (+ 多音源切换) + 右侧登录/账号入口（对齐下方「只看可播」开关） ----
-        var sourceMenuExpanded by remember { mutableStateOf(false) }
+        // ---- 顶部栏：单曲 / 歌单 + 右侧登录/账号入口（对齐下方「只看可播」开关） ----
         var showLoginSheet by remember { mutableStateOf(false) }
         var showAccountSheet by remember { mutableStateOf(false) }
         val skin = LocalSkin.current
@@ -221,35 +217,6 @@ fun OnlineScreen(
                     )
                 }
             )
-            if (vm.onlineSources.size > 1) {
-                Spacer(Modifier.width(6.dp))
-                Box {
-                    Text(
-                        text = (vm.onlineSources.firstOrNull { it.id == vm.onlineSourceId }?.label
-                            ?: "音源") + " ▾",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = skin.textMuted,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { sourceMenuExpanded = true }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                    DropdownMenu(
-                        expanded = sourceMenuExpanded,
-                        onDismissRequest = { sourceMenuExpanded = false }
-                    ) {
-                        vm.onlineSources.forEach { source ->
-                            DropdownMenuItem(
-                                text = { Text(source.label) },
-                                onClick = {
-                                    vm.changeOnlineSource(source.id)
-                                    sourceMenuExpanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
             Spacer(Modifier.weight(1f))
             OnlineAccountActionPill(
                 account = vm.neteaseAccount,
@@ -309,15 +276,14 @@ fun OnlineScreen(
             )
         }
 
-        // ---- 音源切换（多音源或未登录） + 搜索结果统计 / 仅可播筛选 ----
+        // ---- 音源提示（未登录时） + 搜索结果统计 / 仅可播筛选 ----
         val loggedIn = vm.neteaseAccount != null
         val hasSingleResults = vm.onlineSearchMode == OnlineSearchMode.SINGLE && vm.onlineResults.isNotEmpty()
         val hasVisibleSingle = vm.onlineSearchMode == OnlineSearchMode.SINGLE && vm.visibleOnlineResults.isNotEmpty()
         val hasPlaylistResults = vm.onlineSearchMode == OnlineSearchMode.PLAYLIST && vm.onlinePlaylistResults.isNotEmpty()
-        // 单音源 + 已登录 + 有可展示结果时，把「可播统计 + 筛选胶囊」并入下方工具条，不再单独空占一行
-        val mergeSingleToolbar = OnlineSources.all.size <= 1 && loggedIn && hasVisibleSingle && !vm.onlineSearching
-        val showStatusRow = OnlineSources.all.size > 1 ||
-            !loggedIn ||
+        // 已登录 + 有可展示结果时，把「可播统计 + 筛选胶囊」并入下方工具条，不再单独空占一行
+        val mergeSingleToolbar = loggedIn && hasVisibleSingle && !vm.onlineSearching
+        val showStatusRow = !loggedIn ||
             vm.onlineSearching ||
             (hasSingleResults && !mergeSingleToolbar) ||
             hasPlaylistResults
@@ -329,13 +295,7 @@ fun OnlineScreen(
                     .padding(top = if (dense) 4.dp else 6.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (OnlineSources.all.size > 1) {
-                    ChipsRow(
-                        chips = OnlineSources.all.map { it.label to (it.id == vm.onlineSourceId) },
-                        onSelect = { vm.changeOnlineSource(OnlineSources.all[it].id) },
-                        modifier = Modifier.weight(1f)
-                    )
-                } else if (!loggedIn) {
+                if (!loggedIn) {
                     CountLabel("音源 · ${src.label}", Modifier.weight(1f))
                 } else {
                     Spacer(Modifier.weight(1f))
@@ -1817,7 +1777,9 @@ internal fun OnlineTrackRow(
                 PlaceholderCover(
                     seed = track.album + track.artist,
                     showMark = false,
-                    modifier = Modifier.size(44.dp)
+                    modifier = Modifier
+                        .size(44.dp)
+                        .alpha(rowAlpha)
                 )
             }
             // 正在播这一首：在封面上压一个跳动的小均衡器
@@ -1893,13 +1855,12 @@ internal fun OnlineTrackRow(
             }
         }
 
-        if (track.vip) {
+        if (!track.playable && !track.vip) {
+            Spacer(Modifier.width(8.dp))
+            UnavailableBadge(label = track.unavailableReason ?: "无版权")
+        } else if (track.vip) {
             Spacer(Modifier.width(8.dp))
             VipBadge(playable = track.playable)
-        } else if (!track.playable) {
-            // 不是 VIP 还播不了，基本就是版权下架 / 地区限制 —— 说"无版权"比不解释更清楚
-            Spacer(Modifier.width(8.dp))
-            UnavailableBadge()
         }
 
         if (downloaded) {
@@ -1945,9 +1906,9 @@ private fun VipBadge(playable: Boolean = false) {
     }
 }
 
-/** 「无版权」徽标：确认拿不到地址、又不是 VIP 权益问题的那一类 */
+/** 「无版权 / 数专」徽标：确认不可直接点播的那一类 */
 @Composable
-private fun UnavailableBadge() {
+private fun UnavailableBadge(label: String = "无版权") {
     val skin = LocalSkin.current
     Box(
         modifier = Modifier
@@ -1956,7 +1917,7 @@ private fun UnavailableBadge() {
             .padding(horizontal = 5.dp, vertical = 1.dp)
     ) {
         Text(
-            text = "无版权",
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = skin.textMuted

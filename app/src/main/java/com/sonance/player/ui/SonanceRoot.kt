@@ -86,11 +86,14 @@ import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.OnlineMode
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongMetaEditor
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
+import com.sonance.player.data.lx.LxPlatform
+import com.sonance.player.data.lx.LxSheetDetailTarget
 import com.sonance.player.playback.BiliVideoSession
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.AppTopBar
@@ -121,6 +124,8 @@ import com.sonance.player.ui.screens.BiliCacheScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
 import com.sonance.player.ui.screens.LibraryPagerScreen
+import com.sonance.player.ui.screens.LxOnlineScreen
+import com.sonance.player.ui.screens.LxSheetDetailScreen
 import com.sonance.player.ui.screens.OnlinePlaylistScreen
 import com.sonance.player.ui.screens.OnlineScreen
 import com.sonance.player.ui.screens.RecentScreen
@@ -215,6 +220,9 @@ sealed interface Detail {
      * 都要用它，而歌单**不在任何本地查找表里**（不像专辑 / 艺术家能按 id 反查）。
      */
     data class PlaylistDetail(val playlist: RemotePlaylist) : Detail
+
+    /** 洛雪模式歌单 / 排行榜详情页（独立页面，与内置模式隔离）。 */
+    data class LxSheetDetail(val target: LxSheetDetailTarget) : Detail
 }
 
 /* ============================================================
@@ -597,6 +605,14 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     var dlnaCastSheetOpen by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Detail?>(null) }
 
+    LaunchedEffect(vm.onlineMode) {
+        if ((vm.onlineMode == OnlineMode.LX && detail is Detail.PlaylistDetail) ||
+            (vm.onlineMode == OnlineMode.BUILTIN && detail is Detail.LxSheetDetail)
+        ) {
+            detail = null
+        }
+    }
+
     /**
      * 收掉输入法焦点。
      *
@@ -723,12 +739,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
     var artSlideDir by remember { mutableStateOf(1) }
     var lastQueueIndex by remember { mutableStateOf(Int.MIN_VALUE) }
-    LaunchedEffect(playerState.queueIndex, suppressHomeUnderlay) {
+    var lastArtMediaId by remember { mutableStateOf(playerState.mediaId) }
+    LaunchedEffect(playerState.queueIndex, playerState.mediaId, suppressHomeUnderlay) {
         if (suppressHomeUnderlay) return@LaunchedEffect
         val idx = playerState.queueIndex
-        if (lastQueueIndex != Int.MIN_VALUE && idx >= 0 && idx != lastQueueIndex) {
+        val sameTrackReordered = playerState.mediaId != 0L && playerState.mediaId == lastArtMediaId
+        if (!sameTrackReordered && lastQueueIndex != Int.MIN_VALUE && idx >= 0 && idx != lastQueueIndex) {
             artSlideDir = if (idx > lastQueueIndex) 1 else -1
         }
+        lastArtMediaId = playerState.mediaId
         lastQueueIndex = idx
     }
 
@@ -1347,6 +1366,7 @@ private fun CompactLayout(
                     glassVisibility = vm.miniGlassVisibility,
                     cardOpacity = vm.miniCardOpacity,
                     progressStyle = vm.miniProgressStyle,
+                    showTime = vm.miniShowTime,
                     swipeStyle = vm.miniSwipeStyle,
                     swipeLeftPct = vm.miniSwipeLeftPct,
                     swipeRightPct = vm.miniSwipeRightPct,
@@ -1599,6 +1619,7 @@ private fun MediumLayout(
                     glassVisibility = vm.miniGlassVisibility,
                     cardOpacity = vm.miniCardOpacity,
                     progressStyle = vm.miniProgressStyle,
+                    showTime = vm.miniShowTime,
                     swipeStyle = vm.miniSwipeStyle,
                     swipeLeftPct = vm.miniSwipeLeftPct,
                     swipeRightPct = vm.miniSwipeRightPct,
@@ -1758,6 +1779,7 @@ private fun ExpandedLayout(
                                 glassVisibility = vm.miniGlassVisibility,
                                 cardOpacity = vm.miniCardOpacity,
                                 progressStyle = vm.miniProgressStyle,
+                                showTime = vm.miniShowTime,
                                 swipeStyle = vm.miniSwipeStyle,
                                 swipeLeftPct = vm.miniSwipeLeftPct,
                                 swipeRightPct = vm.miniSwipeRightPct,
@@ -1941,6 +1963,12 @@ private fun ScreenBody(
                 playerState = playerState
             )
 
+            is Detail.LxSheetDetail -> LxSheetDetailScreen(
+                target = detail.target,
+                vm = vm,
+                playerState = playerState
+            )
+
             Detail.BiliCache -> BiliCacheScreen()
             Detail.Dlna -> DlnaHubScreen(vm = vm)
         }
@@ -1978,11 +2006,19 @@ private fun ScreenBody(
             reportCurrentVisibility = reportCurrentVisibility
         )
 
-        LibraryTab.ONLINE -> OnlineScreen(
-            vm = vm,
-            playerState = playerState,
-            onOpenPlaylist = { onOpenDetail(Detail.PlaylistDetail(it)) }
-        )
+        LibraryTab.ONLINE -> if (vm.onlineMode == OnlineMode.LX) {
+            LxOnlineScreen(
+                vm = vm,
+                playerState = playerState,
+                onOpenSheet = { onOpenDetail(Detail.LxSheetDetail(it)) }
+            )
+        } else {
+            OnlineScreen(
+                vm = vm,
+                playerState = playerState,
+                onOpenPlaylist = { onOpenDetail(Detail.PlaylistDetail(it)) }
+            )
+        }
 
         LibraryTab.FAVORITES -> FavoritesScreen(
             vm = vm,
@@ -2016,7 +2052,13 @@ private fun tabSubtitle(vm: SonanceViewModel): String {
     // 用 recentEntries 而不是 recentIds —— 在线歌不在 recentIds 里，
     // 用它会让"最近听过 N 首"比列表里实际少几首
     LibraryTab.RECENT -> "最近听过 ${vm.recentEntries.size} 首"
-    LibraryTab.ONLINE -> if (vm.onlineMusicEnabled) "搜索并播放网络歌曲" else "未开启 · 点击开启"
+    LibraryTab.ONLINE -> when {
+        vm.onlineMode == OnlineMode.LX && !vm.onlineMusicEnabled -> "洛雪音源 · 未开启"
+        vm.onlineMode == OnlineMode.LX -> vm.lxActiveScript?.let { "洛雪音源 · ${it.meta.name}" }
+            ?: "洛雪音源 · 请先导入 .js"
+        vm.onlineMusicEnabled -> "搜索并播放网络歌曲"
+        else -> "未开启 · 点击开启"
+    }
     LibraryTab.FAVORITES -> "已收藏 ${vm.favorites.size} 首"
     LibraryTab.SETTINGS -> vm.skin.name
     }
@@ -2027,6 +2069,7 @@ private fun detailTitle(vm: SonanceViewModel, detail: Detail): String = when (de
     is Detail.ArtistDetail -> detail.name
     is Detail.FolderDetail -> vm.folderByPath(detail.path)?.name ?: "文件夹"
     is Detail.PlaylistDetail -> detail.playlist.name
+    is Detail.LxSheetDetail -> detail.target.title
     Detail.BiliCache -> "B站缓存"
     Detail.Dlna -> "D-LAN 共享与投屏"
 }
@@ -2041,6 +2084,15 @@ private fun detailSubtitle(vm: SonanceViewModel, detail: Detail): String = when 
     is Detail.PlaylistDetail -> buildString {
         if (detail.playlist.creatorName.isNotBlank()) append("${detail.playlist.creatorName} · ")
         append("${detail.playlist.trackCount} 首")
+    }
+
+    is Detail.LxSheetDetail -> buildString {
+        LxPlatform.byId(detail.target.platform)?.shortLabel?.let { append(it) }
+        val extra = detail.target.subtitle.ifBlank { detail.target.boardPeriod }
+        if (extra.isNotBlank()) {
+            if (isNotEmpty()) append(" · ")
+            append(extra)
+        }
     }
 
     Detail.BiliCache -> "本机离线缓存"

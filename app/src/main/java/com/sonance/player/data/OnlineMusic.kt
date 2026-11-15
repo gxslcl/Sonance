@@ -97,7 +97,7 @@ interface OnlineSource {
      *
      * 内置源（网易云）的旧实现是同步拼一个固定外链；但那条约 128k，会员歌还会 302
      * 到 HTML 下载页。现在改走 `player/url/v1`：要带 Cookie、会过期、可能降档，
-     * 只能异步拿。插件源的 `getMediaSource` 本来就是 Promise，也归到这条路径上。
+     * 只能异步拿。
      *
      * 默认实现退回同步 [streamUrl] —— 未来加"地址能直接算出来"的源时不用写这个方法。
      *
@@ -140,15 +140,6 @@ interface OnlineSource {
      * 给 FLAC 套 ID3 头会直接把文件写坏。
      */
     fun streamFormat(remoteId: String): String? = null
-
-    /**
-     * 播放/下载前预热若干首歌的取流地址。
-     *
-     * 默认空实现：内置音源（网易云）的地址是同步拼出来的，不需要预热。
-     * 内容源插件的 `getMediaSource` 是异步 Promise，必须先在协程里解析好，
-     * 同步的 [streamUrl] 才能从进程内缓存里取到值 —— 见 PluginOnlineSource。
-     */
-    suspend fun prepareStreams(ids: List<String>) {}
 
     /** [streamUrl] 的 Uri 包装，给播放器用 */
     fun streamUri(track: RemoteTrack): Uri = Uri.parse(streamUrl(track.remoteId))
@@ -239,7 +230,9 @@ data class RemoteTrack(
      */
     val playable: Boolean,
     /** 需要会员 */
-    val vip: Boolean
+    val vip: Boolean,
+    /** 不可播放原因徽章（例如「无版权」/「数专」），可播时为 null */
+    val unavailableReason: String? = null
 )
 
 /**
@@ -514,24 +507,42 @@ fun onlineSongIdsToKeep(
     return keep
 }
 
+/**
+ * 在线音乐引擎模式（设置页「二选一」）。
+ *
+ * - [BUILTIN]：内置网易云音源，使用内置在线页。
+ * - [LX]：洛雪自定义音源脚本 + 多平台曲库，使用独立的洛雪在线页。
+ */
+enum class OnlineMode {
+    BUILTIN,
+    LX;
+
+    companion object {
+        fun fromStored(value: String?): OnlineMode =
+            entries.firstOrNull { it.name == value } ?: BUILTIN
+    }
+}
+
 /** 音源清单。加新音源只要在这里登记 */
 object OnlineSources {
     /**
-     * 内置源永远在第一位。插件源由 [replacePlugins] 在应用启动 / 插件增删后注入，
-     * 这样设置页的 chips 不用改代码就能多出几项，`changeOnlineSource` 的清空与
-     * 重拉逻辑也照常生效。
+     * 内置在线模式固定提供网易云音源。
      *
-     * @Volatile + 整体替换：读 `all` 的地方可能在 IO 线程，别在遍历中途被改到。
+     * 洛雪音源通过 [replaceLxSources] 单独注册，仅用于按 `song.source` 解析播放流、
+     * 音质后缀与下载扩展名，不混入内置模式列表 [all]。
+     *
+     * @Volatile + 整体替换：读的地方可能在 IO 线程，别在遍历中途被改到。
      */
     @Volatile
-    private var plugins: List<OnlineSource> = emptyList()
+    private var lxSources: List<OnlineSource> = emptyList()
 
-    val all: List<OnlineSource> get() = listOf(NeteaseSource) + plugins
+    val all: List<OnlineSource> get() = listOf(NeteaseSource)
 
-    fun byId(id: String?): OnlineSource? = all.firstOrNull { it.id == id }
+    fun byId(id: String?): OnlineSource? =
+        all.firstOrNull { it.id == id } ?: lxSources.firstOrNull { it.id == id }
 
-    fun replacePlugins(list: List<OnlineSource>) {
-        plugins = list.toList()
+    fun replaceLxSources(list: List<OnlineSource>) {
+        lxSources = list.toList()
     }
 }
 

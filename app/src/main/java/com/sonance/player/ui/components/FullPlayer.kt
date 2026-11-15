@@ -63,6 +63,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -320,9 +321,22 @@ fun FullPlayer(
     /** 封面在**本页坐标系**里的矩形 —— 由 PlayerPage 量出来上报，晕染靠它定位 */
     var coverBounds by remember { mutableStateOf<Rect?>(null) }
 
+    // 队列被重新洗牌/还原，或者短暂存在未映射曲目导致 queueIndex 与 mediaId 短时错位时，
+    // 始终以「实际正在播的 mediaId 在当前展示队列中的下标」作为视觉对位基准，彻底杜绝封面/歌名闪成另一首歌。
+    val activeQueueIndex = remember(queue, state.queueIndex, state.mediaId) {
+        if (state.mediaId != 0L) {
+            val atIdx = queue.getOrNull(state.queueIndex)
+            if (atIdx != null && atIdx.id == state.mediaId) state.queueIndex
+            else queue.indexOfFirst { it.id == state.mediaId }.takeIf { it >= 0 } ?: state.queueIndex
+        } else {
+            state.queueIndex
+        }
+    }
+    val latestActiveIdx by rememberUpdatedState(activeQueueIndex)
+
     // 歌曲分页器。**必须声明在晕染素材之前** —— 跟手模式要按它的滚动位置混合颜色。
     val pagerState = rememberPagerState(
-        initialPage = state.queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
+        initialPage = activeQueueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0))
     ) { queue.size }
 
     // 基础缩放与呼吸合并成一个最终值；所有预览页都读取同一份尺寸快照。
@@ -367,7 +381,7 @@ fun FullPlayer(
     val latestQueue by rememberUpdatedState(queue)
     val latestCoveredByVinyl by rememberUpdatedState(coveredByVinyl)
 
-    val curGlowColors = rememberGlowColors(queue.getOrNull(state.queueIndex), skin)
+    val curGlowColors = rememberGlowColors(queue.getOrNull(activeQueueIndex), skin)
     val smoothGlow = remember(skin.id) {
         val initial = curGlowColors.ifEmpty {
             resolveGlowColors(queue.getOrNull(pagerState.currentPage), skin)
@@ -376,9 +390,9 @@ fun FullPlayer(
     }
     val useSmoothGlow = !isSwipeGlow || smoothGlow.fadeActive
 
-    LaunchedEffect(curGlowColors, useSmoothGlow, state.queueIndex, glowFadeMs, skin.id) {
+    LaunchedEffect(curGlowColors, useSmoothGlow, activeQueueIndex, glowFadeMs, skin.id) {
         if (!useSmoothGlow || curGlowColors.isEmpty()) return@LaunchedEffect
-        snapshotFlow { pagerState.currentPage == latestState.queueIndex }.first { it }
+        snapshotFlow { pagerState.currentPage == latestActiveIdx }.first { it }
         if (!smoothGlow.hasColors) {
             smoothGlow.snapTo(curGlowColors, skin.bg)
         } else {
@@ -408,15 +422,15 @@ fun FullPlayer(
         strength = glowBakeStrength
     )
 
-    val buttonPaletteProvider = rememberPlayerControlPaletteProvider(state, queue.getOrNull(state.queueIndex))
+    val buttonPaletteProvider = rememberPlayerControlPaletteProvider(state, queue.getOrNull(activeQueueIndex))
     // 顶栏律动指示器的混色放在叶子组件 [HeaderPlayingIndicator] 的 Canvas 绘制阶段里算：
     // 滑动中每帧只触发该小 Canvas 重绘，不触发任何组合与测量，FullPlayer 零重组。
 
     // 预取相邻两首的色卡并提前烘入 LRU 位图缓存，让滑动跨过中点时零位图分配、零卡顿。
     // 只取前后各一首 —— 队列可能有几千首，不能遍历。
-    LaunchedEffect(state.queueIndex, queue.size, coveredByVinyl, glowMode, glowBakeStrength, skin.id) {
+    LaunchedEffect(activeQueueIndex, queue.size, coveredByVinyl, glowMode, glowBakeStrength, skin.id) {
         if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
-        val idx = state.queueIndex
+        val idx = activeQueueIndex
         val candidates = listOfNotNull(
             queue.getOrNull(idx + 1),
             queue.getOrNull(idx - 1),
@@ -486,8 +500,43 @@ fun FullPlayer(
         goToLayer(PlayerLayer.COVER)
     }
 
+    // 每个队列条目的稳定 key：同一首歌即使通过「下一首播放」在队列里出现多次，
+    // 也能用 occurrence 区分，同时重排队列（随机 ↔ 列表/单曲/顺序）时当前播放页不会被销毁重建而闪屏。
+    val pageKeys = remember(queue) {
+        val seen = HashMap<Long, Int>(queue.size)
+        queue.map { item ->
+            val nth = seen.getOrDefault(item.id, 0)
+            seen[item.id] = nth + 1
+            "${item.id}#$nth"
+        }
+    }
+
     var pendingSwipeTarget by remember { mutableIntStateOf(-1) }
     var pendingSwipeUntilMs by remember { mutableLongStateOf(0L) }
+    var lastSyncedMediaId by remember { mutableLongStateOf(state.mediaId) }
+    var lastSyncedQueueIds by remember { mutableStateOf(state.queueIds) }
+
+    val queueIdsChanged = state.queueIds != lastSyncedQueueIds
+    val hasPendingSwipe = pendingSwipeTarget >= 0 && !queueIdsChanged
+    val stalePagerPage = pagerState.currentPage
+    val externalDesync = !coveredByVinyl &&
+        !pagerState.isScrollInProgress &&
+        !userDraggedPager &&
+        !hasPendingSwipe &&
+        activeQueueIndex in queue.indices &&
+        stalePagerPage != activeQueueIndex
+
+    // 同步对齐：在组合提交后的 SideEffect 立即请求 requestScrollToPage，
+    // 避免等到 LaunchedEffect 在下一帧之后才 scrollToPage 造成一帧以上的错位封面/晕染闪屏。
+    SideEffect {
+        if (queueIdsChanged) {
+            lastSyncedQueueIds = state.queueIds
+            if (pendingSwipeTarget >= 0) pendingSwipeTarget = -1
+        }
+        if (externalDesync) {
+            pagerState.requestScrollToPage(activeQueueIndex)
+        }
+    }
 
     // 分页器 → 播放器：用户主动划动并在目标页静止后切歌。
     // 1) userDraggedPager 只能在 `!scrolling` 时清零：若在 `scrolling == true` 同一轮提前清掉，
@@ -506,7 +555,7 @@ fun FullPlayer(
                 if (queue.isNotEmpty() &&
                     userDraggedPager &&
                     !latestCoveredByVinyl &&
-                    settledPage != latestState.queueIndex
+                    settledPage != latestActiveIdx
                 ) {
                     val pageSong = latestQueue.getOrNull(settledPage)
                     if (pageSong != null) {
@@ -523,12 +572,13 @@ fun FullPlayer(
     // 播放器 → 分页器：按钮切歌 / 自动续播 / 点队列 / 随机重排队列时把页面跟过去。
     // 若刚刚由滑屏触发了 pendingSwipeTarget，则 600ms 窗口内忽略尚未追上的中间态 queueIndex，
     // 防止快速连滑时旧 IPC 结果把分页器倒拽回上一首；窗口期结束后若仍不一致则自愈对齐真实曲目。
-    LaunchedEffect(state.queueIndex, state.mediaId, queue, coveredByVinyl, pendingSwipeTarget) {
+    LaunchedEffect(activeQueueIndex, state.mediaId, queue, coveredByVinyl, pendingSwipeTarget) {
         if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
-        val target = state.queueIndex.coerceIn(0, queue.lastIndex)
+        val target = activeQueueIndex.coerceIn(0, queue.lastIndex)
         if (pendingSwipeTarget >= 0) {
             if (target == pendingSwipeTarget) {
                 pendingSwipeTarget = -1
+                lastSyncedMediaId = state.mediaId
                 return@LaunchedEffect
             }
             val remaining = pendingSwipeUntilMs - android.os.SystemClock.uptimeMillis()
@@ -537,20 +587,23 @@ fun FullPlayer(
             }
             pendingSwipeTarget = -1
         }
-        val latestIdx = latestState.queueIndex
+        val latestIdx = latestActiveIdx
+        val currentMediaId = latestState.mediaId
         if (latestQueue.isEmpty() || latestIdx !in latestQueue.indices) return@LaunchedEffect
+        val mediaChanged = currentMediaId != 0L && currentMediaId != lastSyncedMediaId
         if (pagerState.settledPage != latestIdx && (!pagerState.isScrollInProgress || !userDraggedPager)) {
             userDraggedPager = false
-            // 跟手模式下发生直接切页（无滑动动画）时，先锁定当前正在显示的颜色作为起点，
-            // 再切到目标页并平滑渐变到新歌颜色，避免瞬切色卡闪烁。
-            if (isSwipeGlow && !smoothGlow.fadeActive) {
-                val fromColors = resolveGlowColors(latestQueue.getOrNull(pagerState.currentPage), skin)
-                    .ifEmpty { resolveGlowColors(latestQueue.getOrNull(latestIdx), skin) }
-                if (fromColors.isNotEmpty()) {
-                    smoothGlow.snapTo(fromColors, skin.bg)
+            // 只有在真正切到另一首歌时才触发晕染颜色淡入过渡；同曲仅因模式切换/重排换了页码时静默对位，不闪晕染。
+            if (mediaChanged) {
+                if (isSwipeGlow && !smoothGlow.fadeActive) {
+                    val fromColors = resolveGlowColors(latestQueue.getOrNull(pagerState.currentPage), skin)
+                        .ifEmpty { resolveGlowColors(latestQueue.getOrNull(latestIdx), skin) }
+                    if (fromColors.isNotEmpty()) {
+                        smoothGlow.snapTo(fromColors, skin.bg)
+                    }
                 }
+                smoothGlow.fadeActive = true
             }
-            smoothGlow.fadeActive = true
             programmaticScroll = true
             try {
                 pagerState.scrollToPage(latestIdx)
@@ -558,6 +611,7 @@ fun FullPlayer(
                 programmaticScroll = false
             }
         }
+        lastSyncedMediaId = currentMediaId
     }
 
     // ===== 呼吸动效：引擎 + 帧循环 =====
@@ -575,7 +629,7 @@ fun FullPlayer(
     LaunchedEffect(breathActive, layer, state.mediaId, state.isPlaybackActive) {
         snapshotFlow {
             coveredByVinyl || coverTouched || pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
-                latestState.isBuffering || (latestQueue.isNotEmpty() && pagerState.settledPage != latestState.queueIndex)
+                latestState.isBuffering || (latestQueue.isNotEmpty() && pagerState.settledPage != latestActiveIdx)
         }.collectLatest { frozen ->
             if (frozen || layer != PlayerLayer.COVER) {
                 coverMotion.advance(0f, latestState.isPlaybackActive, frozen = true, trackId = latestState.mediaId)
@@ -686,10 +740,20 @@ fun FullPlayer(
                         // **不能**用 offsetFraction 的符号判方向 —— 那个值在 currentPage
                         // 翻页的一刻会变号，用符号判会在中点处跳一下
                         // （3.4 和 3.6 会算成相反的混合比）。
-                        val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
+                        val curQueue = latestQueue
+                        val activeIdx = latestActiveIdx
+                        val extAnchor = !pagerState.isScrollInProgress &&
+                            !userDraggedPager &&
+                            pendingSwipeTarget < 0 &&
+                            activeIdx in curQueue.indices &&
+                            pagerState.currentPage != activeIdx
+                        val pos = if (extAnchor) {
+                            activeIdx.toFloat()
+                        } else {
+                            pagerState.currentPage + pagerState.currentPageOffsetFraction
+                        }
                         val base = floor(pos).toInt()
                         val t = (pos - base).coerceIn(0f, 1f)
-                        val curQueue = latestQueue
                         val first = cachedGlowFrame(
                             resolveGlowColors(curQueue.getOrNull(base), skin),
                             glowMode,
@@ -721,7 +785,7 @@ fun FullPlayer(
                 }
             }
     ) {
-        val currentSong = queue.getOrNull(state.queueIndex)
+        val currentSong = queue.getOrNull(activeQueueIndex)
 
         // 三层横向轮播。这里用 HorizontalPager 而不是 AnimatedContent：
         // 内容会**跟着手指走**、松手回弹到最近一层，这才是轮播该有的手感；
@@ -847,6 +911,10 @@ fun FullPlayer(
                             isSwipeGlow = !useSmoothGlow,
                             pagerState = pagerState,
                             queueProvider = { latestQueue },
+                            activeIndexProvider = { latestActiveIdx },
+                            anchorActiveProvider = {
+                                !pagerState.isScrollInProgress && !userDraggedPager && pendingSwipeTarget < 0
+                            },
                             smoothGlowColors = smoothGlowColors,
                             skin = skin,
                             glowMode = glowMode,
@@ -904,10 +972,8 @@ fun FullPlayer(
                 VerticalPager(
                     state = pagerState,
                     beyondViewportPageCount = 1,
-                    // key 必须带上页码：`playNext` 不查重，队列里可能出现同一首歌两次
-                    // （用户对已在队列里的歌点"下一首播放"就会），只拿 song.id 当 key
-                    // 会撞成重复 key，分页器直接抛 "Key ... was already used"。
-                    key = { page -> "$page-${queue.getOrNull(page)?.id ?: -1L}" },
+                    // 同曲在队列出现多次时用 occurrence 编号区分 key，同时避免重排队列后页码变动重建整页
+                    key = { page -> pageKeys.getOrNull(page) ?: "empty-$page" },
                     modifier = Modifier
                         .fillMaxSize()
                         // 观察按下而不消费，触摸起点就冻结尺寸，不等分页器越过拖动阈值。
@@ -925,8 +991,13 @@ fun FullPlayer(
                         }
                         .blockSongSwipeInBottomBand(bottomSafePx)
                 ) { page ->
-                    val song = queue.getOrNull(page) ?: return@VerticalPager
-                    val isCurrent = page == state.queueIndex
+                    val displayIdx = if (externalDesync && page == stalePagerPage) {
+                        activeQueueIndex
+                    } else {
+                        page
+                    }
+                    val song = queue.getOrNull(displayIdx) ?: return@VerticalPager
+                    val isCurrent = displayIdx == activeQueueIndex
                     // 每一页都裁到自己的范围 —— **包括当前页**。
                     //
                     // 早先这里给当前页留了豁免（不裁），理由是「晕染画在封面层、
@@ -1014,6 +1085,7 @@ fun FullPlayer(
                             //   绝不能把 0×0 或视口外坐标写进 coverBounds，否则晕染会整屏黑掉几十毫秒；
                             // - rect.width > 1f && rect.height > 1f：拒绝退化空矩形。
                             if (isCurrent &&
+                                !externalDesync &&
                                 page == pagerState.currentPage &&
                                 pagerState.settledPage == page &&
                                 !pagerState.isScrollInProgress &&
@@ -1466,6 +1538,8 @@ private fun HeaderPlayingIndicator(
     isSwipeGlow: Boolean,
     pagerState: PagerState,
     queueProvider: () -> List<Song>,
+    activeIndexProvider: () -> Int,
+    anchorActiveProvider: () -> Boolean,
     smoothGlowColors: List<Color>,
     skin: Skin,
     glowMode: GlowMode,
@@ -1475,10 +1549,18 @@ private fun HeaderPlayingIndicator(
         isPlaying = isPlaying,
         colorProvider = { playingFraction ->
             val coverColor = if (isSwipeGlow) {
-                val pos = pagerState.currentPage + pagerState.currentPageOffsetFraction
+                val q = queueProvider()
+                val activeIdx = activeIndexProvider()
+                val extAnchor = anchorActiveProvider() &&
+                    activeIdx in q.indices &&
+                    pagerState.currentPage != activeIdx
+                val pos = if (extAnchor) {
+                    activeIdx.toFloat()
+                } else {
+                    pagerState.currentPage + pagerState.currentPageOffsetFraction
+                }
                 val base = floor(pos).toInt()
                 val t = (pos - base).coerceIn(0f, 1f)
-                val q = queueProvider()
                 val first = resolveGlowColors(q.getOrNull(base), skin)
                 val second = if (t > 0f) resolveGlowColors(q.getOrNull(base + 1), skin) else emptyList()
                 val c0 = if (first.isEmpty()) skin.bg else glowTintAt(first, 0.5f)

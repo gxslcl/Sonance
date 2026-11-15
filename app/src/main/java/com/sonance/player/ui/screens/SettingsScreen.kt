@@ -89,13 +89,14 @@ import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.LyricPlaybarStyle
 import com.sonance.player.data.OnlineDownloader
+import com.sonance.player.data.OnlineMode
+import com.sonance.player.data.lx.LxQuality
 import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.PlayButtonColorMode
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.AdaptModeRow
-import com.sonance.player.ui.components.ChipsRow
 import com.sonance.player.ui.components.TagChip
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.components.GlassControls
@@ -104,6 +105,7 @@ import com.sonance.player.ui.components.SliderLine
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.sheets.ScanScopeSheet
+import com.sonance.player.ui.sheets.sleepCountdownChipLabel
 import com.sonance.player.ui.theme.AppIconVariant
 import com.sonance.player.ui.theme.AppIcons
 import com.sonance.player.ui.theme.GlassStyle
@@ -117,7 +119,6 @@ import com.sonance.player.ui.theme.MiniSwipeStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -394,13 +395,20 @@ private fun SettingsCategoryPage(
             }
 
             val onlineSummary = buildString {
-                append(if (vm.onlineMusicEnabled) "在线搜索已开启" else "在线搜索关闭")
-                if (vm.neteaseFillEnabled) append(" · 网易云补全")
-                if (vm.onlineDownloadEnabled) append(" · 边听边存")
+                if (vm.onlineMode == OnlineMode.LX) {
+                    append("洛雪音源")
+                    vm.lxActiveScript?.let { append(" · ${it.meta.name}") }
+                    if (!vm.onlineMusicEnabled) append("（未开启）")
+                    if (vm.lxDownloadEnabled) append(" · 边听边存")
+                } else {
+                    append(if (vm.onlineMusicEnabled) "内置在线已开启" else "内置在线关闭")
+                    if (vm.neteaseFillEnabled) append(" · 网易云补全")
+                    if (vm.onlineDownloadEnabled) append(" · 边听边存")
+                }
             }
             CollapsibleSection(
                 id = "online",
-                title = "在线音乐与音源插件",
+                title = "在线音乐与音源",
                 summary = onlineSummary,
                 icon = SonanceIcons.Cloud
             ) {
@@ -898,7 +906,9 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 MiniSwipeStyle.WHOLE_CARD -> "整卡滑动"
                 MiniSwipeStyle.INNER_SLOT -> "槽内滑动"
             }
-            append(" · ").append(prog).append(" · ").append(swipe)
+            append(" · ").append(prog)
+            append(if (vm.miniShowTime) " · 数字时间" else " · 无数字时间")
+            append(" · ").append(swipe)
         }
     }
     CollapsibleSection(
@@ -996,6 +1006,15 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                     }
                 }
             }
+
+            // ---- 歌手名下方数字时间进度（当前进度 / 总时长）----
+            Spacer(Modifier.height(10.dp))
+            SettingsSwitchRow(
+                title = "数字时间进度",
+                subtitle = "在歌手名下方显示「当前进度 / 总时长」（如 1:10 / 3:22）",
+                checked = vm.miniShowTime,
+                onCheckedChange = vm::changeMiniShowTime
+            )
 
             // ---- 卡片高度 / 封面大小 ----
             Spacer(Modifier.height(14.dp))
@@ -1261,11 +1280,12 @@ private val SETTINGS_SLEEP_MINUTES = listOf(15, 30, 45, 60, 90)
 @Composable
 private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () -> Unit) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
     val timerLabel = vm.sleepTimerLabel
-    val eqSummary = if (vm.eqEnabled) {
-        "均衡器：${vm.eqPreset.label}" + (if (vm.eqCustom) "（微调）" else "")
-    } else {
-        "均衡器关闭"
+    val eqSummary = when {
+        vm.eqEnabled -> "均衡器：${vm.eqPreset.label}" + (if (vm.eqCustom) "（微调）" else "")
+        vm.systemAudioEffectEnabled -> "系统音效接入中"
+        else -> "均衡器关闭"
     }
     val sleepSummary = timerLabel?.let { "睡眠定时：剩余 $it" } ?: "睡眠定时未开启"
 
@@ -1287,6 +1307,30 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
             },
             onClick = onOpenEqualizer,
             actionLabel = "调节"
+        )
+        Spacer(Modifier.height(6.dp))
+        SettingsSwitchRow(
+            title = "系统音效接入（杜比 / 本机音效）",
+            subtitle = when {
+                vm.usbExclusiveEnabled -> "USB 独占直通开启时，硬件直出将绕过系统混音与系统音效"
+                vm.systemAudioEffectEnabled && (vm.eqEnabled || vm.soundFxEnabled) ->
+                    "已连接系统音频会话；手机/平板自带杜比等音效可生效（若不想叠加可在音效页切回原声）"
+                vm.systemAudioEffectEnabled ->
+                    "已向系统开放本应用音乐会话，手机/平板自带杜比音效、厂商全景声可直接生效"
+                else -> "关闭后不再广播音频会话，适合希望完全绕过系统音效处理时使用"
+            },
+            checked = vm.systemAudioEffectEnabled,
+            onCheckedChange = vm::changeSystemAudioEffect
+        )
+        SettingsActionRow(
+            title = "系统音效控制面板",
+            subtitle = if (vm.hasDedicatedSystemAudioEffectPanel()) {
+                "直接拉起手机/平板自带音效面板（杜比全景声 / 系统调音等）"
+            } else {
+                "打开系统声音与振动设置中的音效/杜比入口"
+            },
+            onClick = { vm.openSystemAudioEffectPanel(context) },
+            actionLabel = "打开"
         )
 
         Spacer(Modifier.height(16.dp))
@@ -1328,7 +1372,7 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
                     vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.COUNTDOWN &&
                         vm.sleepTimerTotalMinutes == m
                 SleepChip(
-                    label = if (m >= 60) "${m / 60} 小时" else "$m 分钟",
+                    label = sleepCountdownChipLabel(m),
                     selected = active
                 ) { vm.setSleepTimer(m) }
             }
@@ -2373,21 +2417,67 @@ private fun WidgetSettingsContent(vm: SonanceViewModel) {
 
 @Composable
 private fun OnlineMusicContent(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
+    val context = LocalContext.current
+    var pendingDownloadTargetMode by remember { mutableStateOf<OnlineMode?>(null) }
+    val storageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val target = pendingDownloadTargetMode
+        pendingDownloadTargetMode = null
+        if (granted) {
+            when (target) {
+                OnlineMode.LX -> vm.changeLxDownloadEnabled(true)
+                OnlineMode.BUILTIN, null -> vm.changeOnlineDownload(true)
+            }
+        } else {
+            vm.showToast("需要存储权限才能保存下载的文件")
+        }
+    }
+
+    fun toggleDownloadWithPermission(mode: OnlineMode, on: Boolean) {
+        if (on && Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(
+                context, Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownloadTargetMode = mode
+            storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else if (mode == OnlineMode.LX) {
+            vm.changeLxDownloadEnabled(on)
+        } else {
+            vm.changeOnlineDownload(on)
+        }
+    }
 
     Column(Modifier.fillMaxWidth()) {
-        // 账号登录已迁至「在线音乐」页右上角，这里仅保留在线音质档位设置
-        NeteaseQualityCard(vm)
-        Spacer(Modifier.height(10.dp))
+        OnlineModeSelectorCard(vm)
+        Spacer(Modifier.height(12.dp))
 
         SettingsSwitchRow(
             title = "在线搜索与播放",
             subtitle = "开启后可以在「在线音乐」页搜索并播放网络歌曲。默认关闭 —— " +
-                "打开后搜索词会发到音源，播放时从音源的 CDN 拉音频流。",
+                if (vm.onlineMode == OnlineMode.LX) {
+                    "开启后按洛雪多平台曲库搜索，并交由当前启用的洛雪 .js 音源解析播放地址。"
+                } else {
+                    "打开后搜索词会发到音源，播放时从音源的 CDN 拉音频流。"
+                },
             checked = vm.onlineMusicEnabled,
             onCheckedChange = { vm.changeOnlineMusic(it) }
         )
 
+        Spacer(Modifier.height(10.dp))
+        when (vm.onlineMode) {
+            OnlineMode.BUILTIN -> BuiltinOnlineSettingsContent(
+                vm = vm,
+                onToggleDownload = { toggleDownloadWithPermission(OnlineMode.BUILTIN, it) }
+            )
+            OnlineMode.LX -> LxSettingsContent(
+                vm = vm,
+                onToggleDownload = { toggleDownloadWithPermission(OnlineMode.LX, it) }
+            )
+        }
+
+        Spacer(Modifier.height(6.dp))
         SettingsSwitchRow(
             title = "用网易云补全本地歌",
             subtitle = "本地曲库的封面 / 歌词取不到时，改用网易云再找一次。默认关闭。\n" +
@@ -2397,18 +2487,101 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
             checked = vm.neteaseFillEnabled,
             onCheckedChange = { vm.changeNeteaseFill(it) }
         )
+    }
+}
 
-        // ===== 播放并下载 =====
-        val context = LocalContext.current
-        val storageLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            if (granted) {
-                vm.changeOnlineDownload(true)
-            } else {
-                vm.showToast("需要存储权限才能保存下载的文件")
-            }
+@Composable
+private fun OnlineModeSelectorCard(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(skin.surface2)
+            .padding(14.dp)
+    ) {
+        Text(
+            "在线音源模式（二选一互斥）",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.text
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OnlineModeOptionButton(
+                title = "内置在线",
+                subtitle = "网易云直连曲库",
+                selected = vm.onlineMode == OnlineMode.BUILTIN,
+                onClick = { vm.changeOnlineMode(OnlineMode.BUILTIN) },
+                modifier = Modifier.weight(1f)
+            )
+            OnlineModeOptionButton(
+                title = "洛雪音源",
+                subtitle = "导入标准洛雪 .js 脚本",
+                selected = vm.onlineMode == OnlineMode.LX,
+                onClick = { vm.changeOnlineMode(OnlineMode.LX) },
+                modifier = Modifier.weight(1f)
+            )
         }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "两种模式完全隔离：切换模式会立即停止并清空上一模式的在线队列与列表；本地歌曲与 DLNA 播放不受影响。",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim
+        )
+    }
+}
+
+@Composable
+private fun OnlineModeOptionButton(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(12.dp)
+    val bg = if (selected) skin.accentGlow else skin.surface
+    val borderColor = if (selected) skin.accent else skin.border
+    Column(
+        modifier
+            .clip(shape)
+            .background(bg)
+            .border(1.dp, borderColor, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (selected) skin.accent else skin.text
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textMuted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun BuiltinOnlineSettingsContent(
+    vm: SonanceViewModel,
+    onToggleDownload: (Boolean) -> Unit
+) {
+    val skin = LocalSkin.current
+    Column(Modifier.fillMaxWidth()) {
+        // 账号登录已迁至「在线音乐」页右上角，这里仅保留在线音质档位设置
+        NeteaseQualityCard(vm)
+        Spacer(Modifier.height(10.dp))
 
         SettingsSwitchRow(
             title = "播放并下载",
@@ -2419,60 +2592,17 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
                 "文件放在「${OnlineDownloader.FOLDER_NAME}」文件夹里 —— " +
                 "重新扫描后「文件夹」页会有这个分类。",
             checked = vm.onlineDownloadEnabled,
-            onCheckedChange = { on ->
-                if (on && Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                    ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                } else {
-                    vm.changeOnlineDownload(on)
-                }
-            }
+            onCheckedChange = onToggleDownload
         )
 
         if (vm.onlineDownloadEnabled) {
-            Column(Modifier.padding(top = 10.dp, bottom = 4.dp)) {
-                SettingsSwitchRow(
-                    title = "只在 Wi-Fi 下下载",
-                    subtitle = "默认开启 —— 不然在移动网络下随便听几张专辑就悄悄吃掉几百 MB。" +
-                        "\n判断不出网络类型时会跳过，不会赌一把。",
-                    checked = vm.onlineDownloadWifiOnly,
-                    onCheckedChange = { vm.changeDownloadWifiOnly(it) }
-                )
-                Text(
-                    "已下载 ${vm.downloadedCount} 首",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.textMuted
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "文件在系统音乐目录的「${OnlineDownloader.FOLDER_NAME}」里，本应用不会删除它们。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textDim
-                )
-            }
+            OnlineDownloadExtraRows(vm)
         }
 
         if (vm.onlineMusicEnabled) {
-            Column(Modifier.padding(top = 14.dp)) {
-                Text(
-                    "音源",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = skin.textMuted
-                )
-                Spacer(Modifier.height(8.dp))
-                ChipsRow(
-                    chips = vm.onlineSources.map { it.label to (it.id == vm.onlineSourceId) },
-                    onSelect = { vm.changeOnlineSource(vm.onlineSources[it].id) }
-                )
-                PluginSourceRows(vm)
-            }
-
             Spacer(Modifier.height(14.dp))
             Text(
-                "• 未登录时只有音源上免费开放的曲目能播；登录会员账号后 VIP 曲目也可以\n" +
+                "• 未登录时只有免费开放的曲目能播；登录会员账号后 VIP 曲目也可以\n" +
                     "• 音质以音源实际返回的档位为准，标「无损」却只给 320k 时会如实显示 320k\n" +
                     "• 搜索只发送你输入的关键词，不发送任何本地路径或文件\n" +
                     "• 在线歌不进本地曲库，也不会写进「最近播放」「播放次数」\n" +
@@ -2481,6 +2611,251 @@ private fun OnlineMusicContent(vm: SonanceViewModel) {
                 color = skin.textDim
             )
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LxSettingsContent(
+    vm: SonanceViewModel,
+    onToggleDownload: (Boolean) -> Unit
+) {
+    val skin = LocalSkin.current
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) vm.importLxScriptFromUri(uri)
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        // 1. 洛雪脚本管理卡片
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(skin.surface2)
+                .padding(14.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "洛雪音源脚本",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text
+                    )
+                    Text(
+                        "支持标准洛雪 v2（globalThis.lx）.js 脚本，导入即自动校验并启用",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                PillButton(
+                    label = if (vm.lxImporting) "导入中…" else "导入 .js",
+                    enabled = !vm.lxImporting,
+                    compact = true,
+                    onClick = {
+                        importLauncher.launch(
+                            arrayOf("application/javascript", "text/javascript", "text/plain", "*/*")
+                        )
+                    }
+                )
+            }
+
+            if (vm.lxImporting) {
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "正在加载脚本并等待 inited 回调…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
+
+            vm.lxImportError?.let { err ->
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(skin.surface)
+                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { vm.dismissLxImportError() }) {
+                        Text("关闭", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            if (vm.lxScripts.isEmpty()) {
+                Text(
+                    "尚未导入任何洛雪 .js 音源。你可以在此处或在「在线音乐」页顶部随时导入。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    vm.lxScripts.forEach { record ->
+                        val active = record.id == vm.lxActiveScriptId
+                        val shape = RoundedCornerShape(11.dp)
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(shape)
+                                .background(if (active) skin.accentGlow else skin.surface)
+                                .border(
+                                    1.dp,
+                                    if (active) skin.accent else skin.border,
+                                    shape
+                                )
+                                .clickable { vm.selectLxScript(record.id) }
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = if (active) "${record.meta.name}（当前）" else record.meta.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (active) skin.accent else skin.text,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val infoLine = record.displayVersionLine()
+                                if (infoLine.isNotBlank()) {
+                                    Text(
+                                        text = infoLine,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = skin.textMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (!record.lastError.isNullOrBlank()) {
+                                    Text(
+                                        text = record.lastError,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            TextButton(onClick = { vm.removeLxScript(record.id) }) {
+                                Text(
+                                    "删除",
+                                    color = skin.textMuted,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        // 2. 洛雪默认播放音质卡
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(skin.surface2)
+                .padding(14.dp)
+        ) {
+            Text(
+                "默认播放音质",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.text
+            )
+            Spacer(Modifier.height(8.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LxQuality.entries.forEach { q ->
+                    TagChip(
+                        label = q.title,
+                        selected = vm.lxQuality == q.id,
+                        onClick = { vm.changeLxQuality(q.id) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "请求时优先尝试不超过所选档位的最高音质；若当前洛雪脚本不支持该档位，会自动逐级向下平滑回退。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        // 3. 洛雪模式独立的「播放并下载」开关（默认关闭）
+        SettingsSwitchRow(
+            title = "播放并下载",
+            subtitle = "洛雪模式下播放在线歌时自动存一份到本地（默认关闭，可在此手动开启）。\n" +
+                "为降低音源限流风险，下载直接复用本次播放解析到的同一条音频流，" +
+                "文件保存在系统音乐目录的「${OnlineDownloader.FOLDER_NAME}」文件夹。",
+            checked = vm.lxDownloadEnabled,
+            onCheckedChange = onToggleDownload
+        )
+
+        if (vm.lxDownloadEnabled) {
+            OnlineDownloadExtraRows(vm)
+        }
+
+        if (vm.onlineMusicEnabled) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "• 曲库支持酷我 / QQ / 酷狗 / 网易云多平台搜索、排行榜、歌单分类、歌词与封面\n" +
+                    "• 播放地址由你导入的洛雪脚本实时解析；Sonance 不做批量预解析预取，避免触发音源风控\n" +
+                    "• 切换回「内置在线」模式会自动清空当前在线队列与洛雪页面状态",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+        }
+    }
+}
+
+@Composable
+private fun OnlineDownloadExtraRows(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    Column(Modifier.padding(top = 10.dp, bottom = 4.dp)) {
+        SettingsSwitchRow(
+            title = "只在 Wi-Fi 下下载",
+            subtitle = "默认开启 —— 不然在移动网络下随便听几张专辑就悄悄吃掉几百 MB。" +
+                "\n判断不出网络类型时会跳过，不会赌一把。",
+            checked = vm.onlineDownloadWifiOnly,
+            onCheckedChange = { vm.changeDownloadWifiOnly(it) }
+        )
+        Text(
+            "已下载 ${vm.downloadedCount} 首",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "文件在系统音乐目录的「${OnlineDownloader.FOLDER_NAME}」里，本应用不会删除它们。",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim
+        )
     }
 }
 
@@ -3239,87 +3614,4 @@ internal fun buildLastScanSubtitle(
         else -> "${mins / (24 * 60)} 天前"
     }
     return "上次扫描：$rel · $songCount 首 · $scopeText"
-}
-
-/**
- * 内容源插件的导入与管理。
- */
-@Composable
-private fun PluginSourceRows(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            val text = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(uri)
-                        ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                }.getOrNull()
-            }
-            vm.importPluginScript(text.orEmpty())
-        }
-    }
-
-    Spacer(Modifier.height(12.dp))
-    Text("内容源插件", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
-    Spacer(Modifier.height(4.dp))
-
-    vm.pluginRecords.forEach { record ->
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    record.meta.platform,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = skin.text
-                )
-                Text(
-                    "v${record.meta.version} · ${if (record.enabled) "已启用" else "已停用"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
-                )
-            }
-            Switch(
-                checked = record.enabled,
-                onCheckedChange = { vm.setPluginEnabled(record.meta.id, it) },
-                colors = SwitchDefaults.colors(checkedThumbColor = skin.accent)
-            )
-            TextButton(onClick = { vm.removePlugin(record.meta.id) }) {
-                Text("删除", color = skin.textMuted, style = MaterialTheme.typography.labelSmall)
-            }
-        }
-    }
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { launcher.launch("*/*") }) {
-            Text("导入插件 (.js)", color = skin.accent, style = MaterialTheme.typography.labelMedium)
-        }
-        vm.pluginHint?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted,
-                modifier = Modifier.padding(start = 8.dp)
-            )
-        }
-    }
-
-    Text(
-        "• 只支持 CommonJS 内容源插件（module.exports 导出 search / getMediaSource）；" +
-            "洛雪自定义源脚本是另一套协议，不能在这里导入\n" +
-            "• axios 垫片支持 params / headers / timeout / JSON 响应；" +
-            "依赖 cheerio / crypto-js 等第三方 npm 包的插件暂不支持\n" +
-            "• 插件若用 http 明文接口，域名需在明文白名单（network_security_config）里，" +
-            "不在名单里的域名会被系统直接拦掉\n" +
-            "• 本期打通搜索与在线播放，下载暂不走插件取流\n" +
-            "• 插件会在应用内发起网络请求，请只导入你信任且已获授权的内容源；" +
-            "应用不内置任何音源，也不提供插件获取渠道\n" +
-            "• 切换上方「音源」后，搜索结果就来自所选插件",
-        style = MaterialTheme.typography.labelSmall,
-        color = skin.textDim
-    )
 }

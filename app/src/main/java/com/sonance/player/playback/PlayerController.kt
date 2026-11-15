@@ -43,7 +43,8 @@ enum class RepeatMode { OFF, ALL, ONE }
 enum class PlayMode(val label: String) {
     SHUFFLE("随机播放"),
     REPEAT_ALL("列表循环"),
-    REPEAT_ONE("单曲循环");
+    REPEAT_ONE("单曲循环"),
+    SEQUENTIAL("顺序播放");
 
     /** 下一个模式。按钮点一下就取它 */
     fun next(): PlayMode = entries[(ordinal + 1) % entries.size]
@@ -55,15 +56,13 @@ enum class PlayMode(val label: String) {
          * **`shuffle` 优先**：它开着的时候 repeat 是 ALL 还是 OFF 对用户没区别
          * （队列已经被打乱了），都算"随机播放"。
          *
-         * ⚠️ `shuffle=false + repeat=OFF`（App 的初始状态）**归到列表循环** ——
-         * 三态里没有"放完就停"这一档，把它单列出来就变成四态了。
-         * 代价是首次点击之前，按钮显示"列表循环"而实际放完会停；
-         * 点一下（进入下一态再回来）就真的变成列表循环。
+         * 关闭随机后：`ONE` 为「单曲循环」，`ALL` 为「列表循环」，`OFF` 为「顺序播放」。
          */
         fun of(shuffle: Boolean, repeat: RepeatMode): PlayMode = when {
             shuffle -> SHUFFLE
             repeat == RepeatMode.ONE -> REPEAT_ONE
-            else -> REPEAT_ALL
+            repeat == RepeatMode.ALL -> REPEAT_ALL
+            else -> SEQUENTIAL
         }
     }
 }
@@ -139,6 +138,12 @@ class PlayerController(private val context: Context) {
      */
     var onPlaybackEnded: (() -> Unit)? = null
 
+    /** 随机播放自然播完队列最后一首并回绕到第 0 首时触发（由 ViewModel 自动重洗下一轮）。 */
+    var onShuffleRoundWrapped: (() -> Unit)? = null
+
+    private var lastSyncIndex: Int = -1
+    private var lastSyncCount: Int = 0
+
     /**
      * App 侧的「随机」开关。[PlayerUiState.shuffle] 读的是它，不是播放器的标志 ——
      * 播放器那个标志一直关着，见 [setShuffle]。
@@ -178,7 +183,12 @@ class PlayerController(private val context: Context) {
          * 不是用户又听了一遍。不拦的话每开一次 App 就给那首歌的播放次数 +1，
          * 「播放最多」排序会被开机次数污染。
          */
-        val notifyStart: Boolean = true
+        val notifyStart: Boolean = true,
+        /**
+         * 是否来自「恢复上次播放现场」。后台 PlaybackService 若已持有活跃队列或正在播放，
+         * 界面重连后必须放弃恢复请求，不能用本地存档顶掉正在播放的音乐或触发暂停。
+         */
+        val isRestore: Boolean = false
     )
 
     init {
@@ -195,15 +205,34 @@ class PlayerController(private val context: Context) {
         future.addListener({
             val c = runCatching { future.get() }.getOrNull() ?: return@addListener
             controller = c
-            // 冷启动恢复时 [setRepeat] 可能早于连接完成：这里补上记住的模式
-            c.repeatMode = repeatState.toPlayerRepeat()
-            // 同理补上播放速度（1f 不用写，播放器默认就是 1f）
-            if (speedState != 1f) {
-                c.playbackParameters = c.playbackParameters.withSpeed(speedState)
+            val livePlaybackActive = c.mediaItemCount > 0 || c.isPlaying || c.playWhenReady
+            // 后台服务没有活跃现场时，才由新 ViewModel 写入持久化的模式与倍速；
+            // 若服务仍在后台播着（从桌面小组件/超级岛点回界面重建了 Activity），保留服务端当前状态
+            if (!livePlaybackActive) {
+                c.repeatMode = repeatState.toPlayerRepeat()
+                if (speedState != 1f) {
+                    c.playbackParameters = c.playbackParameters.withSpeed(speedState)
+                }
             }
             // 随机始终由 App 自己的队列实现，播放器标志固定关掉
             if (c.shuffleModeEnabled) c.shuffleModeEnabled = false
             c.addListener(object : Player.Listener {
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) return
+                    val count = c.mediaItemCount
+                    if (
+                        count >= 3 &&
+                        PlayMode.of(shuffleState, repeatState) == PlayMode.SHUFFLE &&
+                        c.currentMediaItemIndex == 0 &&
+                        lastSyncCount == count &&
+                        lastSyncIndex == count - 1 &&
+                        pendingReorderQueueIds == null
+                    ) {
+                        lastSyncIndex = 0
+                        onShuffleRoundWrapped?.invoke()
+                    }
+                }
+
                 override fun onEvents(player: Player, events: Player.Events) {
                     sync(player, events)
                 }
@@ -230,11 +259,25 @@ class PlayerController(private val context: Context) {
                 }
             })
             _state.update { it.copy(connected = true) }
-            pendingRequest?.let { req ->
-                pendingRequest = null
-                applyPlay(req)
+            val pending = pendingRequest
+            pendingRequest = null
+            val applyPending = pending != null && !shouldSkipRestoreOnConnect(
+                mediaItemCount = c.mediaItemCount,
+                isPlaying = c.isPlaying,
+                playWhenReady = c.playWhenReady,
+                requestIsRestore = pending.isRestore
+            )
+            if (applyPending && pending != null) {
+                applyPlay(pending)
+            } else {
+                // 重连到已经活着的后台服务时，把 lastNotifiedId 对齐当前曲目，
+                // 避免 sync(c, null) 误判成刚切了一首新歌并触发 onSongStarted（重算次数/写盘归零）
+                if (livePlaybackActive) {
+                    val liveId = c.currentMediaItem?.mediaId?.toLongOrNull() ?: 0L
+                    if (liveId != 0L) lastNotifiedId = liveId
+                }
+                sync(c, null)
             }
-            sync(c, null)
             startTicker()
         }, ContextCompat.getMainExecutor(context))
     }
@@ -266,6 +309,10 @@ class PlayerController(private val context: Context) {
         // 才重建 queueIds，避免快速连滑切歌期间每次都遍历整条队列。
         val queueChanged = events == null ||
             events.contains(Player.EVENT_TIMELINE_CHANGED)
+        val pendingReorder = resolvePendingReorder(player)
+        val resolvedIndex = pendingReorder?.second ?: player.currentMediaItemIndex
+        lastSyncIndex = resolvedIndex
+        lastSyncCount = pendingReorder?.first?.size ?: player.mediaItemCount
 
         _state.update { old ->
             old.copy(
@@ -283,17 +330,13 @@ class PlayerController(private val context: Context) {
                 durationMs = duration,
                 positionMs = if (id != old.mediaId) 0L else player.currentPosition.coerceAtLeast(0L),
                 shuffle = shuffleState,
-                repeat = when (player.repeatMode) {
-                    Player.REPEAT_MODE_ALL -> RepeatMode.ALL
-                    Player.REPEAT_MODE_ONE -> RepeatMode.ONE
-                    else -> RepeatMode.OFF
-                },
+                repeat = resolveSyncRepeat(player),
                 volume = player.volume,
-                queueIndex = player.currentMediaItemIndex
+                queueIndex = resolvedIndex
             )
         }
 
-        if (queueChanged) refreshQueue(player)
+        if (queueChanged) refreshQueue(player, pendingReorder)
 
         // ⚠️ 判据是 `id != 0L`，**不能写 `id > 0`** ——
         // 在线歌的 mediaId 是负数（见 `data/remoteSongId`），写成 `> 0` 的话
@@ -319,7 +362,11 @@ class PlayerController(private val context: Context) {
      */
     private var suppressNextStart = false
 
-    private fun refreshQueue(player: Player) {
+    private fun refreshQueue(
+        player: Player,
+        pendingReorder: Pair<List<Long>, Int>? = resolvePendingReorder(player)
+    ) {
+        if (pendingReorder != null) return
         val count = runCatching { player.mediaItemCount }.getOrDefault(0)
         val ids = ArrayList<Long>(count)
         for (i in 0 until count) {
@@ -341,38 +388,64 @@ class PlayerController(private val context: Context) {
         }
     }
 
+    private fun mutationPlayer(controller: MediaController): Player =
+        PlaybackService.playerOrNull() ?: controller
+
+    private inline fun updateCurrentMediaMetadata(
+        expectedMediaId: Long? = null,
+        logTag: String,
+        failPrefix: String,
+        buildMetadata: (current: MediaItem) -> MediaMetadata?
+    ) {
+        val c = controller ?: return
+        val target = mutationPlayer(c)
+        val idx = target.currentMediaItemIndex
+        if (idx !in 0 until target.mediaItemCount) return
+        val current = runCatching { target.getMediaItemAt(idx) }.getOrNull() ?: return
+        if (expectedMediaId != null && current.mediaId != expectedMediaId.toString()) return
+        val metadata = buildMetadata(current) ?: return
+        val updated = current.buildUpon().setMediaMetadata(metadata).build()
+        runCatching {
+            replaceQueueItemSafely(
+                player = target,
+                index = idx,
+                updated = updated,
+                isMediaController = (target === c)
+            )
+        }.onFailure { android.util.Log.w(logTag, "$failPrefix: ${it.message}") }
+    }
+
     /**
      * 刷新当前曲目的封面 metadata。
      *
      * 两个调用时机：切歌之后、封面刚下载完成之后。以前只有 `setMediaItems` 那一刻
      * 会写一次 artworkUri，所以播放中补到的封面永远进不了通知栏。
      *
-     * [MediaController.replaceMediaItem] 在**媒体源没变**时只更新 metadata、
-     * 不会重新准备播放（ExoPlayer 会比较 `MediaItem.localConfiguration`），
-     * 所以播放不中断、进度不丢。开头先比一次 URI，避免每次切歌都白替换一遍。
+     * 优先走进程内服务端 `ExoPlayer` 原地更新 metadata（`updateMediaSourcesWithMediaItems`），
+     * 绕开 media3 1.5.0 `MediaController.replaceMediaItem` 在单曲循环下把当前项误掩码为队首的缺陷；
+     * 开头先比一次 URI，避免每次切歌都白替换一遍。
      */
     fun refreshCurrentArtwork(song: Song) {
-        val c = controller ?: return
-        val idx = c.currentMediaItemIndex
-        if (idx !in 0 until c.mediaItemCount) return
-        val current = runCatching { c.getMediaItemAt(idx) }.getOrNull() ?: return
-        if (current.mediaId != song.id.toString()) return
         val wanted = song.artworkUri(context)
-        if (current.mediaMetadata.artworkUri == wanted) return
-        // 只原地更新 metadata（封面与标签），保留当前 MediaItem 已经解析好的播放流地址，
-        // 避免 onlineSongMap 里的兜底外链（outer/url 30s 试听）把正在播的无损流顶掉。
-        val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle()).apply {
-            putLong(EXTRA_ALBUM_ID, song.albumId)
+        updateCurrentMediaMetadata(
+            expectedMediaId = song.id,
+            logTag = "SonanceCover",
+            failPrefix = "刷新通知栏封面失败"
+        ) { current ->
+            if (current.mediaMetadata.artworkUri == wanted) return@updateCurrentMediaMetadata null
+            // 只原地更新 metadata（封面与标签），保留当前 MediaItem 已经解析好的播放流地址，
+            // 避免 onlineSongMap 里的兜底外链（outer/url 30s 试听）把正在播的无损流顶掉。
+            val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle()).apply {
+                putLong(EXTRA_ALBUM_ID, song.albumId)
+            }
+            current.mediaMetadata.buildUpon()
+                .setTitle(song.title)
+                .setArtist(song.artist)
+                .setAlbumTitle(song.album)
+                .setArtworkUri(wanted)
+                .setExtras(extras)
+                .build()
         }
-        val metadata = current.mediaMetadata.buildUpon()
-            .setTitle(song.title)
-            .setArtist(song.artist)
-            .setAlbumTitle(song.album)
-            .setArtworkUri(wanted)
-            .setExtras(extras)
-            .build()
-        runCatching { c.replaceMediaItem(idx, current.buildUpon().setMediaMetadata(metadata).build()) }
-            .onFailure { android.util.Log.w("SonanceCover", "刷新通知栏封面失败: ${it.message}") }
     }
 
     /**
@@ -398,22 +471,26 @@ class PlayerController(private val context: Context) {
             }
             return
         }
-        val count = runCatching { c.mediaItemCount }.getOrDefault(0)
+        val target = mutationPlayer(c)
+        val count = runCatching { target.mediaItemCount }.getOrDefault(0)
         for (i in 0 until count) {
-            val item = runCatching { c.getMediaItemAt(i) }.getOrNull() ?: continue
+            val item = runCatching { target.getMediaItemAt(i) }.getOrNull() ?: continue
             if (item.mediaId != mediaId.toString()) continue
             if (item.localConfiguration?.uri == uri) return
             val curUri = item.localConfiguration?.uri?.toString()
-            if (i == c.currentMediaItemIndex && c.isPlaying && !isUnresolvedStreamUri(curUri)) return
+            if (i == target.currentMediaItemIndex && target.isPlaying && !isUnresolvedStreamUri(curUri)) return
             val extras = android.os.Bundle(item.mediaMetadata.extras ?: android.os.Bundle()).apply {
                 putString(EXTRA_URI, uri.toString())
             }
             val metadata = item.mediaMetadata.buildUpon().setExtras(extras).build()
+            val updated = item.buildUpon().setUri(uri).setMediaMetadata(metadata).build()
             runCatching {
-                c.replaceMediaItem(i, item.buildUpon().setUri(uri).setMediaMetadata(metadata).build())
-                if (i == c.currentMediaItemIndex && c.playbackState == Player.STATE_IDLE) {
-                    c.prepare()
-                }
+                replaceQueueItemSafely(
+                    player = target,
+                    index = i,
+                    updated = updated,
+                    isMediaController = (target === c)
+                )
             }.onFailure { android.util.Log.w("Sonance", "补流地址失败: ${it.message}") }
             return
         }
@@ -426,26 +503,26 @@ class PlayerController(private val context: Context) {
      * 所以这里只改 extras，其余字段（标题、歌手、封面、时长）全部原样带回 ——
      * 换掉整个 metadata 会把封面和身份一起丢了。
      *
-     * 用 `replaceMediaItem` 而不是重建 MediaItem：这条路径本来就在给通知栏刷封面
-     * （见 [refreshCurrentArtwork]），实测不会打断播放。
+     * 同样走 [updateCurrentMediaMetadata]（优先服务端 `ExoPlayer`），避免单曲循环下
+     * `MediaController.replaceMediaItem` 触发队列误跳回第 0 首。
      *
      * @param json null = 清除（换到没有歌词的歌时要把上一首的歌词收掉，
      *   否则锁屏会一直挂着上一首的句子）
      */
-    fun publishLyricsInfo(json: String?) {
-        val c = controller ?: return
-        val idx = c.currentMediaItemIndex
-        if (idx !in 0 until c.mediaItemCount) return
-        val current = runCatching { c.getMediaItemAt(idx) }.getOrNull() ?: return
-
-        val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle())
-        if (json == null) extras.remove(LockScreenLyrics.EXTRA_KEY)
-        else extras.putString(LockScreenLyrics.EXTRA_KEY, json)
-        if (current.mediaMetadata.extras?.getString(LockScreenLyrics.EXTRA_KEY) == json) return
-
-        val metadata = current.mediaMetadata.buildUpon().setExtras(extras).build()
-        runCatching { c.replaceMediaItem(idx, current.buildUpon().setMediaMetadata(metadata).build()) }
-            .onFailure { android.util.Log.w("SonanceLyrics", "发布锁屏歌词失败: ${it.message}") }
+    fun publishLyricsInfo(json: String?, expectedMediaId: Long? = null) {
+        updateCurrentMediaMetadata(
+            expectedMediaId = expectedMediaId,
+            logTag = "SonanceLyrics",
+            failPrefix = "发布锁屏歌词失败"
+        ) { current ->
+            if (current.mediaMetadata.extras?.getString(LockScreenLyrics.EXTRA_KEY) == json) {
+                return@updateCurrentMediaMetadata null
+            }
+            val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle())
+            if (json == null) extras.remove(LockScreenLyrics.EXTRA_KEY)
+            else extras.putString(LockScreenLyrics.EXTRA_KEY, json)
+            current.mediaMetadata.buildUpon().setExtras(extras).build()
+        }
     }
 
     /**
@@ -579,9 +656,10 @@ class PlayerController(private val context: Context) {
         index: Int,
         autoplay: Boolean = true,
         startPositionMs: Long = 0L,
-        notifyStart: Boolean = true
+        notifyStart: Boolean = true,
+        isRestore: Boolean = false
     ) {
-        val req = PlayRequest(songs, index, autoplay, startPositionMs, notifyStart)
+        val req = PlayRequest(songs, index, autoplay, startPositionMs, notifyStart, isRestore)
         val c = controller
         if (c == null) {
             pendingRequest = req
@@ -630,11 +708,27 @@ class PlayerController(private val context: Context) {
      * 全程不触碰 curIdx 本身的 MediaItem，ExoPlayer 自动把当前项平移到 	arget，
      * 音频解码与缓冲毫发无损、零停顿！
      */
-    fun reorderQueueKeepingCurrent(songs: List<Song>, targetIndex: Int) {
-        if (songs.isEmpty()) return
+    fun reorderQueueKeepingCurrent(
+        songs: List<Song>,
+        targetIndex: Int,
+        shuffle: Boolean? = null,
+        repeat: RepeatMode? = null
+    ) {
+        if (shuffle != null) shuffleState = shuffle
+        if (repeat != null) {
+            repeatState = repeat
+            repeatLockUntilMs = android.os.SystemClock.elapsedRealtime() + 700L
+        }
+        val effectiveShuffle = shuffleState
+        val effectiveRepeat = repeatState
+        if (songs.isEmpty()) {
+            _state.update { it.copy(shuffle = effectiveShuffle, repeat = effectiveRepeat) }
+            return
+        }
         val target = targetIndex.coerceIn(0, songs.lastIndex)
         val c = controller
         if (c == null) {
+            _state.update { it.copy(shuffle = effectiveShuffle, repeat = effectiveRepeat) }
             pendingRequest = PlayRequest(
                 songs = songs,
                 index = target,
@@ -644,18 +738,36 @@ class PlayerController(private val context: Context) {
             )
             return
         }
+        if (shuffle != null && c.shuffleModeEnabled) c.shuffleModeEnabled = false
+        if (repeat != null) c.repeatMode = effectiveRepeat.toPlayerRepeat()
         cancelPendingSwitchFade()
         val curIdx = c.currentMediaItemIndex
         val curMediaId = c.currentMediaItem?.mediaId
         val targetSong = songs[target]
         if (curIdx in 0 until c.mediaItemCount && curMediaId == targetSong.id.toString()) {
+            val pendingIds = songs.map { it.id }
+            pendingReorderQueueIds = pendingIds
+            pendingReorderTargetIndex = target
+            pendingReorderTargetMediaId = targetSong.id.toString()
+            pendingReorderUntilMs = android.os.SystemClock.elapsedRealtime() + 1500L
+            // 先在 UI 态一次性对齐到目标队列与目标下标，避免两次 replaceMediaItems IPC
+            // 期间产生「已切队列列表但 queueIndex 还是旧值」的中间错位帧。
+            _state.update {
+                it.copy(
+                    shuffle = effectiveShuffle,
+                    repeat = effectiveRepeat,
+                    queueIds = pendingIds,
+                    queueIndex = target
+                )
+            }
             val afterItems = songs.subList(target + 1, songs.size).map { it.toMediaItem(context) }
             val beforeItems = songs.subList(0, target).map { it.toMediaItem(context) }
             c.replaceMediaItems(curIdx + 1, c.mediaItemCount, afterItems)
             c.replaceMediaItems(0, curIdx, beforeItems)
-            refreshQueue(c)
-            sync(c, null)
         } else {
+            if (shuffle != null || repeat != null) {
+                _state.update { it.copy(shuffle = effectiveShuffle, repeat = effectiveRepeat) }
+            }
             val pos = c.currentPosition.coerceAtLeast(0L)
             val autoplay = activePlaybackIntent(c.playWhenReady, c.playbackState, c.playerError != null)
             applyPlay(PlayRequest(songs, target, autoplay, pos, notifyStart = false))
@@ -847,15 +959,74 @@ class PlayerController(private val context: Context) {
      * 做 OFF→ALL→ONE 转一圈，三态合并之后没有调用方了，已删除 ——
      * 它那种"转一圈"的语义和 [PlayMode] 的三态不是一回事，留着只会让人误用。
      */
+    @Volatile
+    private var repeatLockUntilMs: Long = 0L
+
+    @Volatile
+    private var pendingReorderQueueIds: List<Long>? = null
+
+    @Volatile
+    private var pendingReorderTargetIndex: Int = -1
+
+    @Volatile
+    private var pendingReorderTargetMediaId: String? = null
+
+    @Volatile
+    private var pendingReorderUntilMs: Long = 0L
+
+    private fun resolveSyncRepeat(player: Player): RepeatMode =
+        if (android.os.SystemClock.elapsedRealtime() < repeatLockUntilMs) {
+            repeatState
+        } else {
+            when (player.repeatMode) {
+                Player.REPEAT_MODE_ALL -> RepeatMode.ALL
+                Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+                else -> RepeatMode.OFF
+            }
+        }
+
+    private fun resolvePendingReorder(player: Player): Pair<List<Long>, Int>? {
+        val ids = pendingReorderQueueIds ?: return null
+        val targetIdx = pendingReorderTargetIndex
+        val targetMediaId = pendingReorderTargetMediaId
+        val settled = player.currentMediaItem?.mediaId == targetMediaId &&
+            player.currentMediaItemIndex == targetIdx &&
+            player.mediaItemCount == ids.size
+        if (settled || android.os.SystemClock.elapsedRealtime() >= pendingReorderUntilMs) {
+            pendingReorderQueueIds = null
+            pendingReorderTargetIndex = -1
+            pendingReorderTargetMediaId = null
+            pendingReorderUntilMs = 0L
+            return null
+        }
+        return ids to targetIdx
+    }
+
+    /** 原子设置播放模式（shuffle + repeat），避免连发两次状态更新导致 UI / 图标闪烁。 */
+    fun setPlayModeState(shuffle: Boolean, repeat: RepeatMode) {
+        shuffleState = shuffle
+        repeatState = repeat
+        repeatLockUntilMs = android.os.SystemClock.elapsedRealtime() + 700L
+        val c = controller
+        if (c == null) {
+            _state.update { it.copy(shuffle = shuffle, repeat = repeat) }
+            return
+        }
+        if (c.shuffleModeEnabled) c.shuffleModeEnabled = false
+        c.repeatMode = repeat.toPlayerRepeat()
+        _state.update { it.copy(shuffle = shuffle, repeat = repeat) }
+    }
+
     fun setRepeat(mode: RepeatMode) {
         repeatState = mode
+        repeatLockUntilMs = android.os.SystemClock.elapsedRealtime() + 700L
         val c = controller
         if (c == null) {
             _state.update { it.copy(repeat = mode) }
             return
         }
         c.repeatMode = mode.toPlayerRepeat()
-        sync(c, null)
+        _state.update { it.copy(repeat = mode) }
     }
 
     private fun RepeatMode.toPlayerRepeat(): Int = when (this) {
@@ -901,6 +1072,39 @@ class PlayerController(private val context: Context) {
         _state.update { PlayerUiState(connected = true, volume = it.volume, userVolume = it.userVolume) }
     }
 
+    /**
+     * 从当前播放队列里剔除已被删除的曲目，避免已删歌曲仍停留在播放条或后续队列里。
+     * 当前曲目被删时若队列清空则停播并复位状态；否则保留其余曲目顺序并从下一首待机。
+     */
+    fun removeSongIds(ids: Set<Long>) {
+        if (ids.isEmpty()) return
+        val c = controller ?: return
+        val target = mutationPlayer(c)
+        val count = runCatching { target.mediaItemCount }.getOrDefault(0)
+        if (count <= 0) return
+
+        val indicesToRemove = ArrayList<Int>()
+        for (i in 0 until count) {
+            val id = runCatching { target.getMediaItemAt(i).mediaId.toLongOrNull() ?: -1L }.getOrDefault(-1L)
+            if (id in ids) indicesToRemove += i
+        }
+        if (indicesToRemove.isEmpty()) return
+        if (indicesToRemove.size >= count) {
+            clearQueue()
+            return
+        }
+
+        cancelPendingSwitchFade()
+        val currentIdx = target.currentMediaItemIndex
+        val removingCurrent = currentIdx in indicesToRemove
+        if (removingCurrent) target.pause()
+        for (i in indicesToRemove.asReversed()) {
+            runCatching { target.removeMediaItem(i) }
+        }
+        refreshQueue(target)
+        sync(target, null)
+    }
+
     fun release() {
         cancelPendingSwitchFade()
         ticker?.cancel()
@@ -913,6 +1117,78 @@ class PlayerController(private val context: Context) {
     companion object {
         const val EXTRA_ALBUM_ID = "sonance.album_id"
         const val EXTRA_URI = "sonance.source_uri"
+
+        /**
+         * 连接服务端成功时判断是否应丢弃等待中的「恢复现场」请求：
+         * 后台服务已存在队列、正在播放或处于 playWhenReady 意图时绝不能覆写或暂停。
+         */
+        internal fun shouldSkipRestoreOnConnect(
+            mediaItemCount: Int,
+            isPlaying: Boolean,
+            playWhenReady: Boolean,
+            requestIsRestore: Boolean
+        ): Boolean = requestIsRestore && (mediaItemCount > 0 || isPlaying || playWhenReady)
+
+        /**
+         * ViewModel 初始化或扫描完成准备做「恢复现场」前，检查前端或同进程服务是否已在播放/持有队列。
+         */
+        internal fun hasActiveServicePlayback(
+            uiHasItem: Boolean,
+            servicePlayer: Player?
+        ): Boolean {
+            if (uiHasItem) return true
+            val sp = servicePlayer ?: return false
+            return sp.mediaItemCount > 0 || sp.isPlaying || sp.playWhenReady
+        }
+
+        /**
+         * Safely replace a single queue item without triggering Media3 1.5.0's `REPEAT_MODE_ONE`
+         * removal-masking fallback (which resets `currentMediaItemIndex` to `0` on `MediaController`
+         * metadata updates and on `ExoPlayer` when the active item's URI changes).
+         */
+        internal fun replaceQueueItemSafely(
+            player: Player,
+            index: Int,
+            updated: MediaItem,
+            isMediaController: Boolean
+        ) {
+            val count = player.mediaItemCount
+            if (index !in 0 until count) return
+            val existing = player.getMediaItemAt(index)
+            val sameLocalConfig = existing.localConfiguration == updated.localConfiguration
+            val isCurrent = index == player.currentMediaItemIndex
+            val isRepeatOne = player.repeatMode == Player.REPEAT_MODE_ONE
+
+            if (sameLocalConfig) {
+                if (isMediaController && isCurrent && isRepeatOne) return
+                player.replaceMediaItem(index, updated)
+                return
+            }
+
+            if (isCurrent && isRepeatOne) {
+                val resumePos = player.currentPosition.coerceAtLeast(0L)
+                val shouldPlay = activePlaybackIntent(
+                    player.playWhenReady,
+                    player.playbackState,
+                    player.playerError != null
+                )
+                player.addMediaItem(index + 1, updated)
+                player.seekTo(index + 1, resumePos)
+                player.removeMediaItem(index)
+                if (player.playbackState == Player.STATE_IDLE) {
+                    player.prepare()
+                }
+                if (shouldPlay && !player.playWhenReady) {
+                    player.play()
+                }
+                return
+            }
+
+            player.replaceMediaItem(index, updated)
+            if (isCurrent && player.playbackState == Player.STATE_IDLE) {
+                player.prepare()
+            }
+        }
 
         /** 判断播放项当前的 URI 是否仍只是未解析的空地址或外链 30s 兜底页。 */
         internal fun isUnresolvedStreamUri(uri: String?): Boolean {

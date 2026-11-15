@@ -51,6 +51,23 @@
         android:name="android.hardware.audio.output"
         android:required="false" />
 
+    <!-- Android 11+ 包可见性：查询手机/平板系统音效面板（杜比/厂商音效）与声音设置 -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.DISPLAY_AUDIO_EFFECT_CONTROL_PANEL" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.SOUND_SETTINGS" />
+        </intent>
+        <package android:name="com.dolby.daxappui" />
+        <package android:name="com.motorola.dolby.dolbyui" />
+        <package android:name="com.sec.android.app.soundalive" />
+        <package android:name="com.miui.misound" />
+        <package android:name="com.oplus.melody" />
+        <package android:name="com.oneplus.sound.tuner" />
+        <package android:name="com.android.musicfx" />
+    </queries>
+
     <application
         android:name=".SonanceApplication"
         android:allowBackup="true"

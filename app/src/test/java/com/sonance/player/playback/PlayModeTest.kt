@@ -30,13 +30,9 @@ class PlayModeTest {
     }
 
     @Test
-    fun `App 初始状态归到列表循环`() {
-        // shuffle=false + repeat=OFF 是 App 的初始状态。
-        // 三态里没有"放完就停"这一档，把它单列出来就变成四态了 ——
-        // 所以归到列表循环。代价是首次点击之前显示"列表循环"而实际会停，
-        // 点一下就真的变成列表循环。这条测试把这个取舍钉住，
-        // 免得以后有人"顺手"把它改成第四态。
-        assertEquals(PlayMode.REPEAT_ALL, PlayMode.of(shuffle = false, repeat = RepeatMode.OFF))
+    fun `App 初始状态归到顺序播放`() {
+        // shuffle=false + repeat=OFF 对应"顺序播放"（按当前列表从头播到尾后停止）。
+        assertEquals(PlayMode.SEQUENTIAL, PlayMode.of(shuffle = false, repeat = RepeatMode.OFF))
     }
 
     @Test
@@ -52,22 +48,23 @@ class PlayModeTest {
     // ===== 循环 =====
 
     @Test
-    fun `三态按固定顺序循环`() {
+    fun `四态按固定顺序循环`() {
         assertEquals(PlayMode.REPEAT_ALL, PlayMode.SHUFFLE.next())
         assertEquals(PlayMode.REPEAT_ONE, PlayMode.REPEAT_ALL.next())
-        assertEquals(PlayMode.SHUFFLE, PlayMode.REPEAT_ONE.next())
+        assertEquals(PlayMode.SEQUENTIAL, PlayMode.REPEAT_ONE.next())
+        assertEquals(PlayMode.SHUFFLE, PlayMode.SEQUENTIAL.next())
     }
 
     @Test
-    fun `点三下回到原点`() {
+    fun `点四下回到原点`() {
         for (start in PlayMode.entries) {
-            assertEquals(start, start.next().next().next())
+            assertEquals(start, start.next().next().next().next())
         }
     }
 
     @Test
-    fun `循环只覆盖这三个状态`() {
-        // 遍历一整圈，必须恰好回到起点且不重复 —— 少了会卡住，多了会出现第四档
+    fun `循环只覆盖这四个状态`() {
+        // 遍历一整圈，必须恰好回到起点且不重复
         val seen = LinkedHashSet<PlayMode>()
         var cur = PlayMode.SHUFFLE
         repeat(PlayMode.entries.size) {
@@ -81,7 +78,7 @@ class PlayModeTest {
     // ===== 文案 =====
 
     @Test
-    fun `三种模式的文案互不相同且非空`() {
+    fun `四种模式的文案互不相同且非空`() {
         // 文案是点一下之后弹出的提示语，重复了用户就分不清切到了哪一档
         for (m in PlayMode.entries) {
             assertTrue("${m.name} 的文案为空", m.label.isNotBlank())
@@ -91,16 +88,17 @@ class PlayModeTest {
     }
 
     @Test
-    fun `文案就是用户要求的那三种说法`() {
+    fun `文案就是用户要求的那四种说法`() {
         assertEquals("随机播放", PlayMode.SHUFFLE.label)
         assertEquals("列表循环", PlayMode.REPEAT_ALL.label)
         assertEquals("单曲循环", PlayMode.REPEAT_ONE.label)
+        assertEquals("顺序播放", PlayMode.SEQUENTIAL.label)
     }
 
     @Test
-    fun `正好三种模式`() {
-        // 用户明确要求三态。多一个少一个都会让"点几下能切回来"这个预期失效
-        assertEquals(3, PlayMode.entries.size)
+    fun `正好四种模式`() {
+        assertEquals(4, PlayMode.entries.size)
         assertNotEquals(PlayMode.SHUFFLE, PlayMode.REPEAT_ALL)
+        assertNotEquals(PlayMode.REPEAT_ONE, PlayMode.SEQUENTIAL)
     }
 }

@@ -224,7 +224,7 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putLong(KEY_PLAY_POS, v).apply()
 
     /**
-     * 播放模式（[PlayMode] 的 name：SHUFFLE / REPEAT_ALL / REPEAT_ONE）。
+     * 播放模式（[PlayMode] 的 name：SHUFFLE / REPEAT_ALL / REPEAT_ONE / SEQUENTIAL）。
      *
      * 用字符串而不是 ordinal：以后模式顺序变了，旧值也不会错位成另一种模式。
      * 默认「列表循环」—— 与 UI 的首个图标一致。
@@ -611,6 +611,11 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_MINI_PROGRESS, MiniProgressStyle.RING.ordinal)
         set(v) = sp.edit().putInt(KEY_MINI_PROGRESS, v).apply()
 
+    /** 悬浮卡片歌手行下方是否显示「当前进度 / 总时长」数字时间。默认开启。 */
+    var miniShowTime: Boolean
+        get() = sp.getBoolean(KEY_MINI_SHOW_TIME, true)
+        set(v) = sp.edit().putBoolean(KEY_MINI_SHOW_TIME, v).apply()
+
     /**
      * 悬浮卡片左右滑动切歌时的动效样式：[MiniSwipeStyle] 的 ordinal。
      * 默认整卡滑动；也支持保留外圈底座槽、内卡在槽内带圆角滑动渐隐。
@@ -838,10 +843,11 @@ class Prefs(context: Context) {
     /**
      * 选中的音源 id（见 [OnlineSources]）。
      *
-     * 存字符串而不是下标：以后音源清单增删时，下标会串位，字符串不会。
+     * 存字符串而不是下标：若旧版本持久化了已下线的插件 id，自动回退到当前可用默认音源。
      */
     var onlineSourceId: String
         get() = sp.getString(KEY_ONLINE_SOURCE, null)
+            ?.takeIf { saved -> OnlineSources.all.any { it.id == saved } }
             ?: OnlineSources.all.firstOrNull()?.id.orEmpty()
         set(v) = sp.edit().putString(KEY_ONLINE_SOURCE, v).apply()
 
@@ -879,11 +885,7 @@ class Prefs(context: Context) {
      * 词与词之间用换行分隔 —— 搜索词来自单行输入框，正常不会有换行；
      * 万一粘贴进来的词带换行，存之前会先剥掉。
      */
-    fun onlineHistory(): List<String> =
-        (sp.getString(KEY_ONLINE_HISTORY, "") ?: "")
-            .split('\n')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
+    fun onlineHistory(): List<String> = readHistory(KEY_ONLINE_HISTORY)
 
     /**
      * 记一次搜索。
@@ -906,6 +908,56 @@ class Prefs(context: Context) {
     }
 
     fun clearOnlineHistory() = sp.edit().remove(KEY_ONLINE_HISTORY).apply()
+
+    // ===== 洛雪音源模式（与内置在线模式二选一）=====
+
+    /** 当前在线音乐模式：内置网易云 或 洛雪音源。默认 [OnlineMode.BUILTIN] */
+    var onlineMode: OnlineMode
+        get() = OnlineMode.fromStored(sp.getString(KEY_ONLINE_MODE, null))
+        set(v) = sp.edit().putString(KEY_ONLINE_MODE, v.name).apply()
+
+    /** 当前启用的洛雪音源脚本 id（对应 `LxRepository` 保存的记录 id） */
+    var lxActiveSourceId: String
+        get() = sp.getString(KEY_LX_ACTIVE_SOURCE, null).orEmpty()
+        set(v) = sp.edit().putString(KEY_LX_ACTIVE_SOURCE, v).apply()
+
+    /** 洛雪模式当前选中的曲库平台（`kw` / `kg` / `tx` / `wy`） */
+    var lxPlatform: String
+        get() = sp.getString(KEY_LX_PLATFORM, null).orEmpty().ifBlank { "kw" }
+        set(v) = sp.edit().putString(KEY_LX_PLATFORM, v).apply()
+
+    /** 洛雪模式请求音质（`128k` / `320k` / `flac` / `flac24bit`） */
+    var lxQuality: String
+        get() = sp.getString(KEY_LX_QUALITY, null).orEmpty().ifBlank { "320k" }
+        set(v) = sp.edit().putString(KEY_LX_QUALITY, v).apply()
+
+    /** 洛雪模式播放并下载开关，独立于内置开关，默认关闭 */
+    var lxDownloadEnabled: Boolean
+        get() = sp.getBoolean(KEY_LX_DOWNLOAD_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_LX_DOWNLOAD_ENABLED, v).apply()
+
+    /** 洛雪页面最近搜索历史，最新的在前 */
+    fun lxHistory(): List<String> = readHistory(KEY_LX_HISTORY)
+
+    fun pushLxHistory(term: String) {
+        val next = nextOnlineHistory(lxHistory(), term, MAX_ONLINE_HISTORY)
+        sp.edit().putString(KEY_LX_HISTORY, next.joinToString("\n")).apply()
+    }
+
+    fun removeLxHistory(term: String) {
+        val current = lxHistory()
+        if (!current.contains(term)) return
+        sp.edit().putString(KEY_LX_HISTORY, current.filter { it != term }.joinToString("\n"))
+            .apply()
+    }
+
+    fun clearLxHistory() = sp.edit().remove(KEY_LX_HISTORY).apply()
+
+    private fun readHistory(key: String): List<String> =
+        (sp.getString(key, "") ?: "")
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
 
     /**
      * 用网易云补全**本地歌**的封面与歌词。**默认关闭**。
@@ -1028,6 +1080,11 @@ class Prefs(context: Context) {
     fun setPresetIdForRoute(routeId: String, presetId: String) =
         sp.edit().putString(KEY_SOUND_ROUTE_PREFIX + routeId, presetId).apply()
 
+    /** 是否将播放器音频会话开放给手机/平板系统音效（杜比全景声 / 厂商音效等）。默认开启。 */
+    var systemAudioEffectEnabled: Boolean
+        get() = sp.getBoolean(KEY_SYSTEM_AUDIO_EFFECT, true)
+        set(v) = sp.edit().putBoolean(KEY_SYSTEM_AUDIO_EFFECT, v).apply()
+
     // ===== 播放速度 =====
 
     /** 播放速度（0.5–2.5 倍）。音调保持不变（time-stretch） */
@@ -1048,6 +1105,11 @@ class Prefs(context: Context) {
     var lyricsHideStatusBar: Boolean
         get() = sp.getBoolean(KEY_LYRICS_HIDE_STATUS_BAR, false)
         set(v) = sp.edit().putBoolean(KEY_LYRICS_HIDE_STATUS_BAR, v).apply()
+
+    /** 全屏歌词页手动滚动歌词跨行时是否触发触觉轻震反馈 */
+    var lyricsScrollHapticEnabled: Boolean
+        get() = sp.getBoolean(KEY_LYRICS_SCROLL_HAPTIC, true)
+        set(v) = sp.edit().putBoolean(KEY_LYRICS_SCROLL_HAPTIC, v).apply()
 
     // ===== 全屏律动柱页 =====
 
@@ -1120,6 +1182,11 @@ class Prefs(context: Context) {
     var compatTreeLabel: String?
         get() = sp.getString(KEY_COMPAT_TREE_LABEL, null)
         set(v) = sp.edit().putString(KEY_COMPAT_TREE_LABEL, v).apply()
+
+    /** 已授权的外部扫描目录（SAF tree uri 与显示名，按 `uri\tlabel` 换行存，用于车机 U 盘等未入库外置存储） */
+    var safScanTrees: String
+        get() = sp.getString(KEY_SAF_SCAN_TREES, "") ?: ""
+        set(v) = sp.edit().putString(KEY_SAF_SCAN_TREES, v).apply()
 
     /** 还原输出目录（SAF tree uri） */
     var restoreOutputTreeUri: String?
@@ -1240,7 +1307,7 @@ class Prefs(context: Context) {
     }
 
     /** 本地歌曲 id 列表（不含在线歌）。给「按最近播放排序」用 —— 在线歌不参与曲库排序 */
-    fun recentIds(limit: Int = 200): List<Long> =
+    fun recentIds(limit: Int = RECENT_LIMIT): List<Long> =
         recentEntries().mapNotNull { if (it.isOnline) null else it.localId.takeIf { id -> id > 0L } }
             .take(limit)
 
@@ -1395,7 +1462,7 @@ class Prefs(context: Context) {
         private const val KEY_DLNA_MANUAL_HOSTS = "dlna_manual_hosts"
 
         /** 最近播放保留多少条。再往上翻既没人看，也会把 SharedPreferences 撑大 */
-        private const val RECENT_LIMIT = 200
+        private const val RECENT_LIMIT = 250
         private const val KEY_LAST_SONG = "last_song"
         private const val KEY_PLAY_QUEUE = "play_queue_ids"
         private const val KEY_PLAY_INDEX = "play_queue_index"
@@ -1433,6 +1500,12 @@ class Prefs(context: Context) {
         private const val KEY_ONLINE_HIDE_UNPLAYABLE = "online_hide_unplayable"
         private const val KEY_ONLINE_QUALITY = "online_music_quality"
         private const val KEY_ONLINE_HISTORY = "online_search_history"
+        private const val KEY_ONLINE_MODE = "online_music_mode"
+        private const val KEY_LX_ACTIVE_SOURCE = "lx_active_source_id"
+        private const val KEY_LX_PLATFORM = "lx_platform"
+        private const val KEY_LX_QUALITY = "lx_quality"
+        private const val KEY_LX_DOWNLOAD_ENABLED = "lx_download_enabled"
+        private const val KEY_LX_HISTORY = "lx_search_history"
 
         /** 搜索历史最多存几条。再多这一行胶囊就翻不动了，而且没人会翻回去用 */
         const val MAX_ONLINE_HISTORY = 12
@@ -1474,6 +1547,7 @@ class Prefs(context: Context) {
         private const val KEY_MINI_GLASS_VIS = "mini_glass_visibility"
         private const val KEY_MINI_OPACITY = "mini_card_opacity"
         private const val KEY_MINI_PROGRESS = "mini_progress_style"
+        private const val KEY_MINI_SHOW_TIME = "mini_show_time"
         private const val KEY_MINI_SWIPE_STYLE = "mini_swipe_style"
         private const val KEY_LOCK_LYRICS = "lock_screen_lyrics"
         private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
@@ -1513,6 +1587,7 @@ class Prefs(context: Context) {
         private const val KEY_SOUND_FX_PARAMS = "sound_fx_params"
         private const val KEY_SOUND_AUTO_ROUTE = "sound_auto_route"
         private const val KEY_SOUND_ROUTE_PREFIX = "sound_route_preset_"
+        private const val KEY_SYSTEM_AUDIO_EFFECT = "system_audio_effect_enabled"
 
         /** 歌词字号默认值 20sp（旧版是 18sp，反馈偏小，见 [migrateOnce]） */
         const val DEFAULT_LYRICS_FONT = 20
@@ -1522,12 +1597,14 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_SPEED = "play_speed"
         private const val KEY_KARAOKE_ENABLED = "karaoke_enabled"
         private const val KEY_LYRICS_HIDE_STATUS_BAR = "lyrics_hide_status_bar"
+        private const val KEY_LYRICS_SCROLL_HAPTIC = "lyrics_scroll_haptic"
         private const val KEY_VISUALIZER_HIDE_STATUS_BAR = "visualizer_hide_status_bar"
         private const val KEY_EXCLUDED_DIRS = "excluded_dirs"
         private const val KEY_SONGS_CACHE = "songs_cache_json"
         private const val KEY_SCAN_AT = "last_scan_at"
         private const val KEY_COMPAT_TREE = "compat_tree_uri"
         private const val KEY_COMPAT_TREE_LABEL = "compat_tree_label"
+        private const val KEY_SAF_SCAN_TREES = "saf_scan_trees"
         private const val KEY_RESTORE_OUT_URI = "restore_out_uri"
         private const val KEY_RESTORE_OUT_LABEL = "restore_out_label"
         private const val KEY_CONVERSION_UNLOCK_UNTIL = "conversion_unlock_until"
