@@ -3,12 +3,22 @@ package com.sonance.player.data
 import android.content.Context
 import android.net.Uri
 import android.util.LruCache
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+import org.xml.sax.InputSource
+import java.io.StringReader
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
+import javax.xml.parsers.DocumentBuilderFactory
 
 /**
  * 逐字/逐词片段。
@@ -67,8 +77,12 @@ data class LyricsResult(val lyrics: Lyrics?, val source: LyricsSource?)
  */
 object LyricsRepository {
 
-    /** 命中率很高（同一首歌反复看），用一个小的 LRU 缓存；null 也缓存，避免反复开文件/发请求 */
+    /** 命中率很高（同一首歌反复看），用一个小的 LRU 缓存；null 仅在明确无歌词或联网确认后缓存 */
     private val cache = LruCache<String, LyricsResult>(48)
+
+    /** 合并同一首歌并发进入的在线/本地加载，避免 UI 与后台服务重复请求 */
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val inFlightLoads = ConcurrentHashMap<String, Deferred<LyricsResult>>()
 
     /** 导入 / 删除歌词后自增，通知单行歌词条等其它订阅方即时刷新 */
     val revision = MutableStateFlow(0L)
@@ -96,129 +110,189 @@ object LyricsRepository {
         // 缓存键带服务地址（洛雪平台曲目隔离独立命名空间，避免被本地 LrcAPI 哨兵短路）
         val effectiveBase = if (lxPlatform != null) "$apiBase|$remoteSource" else apiBase
         val cacheKey = LyricsCache.keyOf(title, artist, effectiveBase) ?: "id:$songId"
-        val scopedKey = "$cacheKey|id:$songId"
+        val rev = revision.value
+        val scopedKey = "$cacheKey|id:$songId|t2s:$convertToSimplified|rev:$rev"
         cache.get(scopedKey)?.let { return it }
 
-        return withContext(Dispatchers.IO) {
-            cache.get(scopedKey)?.let { return@withContext it }
-
-            var text: String? = null
-            var source: LyricsSource? = null
-
-            // ---- 0) 用户手动导入 / 显式删除覆盖（优先级最高）----
-            when (val ov = LyricsCache.lookupOverride(context, songId)) {
-                is LyricsCache.Override.Deleted -> {
-                    val deleted = LyricsResult(null, null)
-                    cache.put(scopedKey, deleted)
-                    return@withContext deleted
-                }
-                is LyricsCache.Override.Imported -> {
-                    text = ov.text
-                    source = LyricsSource.IMPORTED
-                }
-                LyricsCache.Override.None -> Unit
+        val inFlightKey = "$scopedKey|on:$onlineEnabled|ne:$neteaseEnabled"
+        val existing = inFlightLoads[inFlightKey]
+        val deferred = if (existing != null) {
+            existing
+        } else {
+            val appCtx = context.applicationContext
+            val created = repoScope.async {
+                loadInternal(
+                    context = appCtx,
+                    songId = songId,
+                    uri = uri,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    onlineEnabled = onlineEnabled,
+                    apiBase = apiBase,
+                    convertToSimplified = convertToSimplified,
+                    durationMs = durationMs,
+                    neteaseEnabled = neteaseEnabled,
+                    remoteSource = remoteSource,
+                    remoteId = remoteId,
+                    lxPlatform = lxPlatform,
+                    cacheKey = cacheKey,
+                    scopedKey = scopedKey
+                )
             }
-
-            // ---- 1) 内嵌（免费且权威）----
-            if (source == null) {
-                val embedded = runCatching { AudioTags.readLyrics(context, uri) }.getOrNull()
-                if (!embedded.isNullOrBlank()) {
-                    text = embedded
-                    source = LyricsSource.EMBEDDED
-                }
+            val prev = inFlightLoads.putIfAbsent(inFlightKey, created)
+            if (prev != null) {
+                created.cancel()
+                prev
+            } else {
+                created.invokeOnCompletion { inFlightLoads.remove(inFlightKey, created) }
+                created
             }
+        }
+        return deferred.await()
+    }
 
-            // ---- 2) 本地在线缓存 ----
-            if (source == null) {
-                val primary = LyricsCache.lookup(context, cacheKey)
-                // 元数据键没命中时再试 songId 别名：用户手动搜索歌词时可能填了
-                // 另一个写法（改了错别字 / 补了后缀），那份缓存挂在别名下。
-                // 没有这一步，重启后内存 LRU 一清，歌名对不上就"歌词又没了"。
-                val aliasKey = "id:$songId"
-                val alias = if (cacheKey != aliasKey) LyricsCache.lookup(context, aliasKey) else null
-                when {
-                    primary is LyricsCache.Lookup.Hit -> {
-                        text = primary.text
-                        source = LyricsSource.ONLINE
-                    }
-                    alias is LyricsCache.Lookup.Hit -> {
-                        text = alias.text
-                        source = LyricsSource.ONLINE
-                        // 顺手把结果挪到主键下，下次直接命中
-                        LyricsCache.store(context, cacheKey, alias.text)
-                    }
-                    // 之前查过、确认没有：直接返回"没有"，不再打接口
-                    primary is LyricsCache.Lookup.KnownMiss -> {
-                        val r = LyricsResult(null, null)
-                        cache.put(cacheKey, r)
-                        return@withContext r
-                    }
-                    else -> Unit
-                }
+    private suspend fun loadInternal(
+        context: Context,
+        songId: Long,
+        uri: Uri,
+        title: String,
+        artist: String,
+        album: String,
+        onlineEnabled: Boolean,
+        apiBase: String,
+        convertToSimplified: Boolean,
+        durationMs: Long,
+        neteaseEnabled: Boolean,
+        remoteSource: String,
+        remoteId: String?,
+        lxPlatform: String?,
+        cacheKey: String,
+        scopedKey: String
+    ): LyricsResult = withContext(Dispatchers.IO) {
+        cache.get(scopedKey)?.let { return@withContext it }
+
+        var text: String? = null
+        var source: LyricsSource? = null
+        var authoritativeMiss = false
+
+        // ---- 0) 用户手动导入 / 显式删除覆盖（优先级最高）----
+        when (val ov = LyricsCache.lookupOverride(context, songId)) {
+            is LyricsCache.Override.Deleted -> {
+                val deleted = LyricsResult(null, null)
+                cache.put(scopedKey, deleted)
+                return@withContext deleted
             }
+            is LyricsCache.Override.Imported -> {
+                text = ov.text
+                source = LyricsSource.IMPORTED
+            }
+            LyricsCache.Override.None -> Unit
+        }
 
-            // ---- 3) 在线（用户开启时才走，一次只请求这一首）----
-            val canFetchLx = onlineEnabled && lxPlatform != null && !remoteId.isNullOrBlank()
-            if (source == null && onlineEnabled && (apiBase.isNotBlank() || canFetchLx)) {
-                var online: String? = null
-                if (canFetchLx) {
-                    online = com.sonance.player.data.lx.LxCatalogProvider.fetchLyric(
-                        platform = lxPlatform!!,
-                        remoteId = remoteId!!,
-                        title = title,
-                        artist = artist,
-                        durationMs = durationMs
-                    )
-                }
-                if (online.isNullOrBlank() && apiBase.isNotBlank()) {
-                    // 洛雪平台无结果或普通曲目，走 LrcAPI
-                    online = OnlineLyrics.fetch(apiBase, title, artist, album)
-                }
+        // ---- 1) 内嵌（免费且权威）----
+        if (source == null) {
+            val embedded = runCatching { AudioTags.readLyrics(context, uri) }.getOrNull()
+            if (!embedded.isNullOrBlank()) {
+                text = embedded
+                source = LyricsSource.EMBEDDED
+            }
+        }
 
-                // 没拿到就用网易云兜底（用户开了「网易云补全」时）。
-                // 两个源互补：实测 LrcAPI 偶发没有的歌，网易云那边是有的。
-                //
-                // 匹配带**时长校验**很关键 —— 网易云搜"晴天"第一条是「晴天(深情版)」，
-                // 直接取第一条会拿到完全不同版本的歌词、时间轴整体错位。
-                //
-                // LrcAPI 是纯 LRC 文本、永远没有翻译；拿到了歌词但**不含译文**
-                // 时也要再问一次网易云 —— 它的歌词接口带 tlyric（逐行中文翻译），
-                // 拿得到带翻译的版本就整体替换。否则外文歌永远只有原文。
-                if (neteaseEnabled && (online.isNullOrBlank() || !online.contains(TRANSLATION_SEP))) {
-                    val withTr = NeteaseSource.findTrackFor(title, artist, durationMs)
-                        ?.let { NeteaseSource.lyrics(it.remoteId) }
-                    if (!withTr.isNullOrBlank() &&
-                        (online.isNullOrBlank() || withTr.contains(TRANSLATION_SEP))
-                    ) {
-                        online = withTr
-                    }
-                }
-
-                if (!online.isNullOrBlank()) {
-                    text = online
+        // ---- 2) 本地在线缓存 ----
+        if (source == null) {
+            val primary = LyricsCache.lookup(context, cacheKey)
+            // 元数据键没命中时再试 songId 别名：用户手动搜索歌词时可能填了
+            // 另一个写法（改了错别字 / 补了后缀），那份缓存挂在别名下。
+            // 没有这一步，重启后内存 LRU 一清，歌名对不上就"歌词又没了"。
+            val aliasKey = "id:$songId"
+            val alias = if (cacheKey != aliasKey) LyricsCache.lookup(context, aliasKey) else null
+            when {
+                primary is LyricsCache.Lookup.Hit -> {
+                    text = primary.text
                     source = LyricsSource.ONLINE
                 }
-                // 不管有没有拿到都落盘：拿到存歌词，没拿到存空文件当哨兵，
-                // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）。
-                // ⚠️ 必须**两个源都试完**才写哨兵 —— 提前写会把网易云那条路也短路掉。
-                LyricsCache.store(context, cacheKey, text)
-                // 有歌词时再按 songId 存一份别名：歌名/歌手之后被编辑过，
-                // 也能靠 id 把这来之不易的网络结果找回来。
-                if (!text.isNullOrBlank() && cacheKey != "id:$songId") {
-                    LyricsCache.store(context, "id:$songId", text)
+                alias is LyricsCache.Lookup.Hit -> {
+                    text = alias.text
+                    source = LyricsSource.ONLINE
+                    // 顺手把结果挪到主键下，下次直接命中
+                    LyricsCache.store(context, cacheKey, alias.text)
+                }
+                // 之前查过、确认没有：直接返回"没有"，不再打接口
+                primary is LyricsCache.Lookup.KnownMiss -> {
+                    val r = LyricsResult(null, null)
+                    cache.put(scopedKey, r)
+                    return@withContext r
+                }
+                else -> Unit
+            }
+        }
+
+        // ---- 3) 在线（用户开启时才走，一次只请求这一首）----
+        val canFetchLx = onlineEnabled && lxPlatform != null && !remoteId.isNullOrBlank()
+        if (source == null && onlineEnabled && (apiBase.isNotBlank() || canFetchLx)) {
+            authoritativeMiss = true
+            var online: String? = null
+            if (canFetchLx) {
+                online = com.sonance.player.data.lx.LxCatalogProvider.fetchLyric(
+                    platform = lxPlatform!!,
+                    remoteId = remoteId!!,
+                    title = title,
+                    artist = artist,
+                    durationMs = durationMs
+                )
+            }
+            if (online.isNullOrBlank() && apiBase.isNotBlank()) {
+                // 洛雪平台无结果或普通曲目，走 LrcAPI
+                online = OnlineLyrics.fetch(apiBase, title, artist, album)
+            }
+
+            // 没拿到就用网易云兜底（用户开了「网易云补全」时）。
+            // 两个源互补：实测 LrcAPI 偶发没有的歌，网易云那边是有的。
+            //
+            // 匹配带**时长校验**很关键 —— 网易云搜"晴天"第一条是「晴天(深情版)」，
+            // 直接取第一条会拿到完全不同版本的歌词、时间轴整体错位。
+            //
+            // LrcAPI 是纯 LRC 文本、永远没有翻译；拿到了歌词但**不含译文**
+            // 时也要再问一次网易云 —— 它的歌词接口带 tlyric（逐行中文翻译），
+            // 拿得到带翻译的版本就整体替换。否则外文歌永远只有原文。
+            if (neteaseEnabled && (online.isNullOrBlank() || !online.contains(TRANSLATION_SEP))) {
+                val withTr = NeteaseSource.findTrackFor(title, artist, durationMs)
+                    ?.let { NeteaseSource.lyrics(it.remoteId) }
+                if (!withTr.isNullOrBlank() &&
+                    (online.isNullOrBlank() || withTr.contains(TRANSLATION_SEP))
+                ) {
+                    online = withTr
                 }
             }
 
-            // 繁转简只作用于**展示**：缓存里存的仍是原始文本，
-            // 所以开关关掉后重新打开歌词页立刻就是原文，不需要再联网。
-            val shown = text?.let {
-                if (convertToSimplified) ChineseConverter.toSimplified(context, it) else it
+            if (!online.isNullOrBlank()) {
+                text = online
+                source = LyricsSource.ONLINE
             }
-            val parsed = shown?.takeIf { it.isNotBlank() }?.let { parse(it) }
-            val result = LyricsResult(parsed, if (parsed != null) source else null)
-            cache.put(scopedKey, result)
-            result
+            // 不管有没有拿到都落盘：拿到存歌词，没拿到存空文件当哨兵，
+            // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）。
+            // ⚠️ 必须**两个源都试完**才写哨兵 —— 提前写会把网易云那条路也短路掉。
+            LyricsCache.store(context, cacheKey, text)
+            // 有歌词时再按 songId 存一份别名：歌名/歌手之后被编辑过，
+            // 也能靠 id 把这来之不易的网络结果找回来。
+            if (!text.isNullOrBlank() && cacheKey != "id:$songId") {
+                LyricsCache.store(context, "id:$songId", text)
+            }
         }
+
+        // 繁转简只作用于**展示**：缓存里存的仍是原始文本，
+        // 所以开关关掉后重新打开歌词页立刻就是原文，不需要再联网。
+        val shown = text?.let {
+            if (convertToSimplified) ChineseConverter.toSimplified(context, it) else it
+        }
+        val parsed = shown?.takeIf { it.isNotBlank() }?.let { parse(it) }
+        val result = LyricsResult(parsed, if (parsed != null) source else null)
+        // 仅联网/权威确认的结果才写内存 LRU，避免 offline 探测 miss 短路后续的在线加载
+        if (parsed != null || authoritativeMiss) {
+            cache.put(scopedKey, result)
+        }
+        result
     }
 
     /**
@@ -393,6 +467,9 @@ object LyricsRepository {
         // 有些歌词文件（以及我们自己的缓存）带 UTF-8 BOM；不清掉会让行首 `[..]` 标签
         // 认不出来，时间戳就漏进正文了。
         val normalized = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
+        if (looksLikeTtml(normalized)) {
+            parseTtml(normalized, text)?.let { return it }
+        }
         val rawLines = normalized.split('\n')
         val out = ArrayList<LyricLine>(rawLines.size)
         var offsetMs = 0L
@@ -594,6 +671,187 @@ object LyricsRepository {
             }
         } catch (e: NumberFormatException) {
             null
+        }
+    }
+
+    private fun looksLikeTtml(normalized: String): Boolean {
+        val head = normalized.trimStart()
+        if (!head.startsWith("<")) return false
+        return head.contains("<tt", ignoreCase = true) ||
+            (head.contains("<p ", ignoreCase = true) && head.contains("begin=", ignoreCase = true))
+    }
+
+    /**
+     * 解析 W3C TTML / Apple Music (AMLL) `.ttml` 歌词：
+     * - 支持 `<p begin="..." end="...">` 行级时间轴；
+     * - 支持行内逐字 `<span begin="..." end="...">` 片段（用于逐字高亮）；
+     * - 支持 `<span ttm:role="x-translation">` 内嵌翻译与跳过 `x-roman` 音译。
+     */
+    private fun parseTtml(normalized: String, originalText: String): Lyrics? {
+        val doc = runCatching {
+            val factory = DocumentBuilderFactory.newInstance().apply {
+                isNamespaceAware = true
+                runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+                runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+                runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+            }
+            factory.newDocumentBuilder().parse(InputSource(StringReader(normalized)))
+        }.getOrNull() ?: return null
+
+        val pNodes = doc.getElementsByTagNameNS("*", "p").let { nsList ->
+            if (nsList.length > 0) nsList else doc.getElementsByTagName("p")
+        }
+        if (pNodes.length == 0) return null
+
+        val out = ArrayList<LyricLine>(pNodes.length)
+        var sawTime = false
+
+        for (i in 0 until pNodes.length) {
+            val pElem = pNodes.item(i) as? Element ?: continue
+            val role = ttmlRole(pElem)
+            if (role == "x-roman" || role == "x-translation") continue
+
+            val pBeginMs = parseTtmlTimeMs(pElem.getAttribute("begin"))
+            val mainBuf = StringBuilder()
+            val trBuf = StringBuilder()
+            val segments = ArrayList<LyricSegment>()
+
+            collectTtmlNode(pElem, mainBuf, trBuf, segments)
+
+            val mainText = collapseTtmlWhitespace(mainBuf.toString())
+            if (mainText.isEmpty()) continue
+            val trText = collapseTtmlWhitespace(trBuf.toString()).takeIf { it.isNotEmpty() }
+
+            val validSegments = segments.filter { it.text.isNotEmpty() }
+            val lineTime = pBeginMs ?: validSegments.firstOrNull()?.timeMs ?: -1L
+            if (lineTime >= 0L) sawTime = true
+
+            val finalSegments = if (validSegments.size >= 2) validSegments else null
+            out.add(
+                LyricLine(
+                    timeMs = lineTime,
+                    text = mainText,
+                    translation = trText,
+                    segments = finalSegments
+                )
+            )
+        }
+
+        if (out.isEmpty()) return null
+        return if (sawTime) {
+            val synced = out.filter { it.timeMs >= 0L }.sortedBy { it.timeMs }
+            if (synced.isNotEmpty()) Lyrics.Synced(originalText, synced)
+            else Lyrics.Plain(originalText, plainLines(out))
+        } else {
+            Lyrics.Plain(originalText, plainLines(out))
+        }
+    }
+
+    private fun collectTtmlNode(
+        node: Node,
+        mainBuf: StringBuilder,
+        trBuf: StringBuilder,
+        segments: MutableList<LyricSegment>
+    ) {
+        val children = node.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            when (child.nodeType) {
+                Node.TEXT_NODE, Node.CDATA_SECTION_NODE -> {
+                    val txt = child.nodeValue ?: ""
+                    if (txt.isNotEmpty()) mainBuf.append(txt)
+                }
+                Node.ELEMENT_NODE -> {
+                    val el = child as Element
+                    val local = (el.localName ?: el.tagName).lowercase()
+                    if (local == "br") {
+                        mainBuf.append(' ')
+                        continue
+                    }
+                    val role = ttmlRole(el)
+                    when (role) {
+                        "x-roman" -> continue
+                        "x-translation" -> {
+                            val t = el.textContent ?: ""
+                            if (t.isNotBlank()) {
+                                if (trBuf.isNotEmpty()) trBuf.append(' ')
+                                trBuf.append(t.trim())
+                            }
+                        }
+                        else -> {
+                            val segBegin = parseTtmlTimeMs(el.getAttribute("begin"))
+                            if (segBegin != null && !hasChildTimedSpan(el)) {
+                                val segBuf = StringBuilder()
+                                val dummyTr = StringBuilder()
+                                collectTtmlNode(el, segBuf, dummyTr, mutableListOf())
+                                val rawSegText = segBuf.toString().replace(Regex("[\\r\\n\\t]+"), " ")
+                                val cleanSegText = rawSegText.replace(Regex(" {2,}"), " ")
+                                if (cleanSegText.isNotEmpty()) {
+                                    mainBuf.append(cleanSegText)
+                                    segments.add(LyricSegment(segBegin, cleanSegText))
+                                }
+                                if (dummyTr.isNotEmpty()) {
+                                    if (trBuf.isNotEmpty()) trBuf.append(' ')
+                                    trBuf.append(dummyTr)
+                                }
+                            } else {
+                                collectTtmlNode(el, mainBuf, trBuf, segments)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hasChildTimedSpan(el: Element): Boolean {
+        val children = el.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child.nodeType == Node.ELEMENT_NODE) {
+                val ce = child as Element
+                if (ce.getAttribute("begin").isNotBlank() || hasChildTimedSpan(ce)) return true
+            }
+        }
+        return false
+    }
+
+    private fun ttmlRole(el: Element): String {
+        val nsRole = el.getAttributeNS("http://www.w3.org/ns/ttml#metadata", "role")
+        if (nsRole.isNotBlank()) return nsRole.trim().lowercase()
+        val rawRole = el.getAttribute("ttm:role").ifBlank { el.getAttribute("role") }
+        return rawRole.trim().lowercase()
+    }
+
+    private fun collapseTtmlWhitespace(s: String): String =
+        s.replace(Regex("[\\r\\n\\t]+"), " ")
+            .replace(Regex(" {2,}"), " ")
+            .trim()
+
+    /**
+     * 解析 TTML 时间字符串：`hh:mm:ss.mmm`、`mm:ss.mmm`、`12.345s`、`12345ms`、`hh:mm:ss:ff`。
+     */
+    private fun parseTtmlTimeMs(raw: String?): Long? {
+        val s = raw?.trim().orEmpty()
+        if (s.isEmpty()) return null
+        if (s.endsWith("ms", ignoreCase = true)) {
+            return s.dropLast(2).trim().toDoubleOrNull()?.toLong()?.coerceAtLeast(0L)
+        }
+        if (s.endsWith("s", ignoreCase = true)) {
+            return s.dropLast(1).trim().toDoubleOrNull()?.let { (it * 1000.0).toLong().coerceAtLeast(0L) }
+        }
+        val parts = s.split(':')
+        return when (parts.size) {
+            1 -> s.toDoubleOrNull()?.let { (it * 1000.0).toLong().coerceAtLeast(0L) }
+            2, 3 -> parseTimeTag(s)
+            4 -> {
+                val h = parts[0].trim().toLongOrNull() ?: return null
+                val m = parts[1].trim().toLongOrNull() ?: return null
+                val sec = parts[2].trim().toLongOrNull() ?: return null
+                val frames = parts[3].trim().toLongOrNull() ?: 0L
+                (((h * 3600L) + (m * 60L) + sec) * 1000L) + (frames * 1000L / 30L)
+            }
+            else -> null
         }
     }
 }

@@ -31,12 +31,18 @@ import com.sonance.player.data.Prefs
  */
 object UsbExclusive {
 
+    private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var deviceCallback: AudioDeviceCallback? = null
+    private var pendingUnplugCheck: Runnable? = null
+    private var pendingFormatSync: Runnable? = null
     private var appliedDeviceId = -1
     private var appliedSampleRate = 0
     private var appliedEncoding = AudioFormat.ENCODING_INVALID
     private var appliedChannels = 0
+
+    @Volatile
+    var onStateChanged: ((Boolean) -> Unit)? = null
 
     @Volatile
     private var lastTrackSampleRate = 44_100
@@ -54,56 +60,71 @@ object UsbExclusive {
             .build()
 
     private fun usbOutput(am: AudioManager): AudioDeviceInfo? =
-        am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
-            it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
-        }
+        runCatching {
+            am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+            }
+        }.getOrNull()
 
     /**
      * 设置开关入口。成功返回 null；失败返回原因（UI 拿去 toast），
      * 失败时不写偏好，开关保持关闭，不会出现「显示开了但实际没生效」。
      */
-    fun setEnabled(context: Context, on: Boolean): String? {
+    fun setEnabled(context: Context, on: Boolean): String? = synchronized(lock) {
         val app = context.applicationContext
         val prefs = Prefs(app)
+        pendingUnplugCheck?.let { mainHandler.removeCallbacks(it) }
+        pendingUnplugCheck = null
+        pendingFormatSync?.let { mainHandler.removeCallbacks(it) }
+        pendingFormatSync = null
+
         if (!on) {
-            clear(app)
+            clearLocked(app)
             prefs.usbExclusiveEnabled = false
-            return null
+            notifyStateChanged(false)
+            return@synchronized null
         }
-        if (Build.VERSION.SDK_INT < 34) return "USB 独占需要 Android 14 及以上系统"
+        if (Build.VERSION.SDK_INT < 34) return@synchronized "USB 独占需要 Android 14 及以上系统"
         val am = app.getSystemService(AudioManager::class.java)
-            ?: return "无法访问系统音频服务"
+            ?: return@synchronized "无法访问系统音频服务"
         val device = usbOutput(am)
-            ?: return "未检测到 USB 音频设备，请先连接 USB DAC / 耳机再开启"
-        val err = apply(am, device)
-        if (err != null) return err
+            ?: return@synchronized "未检测到 USB 音频设备，请先连接 USB DAC / 耳机再开启"
+        val err = applyLocked(am, device)
+        if (err != null) {
+            prefs.usbExclusiveEnabled = false
+            notifyStateChanged(false)
+            return@synchronized err
+        }
         prefs.usbExclusiveEnabled = true
-        watchDevices(app)
-        return null
+        notifyStateChanged(true)
+        watchDevicesLocked(app)
+        return@synchronized null
     }
 
     /** 播放服务启动时按偏好补一次：进程重建后系统侧的规则已经没了。 */
-    fun syncWithPrefs(context: Context) {
+    fun syncWithPrefs(context: Context) = synchronized(lock) {
         val app = context.applicationContext
         val prefs = Prefs(app)
-        if (!prefs.usbExclusiveEnabled) return
+        if (!prefs.usbExclusiveEnabled) return@synchronized
         if (Build.VERSION.SDK_INT < 34) {
             prefs.usbExclusiveEnabled = false
-            return
+            notifyStateChanged(false)
+            return@synchronized
         }
-        val am = app.getSystemService(AudioManager::class.java) ?: return
+        val am = app.getSystemService(AudioManager::class.java) ?: return@synchronized
+        watchDevicesLocked(app)
         val device = usbOutput(am)
-        if (device == null || apply(am, device) != null) {
-            // 设备没接 / 声明失败：把偏好收掉，避免界面显示「已开启」而实际走系统混音
-            prefs.usbExclusiveEnabled = false
-            return
+        if (device != null) {
+            // 若设备刚完成上电枚举期间偶发报错，不立刻粗暴关闭偏好，等待后续音轨或设备回调重协商
+            applyLocked(am, device)
         }
-        watchDevices(app)
     }
 
     /**
      * 当正在播放的音轨格式变化时调用：按设备支持的位深与采样率动态重协商 USB 独占属性
      * （例如从 44.1kHz/16bit 切到 96kHz/24bit 时，不再被锁死在 44.1k/16bit 重采样）。
+     *
+     * 切到主线程防抖执行，避免在 ExoPlayer 音频解码线程同步修改系统混音器规则引发死锁或 AudioTrack 异常。
      */
     fun syncTrackFormat(context: Context, sampleRateHz: Int, pcmEncoding: Int, channelCount: Int) {
         if (sampleRateHz <= 0) return
@@ -112,9 +133,20 @@ object UsbExclusive {
         lastTrackChannels = channelCount.coerceIn(1, 2)
         val app = context.applicationContext
         if (Build.VERSION.SDK_INT < 34 || !Prefs(app).usbExclusiveEnabled) return
-        val am = app.getSystemService(AudioManager::class.java) ?: return
-        val device = usbOutput(am) ?: return
-        apply(am, device)
+        synchronized(lock) {
+            pendingFormatSync?.let { mainHandler.removeCallbacks(it) }
+            val task = Runnable {
+                synchronized(lock) {
+                    pendingFormatSync = null
+                    if (!Prefs(app).usbExclusiveEnabled) return@synchronized
+                    val am = app.getSystemService(AudioManager::class.java) ?: return@synchronized
+                    val device = usbOutput(am) ?: return@synchronized
+                    applyLocked(am, device)
+                }
+            }
+            pendingFormatSync = task
+            mainHandler.postDelayed(task, 80L)
+        }
     }
 
     private fun toAndroidEncoding(pcmEncoding: Int): Int = when (pcmEncoding) {
@@ -132,7 +164,7 @@ object UsbExclusive {
         else -> 0
     }
 
-    private fun apply(am: AudioManager, device: AudioDeviceInfo): String? {
+    private fun applyLocked(am: AudioManager, device: AudioDeviceInfo): String? {
         if (Build.VERSION.SDK_INT < 34) return "USB 独占需要 Android 14 及以上系统"
         return runCatching {
             val desiredRate = lastTrackSampleRate.coerceAtLeast(8000)
@@ -181,7 +213,7 @@ object UsbExclusive {
                     .setChannelMask(targetMask)
                     .build()
             } else {
-                val rates = device.sampleRates
+                val rates = runCatching { device.sampleRates }.getOrDefault(intArrayOf())
                 val rate = when {
                     rates.contains(desiredRate) -> desiredRate
                     rates.contains(44100) -> 44100
@@ -189,7 +221,7 @@ object UsbExclusive {
                     rates.isNotEmpty() -> rates[0]
                     else -> desiredRate
                 }
-                val encodings = device.encodings
+                val encodings = runCatching { device.encodings }.getOrDefault(intArrayOf())
                 val enc = when {
                     encodings.contains(desiredEnc) -> desiredEnc
                     encodings.contains(AudioFormat.ENCODING_PCM_24BIT_PACKED) -> AudioFormat.ENCODING_PCM_24BIT_PACKED
@@ -210,6 +242,14 @@ object UsbExclusive {
                     .build()
             }
 
+            if (appliedDeviceId != -1 && appliedDeviceId != device.id) {
+                runCatching {
+                    val prev = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                        .firstOrNull { it.id == appliedDeviceId }
+                    if (prev != null) am.clearPreferredMixerAttributes(streamAttributes(), prev)
+                }
+            }
+
             val mixer = AudioMixerAttributes.Builder(chosenFormat)
                 .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
                 .build()
@@ -221,7 +261,7 @@ object UsbExclusive {
         }.exceptionOrNull()?.let { "USB 独占开启失败：${it.message ?: "设备不支持"}" }
     }
 
-    private fun clear(context: Context) {
+    private fun clearLocked(context: Context) {
         if (Build.VERSION.SDK_INT < 34) return
         val am = context.getSystemService(AudioManager::class.java) ?: return
         runCatching {
@@ -235,21 +275,73 @@ object UsbExclusive {
         appliedChannels = 0
     }
 
-    /** USB 设备拔出后系统规则随之失效：把偏好一起收掉，保持界面与实际一致。 */
-    private fun watchDevices(context: Context) {
+    /** USB 设备拔出后系统规则随之失效：延迟 500ms 复核，避免 DAC 切换采样率瞬断重枚举误关开关。 */
+    private fun watchDevicesLocked(context: Context) {
         if (deviceCallback != null) return
-        val am = context.getSystemService(AudioManager::class.java) ?: return
+        val app = context.applicationContext
+        val am = app.getSystemService(AudioManager::class.java) ?: return
         val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
+                val hasUsb = addedDevices.any {
+                    it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                }
+                if (!hasUsb) return
+                synchronized(lock) {
+                    pendingUnplugCheck?.let { mainHandler.removeCallbacks(it) }
+                    pendingUnplugCheck = null
+                    if (Prefs(app).usbExclusiveEnabled) {
+                        val dev = usbOutput(am)
+                        if (dev != null) applyLocked(am, dev)
+                    }
+                }
+            }
+
             override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
-                if (removedDevices.none { it.id == appliedDeviceId }) return
-                appliedDeviceId = -1
-                appliedSampleRate = 0
-                appliedEncoding = AudioFormat.ENCODING_INVALID
-                appliedChannels = 0
-                Prefs(context).usbExclusiveEnabled = false
+                val relevant = removedDevices.any {
+                    it.id == appliedDeviceId ||
+                        it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+                        it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                }
+                if (!relevant) return
+                synchronized(lock) {
+                    if (removedDevices.any { it.id == appliedDeviceId }) {
+                        appliedDeviceId = -1
+                        appliedSampleRate = 0
+                        appliedEncoding = AudioFormat.ENCODING_INVALID
+                        appliedChannels = 0
+                    }
+                    pendingUnplugCheck?.let { mainHandler.removeCallbacks(it) }
+                    val check = Runnable {
+                        synchronized(lock) {
+                            pendingUnplugCheck = null
+                            if (!Prefs(app).usbExclusiveEnabled) return@synchronized
+                            val dev = usbOutput(am)
+                            if (dev != null) {
+                                // DAC 只是重枚举（如切采样率），自动恢复独占
+                                applyLocked(am, dev)
+                            } else {
+                                Prefs(app).usbExclusiveEnabled = false
+                                notifyStateChanged(false)
+                            }
+                        }
+                    }
+                    pendingUnplugCheck = check
+                    mainHandler.postDelayed(check, 500L)
+                }
             }
         }
-        deviceCallback = cb
-        am.registerAudioDeviceCallback(cb, mainHandler)
+        runCatching {
+            am.registerAudioDeviceCallback(cb, mainHandler)
+            deviceCallback = cb
+        }
+    }
+
+    private fun notifyStateChanged(enabled: Boolean) {
+        val listener = onStateChanged ?: return
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            listener(enabled)
+        } else {
+            mainHandler.post { listener(enabled) }
+        }
     }
 }

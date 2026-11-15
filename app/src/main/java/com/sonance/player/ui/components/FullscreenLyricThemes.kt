@@ -195,32 +195,45 @@ internal fun FullscreenThemedLyrics(
         ) {
             val w = with(density) { maxWidth.toPx() }
             val h = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
-            // Scale prototype geometry to the current viewport; font size remains a user setting.
-            val unit = w / 336f
+            val isLandscape = w > h * 1.15f
+            // 竖屏严格遵循原有定标（w / 336f），不做任何裁切；横屏高度受限，按高度等比定标
+            val unit = if (isLandscape) (h / 440f) else (w / 336f)
             val left = when (style) {
-                LyricStyle.VINYL -> w * 0.35f
+                LyricStyle.VINYL -> if (isLandscape) w * 0.32f else w * 0.35f
                 LyricStyle.FLUID -> with(density) { 24.dp.toPx() }
                 else -> w * 0.04f
             }
             val textWidth = (w - left - if (style == LyricStyle.SPATIAL) w * 0.04f else 16f * unit)
                 .coerceAtLeast(1f)
             val textWidthDp = with(density) { textWidth.toDp() }
+            // 竖屏保持原版样式字号；横屏适当放大字体，确保远距离清晰易读
             val font = fontSizeSp * when (style) {
-                LyricStyle.FLUID -> 1.3f
-                LyricStyle.SPATIAL -> 1.15f
-                else -> 1f
+                LyricStyle.FLUID -> if (isLandscape) 1.35f else 1.3f
+                LyricStyle.SPATIAL -> if (isLandscape) 1.22f else 1.15f
+                else -> if (isLandscape) 1.12f else 1f
             }
-            val mainStyle = TextStyle(fontSize = font.sp, lineHeight = (font * 1.38f).sp, fontWeight = FontWeight.ExtraBold)
-            val translationStyle = TextStyle(fontSize = (fontSizeSp * 0.72f).sp, lineHeight = (fontSizeSp * 1.01f).sp)
+            val mainStyle = TextStyle(
+                fontSize = font.sp,
+                lineHeight = (font * if (isLandscape) 1.32f else 1.38f).sp,
+                fontWeight = FontWeight.ExtraBold
+            )
+            val translationStyle = TextStyle(
+                fontSize = (fontSizeSp * 0.72f).sp,
+                lineHeight = (fontSizeSp * 1.01f).sp
+            )
             // 时间戳的样式必须和「测量」用同一份，否则行内宽度对不上（黑胶模式的缩进就靠它）
             val timeStyle = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            val reflectionStyle = TextStyle(fontSize = (font * 0.92f).sp, lineHeight = (font * 1.27f).sp,
-                fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
+            val reflectionStyle = TextStyle(
+                fontSize = (font * 0.92f).sp,
+                lineHeight = (font * 1.27f).sp,
+                fontWeight = FontWeight.ExtraBold,
+                textAlign = TextAlign.Center
+            )
             val reflectionHeights = remember(lines, textWidth, fontSizeSp, density, style) {
                 if (style == LyricStyle.SPATIAL) lines.map {
                     measurer.measure(AnnotatedString(it.text), reflectionStyle,
                         constraints = Constraints(maxWidth = textWidth.toInt().coerceAtLeast(1))).size.height.toFloat()
-                } else List(lines.size) { 0f }
+                } else emptyList()
             }
             /**
              * 黑胶模式把时间戳内联在原文左侧，所以原文和翻译都必须让开同一段宽度。
@@ -249,7 +262,7 @@ internal fun FullscreenThemedLyrics(
                 (vinylGutterPx - 8.dp.toPx()).coerceAtLeast(0f).toDp()
             }
 
-            val heights = remember(lines, textWidth, lyricTextWidth, fontSizeSp, density, style) {
+            val heights = remember(lines, textWidth, lyricTextWidth, fontSizeSp, density, style, isLandscape) {
                 lines.mapIndexed { index, line ->
                     val main = measurer.measure(AnnotatedString(line.text), mainStyle,
                         constraints = Constraints(maxWidth = lyricTextWidth.toInt().coerceAtLeast(1))).size.height
@@ -259,15 +272,21 @@ internal fun FullscreenThemedLyrics(
                     } ?: 0
                     with(density) {
                         main + translation + when (style) {
-                            LyricStyle.FLUID -> 34.dp.toPx()
-                            LyricStyle.SPATIAL -> 32.dp.toPx() + reflectionHeights[index] * 0.55f
-                            else -> 18.dp.toPx()
+                            LyricStyle.FLUID -> if (isLandscape) 20.dp.toPx() else 34.dp.toPx()
+                            LyricStyle.SPATIAL -> (if (isLandscape) 18.dp.toPx() else 32.dp.toPx()) + (reflectionHeights.getOrNull(index) ?: 0f) * (if (isLandscape) 0.35f else 0.55f)
+                            else -> if (isLandscape) 12.dp.toPx() else 18.dp.toPx()
                         }
                     }
                 }
             }
-            val centers = remember(heights, unit, style) {
-                lyricStageCenters(heights, (if (style == LyricStyle.FLUID) 76f else 56f) * unit, 18f * unit)
+            val centers = remember(heights, unit, style, isLandscape) {
+                val minSlot = if (isLandscape) {
+                    (if (style == LyricStyle.FLUID) 54f else 42f) * unit
+                } else {
+                    (if (style == LyricStyle.FLUID) 76f else 56f) * unit
+                }
+                val gap = if (isLandscape) 10f * unit else 18f * unit
+                lyricStageCenters(heights, minSlot, gap)
             }
             val a = stage.floatValue
             val anchorCenter = lyricStageAnchor(centers, a)
@@ -340,7 +359,7 @@ internal fun FullscreenThemedLyrics(
                     val isCurrent = index == current
                     val emphasis = if (current >= 0) pose.emphasis else 0f
                     val base = lerp(skin.textDim, skin.accent, emphasis)
-                    val y = h * (if (style == LyricStyle.FLUID) 0.44f else 0.5f) + pose.y
+                    val y = h * (if (isLandscape) 0.42f else (if (style == LyricStyle.FLUID) 0.44f else 0.5f)) + pose.y
                     val color = if (bgProfile != null && shouldAdapt(isCurrent, adaptMode)) {
                         lyricColor(base, y / h, isCurrent, bgProfile)
                     } else base

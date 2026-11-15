@@ -8,6 +8,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -41,8 +43,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.LongState
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -202,8 +206,8 @@ fun LyricsOverlay(
 
     // 全屏展现模式：全局设置，页内切换即时生效
     var style by remember { mutableStateOf(prefs.lyricsStyle) }
-    // 手动滑动歌词跨行轻震：全局设置，页内开关即时生效
-    var scrollHaptic by remember { mutableStateOf(prefs.lyricsScrollHapticEnabled) }
+    // 手动滑动歌词跨行轻震：全局设置，与封面内嵌歌词共享，实时监听变更
+    var scrollHaptic by rememberLyricsScrollHaptic(prefs)
 
     // 歌词进度偏移：**按歌记忆**。页内 ± 调整即时生效并写回 prefs，
     // 换歌时回到这首歌自己的偏移值
@@ -232,7 +236,7 @@ fun LyricsOverlay(
     // 开关或导入/删除版本进 key：任何改动回到歌词页都会即时同步
     LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill, lyricsRev) {
         loading = true
-        result = LyricsRepository.load(
+        val loaded = LyricsRepository.load(
             context = context,
             songId = song.id,
             uri = song.uri,
@@ -248,7 +252,14 @@ fun LyricsOverlay(
             remoteSource = song.source,
             remoteId = song.remoteId
         )
+        result = loaded
         loading = false
+        com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            lines = (loaded.lyrics as? Lyrics.Synced)?.lines.orEmpty()
+        )
     }
 
     val lyrics = result?.lyrics
@@ -544,14 +555,10 @@ fun LyricsOverlay(
                     .fillMaxSize()
                     .statusBarsPadding()
                     .padding(top = 54.dp)
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                awaitPointerEvent(PointerEventPass.Initial)
-                                    .changes.forEach { it.consume() }
-                            }
-                        }
-                    }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showAppearance = false }
             )
         }
 
@@ -568,7 +575,11 @@ fun LyricsOverlay(
                     .clip(RoundedCornerShape(16.dp))
                     .background(skin.surface.copy(alpha = 0.97f))
                     .border(1.dp, skin.border, RoundedCornerShape(16.dp))
-                    .padding(vertical = 8.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {}
+                    .padding(vertical = 14.dp)
             ) {
                 GlassControls(
                     style = glassStyle,
@@ -625,7 +636,7 @@ fun LyricsOverlay(
                 )
                 ToggleSettingRow(
                     title = "滚动歌词震动",
-                    subtitle = "手动上下滑动歌词跨行时轻震反馈",
+                    subtitle = "手动上下滑动歌词跨行时轻震反馈（全屏歌词与封面内嵌歌词同步生效）",
                     checked = scrollHaptic,
                     onCheckedChange = {
                         scrollHaptic = it
@@ -1135,7 +1146,22 @@ private fun OffsetRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text("歌词偏移", style = MaterialTheme.typography.labelLarge, color = skin.text)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("歌词偏移", style = MaterialTheme.typography.labelLarge, color = skin.text)
+                if (offsetMs != 0L) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "复原",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = skin.accent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(skin.accent.copy(alpha = 0.12f))
+                            .clickable { onReset() }
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
             Text(
                 "歌词慢了往提前调，快了往推迟调；只对这首歌生效",
                 style = MaterialTheme.typography.labelSmall,
@@ -1143,28 +1169,19 @@ private fun OffsetRow(
                 fontSize = 10.sp
             )
         }
-        // − / +：0.1 秒步进。用文字而不是图标 —— 加减号本身就够清楚
+        // − / +：0.5 秒步进，固定在行尾，不随「复原」按钮显隐而位移
         StepDot("−", skin) { onStep(-1) }
         Text(
             text = String.format("%+.1fs", offsetMs / 1000.0),
             style = MaterialTheme.typography.labelLarge,
             color = if (offsetMs == 0L) skin.textMuted else skin.accent,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 10.dp)
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .widthIn(min = 52.dp)
+                .padding(horizontal = 6.dp)
         )
         StepDot("+", skin) { onStep(1) }
-        if (offsetMs != 0L) {
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "复原",
-                style = MaterialTheme.typography.labelMedium,
-                color = skin.accent,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable { onReset() }
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            )
-        }
     }
 }
 
@@ -1385,10 +1402,12 @@ fun InlineLyrics(
     val convertT2S = prefs.lyricsConvertToSimplified
     val fontSize = prefs.lyricsFontSizeSp
     val neteaseFill = prefs.neteaseFillEnabled
+    val scrollHaptic by rememberLyricsScrollHaptic(prefs)
+    val lyricsRev by LyricsRepository.revision.collectAsState()
 
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill, lyricsRev) {
         loading = true
-        result = LyricsRepository.load(
+        val loaded = LyricsRepository.load(
             context = context,
             songId = song.id,
             uri = song.uri,
@@ -1403,7 +1422,14 @@ fun InlineLyrics(
             remoteSource = song.source,
             remoteId = song.remoteId
         )
+        result = loaded
         loading = false
+        com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            lines = (loaded.lyrics as? Lyrics.Synced)?.lines.orEmpty()
+        )
     }
 
     val lyrics = result?.lyrics
@@ -1464,12 +1490,30 @@ fun InlineLyrics(
                 fontSizeSp = fontSize,
                 onSeek = onSeek,
                 bgProfile = bgProfile,
-                adaptMode = adaptMode
+                adaptMode = adaptMode,
+                timelineOffsetMs = offsetMs,
+                scrollHaptic = scrollHaptic
             )
 
             else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize, bgProfile, adaptMode)
         }
     }
+}
+
+@Composable
+private fun rememberLyricsScrollHaptic(prefs: Prefs): MutableState<Boolean> {
+    val enabled = remember(prefs) { mutableStateOf(prefs.lyricsScrollHapticEnabled) }
+    DisposableEffect(prefs) {
+        enabled.value = prefs.lyricsScrollHapticEnabled
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || Prefs.isLyricsScrollHapticKey(key)) {
+                enabled.value = prefs.lyricsScrollHapticEnabled
+            }
+        }
+        prefs.registerChangeListener(listener)
+        onDispose { prefs.unregisterChangeListener(listener) }
+    }
+    return enabled
 }
 
 /** 紧凑三行：上一句 / 当前句 / 下一句，字号与透明度向两侧递减，行距 6dp。 */
@@ -1673,7 +1717,9 @@ internal fun SyncedLyrics(
                 }
             )
     ) {
-        val centerPad = maxHeight * LYRIC_ANCHOR_FRACTION
+        val isLandscape = maxWidth > maxHeight * 1.15f
+        val effectiveFontSizeSp = if (isLandscape) (fontSizeSp * 1.15f).roundToInt() else fontSizeSp
+        val centerPad = if (isLandscape) maxHeight * 0.32f else maxHeight * LYRIC_ANCHOR_FRACTION
 
         // 「行号差 → 屏幕纵向比例」的换算：当前句停在锚点处，往上 / 往下每行移动
         // linePx（行高 + 行距 + 上下各 2dp 的 padding）。有了它，某一行歌词就能
@@ -1683,21 +1729,22 @@ internal fun SyncedLyrics(
         // 用户手动翻到别处时会有偏差 —— 但那种时候他正在读的也不是当前句，
         // 颜色差一点点看不出来，不值得为此挂一层逐项布局回调。
         val containerPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
+        val lineSpacingDp = if (isLandscape) (effectiveFontSizeSp * 0.45f).dp else (fontSizeSp * 0.62f).dp
         val linePx = with(density) {
-            (fontSizeSp * 1.5f).sp.toPx() + (fontSizeSp * 0.62f).dp.toPx() + 4.dp.toPx()
+            (effectiveFontSizeSp * 1.5f).sp.toPx() + lineSpacingDp.toPx() + 4.dp.toPx()
         }
-        val anchorPx = containerPx * LYRIC_ANCHOR_FRACTION
+        val anchorPx = containerPx * (if (isLandscape) 0.32f else LYRIC_ANCHOR_FRACTION)
 
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
-                start = 28.dp,
-                end = 28.dp,
+                start = if (isLandscape) 40.dp else 28.dp,
+                end = if (isLandscape) 40.dp else 28.dp,
                 top = centerPad,
                 bottom = centerPad
             ),
-            verticalArrangement = Arrangement.spacedBy((fontSizeSp * 0.62f).dp),
+            verticalArrangement = Arrangement.spacedBy(lineSpacingDp),
             userScrollEnabled = userScrollEnabled
         ) {
             itemsIndexed(lines) { index, line ->
@@ -1735,8 +1782,8 @@ internal fun SyncedLyrics(
                         )
                         .padding(vertical = 2.dp)
                 ) {
-                    val lineFontSize = (fontSizeSp + if (isCurrent) 2 else 0).sp
-                    val lineLineHeight = (fontSizeSp * 1.5f).sp
+                    val lineFontSize = (effectiveFontSizeSp + if (isCurrent) 2 else 0).sp
+                    val lineLineHeight = (effectiveFontSizeSp * 1.5f).sp
                     val lineWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal
                     if (isCurrent && line.segments != null) {
                         // 增强型 LRC：当前句逐字高亮
@@ -1869,10 +1916,11 @@ fun PanelLyrics(
     val apiBase = prefs.lyricsApiBase
     val neteaseFill = prefs.neteaseFillEnabled
     val convertT2S = prefs.lyricsConvertToSimplified
+    val lyricsRev by LyricsRepository.revision.collectAsState()
 
-    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill) {
+    LaunchedEffect(song.id, song.uri, onlineEnabled, apiBase, convertT2S, neteaseFill, lyricsRev) {
         loading = true
-        result = LyricsRepository.load(
+        val loaded = LyricsRepository.load(
             context = context,
             songId = song.id,
             uri = song.uri,
@@ -1887,7 +1935,14 @@ fun PanelLyrics(
             remoteSource = song.source,
             remoteId = song.remoteId
         )
+        result = loaded
         loading = false
+        com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            lines = (loaded.lyrics as? Lyrics.Synced)?.lines.orEmpty()
+        )
     }
 
     val lyrics = result?.lyrics
@@ -2117,7 +2172,7 @@ private fun LyricsSearchDialog(
                         if (onlineEnabled) {
                             "默认填的是当前歌曲的标签信息。改一下歌名或歌手再搜一次，也可以直接导入或删除歌词。"
                         } else {
-                            "当前未开启在线歌词（可在「设置 → 歌词」开启），可在此直接导入外部 .lrc / 粘贴歌词或删除当前歌词。"
+                            "当前未开启在线歌词（可在「设置 → 歌词」开启），可在此直接导入外部 .lrc / .ttml / 粘贴歌词或删除当前歌词。"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = skin.textMuted
@@ -2337,7 +2392,14 @@ fun LyricStrip(
             remoteSource = song.source,
             remoteId = song.remoteId
         )
-        lines = (loaded?.lyrics as? Lyrics.Synced)?.lines
+        val synced = (loaded?.lyrics as? Lyrics.Synced)?.lines
+        lines = synced
+        com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            lines = synced.orEmpty()
+        )
     }
 
     // 还没取到 / 不是同步歌词 / 当前还在前奏（indexAt 返回 -1）→ 什么都不画。

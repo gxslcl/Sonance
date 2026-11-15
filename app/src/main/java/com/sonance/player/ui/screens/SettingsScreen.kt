@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
+import com.sonance.player.desktoplyrics.DesktopLyricsBgMode
+import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -136,10 +138,10 @@ private enum class SettingsCategory(
     val icon: ImageVector
 ) {
     ALL("全部", "全部设置分组", SonanceIcons.GridView),
-    APPEARANCE("外观界面", "主题皮肤、背景玻璃、图标、列表与播放条", SonanceIcons.Palette),
-    PLAYBACK("播放音效", "均衡器、睡眠定时、播放键触感与黑胶视觉", SonanceIcons.Equalizer),
+    APPEARANCE("外观界面", "主题皮肤、背景玻璃、列表播放条与桌面组件", SonanceIcons.Palette),
+    PLAYBACK("播放音效", "均衡器、音频输出、通知播控与播放外观", SonanceIcons.Equalizer),
     LYRICS_COVER("歌词封面", "歌词样式、锁屏歌词、在线歌词与封面补全", SonanceIcons.Lyrics),
-    LIBRARY_ONLINE("曲库在线", "本地扫描过滤、曲库去重、兼容性与在线音源", SonanceIcons.Folder),
+    LIBRARY_ONLINE("曲库在线", "本地扫描、在线音源、曲库清理与格式检查", SonanceIcons.Folder),
     ABOUT("关于支持", "版本信息、基线导出与支持作者", SonanceIcons.Info)
 }
 
@@ -259,6 +261,10 @@ private fun SettingsCategoryPage(
 
             ShellBackgroundSection(vm = vm)
 
+            ListAppearanceSection(vm = vm)
+
+            MiniPlayerSettingsSection(vm = vm)
+
             IconSetSettingsSection(vm = vm)
 
             CollapsibleSection(
@@ -275,10 +281,6 @@ private fun SettingsCategoryPage(
                 Spacer(Modifier.height(12.dp))
                 AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
             }
-
-            ListAppearanceSection(vm = vm)
-
-            MiniPlayerSettingsSection(vm = vm)
 
             CollapsibleSection(
                 id = "widget",
@@ -305,6 +307,8 @@ private fun SettingsCategoryPage(
             )
 
             AudioOutputSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
+
+            SystemControlsSection()
 
             PlayControlSettingsSection(vm = vm)
 
@@ -341,6 +345,27 @@ private fun SettingsCategoryPage(
                 onOpenScanScope = openScanScope
             )
 
+            val onlineSummary = buildString {
+                if (vm.onlineMode == OnlineMode.LX) {
+                    append("洛雪音源")
+                    vm.lxActiveScript?.let { append(" · ${it.meta.name}") }
+                    if (!vm.onlineMusicEnabled) append("（未开启）")
+                    if (vm.lxDownloadEnabled) append(" · 边听边存")
+                } else {
+                    append(if (vm.onlineMusicEnabled) "内置在线已开启" else "内置在线关闭")
+                    if (vm.neteaseFillEnabled) append(" · 网易云补全")
+                    if (vm.onlineDownloadEnabled) append(" · 边听边存")
+                }
+            }
+            CollapsibleSection(
+                id = "online",
+                title = "在线音乐与音源",
+                summary = onlineSummary,
+                icon = SonanceIcons.Cloud
+            ) {
+                OnlineMusicContent(vm = vm)
+            }
+
             CollapsibleSection(
                 id = "cleanup",
                 title = "曲库清理与去重",
@@ -353,6 +378,16 @@ private fun SettingsCategoryPage(
                 Spacer(Modifier.height(18.dp))
                 SettingsGroupLabel("重复与同名歌曲")
                 DuplicateCleanupContent(vm = vm)
+            }
+
+            CollapsibleSection(
+                id = "formatCompat",
+                title = "格式与兼容性检查",
+                summary = "系统解码支持范围 · 私有加密容器扫描",
+                icon = SonanceIcons.Waveform,
+                defaultExpanded = false
+            ) {
+                FormatCompatContent(vm = vm)
             }
 
             CollapsibleSection(
@@ -385,37 +420,6 @@ private fun SettingsCategoryPage(
                     StatBox("占用空间", formatSize(vm.totalSizeBytes), Modifier.weight(1f))
                 }
             }
-
-            CollapsibleSection(
-                id = "formatCompat",
-                title = "格式与兼容性检查",
-                summary = "系统解码支持范围 · 私有加密容器扫描",
-                icon = SonanceIcons.Waveform,
-                defaultExpanded = false
-            ) {
-                FormatCompatContent(vm = vm)
-            }
-
-            val onlineSummary = buildString {
-                if (vm.onlineMode == OnlineMode.LX) {
-                    append("洛雪音源")
-                    vm.lxActiveScript?.let { append(" · ${it.meta.name}") }
-                    if (!vm.onlineMusicEnabled) append("（未开启）")
-                    if (vm.lxDownloadEnabled) append(" · 边听边存")
-                } else {
-                    append(if (vm.onlineMusicEnabled) "内置在线已开启" else "内置在线关闭")
-                    if (vm.neteaseFillEnabled) append(" · 网易云补全")
-                    if (vm.onlineDownloadEnabled) append(" · 边听边存")
-                }
-            }
-            CollapsibleSection(
-                id = "online",
-                title = "在线音乐与音源",
-                summary = onlineSummary,
-                icon = SonanceIcons.Cloud
-            ) {
-                OnlineMusicContent(vm = vm)
-            }
         }
 
         // ===== 私有格式还原 & 音乐缓存嗅探转换 =====
@@ -445,14 +449,12 @@ private fun SettingsCategoryPage(
 
             AboutSettingsSection(vm = vm)
 
-            SystemControlsSection()
-
             CollapsibleSection(
                 id = "donate",
                 title = "支持作者",
                 summary = "微信扫一扫 · 请作者喝杯饮料",
                 icon = SonanceIcons.Heart,
-                defaultExpanded = false
+                defaultExpanded = true
             ) {
                 DonateCard()
             }
@@ -1929,10 +1931,12 @@ private fun SleepChip(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val summary = buildString {
         append("字号 ${vm.lyricsFontSizeSp}sp")
         append(" · 背景${vm.glassStyle.label}")
         if (vm.lockScreenLyrics) append(" · 锁屏歌词开")
+        if (vm.desktopLyricsEnabled) append(" · 桌面歌词开")
     }
 
     CollapsibleSection(
@@ -2000,6 +2004,68 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
             checked = vm.lockScreenLyrics,
             onCheckedChange = vm::changeLockScreenLyrics
         )
+
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "桌面歌词",
+            subtitle = "在桌面及所有应用上方悬浮显示逐行歌词，支持自由拖动、快捷播控与手势穿透锁定",
+            checked = vm.desktopLyricsEnabled,
+            onCheckedChange = { enabled ->
+                if (enabled && !DesktopLyricsManager.hasOverlayPermission(context)) {
+                    Toast.makeText(context, "请授予山水有清音「悬浮窗」权限以开启桌面歌词", Toast.LENGTH_LONG).show()
+                    runCatching {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }
+                } else {
+                    vm.changeDesktopLyricsEnabled(enabled)
+                    DesktopLyricsManager.setEnabled(context, enabled)
+                }
+            }
+        )
+
+        if (vm.desktopLyricsEnabled) {
+            val prefs = remember { com.sonance.player.data.Prefs(context) }
+            var currentBgMode by remember { mutableStateOf(DesktopLyricsBgMode.fromId(prefs.desktopLyricsBgMode)) }
+            Text(
+                "桌面歌词背景样式",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.textMuted,
+                modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DesktopLyricsBgMode.entries.forEach { mode ->
+                    val selected = currentBgMode == mode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(
+                                1.dp,
+                                if (selected) skin.accent else Color.Transparent,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable {
+                                currentBgMode = mode
+                                DesktopLyricsManager.setBgMode(context, mode)
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) skin.accent else skin.textMuted
+                        )
+                    }
+                }
+            }
+        }
 
         Spacer(Modifier.height(8.dp))
         SettingsSwitchRow(
@@ -3183,10 +3249,10 @@ private fun AboutSettingsSection(vm: SonanceViewModel) {
             // 署名。连点 10 次会解锁「私有格式还原」区块 —— 彩蛋，界面上不做任何暗示
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Text(
-                    "陈陆",
+                    "by：工作难找屎难吃",
                     style = MaterialTheme.typography.bodySmall,
                     color = skin.textMuted,
-                    letterSpacing = 2.sp,
+                    letterSpacing = 1.sp,
                     modifier = Modifier.clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -3432,8 +3498,9 @@ private object FoldState {
     fun collapseAll() {
         val keys = expanded.keys.toList()
         keys.forEach { expanded[it] = false }
-        // 默认展开的「关于应用」也显式收起
+        // 默认展开的「关于应用」「支持作者」也显式收起
         expanded["about"] = false
+        expanded["donate"] = false
     }
 }
 

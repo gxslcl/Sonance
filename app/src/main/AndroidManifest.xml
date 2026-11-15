@@ -38,6 +38,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 黑胶模式的触感反馈（install-time 普通权限） -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 桌面歌词悬浮窗权限 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!--
       Shizuku：以 shell 身份读 B 站缓存目录（Android/data/tv.danmaku.bilibilihd）。

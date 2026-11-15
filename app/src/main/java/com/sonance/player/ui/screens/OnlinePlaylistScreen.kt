@@ -48,7 +48,6 @@ import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.remoteSongId
-import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.EmptyState
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.LoadingState
@@ -81,7 +80,8 @@ import com.sonance.player.ui.theme.LocalSkin
 fun OnlinePlaylistScreen(
     playlist: RemotePlaylist,
     vm: SonanceViewModel,
-    playerState: PlayerUiState,
+    currentMediaId: Long,
+    isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -121,13 +121,20 @@ fun OnlinePlaylistScreen(
         if (selectedIds.isEmpty()) emptyList()
         else tracks.filter { it.remoteId in selectedIds }
     }
+    val totalMs = remember(ready, tracks) {
+        if (ready) tracks.sumOf { it.durationMs } else 0L
+    }
+    val downloadedIds = vm.playlistDownloadedTrackIds
+    val selectedDownloadable = remember(selectedTracks, downloadedIds) {
+        selectedTracks.count { it.playable && it.remoteId !in downloadedIds }
+    }
 
     Column(modifier.fillMaxSize()) {
         PlaylistHeader(
             playlist = playlist,
             vm = vm,
             loadedCount = if (ready) tracks.size else null,
-            totalMs = if (ready) tracks.sumOf { it.durationMs } else 0L,
+            totalMs = totalMs,
             onPlayAll = { vm.playPlaylist() },
             onDownload = { pendingDownloadTracks = tracks }
         )
@@ -148,7 +155,6 @@ fun OnlinePlaylistScreen(
         // 歌曲列表顶部同一行操作栏：常规态左上角摆「多选」，进入多选后同一行右侧出现「下载」与「加入播放队列」（未选时禁用）
         if (ready && tracks.isNotEmpty() && !loading) {
             val allSelected = selectedIds.size >= tracks.size
-            val selectedDownloadable = selectedTracks.count { it.playable && !vm.isDownloaded(it) }
             OnlineTrackListToolbar(
                 selectionMode = selectionMode,
                 selectedCount = selectedTracks.size,
@@ -214,9 +220,9 @@ fun OnlinePlaylistScreen(
                             track = track,
                             thumbUrl = vm.onlineThumbUrl(track, ROW_COVER_PX),
                             sourceLabel = src.label,
-                            downloaded = vm.isDownloaded(track),
-                            isCurrent = playerState.mediaId == remoteSongId(src.id, track.remoteId),
-                            isPlaying = playerState.isPlaying,
+                            downloaded = track.remoteId in downloadedIds,
+                            isCurrent = currentMediaId == remoteSongId(src.id, track.remoteId),
+                            isPlaying = isPlaying,
                             selectionMode = selectionMode,
                             selected = checked,
                             onLongClick = {
@@ -257,6 +263,7 @@ fun OnlinePlaylistScreen(
         OnlineDownloadConfirmDialog(
             collectionTitle = "「${playlist.name}」",
             tracks = targetTracks,
+            downloadedIds = downloadedIds,
             isPartial = selectionMode && targetTracks.size < tracks.size,
             vm = vm,
             onDismiss = { pendingDownloadTracks = null },
@@ -666,6 +673,7 @@ internal fun OnlineDownloadProgressBanner(
 internal fun OnlineDownloadConfirmDialog(
     collectionTitle: String,
     tracks: List<RemoteTrack>,
+    downloadedIds: Set<String>,
     isPartial: Boolean,
     vm: SonanceViewModel,
     onDismiss: () -> Unit,
@@ -673,10 +681,18 @@ internal fun OnlineDownloadConfirmDialog(
 ) {
     val skin = LocalSkin.current
     val total = tracks.size
-    val playable = tracks.count { it.playable }
+    val (playable, downloaded, downloadable) = remember(tracks, downloadedIds) {
+        var p = 0
+        var d = 0
+        var dl = 0
+        for (t in tracks) {
+            if (t.playable) p++
+            if (t.remoteId in downloadedIds) d++
+            else if (t.playable) dl++
+        }
+        Triple(p, d, dl)
+    }
     val notPlayable = total - playable
-    val downloaded = tracks.count { vm.isDownloaded(it) }
-    val downloadable = tracks.count { it.playable && !vm.isDownloaded(it) }
 
     AlertDialog(
         onDismissRequest = onDismiss,

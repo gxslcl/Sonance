@@ -3,7 +3,11 @@ package com.sonance.player.playback
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.AudioAttributes
@@ -33,9 +37,16 @@ import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.indexAt
 import com.sonance.player.data.isRemoteUrl
+import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import com.sonance.player.widget.SonanceWidgets
 import com.sonance.player.widget.WidgetCommandReceiver
 import com.sonance.player.widget.WidgetState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -54,6 +65,8 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var transitions: TransitionEffects? = null
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var pendingBtRecovery: Runnable? = null
 
     override fun onCreate() {
         // 必须先于 super.onCreate()：MediaSessionService 在 super 里就会建通知管理器，
@@ -155,7 +168,107 @@ class PlaybackService : MediaSessionService() {
 
         player.addListener(widgetSync)
         liveService = this
+        watchBluetoothRoute(player)
+
+        if (player.isPlaying) {
+            mainHandler.post(playbackTicker)
+        }
+
+        if (Prefs(this).desktopLyricsEnabled && DesktopLyricsManager.hasOverlayPermission(this)) {
+            DesktopLyricsManager.show(this)
+        }
     }
+
+    /**
+     * 监听蓝牙 / 有线 / 外放输出切换：
+     * 部分机型（尤其同时开启经典蓝牙 A2DP 与 LE Audio 的系统）在蓝牙连接或切换时，
+     * 已创建的 AudioTrack 会继续挂在旧输出通道上，出现「进度条在走但蓝牙耳机无声」。
+     * 在输出切换到蓝牙时清掉过期首选设备并在 HAL 握手稳定后原地 seek 刷新 AudioSink，
+     * 迫使 ExoPlayer 重建指向当前蓝牙通道的 AudioTrack。
+     */
+    private fun watchBluetoothRoute(player: ExoPlayer) {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        var lastRoute = OutputAudioRouter.detectCurrentRoute(this)
+        var lastBtIds = bluetoothMediaDeviceIds(am)
+
+        val scheduleRebuild = {
+            pendingBtRecovery?.let { mainHandler.removeCallbacks(it) }
+            val task = Runnable {
+                pendingBtRecovery = null
+                if (liveService != this) return@Runnable
+                player.setPreferredAudioDevice(null)
+                transitions?.ensureActiveVolume()
+                if (OutputAudioRouter.detectCurrentRoute(this) == AudioOutputRoute.BLUETOOTH &&
+                    player.playbackState != Player.STATE_IDLE &&
+                    player.playbackState != Player.STATE_ENDED &&
+                    player.isCurrentMediaItemSeekable &&
+                    transitions?.isSwitchFadingNow() != true
+                ) {
+                    player.seekTo(player.currentPosition.coerceAtLeast(0L))
+                }
+            }
+            pendingBtRecovery = task
+            mainHandler.postDelayed(task, 280L)
+        }
+
+        val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
+                val relevant = addedDevices.any { isBluetoothMediaOutput(it) || isExternalRouteOutput(it) }
+                if (!relevant) return
+                val newRoute = OutputAudioRouter.detectCurrentRoute(this@PlaybackService)
+                val newBtIds = bluetoothMediaDeviceIds(am)
+                val btAppeared = newBtIds.any { it !in lastBtIds }
+                val enteredBt = newRoute == AudioOutputRoute.BLUETOOTH && (lastRoute != AudioOutputRoute.BLUETOOTH || btAppeared)
+                lastRoute = newRoute
+                lastBtIds = newBtIds
+                if (enteredBt) {
+                    scheduleRebuild()
+                } else {
+                    player.setPreferredAudioDevice(null)
+                    transitions?.ensureActiveVolume()
+                }
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
+                val relevant = removedDevices.any { isBluetoothMediaOutput(it) || isExternalRouteOutput(it) }
+                if (!relevant) return
+                val newRoute = OutputAudioRouter.detectCurrentRoute(this@PlaybackService)
+                val newBtIds = bluetoothMediaDeviceIds(am)
+                val hadBt = removedDevices.any { isBluetoothMediaOutput(it) }
+                lastRoute = newRoute
+                lastBtIds = newBtIds
+                player.setPreferredAudioDevice(null)
+                transitions?.ensureActiveVolume()
+                if (hadBt && newRoute == AudioOutputRoute.BLUETOOTH && newBtIds.isNotEmpty()) {
+                    scheduleRebuild()
+                }
+            }
+        }
+        runCatching {
+            am.registerAudioDeviceCallback(cb, mainHandler)
+            audioDeviceCallback = cb
+        }
+    }
+
+    private fun bluetoothMediaDeviceIds(am: AudioManager): Set<Int> =
+        am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .filter(::isBluetoothMediaOutput)
+            .map { it.id }
+            .toSet()
+
+    private fun isBluetoothMediaOutput(info: AudioDeviceInfo): Boolean =
+        info.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+            (Build.VERSION.SDK_INT >= 28 && info.type == AudioDeviceInfo.TYPE_HEARING_AID) ||
+            (Build.VERSION.SDK_INT >= 31 && info.type == AudioDeviceInfo.TYPE_BLE_HEADSET) ||
+            (Build.VERSION.SDK_INT >= 33 && info.type == AudioDeviceInfo.TYPE_BLE_SPEAKER)
+
+    private fun isExternalRouteOutput(info: AudioDeviceInfo): Boolean =
+        info.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+            info.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+            info.type == AudioDeviceInfo.TYPE_AUX_LINE ||
+            info.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+            info.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+            info.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
 
     /**
      * 播放用的数据源。**本地和在线共用这一套**，所以每一项都得兼顾两边。
@@ -226,6 +339,81 @@ class PlaybackService : MediaSessionService() {
             SystemAudioEffects.syncSession(svc, Prefs(svc).systemAudioEffectEnabled, exo.audioSessionId)
         }
 
+        internal fun canonicalLyricKey(
+            mediaId: Long,
+            title: String,
+            artist: String,
+            revision: Long = LyricsRepository.revision.value
+        ): String = "$mediaId|${title.trim()}|${artist.trim()}|$revision"
+
+        internal fun trackPartOfLyricKey(
+            mediaId: Long,
+            title: String,
+            artist: String
+        ): String = "$mediaId|${title.trim()}|${artist.trim()}"
+
+        internal fun matchesSameTrack(key: String?, mediaId: Long, title: String, artist: String): Boolean {
+            if (key.isNullOrEmpty()) return false
+            val prefix = trackPartOfLyricKey(mediaId, title, artist)
+            return key.startsWith("$prefix|")
+        }
+
+        internal fun syncLiveLyrics(title: String, artist: String, lines: List<LyricLine>) {
+            syncLiveLyrics(0L, title, artist, lines)
+        }
+
+        internal fun syncLiveLyrics(
+            songId: Long,
+            title: String,
+            artist: String,
+            lines: List<LyricLine>
+        ) {
+            val svc = liveService ?: return
+            val cleaned = lines.filter { it.text.isNotBlank() }
+            svc.runOnMain {
+                val player = svc.playerOrNull()
+                val item = player?.currentMediaItem
+                val curId = item?.mediaId?.toLongOrNull() ?: -1L
+                val curMeta = item?.mediaMetadata
+                val curTitle = curMeta?.title?.toString().orEmpty()
+                val curArtist = curMeta?.artist?.toString().orEmpty()
+                val hasActiveItem = item != null && (curId != -1L || curTitle.isNotBlank())
+                val matchesCurrent = !hasActiveItem || when {
+                    curId != 0L && curId != -1L && songId != 0L && songId != -1L -> curId == songId
+                    else -> curTitle.trim() == title.trim() && curArtist.trim() == artist.trim()
+                }
+                if (!matchesCurrent) return@runOnMain
+
+                val resolvedId = if (curId != -1L) curId else songId
+                val resolvedTitle = curTitle.ifBlank { title }
+                val resolvedArtist = curArtist.ifBlank { artist }
+                val key = canonicalLyricKey(resolvedId, resolvedTitle, resolvedArtist)
+                svc.activeTrackIdentity = trackPartOfLyricKey(resolvedId, resolvedTitle, resolvedArtist)
+                svc.pendingOnlineLyricJob?.cancel()
+                svc.pendingOnlineLyricJob = null
+                synchronized(svc.lyricLoadLock) {
+                    svc.widgetLyricInFlightKey = null
+                    svc.widgetLyricKey = key
+                    svc.widgetLyricLines = cleaned
+                }
+                svc.tickLive()
+                svc.enqueueWidgetLivePush()
+            }
+        }
+
+        internal fun refreshLyricsIfEmpty() {
+            val svc = liveService ?: return
+            svc.runOnMain {
+                if (svc.widgetLyricLines.isEmpty()) {
+                    synchronized(svc.lyricLoadLock) {
+                        svc.widgetLyricKey = null
+                        svc.widgetLyricInFlightKey = null
+                    }
+                    svc.tickLive()
+                }
+            }
+        }
+
         /**
          * 带浏览器 UA 去请求在线音源。
          *
@@ -251,42 +439,214 @@ class PlaybackService : MediaSessionService() {
         val mediaId: Long,
         val title: String,
         val artist: String,
+        val album: String,
         val isPlaying: Boolean,
         val albumId: Long,
         val sourceUri: String?,
+        val remoteSource: String,
+        val remoteId: String?,
         val coverKey: String?,
         val positionMs: Long,
         val durationMs: Long
     )
 
+    private data class TrackLyricQuery(
+        val lyricKey: String,
+        val mediaId: Long,
+        val title: String,
+        val artist: String,
+        val album: String,
+        val durationMs: Long,
+        val sourceUri: String?,
+        val remoteSource: String,
+        val remoteId: String?
+    )
+
+    private data class WidgetTickPayload(
+        val positionMs: Long,
+        val durationMs: Long,
+        val triplet: WidgetState.LyricTriplet
+    )
+
+    private sealed interface LocalLyricsLookup {
+        data class Resolved(val lines: List<LyricLine>) : LocalLyricsLookup
+        data object NeedOnline : LocalLyricsLookup
+    }
+
     private val pendingWidgetSync = AtomicReference<WidgetSyncSnapshot?>(null)
+    private val pendingWidgetTick = AtomicReference<WidgetTickPayload?>(null)
 
     private val widgetExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "sonance-widget-sync").apply { isDaemon = true }
+    }
+
+    private val lyricScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pendingOnlineLyricJob: Job? = null
+    private val lyricLoadLock = Any()
+
+    @Volatile
+    private var activeTrackIdentity: String = ""
+
+    @Volatile
+    private var lastPushedWidgetTickSig: String? = null
+
+    private val playbackTicker = object : Runnable {
+        override fun run() {
+            val player = mediaSession?.player
+            if (player != null && player.isPlaying) {
+                tickLive()
+                mainHandler.postDelayed(this, 250L)
+            }
+        }
+    }
+
+    private fun queryFromPlayer(player: Player): TrackLyricQuery {
+        val item = player.currentMediaItem
+        val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
+        val meta = item?.mediaMetadata
+        val title = meta?.title?.toString().orEmpty()
+        val artist = meta?.artist?.toString().orEmpty()
+        val album = meta?.albumTitle?.toString().orEmpty()
+        val extras = meta?.extras
+        val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+            ?: meta?.durationMs?.takeIf { it > 0L }
+            ?: extras?.getLong(PlayerController.EXTRA_DURATION_MS, 0L)?.takeIf { it > 0L }
+            ?: 0L
+        return TrackLyricQuery(
+            lyricKey = canonicalLyricKey(mediaId, title, artist),
+            mediaId = mediaId,
+            title = title,
+            artist = artist,
+            album = album,
+            durationMs = durationMs,
+            sourceUri = extras?.getString(PlayerController.EXTRA_URI),
+            remoteSource = extras?.getString(PlayerController.EXTRA_SOURCE).orEmpty(),
+            remoteId = extras?.getString(PlayerController.EXTRA_REMOTE_ID)
+        )
+    }
+
+    private fun tickLive() {
+        val player = mediaSession?.player ?: return
+        val query = queryFromPlayer(player)
+        val posMs = player.currentPosition.coerceAtLeast(0L)
+        activeTrackIdentity = trackPartOfLyricKey(query.mediaId, query.title, query.artist)
+
+        // 计算当前歌曲的歌词延迟/提前偏移 (lyricsOffsetMs)
+        val offsetMs = Prefs(applicationContext).lyricsOffsetMs(query.title, query.artist)
+        val effectivePosMs = (posMs + offsetMs).coerceAtLeast(0L)
+
+        // 切到新歌时立即清空上一首的残留歌词，绝不在主线程做磁盘或网络 I/O
+        val prevKey = widgetLyricKey
+        if (!matchesSameTrack(prevKey, query.mediaId, query.title, query.artist) && widgetLyricLines.isNotEmpty()) {
+            widgetLyricLines = emptyList()
+        }
+        if (query.title.isNotBlank() &&
+            query.lyricKey != widgetLyricKey &&
+            query.lyricKey != widgetLyricInFlightKey
+        ) {
+            requestServiceLyricsLoad(query)
+        }
+
+        val triplet = lyricTripletAt(effectivePosMs)
+
+        DesktopLyricsManager.onTick(
+            context = applicationContext,
+            isPlaying = player.isPlaying,
+            title = query.title,
+            artist = query.artist,
+            lyricTriplet = triplet
+        )
+
+        val posSec = (posMs / 1000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val durSec = (query.durationMs / 1000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val tickSig = "${query.mediaId}|$posSec|$durSec|${triplet.hasLyrics}|${triplet.prev}|${triplet.cur}|${triplet.next}"
+        if (tickSig != lastPushedWidgetTickSig) {
+            lastPushedWidgetTickSig = tickSig
+            val payload = WidgetTickPayload(posMs, query.durationMs, triplet)
+            if (pendingWidgetTick.getAndSet(payload) == null) {
+                widgetExecutor.execute { drainWidgetTick() }
+            }
+        }
+    }
+
+    private fun enqueueWidgetLivePush() {
+        val player = mediaSession?.player ?: return
+        val query = queryFromPlayer(player)
+        val posMs = player.currentPosition.coerceAtLeast(0L)
+        val offsetMs = Prefs(applicationContext).lyricsOffsetMs(query.title, query.artist)
+        val triplet = lyricTripletAt((posMs + offsetMs).coerceAtLeast(0L))
+        lastPushedWidgetTickSig = null
+        val payload = WidgetTickPayload(posMs, query.durationMs, triplet)
+        if (pendingWidgetTick.getAndSet(payload) == null) {
+            widgetExecutor.execute { drainWidgetTick() }
+        }
+    }
+
+    private fun drainWidgetTick() {
+        while (true) {
+            val payload = pendingWidgetTick.getAndSet(null) ?: break
+            runCatching {
+                if (SonanceWidgets.hasAnyWidgets(applicationContext)) {
+                    SonanceWidgets.onTick(
+                        applicationContext,
+                        payload.positionMs,
+                        payload.durationMs,
+                        payload.triplet
+                    )
+                }
+            }
+        }
     }
 
     private val widgetSync = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             // 主线程只读内存中的轻量字段，Pref 读写 / 歌词读取 / RemoteViews 构建全部转到后台串行执行，
             // 快速连滑切歌时原子合并待处理状态，避免主线程卡顿。
-            val meta = player.currentMediaItem?.mediaMetadata
+            val item = player.currentMediaItem
+            val meta = item?.mediaMetadata
             val title = meta?.title?.toString().orEmpty()
             val artist = meta?.artist?.toString().orEmpty()
-            val mediaId = player.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
+            val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
+            val extras = meta?.extras
+            val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+                ?: meta?.durationMs?.takeIf { it > 0L }
+                ?: extras?.getLong(PlayerController.EXTRA_DURATION_MS, 0L)?.takeIf { it > 0L }
+                ?: 0L
+            activeTrackIdentity = trackPartOfLyricKey(mediaId, title, artist)
             val snapshot = WidgetSyncSnapshot(
                 mediaId = mediaId,
                 title = title,
                 artist = artist,
+                album = meta?.albumTitle?.toString().orEmpty(),
                 isPlaying = player.isPlaying,
-                albumId = meta?.extras?.getLong(PlayerController.EXTRA_ALBUM_ID, -1L) ?: -1L,
-                sourceUri = meta?.extras?.getString(PlayerController.EXTRA_URI),
+                albumId = extras?.getLong(PlayerController.EXTRA_ALBUM_ID, -1L) ?: -1L,
+                sourceUri = extras?.getString(PlayerController.EXTRA_URI),
+                remoteSource = extras?.getString(PlayerController.EXTRA_SOURCE).orEmpty(),
+                remoteId = extras?.getString(PlayerController.EXTRA_REMOTE_ID),
                 coverKey = OnlineCover.keyOf(title, artist),
                 positionMs = player.currentPosition.coerceAtLeast(0L),
-                durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
+                durationMs = durationMs
             )
             if (pendingWidgetSync.getAndSet(snapshot) == null) {
                 widgetExecutor.execute { drainWidgetSync() }
             }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            mainHandler.removeCallbacks(playbackTicker)
+            if (isPlaying) {
+                mainHandler.post(playbackTicker)
+            } else {
+                tickLive()
+            }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            tickLive()
         }
     }
 
@@ -305,19 +665,50 @@ class PlaybackService : MediaSessionService() {
                     coverKey = s.coverKey
                 )
 
-                val lyricKey = "${s.title}|${s.artist}|${s.mediaId}"
-                if (lyricKey != widgetLyricKey) {
-                    widgetLyricKey = lyricKey
-                    widgetLyricLines = runCatching {
-                        readLocalLyrics(applicationContext, s.title, s.artist, s.sourceUri)
-                    }.getOrDefault(emptyList())
+                val query = TrackLyricQuery(
+                    lyricKey = canonicalLyricKey(s.mediaId, s.title, s.artist),
+                    mediaId = s.mediaId,
+                    title = s.title,
+                    artist = s.artist,
+                    album = s.album,
+                    durationMs = s.durationMs,
+                    sourceUri = s.sourceUri,
+                    remoteSource = s.remoteSource,
+                    remoteId = s.remoteId
+                )
+                if (s.title.isNotBlank() &&
+                    query.lyricKey != widgetLyricKey &&
+                    query.lyricKey != widgetLyricInFlightKey
+                ) {
+                    val claimed = synchronized(lyricLoadLock) {
+                        if (query.lyricKey == widgetLyricKey || query.lyricKey == widgetLyricInFlightKey) {
+                            false
+                        } else {
+                            widgetLyricInFlightKey = query.lyricKey
+                            true
+                        }
+                    }
+                    if (claimed) {
+                        resolveAndApplyLyricsInBackground(query)
+                    }
                 }
+
+                val offsetMs = Prefs(applicationContext).lyricsOffsetMs(s.title, s.artist)
+                val effectivePosMs = (s.positionMs + offsetMs).coerceAtLeast(0L)
+                val triplet = lyricTripletAt(effectivePosMs)
 
                 SonanceWidgets.onTick(
                     applicationContext,
                     s.positionMs,
                     s.durationMs,
-                    lyricTripletAt(s.positionMs)
+                    triplet
+                )
+                DesktopLyricsManager.onTick(
+                    context = applicationContext,
+                    isPlaying = s.isPlaying,
+                    title = s.title,
+                    artist = s.artist,
+                    lyricTriplet = triplet
                 )
             }
         }
@@ -325,36 +716,214 @@ class PlaybackService : MediaSessionService() {
 
     // ===== 给桌面小组件的歌词 =====
 
+    @Volatile
     private var widgetLyricKey: String? = null
 
+    @Volatile
     private var widgetLyricLines: List<LyricLine> = emptyList()
+
+    @Volatile
+    private var widgetLyricInFlightKey: String? = null
+
+    private fun requestServiceLyricsLoad(query: TrackLyricQuery) {
+        synchronized(lyricLoadLock) {
+            if (query.lyricKey == widgetLyricKey || query.lyricKey == widgetLyricInFlightKey) return
+            widgetLyricInFlightKey = query.lyricKey
+        }
+        widgetExecutor.execute {
+            resolveAndApplyLyricsInBackground(query)
+        }
+    }
+
+    private fun resolveAndApplyLyricsInBackground(query: TrackLyricQuery) {
+        val local = runCatching {
+            readLocalLyrics(
+                context = applicationContext,
+                songId = query.mediaId,
+                title = query.title,
+                artist = query.artist,
+                uriStr = query.sourceUri,
+                remoteSource = query.remoteSource
+            )
+        }.getOrDefault(LocalLyricsLookup.Resolved(emptyList()))
+
+        when (local) {
+            is LocalLyricsLookup.Resolved -> {
+                val applied = applyLoadedLyricsIfStillCurrent(query, local.lines)
+                synchronized(lyricLoadLock) {
+                    if (widgetLyricInFlightKey == query.lyricKey) widgetLyricInFlightKey = null
+                }
+                if (applied) {
+                    runOnMain {
+                        tickLive()
+                        enqueueWidgetLivePush()
+                    }
+                }
+            }
+            LocalLyricsLookup.NeedOnline -> {
+                val prefs = Prefs(applicationContext)
+                val shouldFetchOnline = query.title.isNotBlank() &&
+                    prefs.onlineLyricsEnabled &&
+                    (DesktopLyricsManager.isShowing() || prefs.desktopLyricsEnabled || SonanceWidgets.hasAnyWidgets(applicationContext))
+
+                applyLoadedLyricsIfStillCurrent(query, emptyList())
+                if (shouldFetchOnline) {
+                    scheduleOnlineLyricsFetch(query)
+                } else {
+                    synchronized(lyricLoadLock) {
+                        if (widgetLyricInFlightKey == query.lyricKey) widgetLyricInFlightKey = null
+                    }
+                    runOnMain {
+                        tickLive()
+                        enqueueWidgetLivePush()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun scheduleOnlineLyricsFetch(query: TrackLyricQuery) {
+        pendingOnlineLyricJob?.cancel()
+        pendingOnlineLyricJob = lyricScope.launch {
+            delay(350L)
+            val expectedTrack = trackPartOfLyricKey(query.mediaId, query.title, query.artist)
+            if (activeTrackIdentity.isNotEmpty() && activeTrackIdentity != expectedTrack) {
+                synchronized(lyricLoadLock) {
+                    if (widgetLyricInFlightKey == query.lyricKey) widgetLyricInFlightKey = null
+                }
+                return@launch
+            }
+            val uri = query.sourceUri
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                ?: Uri.EMPTY
+            val prefs = Prefs(applicationContext)
+            val result = runCatching {
+                LyricsRepository.load(
+                    context = applicationContext,
+                    songId = query.mediaId,
+                    uri = uri,
+                    title = query.title,
+                    artist = query.artist,
+                    album = query.album,
+                    onlineEnabled = prefs.onlineLyricsEnabled,
+                    apiBase = prefs.lyricsApiBase,
+                    convertToSimplified = prefs.lyricsConvertToSimplified,
+                    durationMs = query.durationMs,
+                    neteaseEnabled = prefs.neteaseFillEnabled,
+                    remoteSource = query.remoteSource,
+                    remoteId = query.remoteId
+                )
+            }.getOrNull()
+            val lines = (result?.lyrics as? Lyrics.Synced)?.lines
+                ?.filter { it.text.isNotBlank() }
+                .orEmpty()
+            synchronized(lyricLoadLock) {
+                if (widgetLyricInFlightKey == query.lyricKey) widgetLyricInFlightKey = null
+            }
+            if (applyLoadedLyricsIfStillCurrent(query, lines)) {
+                runOnMain {
+                    tickLive()
+                    enqueueWidgetLivePush()
+                }
+            }
+        }
+    }
+
+    private fun applyLoadedLyricsIfStillCurrent(
+        query: TrackLyricQuery,
+        lines: List<LyricLine>
+    ): Boolean {
+        val currentRev = LyricsRepository.revision.value
+        val expectedTrack = trackPartOfLyricKey(query.mediaId, query.title, query.artist)
+        val active = activeTrackIdentity
+        if (active.isNotEmpty() && active != expectedTrack) return false
+        synchronized(lyricLoadLock) {
+            if (query.lyricKey != canonicalLyricKey(query.mediaId, query.title, query.artist, currentRev)) {
+                return false
+            }
+            widgetLyricKey = query.lyricKey
+            widgetLyricLines = lines
+        }
+        return true
+    }
 
     private fun readLocalLyrics(
         context: Context,
+        songId: Long,
         title: String,
         artist: String,
-        uriStr: String?
-    ): List<LyricLine> {
-        val apiBase = Prefs(context).lyricsApiBase
-        val keys = listOfNotNull(
-            LyricsCache.keyOf(title, artist, apiBase),
-            LyricsCache.keyOf(title, artist, "")
-        ).distinct()
+        uriStr: String?,
+        remoteSource: String = ""
+    ): LocalLyricsLookup {
+        val prefs = Prefs(context)
+        val convertT2S = prefs.lyricsConvertToSimplified
 
-        var raw: String? = null
-        for (k in keys) {
-            val hit = LyricsCache.lookup(context, k)
-            if (hit is LyricsCache.Lookup.Hit) {
-                raw = hit.text
-                break
+        // 0) 用户手动导入 / 显式删除覆盖（优先级最高）
+        when (val ov = LyricsCache.lookupOverride(context, songId)) {
+            is LyricsCache.Override.Deleted -> return LocalLyricsLookup.Resolved(emptyList())
+            is LyricsCache.Override.Imported -> {
+                return LocalLyricsLookup.Resolved(parseSyncedLines(context, ov.text, convertT2S))
+            }
+            LyricsCache.Override.None -> Unit
+        }
+
+        // 1) 内嵌标签
+        if (!uriStr.isNullOrBlank() && !isRemoteUrl(uriStr)) {
+            val embedded = runCatching { AudioTags.readLyrics(context, Uri.parse(uriStr)) }.getOrNull()
+            if (!embedded.isNullOrBlank()) {
+                return LocalLyricsLookup.Resolved(parseSyncedLines(context, embedded, convertT2S))
             }
         }
-        if (raw == null && !uriStr.isNullOrBlank() && !isRemoteUrl(uriStr)) {
-            raw = runCatching { AudioTags.readLyrics(context, Uri.parse(uriStr)) }.getOrNull()
+
+        // 2) 本地在线缓存（含洛雪命名空间、当前服务地址、空盐值、以及 songId 别名）
+        val apiBase = prefs.lyricsApiBase
+        val lxPlatform = com.sonance.player.data.lx.LxPlatform.platformIdFromSource(remoteSource)
+        val effectiveBase = if (lxPlatform != null) "$apiBase|$remoteSource" else apiBase
+        val primaryKey = LyricsCache.keyOf(title, artist, effectiveBase)
+        val candidateKeys = buildList {
+            if (primaryKey != null) add(primaryKey)
+            LyricsCache.keyOf(title, artist, apiBase)?.let { if (it !in this) add(it) }
+            LyricsCache.keyOf(title, artist, "")?.let { if (it !in this) add(it) }
+            if (songId != 0L && songId != -1L) add("id:$songId")
         }
-        val text = raw ?: return emptyList()
-        if (text.isBlank()) return emptyList()
-        val synced = runCatching { LyricsRepository.parse(text) }.getOrNull() as? Lyrics.Synced
+
+        var rawHit: String? = null
+        var primaryKnownMiss = false
+        for ((index, key) in candidateKeys.withIndex()) {
+            when (val lookup = LyricsCache.lookup(context, key)) {
+                is LyricsCache.Lookup.Hit -> {
+                    rawHit = lookup.text
+                    break
+                }
+                is LyricsCache.Lookup.KnownMiss -> {
+                    if (index == 0) primaryKnownMiss = true
+                }
+                LyricsCache.Lookup.Unknown -> Unit
+            }
+        }
+
+        if (!rawHit.isNullOrBlank()) {
+            return LocalLyricsLookup.Resolved(parseSyncedLines(context, rawHit, convertT2S))
+        }
+        if (primaryKnownMiss) {
+            return LocalLyricsLookup.Resolved(emptyList())
+        }
+        return LocalLyricsLookup.NeedOnline
+    }
+
+    private fun parseSyncedLines(
+        context: Context,
+        rawText: String,
+        convertToSimplified: Boolean
+    ): List<LyricLine> {
+        if (rawText.isBlank()) return emptyList()
+        val shown = if (convertToSimplified) {
+            com.sonance.player.data.ChineseConverter.toSimplified(context, rawText)
+        } else {
+            rawText
+        }
+        val synced = runCatching { LyricsRepository.parse(shown) }.getOrNull() as? Lyrics.Synced
         return synced?.lines?.filter { it.text.isNotBlank() }.orEmpty()
     }
 
@@ -436,6 +1005,16 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        pendingOnlineLyricJob?.cancel()
+        pendingOnlineLyricJob = null
+        lyricScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        DesktopLyricsManager.hide(this)
+        pendingBtRecovery?.let { mainHandler.removeCallbacks(it) }
+        pendingBtRecovery = null
+        audioDeviceCallback?.let { cb ->
+            runCatching { getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb) }
+        }
+        audioDeviceCallback = null
         mainHandler.removeCallbacksAndMessages(null)
         SystemAudioEffects.releaseSession(this)
         mediaSession?.run {

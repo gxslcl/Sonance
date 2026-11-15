@@ -121,9 +121,11 @@ object OnlineDownloader {
      * 覆盖 FAT/exFAT 和 ext4 的非法字符集，另外去掉首尾的点和空格 ——
      * Windows 上以点或空格结尾的文件名是非法的（外接卡插到电脑上就看出问题了）。
      */
+    private val ILLEGAL_FILENAME_CHARS_REGEX = Regex("""[\\/:*?"<>|\u0000-\u001F]""")
+
     private fun sanitize(raw: String): String {
         val cleaned = raw
-            .replace(Regex("""[\\/:*?"<>|\u0000-\u001F]"""), "_")
+            .replace(ILLEGAL_FILENAME_CHARS_REGEX, "_")
             .trim()
             .trimEnd('.', ' ')
         // 单段文件名上限通常 255 字节，中文按 UTF-8 占 3 字节 —— 保守取 60 个字符

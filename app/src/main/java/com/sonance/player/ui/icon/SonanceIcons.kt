@@ -271,6 +271,13 @@ object SonanceIcons {
     )
     val MoreVertical: ImageVector get() = pick(moreSets)
 
+    private val moreHorizontalSets = listOf(
+        f("MoreHorizontal0", circle(5.0, 12.0, 1.3), circle(12.0, 12.0, 1.3), circle(19.0, 12.0, 1.3)),
+        lazy { build("MoreHorizontal1", listOf(circle(5.0, 12.0, 1.4), circle(12.0, 12.0, 1.4), circle(19.0, 12.0, 1.4)), emptyList(), 1.4f) },
+        f("MoreHorizontal2", circle(5.0, 12.0, 1.6), circle(12.0, 12.0, 1.6), circle(19.0, 12.0, 1.6))
+    )
+    val MoreHorizontal: ImageVector get() = pick(moreHorizontalSets)
+
     val Check by o("Check", "M20 6L9 17l-5-5")
     val Refresh by o(
         "Refresh",
@@ -298,13 +305,31 @@ object SonanceIcons {
     )
     val Plus by o("Plus", "M12 5v14", "M5 12h14")
 
-    /** 下载：托盘 + 向下的箭头（feather download） */
-    val Download by o(
-        "Download",
-        "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4",
-        "M7 10l5 5 5-5",
-        "M12 15V3"
+    /** 下载：轻盈细线箭头 + 浅托盘，随当前图标套系切换笔触 */
+    private val downloadSets = listOf(
+        ow(
+            "Download0",
+            1.5f,
+            "M12 4.6v10.1",
+            "M8.6 11.3L12 14.7l3.4-3.4",
+            "M6.2 17.4a1.6 1.6 0 0 0 1.6 1.6h8.4a1.6 1.6 0 0 0 1.6-1.6"
+        ),
+        ow(
+            "Download1",
+            1.25f,
+            "M12 4.8v10.1",
+            "M8.6 11.5L12 14.9l3.4-3.4",
+            "M6.6 18.8h10.8"
+        ),
+        ow(
+            "Download2",
+            1.8f,
+            "M12 4.6v10.1",
+            "M8.6 11.3L12 14.7l3.4-3.4",
+            "M6.2 17.4a1.6 1.6 0 0 0 1.6 1.6h8.4a1.6 1.6 0 0 0 1.6-1.6"
+        )
     )
+    val Download: ImageVector get() = pick(downloadSets)
     val Waveform by o("Waveform", "M22 12h-4l-3 9L9 3l-3 9H2")
     val Image by o(
         "Image",

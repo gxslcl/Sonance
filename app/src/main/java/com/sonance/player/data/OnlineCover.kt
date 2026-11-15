@@ -43,8 +43,11 @@ data class CoverCandidate(
  */
 object OnlineCover {
 
-    /** 候选列表的缩略图缓存（只活在内存里，列表关掉即可回收） */
-    val thumbCache = android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(60)
+    /** 候选与歌单/搜索缩略图内存缓存（加大容量避免长列表回滑频繁淘汰重下） */
+    val thumbCache = android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(240)
+
+    private val TRACK_PREFIX_REGEX = Regex("^\\[?\\d{1,3}\\]?\\s*[-._、)）]?\\s*")
+    private val ARTWORK_SIZE_REGEX = Regex("/\\d+x\\d+bb\\.(jpg|png)$")
 
     private const val TAG = "SonanceCover"
     private const val CONNECT_MS = 6000
@@ -90,7 +93,7 @@ object OnlineCover {
      */
     internal fun cleanTitle(title: String): String {
         var t = title.trim()
-        t = t.replace(Regex("^\\[?\\d{1,3}\\]?\\s*[-._、)）]?\\s*"), "")
+        t = t.replace(TRACK_PREFIX_REGEX, "")
         return t.trim().ifBlank { title.trim() }
     }
 
@@ -271,7 +274,7 @@ object OnlineCover {
 
     /** 把 iTunes 的 artworkUrl 换成指定尺寸 */
     fun resizeUrl(url: String, px: Int): String =
-        url.replace(Regex("/\\d+x\\d+bb\\.(jpg|png)$"), "/${px}x${px}bb.$1")
+        url.replace(ARTWORK_SIZE_REGEX, "/${px}x${px}bb.$1")
 
     /* ============================================================ */
 

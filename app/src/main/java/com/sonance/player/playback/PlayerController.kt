@@ -1117,6 +1117,9 @@ class PlayerController(private val context: Context) {
     companion object {
         const val EXTRA_ALBUM_ID = "sonance.album_id"
         const val EXTRA_URI = "sonance.source_uri"
+        const val EXTRA_SOURCE = "sonance.source"
+        const val EXTRA_REMOTE_ID = "sonance.remote_id"
+        const val EXTRA_DURATION_MS = "sonance.duration_ms"
 
         /**
          * 连接服务端成功时判断是否应丢弃等待中的「恢复现场」请求：
@@ -1215,6 +1218,9 @@ class PlayerController(private val context: Context) {
             val extras = android.os.Bundle().apply {
                 putLong(EXTRA_ALBUM_ID, albumId)
                 putString(EXTRA_URI, uri.toString())
+                if (source.isNotBlank()) putString(EXTRA_SOURCE, source)
+                if (!remoteId.isNullOrBlank()) putString(EXTRA_REMOTE_ID, remoteId)
+                if (durationMs > 0L) putLong(EXTRA_DURATION_MS, durationMs)
             }
             return MediaItem.Builder()
                 .setMediaId(id.toString())

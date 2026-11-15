@@ -68,7 +68,6 @@ import com.sonance.player.data.RemoteTrack
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.netease.NeteaseAccount
 import com.sonance.player.data.remoteSongId
-import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.ChipsRow
 import com.sonance.player.ui.components.CountLabel
 import com.sonance.player.ui.components.EmptyState
@@ -112,7 +111,8 @@ import java.util.Locale
 @Composable
 fun OnlineScreen(
     vm: SonanceViewModel,
-    playerState: PlayerUiState,
+    currentMediaId: Long,
+    isPlaying: Boolean,
     /** 点开一个歌单 —— 由上层导航到歌单详情独立页面 */
     onOpenPlaylist: (RemotePlaylist) -> Unit,
     modifier: Modifier = Modifier
@@ -306,7 +306,7 @@ fun OnlineScreen(
                     CountLabel("${vm.onlinePlaylistResults.size} 个歌单")
                 } else if (hasSingleResults && !mergeSingleToolbar) {
                     PlayableFilterControls(
-                        playable = vm.onlineResults.count { it.playable },
+                        playable = vm.onlinePlayableCount,
                         total = vm.onlineResults.size,
                         hideUnplayable = vm.onlineHideUnplayable,
                         onToggleHideUnplayable = { vm.changeOnlineHideUnplayable(!vm.onlineHideUnplayable) }
@@ -320,7 +320,8 @@ fun OnlineScreen(
             when (vm.onlineSearchMode) {
                 OnlineSearchMode.SINGLE -> SingleSearchBody(
                     vm = vm,
-                    playerState = playerState,
+                    currentMediaId = currentMediaId,
+                    isPlaying = isPlaying,
                     src = src,
                     listState = listState,
                     mergeStatusIntoToolbar = mergeSingleToolbar,
@@ -388,7 +389,8 @@ private fun PlayableFilterControls(
 @Composable
 private fun SingleSearchBody(
     vm: SonanceViewModel,
-    playerState: PlayerUiState,
+    currentMediaId: Long,
+    isPlaying: Boolean,
     src: OnlineSource,
     listState: LazyListState,
     mergeStatusIntoToolbar: Boolean = false,
@@ -407,10 +409,14 @@ private fun SingleSearchBody(
     }
     BackHandler(enabled = selectionMode) { exitSelection() }
 
-    val visibleTracks = vm.visibleOnlineResults.map { it.second }
+    val visibleTracks = vm.visibleOnlineTracks
     val selectedTracks = remember(visibleTracks, selectedIds) {
         if (selectedIds.isEmpty()) emptyList()
         else visibleTracks.filter { it.remoteId in selectedIds }
+    }
+    val downloadedIds = vm.onlineSearchDownloadedTrackIds
+    val selectedDownloadable = remember(selectedTracks, downloadedIds) {
+        selectedTracks.count { it.playable && it.remoteId !in downloadedIds }
     }
 
     when {
@@ -449,8 +455,7 @@ private fun SingleSearchBody(
                 }
 
                 val allSelected = selectedIds.size >= visibleTracks.size
-                val selectedDownloadable = selectedTracks.count { it.playable && !vm.isDownloaded(it) }
-                val playableTotal = vm.onlineResults.count { it.playable }
+                val playableTotal = vm.onlinePlayableCount
                 OnlineTrackListToolbar(
                     selectionMode = selectionMode,
                     selectedCount = selectedTracks.size,
@@ -516,9 +521,9 @@ private fun SingleSearchBody(
                             thumbUrl = vm.onlineThumbUrl(track, THUMB_PX),
                             sourceLabel = src.label,
                             // 存过本地的标出来：点它播的是文件，不再联网
-                            downloaded = vm.isDownloaded(track),
-                            isCurrent = playerState.mediaId == songId,
-                            isPlaying = playerState.isPlaying,
+                            downloaded = track.remoteId in downloadedIds,
+                            isCurrent = currentMediaId == songId,
+                            isPlaying = isPlaying,
                             selectionMode = selectionMode,
                             selected = checked,
                             onLongClick = {
@@ -582,7 +587,7 @@ private fun SingleSearchBody(
                         .ifBlank { null },
                     actions = listOf(
                         RowSheetAction(
-                            label = if (vm.isDownloaded(target)) "下载（已保存到本地）" else "下载"
+                            label = if (target.remoteId in downloadedIds) "下载（已保存到本地）" else "下载"
                         ) {
                             vm.downloadSingleOnlineTrack(target)
                         },
@@ -598,6 +603,7 @@ private fun SingleSearchBody(
                 OnlineDownloadConfirmDialog(
                     collectionTitle = if (vm.onlineQuery.isNotBlank()) "搜索「${vm.onlineQuery}」" else "在线搜索结果",
                     tracks = targetTracks,
+                    downloadedIds = downloadedIds,
                     isPartial = targetTracks.size < visibleTracks.size,
                     vm = vm,
                     onDismiss = { pendingDownloadTracks = null },

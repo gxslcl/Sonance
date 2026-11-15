@@ -2,6 +2,7 @@ package com.sonance.player.ui.components
 
 import androidx.compose.animation.Animatable
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.AnimationSpec
@@ -15,8 +16,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,8 +93,12 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.foundation.Canvas
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import android.provider.Settings
 import android.util.LruCache
+import android.widget.Toast
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -107,6 +114,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -129,6 +137,7 @@ import com.sonance.player.data.CoverTint
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.data.formatDuration
@@ -311,6 +320,9 @@ fun FullPlayer(
 
     /** 双击封面打开的「晕染」面板 */
     var showGlowSheet by rememberSaveable { mutableStateOf(false) }
+
+    /** 右上角胶囊更多按钮打开的「更多功能」面板 */
+    var showTopMoreSheet by rememberSaveable { mutableStateOf(false) }
 
     /**
      * 本页（FullPlayer 根 Box）在 root 坐标系里的左上角。
@@ -859,7 +871,7 @@ fun FullPlayer(
                         )
                     }
                     Spacer(Modifier.weight(1f))
-                    // 右侧合并微磨砂胶囊：黑胶模式（唱片图标）+ 睡眠定时器，统一亮度与字重
+                    // 右侧双联微磨砂胶囊：黑胶模式 | 更多面板（睡眠定时器 + DLNA 无线投屏）
                     Row(
                         modifier = Modifier
                             .height(34.dp)
@@ -893,13 +905,16 @@ fun FullPlayer(
                             modifier = Modifier
                                 .size(width = 30.dp, height = 28.dp)
                                 .clip(CircleShape)
-                                .clickable(onClick = onOpenSleepTimer),
+                                .clickable {
+                                    hapticTick(context)
+                                    showTopMoreSheet = true
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             androidx.compose.material3.Icon(
-                                imageVector = SonanceIcons.Timer,
-                                contentDescription = if (sleepTimerActive) "睡眠定时器（计时中）" else "睡眠定时器",
-                                tint = if (sleepTimerActive) skin.accent else iconTint,
+                                imageVector = SonanceIcons.MoreVertical,
+                                contentDescription = "更多",
+                                tint = if (sleepTimerActive || dlnaActive) skin.accent else iconTint,
                                 modifier = Modifier.size(17.dp)
                             )
                         }
@@ -927,12 +942,12 @@ fun FullPlayer(
                     }
                 }
 
-                // 收起热区：顶栏左侧 ~60% 整片都能触发「收起播放页」，
-                // 覆盖左上角箭头与中间的律动指示器；右侧胶囊所在的右侧区域不铺热区，保留各自点击。
+                // 收起热区：顶栏左侧 ~55% 整片都能触发「收起播放页」，
+                // 覆盖左上角箭头与中间的律动指示器；右侧三联胶囊所在的右侧区域不铺热区，保留各自点击。
                 Box(
                     Modifier
                         .align(Alignment.CenterStart)
-                        .fillMaxWidth(0.60f)
+                        .fillMaxWidth(0.55f)
                         .fillMaxHeight()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
@@ -1011,12 +1026,14 @@ fun FullPlayer(
                     // 也就是顶栏 / 状态栏那一条 —— 表现是屏幕上半截突然出现
                     // 不属于当前页的画面（用户反馈的「遮罩异常」）。
                     Box(Modifier.fillMaxSize().clipToBounds()) {
+                    val downloadBusy = isDownloadBusy(song)
+                    val downloaded = isDownloaded(song)
                     PlayerPage(
                         song = song,
                         isFavorite = isSongFavorite?.invoke(song) ?: (song.id in favorites),
-                        showDownloadButton = !song.isLocal && !song.isDlna,
-                        isDownloading = isDownloadBusy(song),
-                        isDownloaded = isDownloaded(song),
+                        showDownloadButton = !song.isLocal && !song.isDlna && (downloadBusy || !downloaded),
+                        isDownloading = downloadBusy,
+                        isDownloaded = downloaded,
                         onDownload = { onDownloadSong(song) },
                         // 只有当前页读实时播放状态；其它页给中性值，避免进度每 500ms
                         // 更新时把相邻页也拖进重组。
@@ -1052,8 +1069,6 @@ fun FullPlayer(
                         onOpenQueue = onOpenQueue,
                         onOpenCover = onOpenCover,
                         onOpenEqualizer = onOpenEqualizer,
-                        dlnaActive = dlnaActive,
-                        onOpenDlna = onOpenDlna,
                         eqEnabled = eqEnabled,
                         playbackSpeed = playbackSpeed,
                         onSetSpeed = onSetSpeed,
@@ -1164,6 +1179,22 @@ fun FullPlayer(
             vinylMode = vinylMode,
             onVinylModeChange = onVinylModeChange,
             onDismiss = { showGlowSheet = false }
+        )
+    }
+
+    if (showTopMoreSheet) {
+        PlayerMoreActionsSheet(
+            sleepTimerActive = sleepTimerActive,
+            dlnaActive = dlnaActive,
+            onOpenSleepTimer = {
+                showTopMoreSheet = false
+                onOpenSleepTimer()
+            },
+            onOpenDlna = {
+                showTopMoreSheet = false
+                onOpenDlna()
+            },
+            onDismiss = { showTopMoreSheet = false }
         )
     }
 }
@@ -2008,6 +2039,270 @@ private fun GlowSheet(
     }
 }
 
+/**
+ * 右上角「更多功能」半屏面板（睡眠定时 + DLNA 无线投屏）。
+ * 遵循系统内一致的 ModalBottomSheet 底板规范。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerMoreActionsSheet(
+    sleepTimerActive: Boolean,
+    dlnaActive: Boolean,
+    onOpenSleepTimer: () -> Unit,
+    onOpenDlna: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = skin.surface.solidSurface(),
+        dragHandle = {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    Modifier
+                        .width(38.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(skin.textMuted.copy(alpha = 0.45f))
+                )
+            }
+        }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = "更多功能",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = skin.text
+            )
+            Spacer(Modifier.height(14.dp))
+
+            // 睡眠定时卡片
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (sleepTimerActive) skin.accentGlow else skin.surface2)
+                    .border(
+                        1.dp,
+                        if (sleepTimerActive) skin.accent else Color.Transparent,
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable {
+                        hapticTick(context)
+                        onOpenSleepTimer()
+                    }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (sleepTimerActive) skin.accentDim else skin.surface3),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = SonanceIcons.Timer,
+                        contentDescription = null,
+                        tint = if (sleepTimerActive) skin.accent else skin.text,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "睡眠定时",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = skin.text
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = if (sleepTimerActive) "计时中 · 到点自动暂停" else "未开启 · 到点自动暂停播放",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (sleepTimerActive) skin.accent else skin.textMuted
+                    )
+                }
+                if (sleepTimerActive) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(skin.accentDim)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "运行中",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.accent
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // 无线投屏卡片
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (dlnaActive) skin.accentGlow else skin.surface2)
+                    .border(
+                        1.dp,
+                        if (dlnaActive) skin.accent else Color.Transparent,
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable {
+                        hapticTick(context)
+                        onOpenDlna()
+                    }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (dlnaActive) skin.accentDim else skin.surface3),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = SonanceIcons.Cast,
+                        contentDescription = null,
+                        tint = if (dlnaActive) skin.accent else skin.text,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "无线投屏",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = skin.text
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = if (dlnaActive) "已连接 · DLNA 投屏中" else "未连接 · 投屏到音箱或电视",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (dlnaActive) skin.accent else skin.textMuted
+                    )
+                }
+                if (dlnaActive) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(skin.accentDim)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "已连接",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.accent
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // 桌面歌词卡片
+            val prefs = remember { com.sonance.player.data.Prefs(context) }
+            var desktopLyricsOn by remember { mutableStateOf(prefs.desktopLyricsEnabled) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (desktopLyricsOn) skin.accentGlow else skin.surface2)
+                    .border(
+                        1.dp,
+                        if (desktopLyricsOn) skin.accent else Color.Transparent,
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable {
+                        hapticTick(context)
+                        if (!DesktopLyricsManager.hasOverlayPermission(context)) {
+                            Toast.makeText(context, "请授予山水有清音「悬浮窗」权限以开启桌面歌词", Toast.LENGTH_LONG).show()
+                            runCatching {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            }
+                        } else {
+                            val next = !desktopLyricsOn
+                            desktopLyricsOn = next
+                            DesktopLyricsManager.setEnabled(context, next)
+                        }
+                    }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (desktopLyricsOn) skin.accentDim else skin.surface3),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = SonanceIcons.Lyrics,
+                        contentDescription = null,
+                        tint = if (desktopLyricsOn) skin.accent else skin.text,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "桌面歌词",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = skin.text
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = if (desktopLyricsOn) "已开启 · 悬浮于多应用之上" else "未开启 · 悬浮逐行显示歌词",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (desktopLyricsOn) skin.accent else skin.textMuted
+                    )
+                }
+                if (desktopLyricsOn) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(skin.accentDim)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "已开启",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.accent
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** 封面圆角唯一来源：投影、裁剪、内容绘制全部引用它，防止切换路径上形状漂移 */
 private val CoverCornerRadius = 20.dp
 private const val COVER_LIFT_PX = 40f
@@ -2107,8 +2402,6 @@ private fun PlayerPage(
     onOpenCover: () -> Unit,
     /** 打开均衡器面板 */
     onOpenEqualizer: () -> Unit,
-    dlnaActive: Boolean = false,
-    onOpenDlna: () -> Unit = {},
     /** 均衡器是否开着（图标高亮用） */
     eqEnabled: Boolean,
     /** 当前播放速度（0.5–2.5 倍） */
@@ -2318,7 +2611,7 @@ private fun PlayerPage(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.Center
                 ) {
-                    // 信息行：收藏 + 歌名/歌手·专辑 + 歌词胶囊（参考样机 track-meta-bar）
+                    // 信息行：收藏 + 歌名/歌手·专辑 + 下载|词胶囊
                     TrackMetaBar(
                         title = song.title,
                         artist = song.artist,
@@ -2326,6 +2619,10 @@ private fun PlayerPage(
                         quality = streamQuality,
                         isFavorite = isFavorite,
                         lyricsExpanded = lyricsExpanded,
+                        showDownloadButton = showDownloadButton,
+                        isDownloading = isDownloading,
+                        isDownloaded = isDownloaded,
+                        onDownload = onDownload,
                         onToggleFavorite = onToggleFavorite,
                         onToggleLyrics = onToggleLyrics
                     )
@@ -2355,14 +2652,9 @@ private fun PlayerPage(
                     )
                     Spacer(Modifier.height(16.dp))
                     BottomRow(
-                        volume, onVolume,
-                        onOpenEqualizer,
-                        dlnaActive,
-                        onOpenDlna,
-                        showDownloadButton = showDownloadButton,
-                        isDownloading = isDownloading,
-                        isDownloaded = isDownloaded,
-                        onDownload = onDownload
+                        volume = volume,
+                        onVolume = onVolume,
+                        onOpenEqualizer = onOpenEqualizer
                     )
                     }
                 }
@@ -2501,7 +2793,7 @@ private fun PlayerPage(
                 }
 
                 Spacer(Modifier.height(3.dp))
-                // 信息行：收藏 + 标题/歌手/专辑（三行）+ 歌词胶囊
+                // 信息行：收藏 + 标题/歌手/专辑（三行）+ 下载|词胶囊
                 TrackMetaBar(
                     title = song.title,
                     artist = song.artist,
@@ -2509,6 +2801,10 @@ private fun PlayerPage(
                     quality = streamQuality,
                     isFavorite = isFavorite,
                     lyricsExpanded = lyricsExpanded,
+                    showDownloadButton = showDownloadButton,
+                    isDownloading = isDownloading,
+                    isDownloaded = isDownloaded,
+                    onDownload = onDownload,
                     onToggleFavorite = onToggleFavorite,
                     onToggleLyrics = onToggleLyrics
                 )
@@ -2538,14 +2834,9 @@ private fun PlayerPage(
                 )
                 Spacer(Modifier.height(12.dp))
                 BottomRow(
-                    volume, onVolume,
-                    onOpenEqualizer,
-                    dlnaActive,
-                    onOpenDlna,
-                    showDownloadButton = showDownloadButton,
-                    isDownloading = isDownloading,
-                    isDownloaded = isDownloaded,
-                    onDownload = onDownload
+                    volume = volume,
+                    onVolume = onVolume,
+                    onOpenEqualizer = onOpenEqualizer
                 )
                 }
                 // 距底部 20dp（再叠加系统导航栏安全区）
@@ -2557,12 +2848,13 @@ private fun PlayerPage(
 }
 
 /**
- * 信息行：`收藏 | 标题 / 歌手 / 专辑（三行） | 歌词胶囊`。
+ * 信息行：`收藏 | 标题 / 歌手 / 专辑（三行） | [下载 | 词]胶囊`。
  *
  * 用户要求标题、歌手、专辑三行独立显示（不能合并成 `歌手 · 专辑` 一行）。
  * 三行都单行省略；即使歌手/专辑为空也保留行高（空格占位），保证每一页信息区
  * 高度完全相同 —— 否则底部贴底的信息区会随歌变高/变矮，把上方封面顶得上下挪，
- * 滑动切歌时就表现为「封面跳一下」。收藏和「词」胶囊垂直居中于三行块。
+ * 滑动切歌时就表现为「封面跳一下」。通过自定义 [Layout] 在不触碰左右按钮的前提下
+ * 优先让文本块居中于整条信息行中轴，收藏和右侧胶囊垂直居中于三行块。
  */
 @Composable
 private fun TrackMetaBar(
@@ -2572,122 +2864,239 @@ private fun TrackMetaBar(
     quality: String? = null,
     isFavorite: Boolean,
     lyricsExpanded: Boolean,
+    showDownloadButton: Boolean = false,
+    isDownloading: Boolean = false,
+    isDownloaded: Boolean = false,
+    onDownload: () -> Unit = {},
     onToggleFavorite: () -> Unit,
     onToggleLyrics: () -> Unit
 ) {
     val skin = LocalSkin.current
-    Row(
+    Layout(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 收藏：42dp 热区、22dp 图标、无圆底（样机 like-pure-btn）
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onToggleFavorite),
-            contentAlignment = Alignment.Center
-        ) {
-            androidx.compose.material3.Icon(
-                imageVector = if (isFavorite) SonanceIcons.HeartFilled else SonanceIcons.Heart,
-                contentDescription = "收藏",
-                tint = if (isFavorite) Color(0xFFFF4D6D) else skin.text.copy(alpha = 0.72f),
-                modifier = Modifier.size(22.dp)
+        content = {
+            // 0: 收藏（42dp 热区、22dp 图标、无圆底）
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onToggleFavorite),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = if (isFavorite) SonanceIcons.HeartFilled else SonanceIcons.Heart,
+                    contentDescription = "收藏",
+                    tint = if (isFavorite) Color(0xFFFF4D6D) else skin.text.copy(alpha = 0.72f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            // 1: 居中三行曲目信息
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = skin.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+                // 歌手 / 专辑两行即使为空也保留行高（用空格占位）：固定三行高度保证翻页不跳。
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    text = artist.ifBlank { " " },
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+                    color = skin.textDim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    // 音质附在专辑后面：占同一行，不破坏"固定三行"的高度约定
+                    text = buildString {
+                        if (album.isNotBlank()) append(album)
+                        if (!quality.isNullOrBlank()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(quality)
+                        }
+                    }.ifBlank { " " },
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                    color = skin.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+            }
+            // 2: 右侧「下载 | 词」或单「词」微磨砂胶囊
+            LyricsPillButton(
+                expanded = lyricsExpanded,
+                showDownloadButton = showDownloadButton,
+                isDownloading = isDownloading,
+                isDownloaded = isDownloaded,
+                onDownload = onDownload,
+                onToggleLyrics = onToggleLyrics
             )
         }
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = skin.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
-            // 歌手 / 专辑两行即使为空也保留行高（用空格占位）：
-            // 信息区高度一旦随歌变化，底部贴底的这一块就会变高/变矮，
-            // 上方弹性区里的封面跟着上下挪 —— 相邻页尺寸一样、位置却不同，
-            // 滑动时看起来就是「封面跳一下」。固定三行高度才能让每页完全对齐。
-            Spacer(Modifier.height(1.dp))
-            Text(
-                text = artist.ifBlank { " " },
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
-                color = skin.textDim,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(1.dp))
-            Text(
-                // 音质附在专辑后面：占同一行，不破坏"固定三行"的高度约定
-                text = buildString {
-                    if (album.isNotBlank()) append(album)
-                    if (!quality.isNullOrBlank()) {
-                        if (isNotEmpty()) append(" · ")
-                        append(quality)
-                    }
-                }.ifBlank { " " },
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                color = skin.textMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
+    ) { measurables, constraints ->
+        val minGap = 6.dp.roundToPx()
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val left = measurables[0].measure(loose)
+        val right = measurables[2].measure(loose)
+        val maxCenterW = (constraints.maxWidth - left.width - right.width - minGap * 2)
+            .coerceAtLeast(0)
+        val center = measurables[1].measure(
+            constraints.copy(minWidth = 0, maxWidth = maxCenterW, minHeight = 0)
+        )
+        val height = maxOf(left.height, center.height, right.height)
+        layout(constraints.maxWidth, height) {
+            left.placeRelative(0, (height - left.height) / 2)
+            right.placeRelative(constraints.maxWidth - right.width, (height - right.height) / 2)
+            val idealX = (constraints.maxWidth - center.width) / 2
+            val minX = left.width + minGap
+            val maxX = (constraints.maxWidth - right.width - minGap - center.width)
+                .coerceAtLeast(minX)
+            center.placeRelative(idealX.coerceIn(minX, maxX), (height - center.height) / 2)
         }
-        LyricsPillButton(expanded = lyricsExpanded, onClick = onToggleLyrics)
     }
 }
 
 /**
- * 「词」胶囊：参考样机的 lyrics-pill —— 半透明底、1px 细边、圆角 16，
- * 展开时描边与图标变主题色。样机用 `backdrop-filter: blur(10px)`，
- * Compose 里实时背景模糊代价高，这里换成了 55% 透明底 + 细描边（观感接近）。
+ * 信息行右侧微磨砂胶囊：`[ ↓ | ≡ 词 ]`（播放在线歌时合入下载，本地歌为单「≡ 词」）。
+ * 已下载后直接禁用下载按钮并柔和置灰，不再替换图标或绘制高亮圆底。
  */
 @Composable
-private fun LyricsPillButton(expanded: Boolean, onClick: () -> Unit) {
+private fun LyricsPillButton(
+    expanded: Boolean,
+    showDownloadButton: Boolean,
+    isDownloading: Boolean,
+    isDownloaded: Boolean,
+    onDownload: () -> Unit,
+    onToggleLyrics: () -> Unit
+) {
     val skin = LocalSkin.current
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.9f else 1f,
+    val ctx = LocalContext.current
+    val lyricsInteraction = remember { MutableInteractionSource() }
+    val lyricsPressed by lyricsInteraction.collectIsPressedAsState()
+    val lyricsScale by animateFloatAsState(
+        targetValue = if (lyricsPressed) 0.92f else 1f,
         animationSpec = spring(dampingRatio = 0.5f, stiffness = 900f),
         label = "lyricsPill"
     )
+    val downloadEnabled = !isDownloaded && !isDownloading
+    val downloadInteraction = remember { MutableInteractionSource() }
+    val downloadPressed by downloadInteraction.collectIsPressedAsState()
+    val downloadScale by animateFloatAsState(
+        targetValue = if (downloadEnabled && downloadPressed) 0.88f else 1f,
+        animationSpec = spring(dampingRatio = 0.5f, stiffness = 900f),
+        label = "downloadPill"
+    )
+
     val shape = RoundedCornerShape(16.dp)
+    val containerBg = if (!showDownloadButton && expanded) {
+        skin.accentGlow
+    } else {
+        skin.surface2.copy(alpha = 0.55f)
+    }
+    val containerBorder = if (!showDownloadButton && expanded) {
+        skin.accent
+    } else {
+        Color.White.copy(alpha = 0.12f)
+    }
     Row(
         modifier = Modifier
             .height(32.dp)
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
             .clip(shape)
-            .background(if (expanded) skin.accentGlow else skin.surface2.copy(alpha = 0.55f))
-            .border(1.dp, if (expanded) skin.accent else Color.White.copy(alpha = 0.12f), shape)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(horizontal = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+            .background(containerBg)
+            .border(1.dp, containerBorder, shape),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        androidx.compose.material3.Icon(
-            imageVector = SonanceIcons.Lyrics,
-            contentDescription = null,
-            tint = skin.accent,
-            modifier = Modifier.size(14.dp)
-        )
-        Text(
-            text = "词",
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            ),
-            color = skin.text
-        )
+        AnimatedVisibility(
+            visible = showDownloadButton,
+            enter = fadeIn(tween(180)) + expandHorizontally(tween(180)),
+            exit = fadeOut(tween(180)) + shrinkHorizontally(tween(180))
+        ) {
+            Row(
+                modifier = Modifier.fillMaxHeight(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .graphicsLayer {
+                            scaleX = downloadScale
+                            scaleY = downloadScale
+                        }
+                        .clickable(
+                            interactionSource = downloadInteraction,
+                            indication = null,
+                            enabled = downloadEnabled
+                        ) {
+                            hapticTick(ctx)
+                            onDownload()
+                        }
+                        .padding(start = 10.dp, end = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier.size(14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isDownloading) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = skin.accent,
+                                strokeWidth = 1.6.dp,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        } else {
+                            androidx.compose.material3.Icon(
+                                imageVector = SonanceIcons.Download,
+                                contentDescription = if (isDownloaded) "已下载到本地曲库" else "下载此在线歌曲",
+                                tint = if (isDownloaded) skin.text.copy(alpha = 0.28f) else skin.text.copy(alpha = 0.85f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .height(13.dp)
+                        .background(Color.White.copy(alpha = 0.14f))
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .background(if (showDownloadButton && expanded) skin.accentGlow else Color.Transparent)
+                .clickable(
+                    interactionSource = lyricsInteraction,
+                    indication = null,
+                    onClick = onToggleLyrics
+                )
+                .padding(start = if (showDownloadButton) 8.dp else 11.dp, end = 11.dp)
+                .graphicsLayer {
+                    scaleX = lyricsScale
+                    scaleY = lyricsScale
+                },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Lyrics,
+                contentDescription = null,
+                tint = skin.accent,
+                modifier = Modifier.size(14.dp)
+            )
+            Text(
+                text = "词",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                ),
+                color = skin.text
+            )
+        }
     }
 }
 
@@ -2788,16 +3197,10 @@ private fun formatSpeed(v: Float): String =
 private fun BottomRow(
     volume: Float,
     onVolume: (Float) -> Unit,
-    onOpenEqualizer: () -> Unit,
-    dlnaActive: Boolean = false,
-    onOpenDlna: () -> Unit = {},
-    showDownloadButton: Boolean = false,
-    isDownloading: Boolean = false,
-    isDownloaded: Boolean = false,
-    onDownload: () -> Unit = {}
+    onOpenEqualizer: () -> Unit
 ) {
     val skin = LocalSkin.current
-    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val ctx = LocalContext.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -2807,36 +3210,7 @@ private fun BottomRow(
             onVolumeChange = onVolume,
             modifier = Modifier.weight(1f)
         )
-        if (showDownloadButton) {
-            Spacer(Modifier.width(8.dp))
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(if (isDownloaded) skin.accentDim else Color.Transparent)
-                    .clickable {
-                        hapticTick(ctx)
-                        onDownload()
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                if (isDownloading) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        color = skin.accent,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(16.dp)
-                    )
-                } else {
-                    androidx.compose.material3.Icon(
-                        imageVector = if (isDownloaded) SonanceIcons.Check else SonanceIcons.Download,
-                        contentDescription = if (isDownloaded) "已下载到本地曲库" else "下载此在线歌曲",
-                        tint = if (isDownloaded) skin.accent else skin.textDim,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.width(if (showDownloadButton) 4.dp else 10.dp))
+        Spacer(Modifier.width(10.dp))
         Box(
             modifier = Modifier
                 .size(34.dp)
@@ -2851,25 +3225,6 @@ private fun BottomRow(
                 imageVector = SonanceIcons.Equalizer,
                 contentDescription = "均衡器",
                 tint = skin.accent,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-        Spacer(Modifier.width(4.dp))
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(if (dlnaActive) skin.accentDim else Color.Transparent)
-                .clickable {
-                    hapticTick(ctx)
-                    onOpenDlna()
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            androidx.compose.material3.Icon(
-                imageVector = SonanceIcons.Cast,
-                contentDescription = "D-LAN 无线投屏",
-                tint = if (dlnaActive) skin.accent else skin.textDim,
                 modifier = Modifier.size(20.dp)
             )
         }

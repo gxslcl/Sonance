@@ -111,6 +111,17 @@ interface OnlineSource {
         resolveStream(remoteId)
 
     /**
+     * 异步解析正式下载地址（优先走平台专有客户端下载接口，若无特殊接口则回退至 [resolveStream]）。
+     */
+    suspend fun resolveDownloadStream(remoteId: String, expectedDurationMs: Long = 0L): String? =
+        resolveStream(remoteId, expectedDurationMs)
+
+    /**
+     * 正式下载流对应的容器格式（`mp3` / `flac`）。
+     */
+    fun downloadStreamFormat(remoteId: String): String? = streamFormat(remoteId)
+
+    /**
      * 当前是否已经有可用的新鲜取流地址（未过期/非仅兜底外链）。
      *
      * 用于冷启动恢复队列或切歌补流判断：像 [NeteaseSource] 的同步 [streamUrl] 会退回
@@ -650,6 +661,13 @@ object NeteaseSource : OnlineSource {
 
     override suspend fun resolveStream(remoteId: String, expectedDurationMs: Long): String? =
         NeteaseStream.resolve(remoteId, NeteaseQuality.current, expectedDurationMs)?.url
+
+    override suspend fun resolveDownloadStream(remoteId: String, expectedDurationMs: Long): String? =
+        NeteaseStream.resolveDownload(remoteId, NeteaseQuality.current, expectedDurationMs)?.url
+            ?: resolveStream(remoteId, expectedDurationMs)
+
+    override fun downloadStreamFormat(remoteId: String): String? =
+        NeteaseStream.downloadFormatOf(remoteId) ?: streamFormat(remoteId)
 
     override fun hasFreshStream(remoteId: String): Boolean =
         NeteaseStream.cachedUrl(remoteId) != null

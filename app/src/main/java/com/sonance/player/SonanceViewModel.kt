@@ -184,8 +184,41 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private val lxRepo = LxRepository.get(app)
 
     // ===== 媒体库 =====
-    var songs by mutableStateOf<List<Song>>(emptyList())
+    private val songsState = mutableStateOf<List<Song>>(emptyList())
+
+    var songs: List<Song>
+        get() = songsState.value
+        private set(value) {
+            songsState.value = value
+            scheduleLocalSongIndexRebuild(value)
+        }
+
+    var localSongIndex by mutableStateOf(OnlineFavorites.LocalSongIndex.EMPTY)
         private set
+
+    private var localSongIndexJob: Job? = null
+
+    private fun scheduleLocalSongIndexRebuild(snapshot: List<Song>) {
+        localSongIndexJob?.cancel()
+        if (snapshot.isEmpty()) {
+            localSongIndex = OnlineFavorites.LocalSongIndex.EMPTY
+            onDownloadMarkersChanged()
+            return
+        }
+        localSongIndexJob = viewModelScope.launch {
+            val built = withContext(Dispatchers.Default) {
+                OnlineFavorites.buildLocalIndex(snapshot)
+            }
+            if (songsState.value !== snapshot) return@launch
+            localSongIndex = built
+            onDownloadMarkersChanged()
+        }
+    }
+
+    private fun onDownloadMarkersChanged() {
+        scheduleSearchDownloadStateRefresh()
+        schedulePlaylistDownloadStateRefresh()
+    }
     var scanState by mutableStateOf(ScanState.IDLE)
         private set
 
@@ -1869,6 +1902,22 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         failureReason: String? = null
     ) {
         if (ids.isNotEmpty()) {
+            val deletedSongs = songs.filter { it.id in ids }
+            if (deletedSongs.isNotEmpty() && sessionDownloadedEntries.isNotEmpty()) {
+                sessionDownloadedEntries = sessionDownloadedEntries.filterValues { meta ->
+                    deletedSongs.none { deleted ->
+                        OnlineFavorites.matchesTrackFields(
+                            titleA = meta.title,
+                            artistA = meta.artist,
+                            durationMsA = meta.durationMs,
+                            titleB = deleted.title,
+                            artistB = deleted.artist,
+                            durationMsB = deleted.durationMs,
+                            displayNameB = deleted.displayName
+                        )
+                    }
+                }
+            }
             songs = songs.filter { it.id !in ids }
             albums = MediaRepository.groupAlbums(songs)
             artists = MediaRepository.groupArtists(songs)
@@ -2257,6 +2306,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var usbExclusiveEnabled by mutableStateOf(prefs.usbExclusiveEnabled)
         private set
 
+    init {
+        com.sonance.player.playback.UsbExclusive.onStateChanged = { enabled ->
+            usbExclusiveEnabled = enabled
+        }
+    }
+
     fun changeUsbExclusive(on: Boolean) {
         val err = com.sonance.player.playback.UsbExclusive.setEnabled(getApplication(), on)
         usbExclusiveEnabled = prefs.usbExclusiveEnabled
@@ -2418,6 +2473,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var lockScreenLyrics by mutableStateOf(prefs.lockScreenLyrics)
         private set
 
+    /** 桌面歌词开关 */
+    var desktopLyricsEnabled by mutableStateOf(prefs.desktopLyricsEnabled)
+        private set
+
+    fun changeDesktopLyricsEnabled(value: Boolean) {
+        desktopLyricsEnabled = value
+        prefs.desktopLyricsEnabled = value
+    }
+
     /** 换歌代次：迟到的旧歌词结果靠它丢弃 */
     private var lockLyricsGeneration = 0
 
@@ -2460,9 +2524,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     album = song.album,
                     // 锁屏歌词**不联网**：只用内嵌标签和本地缓存
                     onlineEnabled = false,
+                    apiBase = prefs.lyricsApiBase,
                     convertToSimplified = false,
                     durationMs = song.durationMs,
-                    neteaseEnabled = false
+                    neteaseEnabled = false,
+                    remoteSource = song.source,
+                    remoteId = song.remoteId
                 )
             }.onFailure {
                 android.util.Log.w("SonanceLyrics", "读取锁屏歌词失败: ${it.message}")
@@ -2470,6 +2537,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 回来时可能已经换歌了：代次或当前歌对不上就丢弃
             if (gen != lockLyricsGeneration) return@launch
             if (player.state.value.mediaId != song.id) return@launch
+            val synced = result?.lyrics as? com.sonance.player.data.Lyrics.Synced
+            if (synced != null) {
+                com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+                    songId = song.id,
+                    title = song.title,
+                    artist = song.artist,
+                    lines = synced.lines
+                )
+            }
             player.publishLyricsInfo(LockScreenLyrics.buildJson(song, result?.lyrics, gen), expectedMediaId = song.id)
         }
     }
@@ -3813,6 +3889,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var downloadedCount by mutableIntStateOf(downloadedKeysSet.size)
         private set
 
+    private data class SessionDownloadedMeta(
+        val title: String,
+        val artist: String,
+        val durationMs: Long
+    )
+
+    private var sessionDownloadedEntries by mutableStateOf<Map<String, SessionDownloadedMeta>>(emptyMap())
+
     /** 正在下载中的在线歌曲 ID 集合，供播放页下载按钮实时显示状态并防止同首重复下载。 */
     var downloadingSongIds by mutableStateOf<Set<Long>>(emptySet())
         private set
@@ -3821,20 +3905,31 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadJob: Job? = null
     private var downloadJobSongId: Long = 0L
 
-    private fun markKeyDownloaded(key: String) {
+    private fun markKeyDownloaded(
+        key: String,
+        title: String = "",
+        artist: String = "",
+        durationMs: Long = 0L
+    ) {
         prefs.markDownloaded(key)
         val next = prefs.downloadedKeys().toSet()
         downloadedKeysSet = next
         downloadedCount = next.size
+        sessionDownloadedEntries = sessionDownloadedEntries +
+            (key to SessionDownloadedMeta(title, artist, durationMs))
+        onDownloadMarkersChanged()
     }
 
-    /** 当前在线歌曲是否已有完整本地副本（结合记录与当前已扫描本地曲库核对，避免删文件后状态失真）。 */
-    fun isOnlineSongDownloaded(song: Song): Boolean {
-        if (song.isLocal || song.isDlna) return true
-        val key = OnlineDownloader.downloadKeyOf(song.source, song.remoteId) ?: return false
-        if (key !in downloadedKeysSet) return false
-        return songs.isEmpty() || songs.any { it.isLocal && OnlineFavorites.matchesSong(it, song) }
-    }
+    /**
+     * 当前在线歌曲是否「已下载或本地曲库已存在同一首歌」：
+     * 通过预建本地曲库哈希索引进行 O(1) 比对，避免主线程全库扫描。
+     */
+    fun isOnlineSongDownloaded(song: Song): Boolean = OnlineFavorites.isOnlineSongAvailableLocally(
+        song = song,
+        localIndex = localSongIndex,
+        downloadedKeys = downloadedKeysSet,
+        sessionDownloadedKeys = sessionDownloadedEntries.keys
+    )
 
     fun changeOnlineDownload(enabled: Boolean) {
         onlineDownloadEnabled = enabled
@@ -3863,6 +3958,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.clearDownloadedKeys()
         downloadedKeysSet = emptySet()
         downloadedCount = 0
+        sessionDownloadedEntries = emptyMap()
+        onDownloadMarkersChanged()
         showToast("已清除下载记录（文件未删除）")
     }
 
@@ -3883,7 +3980,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val src = OnlineSources.byId(song.source) ?: return
         val remoteId = song.remoteId ?: return
         val key = OnlineDownloader.downloadKeyOf(song.source, remoteId) ?: return
-        if (key in downloadedKeysSet) return
+        if (isOnlineSongDownloaded(song)) return
         if (song.id in downloadingSongIds) return
         // 上一首还没下完就跳过这一首。用队列会更"完整"，但并发下载会和播放抢带宽，
         // 而这首歌下次再播还会触发 —— 不值得为它引入一个队列
@@ -3978,7 +4075,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
         downloadingSongIds = downloadingSongIds + song.id
         try {
-            val url = src.resolveStream(remoteId, song.durationMs) ?: run {
+            val url = src.resolveDownloadStream(remoteId, song.durationMs) ?: run {
                 android.util.Log.i("SonanceDownload", "取流失败，跳过「${song.title}」")
                 if (notifyUser) showToast("未获取到可下载音频流：「${song.title}」")
                 return false
@@ -3997,11 +4094,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 album = song.album,
                 streamUrl = url,
                 coverBytes = coverBytesForTag(song),
-                format = src.streamFormat(remoteId) ?: "mp3"
+                format = src.downloadStreamFormat(remoteId) ?: src.streamFormat(remoteId) ?: "mp3"
             )
             return when (outcome) {
                 is OnlineDownloader.Outcome.Saved -> {
-                    markKeyDownloaded(key)
+                    markKeyDownloaded(key, song.title, song.artist, song.durationMs)
                     showToast("已存到「${OnlineDownloader.FOLDER_NAME}」")
                     rescanAfterDownload()
                     true
@@ -4079,8 +4176,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     fun changeOnlineHideUnplayable(v: Boolean) {
+        if (onlineHideUnplayable == v) return
         onlineHideUnplayable = v
         prefs.onlineHideUnplayable = v
+        rebuildVisibleOnlineResults()
     }
 
     // ===== 网易云账号与音质 =====
@@ -4171,17 +4270,95 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 列表要显示的曲目，带**在 [onlineResults] 里的原始下标**。
-     *
-     * 必须带下标：过滤之后下标就错位了，直接用过滤后列表的下标点播放会播成另一首。
-     * 播放队列也是按 [onlineResults] 建的，两边要对得上。
+     * 列表要显示的曲目，带**在 [onlineResults] 里的原始下标**（随结果/筛选变动预计算，避免重组反复过滤）。
      */
-    val visibleOnlineResults: List<Pair<Int, RemoteTrack>>
-        get() = if (onlineHideUnplayable) {
-            onlineResults.withIndex().filter { it.value.playable }.map { it.index to it.value }
-        } else {
-            onlineResults.mapIndexed { i, t -> i to t }
+    var visibleOnlineResults by mutableStateOf<List<Pair<Int, RemoteTrack>>>(emptyList())
+        private set
+
+    var visibleOnlineTracks by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+
+    var onlinePlayableCount by mutableIntStateOf(0)
+        private set
+
+    var onlineSearchDownloadedTrackIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    private var searchDownloadStateJob: Job? = null
+
+    private data class TrackDownloadStats(
+        val downloadedIds: Set<String>,
+        val downloadedCount: Int,
+        val downloadableCount: Int
+    )
+
+    private fun computeTrackDownloadStats(
+        sourceId: String,
+        tracks: List<RemoteTrack>,
+        localIndex: OnlineFavorites.LocalSongIndex,
+        downloadedKeys: Set<String>,
+        sessionDownloadedKeys: Set<String>
+    ): TrackDownloadStats {
+        if (tracks.isEmpty()) return TrackDownloadStats(emptySet(), 0, 0)
+        val downloadedIds = HashSet<String>(tracks.size)
+        var downloadedCount = 0
+        var downloadableCount = 0
+        for (track in tracks) {
+            val downloaded = OnlineFavorites.isRemoteTrackAvailableLocally(
+                sourceId = sourceId,
+                track = track,
+                localIndex = localIndex,
+                downloadedKeys = downloadedKeys,
+                sessionDownloadedKeys = sessionDownloadedKeys
+            )
+            if (downloaded) {
+                downloadedIds += track.remoteId
+                downloadedCount++
+            } else if (track.playable) {
+                downloadableCount++
+            }
         }
+        return TrackDownloadStats(downloadedIds, downloadedCount, downloadableCount)
+    }
+
+    private fun rebuildVisibleOnlineResults() {
+        val all = onlineResults
+        var playable = 0
+        val indexed = ArrayList<Pair<Int, RemoteTrack>>(all.size)
+        val tracks = ArrayList<RemoteTrack>(all.size)
+        val hide = onlineHideUnplayable
+        for (i in all.indices) {
+            val t = all[i]
+            if (t.playable) playable++
+            if (!hide || t.playable) {
+                indexed += i to t
+                tracks += t
+            }
+        }
+        onlinePlayableCount = playable
+        visibleOnlineResults = indexed
+        visibleOnlineTracks = tracks
+    }
+
+    private fun scheduleSearchDownloadStateRefresh() {
+        searchDownloadStateJob?.cancel()
+        val tracks = onlineResults
+        if (tracks.isEmpty()) {
+            onlineSearchDownloadedTrackIds = emptySet()
+            return
+        }
+        val srcId = onlineSourceId
+        val idxSnapshot = localSongIndex
+        val dlSnapshot = downloadedKeysSet
+        val sessSnapshot = sessionDownloadedEntries.keys
+        searchDownloadStateJob = viewModelScope.launch {
+            val stats = withContext(Dispatchers.Default) {
+                computeTrackDownloadStats(srcId, tracks, idxSnapshot, dlSnapshot, sessSnapshot)
+            }
+            if (onlineResults !== tracks) return@launch
+            onlineSearchDownloadedTrackIds = stats.downloadedIds
+        }
+    }
 
     var onlineSearching by mutableStateOf(false)
         private set
@@ -4781,11 +4958,26 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val page = withContext(Dispatchers.IO) { src.search(kw, ONLINE_PAGE_SIZE, 0) }
                 val tracks = page?.tracks.orEmpty()
+                val idxSnapshot = localSongIndex
+                val dlSnapshot = downloadedKeysSet
+                val sessSnapshot = sessionDownloadedEntries.keys
+                val stats = withContext(Dispatchers.Default) {
+                    computeTrackDownloadStats(src.id, tracks, idxSnapshot, dlSnapshot, sessSnapshot)
+                }
 
                 // 把结果转成 Song 存进映射，队列 / 播放页 / 收藏判断才查得到
                 commitOnlinePage(src, tracks)
 
+                searchDownloadStateJob?.cancel()
                 onlineResults = tracks
+                rebuildVisibleOnlineResults()
+                onlineSearchDownloadedTrackIds = stats.downloadedIds
+                if (localSongIndex !== idxSnapshot ||
+                    downloadedKeysSet !== dlSnapshot ||
+                    sessionDownloadedEntries.keys != sessSnapshot
+                ) {
+                    scheduleSearchDownloadStateRefresh()
+                }
                 onlineLoadedCount = tracks.size
                 onlineSearchedFor = kw
                 onlineSearchFailed = page == null
@@ -4864,9 +5056,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 // 下面的 hasMore 用总数算，所以不会因此反复请求。
                 val seen = onlineResults.mapTo(HashSet(onlineResults.size * 2)) { it.remoteId }
                 val fresh = tracks.filter { it.remoteId !in seen }
+                val idxSnapshot = localSongIndex
+                val dlSnapshot = downloadedKeysSet
+                val sessSnapshot = sessionDownloadedEntries.keys
+                val freshStats = withContext(Dispatchers.Default) {
+                    computeTrackDownloadStats(src.id, fresh, idxSnapshot, dlSnapshot, sessSnapshot)
+                }
+                if (token != onlineSearchToken) return@launch
 
                 commitOnlinePage(src, fresh)
+                searchDownloadStateJob?.cancel()
                 onlineResults = onlineResults + fresh
+                rebuildVisibleOnlineResults()
+                onlineSearchDownloadedTrackIds = onlineSearchDownloadedTrackIds + freshStats.downloadedIds
+                if (localSongIndex !== idxSnapshot ||
+                    downloadedKeysSet !== dlSnapshot ||
+                    sessionDownloadedEntries.keys != sessSnapshot
+                ) {
+                    scheduleSearchDownloadStateRefresh()
+                }
                 // offset 按**服务端返回的条数**推进，不是按去重后的
                 onlineLoadedCount = offset + tracks.size
                 // 总数说了算；另外卡一个上限兜底 —— 万一音源报的总数虚高，
@@ -4944,8 +5152,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun clearOnlineSearch() {
         cancelOnlineRequests()
+        searchDownloadStateJob?.cancel()
         onlineSearchToken++
         onlineResults = emptyList()
+        visibleOnlineResults = emptyList()
+        visibleOnlineTracks = emptyList()
+        onlinePlayableCount = 0
+        onlineSearchDownloadedTrackIds = emptySet()
         onlinePlaylistResults = emptyList()
         onlineLoadedCount = 0
         onlineHasMore = false
@@ -5162,10 +5375,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 判据是 [Prefs.downloadedKeys]（`音源:远端id`），和 [maybeDownload] 用同一个键 ——
      * 判断和写入必须是同一套，否则会出现"存过却还是每次都下"。
      */
-    fun isDownloaded(track: RemoteTrack): Boolean {
-        val key = OnlineDownloader.downloadKeyOf(onlineSourceId, track.remoteId) ?: return false
-        return key in prefs.downloadedKeys()
-    }
+    fun isDownloaded(track: RemoteTrack): Boolean = OnlineFavorites.isRemoteTrackAvailableLocally(
+        sourceId = onlineSourceId,
+        track = track,
+        localIndex = localSongIndex,
+        downloadedKeys = downloadedKeysSet,
+        sessionDownloadedKeys = sessionDownloadedEntries.keys
+    )
 
     /**
      * 已经存到本地的在线歌 → 曲库里对应的那一首；没存过 / 曲库里找不到则返回 null。
@@ -5593,6 +5809,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var playlistTracks by mutableStateOf<List<RemoteTrack>>(emptyList())
         private set
 
+    var playlistDownloadedTrackIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
     var playlistLoading by mutableStateOf(false)
         private set
 
@@ -5600,6 +5819,37 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var playlistJob: Job? = null
+    private var playlistDownloadStateJob: Job? = null
+
+    private fun schedulePlaylistDownloadStateRefresh() {
+        playlistDownloadStateJob?.cancel()
+        val detail = playlistDetail
+        val tracks = playlistTracks
+        if (detail == null || tracks.isEmpty()) {
+            playlistDownloadedTrackIds = emptySet()
+            playlistDownloadedCount = 0
+            playlistDownloadableCount = 0
+            return
+        }
+        val targetPlaylistId = detail.remoteId
+        val srcId = if (targetPlaylistId == NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID) {
+            NeteaseSource.id
+        } else {
+            onlineSourceId
+        }
+        val idxSnapshot = localSongIndex
+        val dlSnapshot = downloadedKeysSet
+        val sessSnapshot = sessionDownloadedEntries.keys
+        playlistDownloadStateJob = viewModelScope.launch {
+            val stats = withContext(Dispatchers.Default) {
+                computeTrackDownloadStats(srcId, tracks, idxSnapshot, dlSnapshot, sessSnapshot)
+            }
+            if (playlistDetail?.remoteId != targetPlaylistId || playlistTracks !== tracks) return@launch
+            playlistDownloadedTrackIds = stats.downloadedIds
+            playlistDownloadedCount = stats.downloadedCount
+            playlistDownloadableCount = stats.downloadableCount
+        }
+    }
 
     /**
      * 打开一个歌单：记住它，然后去拉全部曲目。
@@ -5610,8 +5860,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun openPlaylist(playlist: RemotePlaylist) {
         val src = onlineSource ?: return
         playlistJob?.cancel()
+        playlistDownloadStateJob?.cancel()
         playlistDetail = playlist
         playlistTracks = emptyList()
+        playlistDownloadedTrackIds = emptySet()
+        playlistDownloadedCount = 0
+        playlistDownloadableCount = 0
         playlistFailed = false
         // 同步置位，别等协程调度 —— 否则详情页会先闪一下"这个歌单是空的"
         playlistLoading = true
@@ -5632,14 +5886,31 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (tracks == null) {
                     playlistFailed = true
                 } else {
-                    playlistTracks = tracks
-                    // 并进 onlineSongMap：播放、队列页、播放页、收藏判断都要按 id 反查
                     val targetSrc = if (playlist.remoteId == NeteaseExplore.DAILY_RECOMMEND_PLAYLIST_ID) {
                         NeteaseSource
                     } else {
                         src
                     }
+                    val idxSnapshot = localSongIndex
+                    val dlSnapshot = downloadedKeysSet
+                    val sessSnapshot = sessionDownloadedEntries.keys
+                    val stats = withContext(Dispatchers.Default) {
+                        computeTrackDownloadStats(targetSrc.id, tracks, idxSnapshot, dlSnapshot, sessSnapshot)
+                    }
+                    if (playlistDetail?.remoteId != playlist.remoteId) return@launch
+                    playlistDownloadStateJob?.cancel()
+                    playlistTracks = tracks
+                    playlistDownloadedTrackIds = stats.downloadedIds
+                    playlistDownloadedCount = stats.downloadedCount
+                    playlistDownloadableCount = stats.downloadableCount
+                    // 并进 onlineSongMap：播放、队列页、播放页、收藏判断都要按 id 反查
                     commitOnlinePage(targetSrc, tracks)
+                    if (localSongIndex !== idxSnapshot ||
+                        downloadedKeysSet !== dlSnapshot ||
+                        sessionDownloadedEntries.keys != sessSnapshot
+                    ) {
+                        schedulePlaylistDownloadStateRefresh()
+                    }
                 }
             } finally {
                 if (playlistDetail?.remoteId == playlist.remoteId) playlistLoading = false
@@ -5656,8 +5927,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun closePlaylist() {
         playlistJob?.cancel()
         playlistJob = null
+        playlistDownloadStateJob?.cancel()
+        playlistDownloadStateJob = null
         playlistDetail = null
         playlistTracks = emptyList()
+        playlistDownloadedTrackIds = emptySet()
+        playlistDownloadedCount = 0
+        playlistDownloadableCount = 0
         playlistLoading = false
         playlistFailed = false
     }
@@ -5697,13 +5973,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         playPlaylistTrack(at)
     }
 
-    /** 当前歌单里已经存到本地的曲目数（详情页头部显示进度用） */
-    val playlistDownloadedCount: Int
-        get() = playlistTracks.count { isDownloaded(it) }
+    /** 当前歌单里已经存到本地的曲目数（预计算状态，避免列表重组全量重算） */
+    var playlistDownloadedCount by mutableIntStateOf(0)
+        private set
 
-    /** 当前歌单里"还能下"的曲目数（可播且没存过）。确认弹窗用它报预期 */
-    val playlistDownloadableCount: Int
-        get() = playlistTracks.count { it.playable && !isDownloaded(it) }
+    /** 当前歌单里"还能下"的曲目数（可播且没存过；确认弹窗用它报预期） */
+    var playlistDownloadableCount by mutableIntStateOf(0)
+        private set
 
     // ---- 一键下载整个歌单 ----
 
@@ -5855,8 +6131,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         playlistDownloadDone++
                         continue
                     }
-                    // 逐首按当前音质取流；取不到就计入"跳过"，不打断整批
-                    val url = src.resolveStream(track.remoteId, track.durationMs)
+                    // 逐首按当前音质取正式下载流；取不到就计入"跳过"，不打断整批
+                    val url = src.resolveDownloadStream(track.remoteId, track.durationMs)
                     if (url == null) {
                         playlistDownloadSkipped++
                         playlistDownloadDone++
@@ -5871,11 +6147,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         album = track.album,
                         streamUrl = url,
                         coverBytes = coverBytesForTag(track.title, track.artist, track.coverUrl),
-                        format = src.streamFormat(track.remoteId) ?: "mp3"
+                        format = src.downloadStreamFormat(track.remoteId) ?: src.streamFormat(track.remoteId) ?: "mp3"
                     )
                     when (outcome) {
                         is OnlineDownloader.Outcome.Saved -> {
-                            key?.let { markKeyDownloaded(it) }
+                            key?.let { markKeyDownloaded(it, track.title, track.artist, track.durationMs) }
                             playlistDownloadSaved++
                         }
                         OnlineDownloader.Outcome.Unavailable -> playlistDownloadSkipped++
@@ -6914,6 +7190,86 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (prefs.playToastEnabled) showToast("已添加到下一首播放")
     }
 
+    // ===== 封面墙状态与队列恢复 =====
+
+    /** 当前是否处于封面墙界面中。由 SonanceRoot 同步。 */
+    var isCoverWallOpen by mutableStateOf(false)
+
+    /**
+     * 用户退出封面墙回到主界面（或其它界面）时调用。
+     * 若当前播放列表仅有一首歌（例如在封面墙内点播了单曲或单曲专辑），
+     * 则在不中断当前音频播放的前提下，平滑将播放列表扩充为全部歌曲（曲库）。
+     */
+    fun onExitCoverWall() {
+        isCoverWallOpen = false
+        expandQueueToAllSongsIfSingle(keepingCurrent = true)
+    }
+
+    /**
+     * 当不在封面墙且队列只有一首歌、曲库有多首歌时，将队列扩展为全部歌曲。
+     * [keepingCurrent] 为 true 时保持当前正在播放的曲目及播放状态平滑延续（不中断播放）。
+     */
+    fun expandQueueToAllSongsIfSingle(keepingCurrent: Boolean = true): Boolean {
+        if (isCoverWallOpen) return false
+        val all = songs
+        if (all.size <= 1) return false
+        val qIds = player.state.value.queueIds
+        if (qIds.size > 1) return false
+
+        val currentId = player.state.value.mediaId
+        val curIndexInAll = all.indexOfFirst { it.id == currentId }
+        // 若当前播放的不是本地曲库的歌曲（例如在线音乐试听），不自动扩展为本地歌曲
+        if (curIndexInAll < 0) return false
+
+        val isShuffle = player.state.value.shuffle
+        val orderedList = if (isShuffle) {
+            buildShuffledOrder(all, curIndexInAll)
+        } else {
+            all
+        }
+        val finalTargetIdx = orderedList.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        preShuffleOrder = if (isShuffle) all else null
+
+        if (keepingCurrent) {
+            player.reorderQueueKeepingCurrent(
+                songs = orderedList,
+                targetIndex = finalTargetIdx,
+                shuffle = isShuffle
+            )
+        } else {
+            player.play(orderedList, finalTargetIdx)
+        }
+        return true
+    }
+
+    /**
+     * 当不在封面墙且当前队列仅有 1 首歌时执行统一切歌：
+     * 随机切到曲库中另一首歌，并将播放列表置为全部歌曲。
+     */
+    fun switchSongWhenSingleQueue(isNext: Boolean): Boolean {
+        if (isCoverWallOpen) return false
+        val all = songs
+        if (all.size <= 1) return false
+        val qIds = player.state.value.queueIds
+        if (qIds.size > 1) return false
+
+        val currentId = player.state.value.mediaId
+        val candidates = all.filter { it.id != currentId }
+        val targetSong = (if (candidates.isNotEmpty()) candidates.randomOrNull() else null) ?: all.first()
+        val targetIdxInAll = all.indexOfFirst { it.id == targetSong.id }.coerceAtLeast(0)
+
+        val isShuffle = player.state.value.shuffle
+        val orderedList = if (isShuffle) {
+            buildShuffledOrder(all, targetIdxInAll)
+        } else {
+            all
+        }
+        val finalTargetIdx = orderedList.indexOfFirst { it.id == targetSong.id }.coerceAtLeast(0)
+        preShuffleOrder = if (isShuffle) all else null
+        player.play(orderedList, finalTargetIdx)
+        return true
+    }
+
     // ===== 单曲队列：手动切歌与自然播完都 → 直接随机（与封面墙「随便听听」同一套逻辑）=====
 
     /** 最近随机到的专辑 key，窗口与封面墙一致（20），避免反复撞同一张 */
@@ -7288,10 +7644,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dispatchNext(allowRandomFallback: Boolean = false) {
+        if (!isCoverWallOpen && player.state.value.queueIds.size <= 1 && songs.size > 1) {
+            switchSongWhenSingleQueue(isNext = true)
+            return
+        }
         if (allowRandomFallback) nextOrRandom() else player.next()
     }
 
     fun dispatchPrevious(allowRandomFallback: Boolean = false) {
+        if (!isCoverWallOpen && player.state.value.queueIds.size <= 1 && songs.size > 1) {
+            switchSongWhenSingleQueue(isNext = false)
+            return
+        }
         if (allowRandomFallback) previousOrRandom() else player.previous()
     }
 

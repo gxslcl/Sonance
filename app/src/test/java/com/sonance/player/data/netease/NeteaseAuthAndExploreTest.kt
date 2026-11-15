@@ -14,17 +14,6 @@ class NeteaseAuthAndExploreTest {
     }
 
     @Test
-    fun `parseSmsSendResponse distinguishes 200 vs rate limit vs risk control`() {
-        assertTrue(NeteaseAuth.parseSmsSendResponse("""{"code":200,"data":true}""") is NeteaseAuth.SmsSendResult.Sent)
-        val limited = NeteaseAuth.parseSmsSendResponse("""{"code":405,"message":"too fast"}""")
-        assertTrue(limited is NeteaseAuth.SmsSendResult.Failed)
-        assertTrue((limited as NeteaseAuth.SmsSendResult.Failed).message.contains("频繁"))
-
-        val risk = NeteaseAuth.parseSmsSendResponse("""{"code":462}""")
-        assertTrue((risk as NeteaseAuth.SmsSendResult.Failed).message.contains("扫码"))
-    }
-
-    @Test
     fun `parseCellphoneLoginPayload extracts MUSIC_U from Set-Cookie or body cookie`() {
         val fromHeader = NeteaseAuth.parseCellphoneLoginPayload(
             raw = """{"code":200,"account":{"id":12345},"profile":{"nickname":"清音","avatarUrl":"https://p1.music.126.net/a.jpg"}}""",
@@ -49,9 +38,6 @@ class NeteaseAuthAndExploreTest {
     fun `parseCellphoneLoginPayload maps error codes cleanly`() {
         val wrongPwd = NeteaseAuth.parseCellphoneLoginPayload("""{"code":502}""", emptyList())
         assertTrue(wrongPwd.errorMessage!!.contains("密码"))
-
-        val badCaptcha = NeteaseAuth.parseCellphoneLoginPayload("""{"code":503}""", emptyList())
-        assertTrue(badCaptcha.errorMessage!!.contains("验证码"))
 
         val risk = NeteaseAuth.parseCellphoneLoginPayload("""{"code":-460}""", emptyList())
         assertTrue(risk.errorMessage!!.contains("扫码"))

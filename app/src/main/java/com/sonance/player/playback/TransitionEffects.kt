@@ -320,10 +320,26 @@ internal class TransitionEffects internal constructor(
         }
     }
 
+    internal fun isSwitchFadingNow(): Boolean = switchFading
+
+    internal fun ensureActiveVolume() {
+        if (!fading && !switchFading && player.volume <= 0f && userVolume > 0f) {
+            writeVolume(userVolume)
+        }
+    }
+
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
         if (!playWhenReady && switchFading) {
             // 淡出期间被暂停（如耳机按键/通知栏）：放弃延迟切歌并恢复用户音量
             cancelSwitchFade(restoreVolume = true)
+        }
+        if (!playWhenReady && fading && fadeOut) {
+            // 蓝牙断连/暂停打断曲尾淡出时，防止定时步进把音量彻底写到 0
+            fading = false
+            writeVolume(userVolume)
+        }
+        if (playWhenReady) {
+            ensureActiveVolume()
         }
         // 插停顿期间的 pause 是自己触发的，不算用户操作
         if (gapPending) return

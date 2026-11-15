@@ -74,13 +74,12 @@ import kotlinx.coroutines.withContext
 
 private enum class NeteaseLoginTab(val label: String) {
     QR("扫码"),
-    SMS("验证码"),
     PASSWORD("密码"),
     COOKIE("Cookie")
 }
 
 /**
- * 网易云多方式登录弹窗：扫码 / 手机验证码 / 账号密码 / Cookie 凭证。
+ * 网易云多方式登录弹窗：扫码 / 账号密码 / Cookie 凭证。
  *
  * 轮询只在选中「扫码」且弹窗打开时运行，切到其它方式或关闭弹窗自动停止。
  */
@@ -97,12 +96,6 @@ fun NeteaseLoginSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
     var qrStatus by remember { mutableStateOf("正在生成二维码…") }
     var qrGeneration by remember { mutableIntStateOf(0) }
 
-    // 短信验证码状态
-    var smsPhone by remember { mutableStateOf("") }
-    var smsCode by remember { mutableStateOf("") }
-    var smsCountdown by remember { mutableIntStateOf(0) }
-    var smsSending by remember { mutableStateOf(false) }
-
     // 账号密码状态
     var pwdPhone by remember { mutableStateOf("") }
     var pwdText by remember { mutableStateOf("") }
@@ -115,13 +108,6 @@ fun NeteaseLoginSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
     var formInfo by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(smsCountdown) {
-        if (smsCountdown > 0) {
-            delay(1_000L)
-            smsCountdown--
-        }
-    }
 
     LaunchedEffect(tab, qrGeneration) {
         if (tab != NeteaseLoginTab.QR) return@LaunchedEffect
@@ -275,88 +261,6 @@ fun NeteaseLoginSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                         label = "刷新二维码",
                         filled = false,
                         onClick = { qrGeneration++ }
-                    )
-                }
-
-                NeteaseLoginTab.SMS -> {
-                    Text("手机号（+86）", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
-                    Spacer(Modifier.height(6.dp))
-                    SheetInputBox(
-                        value = smsPhone,
-                        onValueChange = {
-                            smsPhone = it.filter(Char::isDigit).take(15)
-                            formError = null
-                        },
-                        placeholder = "输入绑定网易云的手机号",
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text("短信验证码", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
-                    Spacer(Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        SheetInputBox(
-                            value = smsCode,
-                            onValueChange = {
-                                smsCode = it.filter(Char::isDigit).take(8)
-                                formError = null
-                            },
-                            placeholder = "6 位验证码",
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(1f)
-                        )
-                        PillButton(
-                            label = when {
-                                smsSending -> "发送中…"
-                                smsCountdown > 0 -> "${smsCountdown}s"
-                                else -> "获取验证码"
-                            },
-                            filled = false,
-                            enabled = smsPhone.length >= 6 && smsCountdown == 0 && !smsSending && !busy,
-                            onClick = {
-                                smsSending = true
-                                formError = null
-                                formInfo = null
-                                scope.launch {
-                                    val res = NeteaseAuth.sendSmsCaptcha(smsPhone)
-                                    smsSending = false
-                                    when (res) {
-                                        NeteaseAuth.SmsSendResult.Sent -> {
-                                            smsCountdown = 60
-                                            formInfo = "验证码已发送，请注意查收短信"
-                                        }
-                                        is NeteaseAuth.SmsSendResult.Failed -> {
-                                            formError = res.message
-                                        }
-                                    }
-                                }
-                            }
-                        )
-                    }
-                    FormFeedback(error = formError, info = formInfo)
-                    Spacer(Modifier.height(16.dp))
-                    PillButton(
-                        label = if (busy) "正在登录…" else "验证码登录",
-                        enabled = smsPhone.length >= 6 && smsCode.length >= 4 && !busy,
-                        onClick = {
-                            busy = true
-                            formError = null
-                            formInfo = null
-                            scope.launch {
-                                val res = NeteaseAuth.loginWithPhoneCaptcha(context, smsPhone, smsCode)
-                                busy = false
-                                when (res) {
-                                    is NeteaseAuth.LoginResult.Success -> {
-                                        vm.onNeteaseLoggedIn(res.account)
-                                        onDismiss()
-                                    }
-                                    is NeteaseAuth.LoginResult.Failed -> formError = res.message
-                                }
-                            }
-                        }
                     )
                 }
 

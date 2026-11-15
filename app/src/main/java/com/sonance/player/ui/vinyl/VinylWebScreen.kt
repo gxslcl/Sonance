@@ -505,6 +505,12 @@ private suspend fun pushLyrics(wv: WebView, context: android.content.Context, so
         when (val l = result?.lyrics) {
             is Lyrics.Synced -> {
                 synced = true
+                com.sonance.player.playback.PlaybackService.syncLiveLyrics(
+                    songId = song.id,
+                    title = song.title,
+                    artist = song.artist,
+                    lines = l.lines
+                )
                 val offset = Prefs(context).lyricsOffsetMs(song.title, song.artist)
                 l.lines.forEach { line ->
                     lines.put(

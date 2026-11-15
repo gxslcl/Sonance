@@ -1041,13 +1041,13 @@ private fun VizSettingsPanel(
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.35f))
             .clickable { onDismiss() },
-        contentAlignment = Alignment.TopEnd
+        contentAlignment = Alignment.TopCenter
     ) {
-Column(
-                Modifier
-                    .padding(top = 92.dp, end = 12.dp, bottom = 12.dp)
-                    .width(280.dp)
-                    .heightIn(max = 520.dp)
+        Column(
+            Modifier
+                .padding(top = 92.dp, start = 12.dp, end = 12.dp, bottom = 12.dp)
+                .fillMaxWidth()
+                .heightIn(max = 520.dp)
                     .shadow(8.dp, RoundedCornerShape(16.dp))
                     .clip(RoundedCornerShape(16.dp))
                     .background(skin.surface2.solidSurface())

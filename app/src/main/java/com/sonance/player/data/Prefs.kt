@@ -615,6 +615,36 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_LOCK_LYRICS, true)
         set(v) = sp.edit().putBoolean(KEY_LOCK_LYRICS, v).apply()
 
+    /** 桌面歌词（悬浮窗逐行歌词）总开关 */
+    var desktopLyricsEnabled: Boolean
+        get() = sp.getBoolean(KEY_DESKTOP_LYRICS_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_DESKTOP_LYRICS_ENABLED, v).apply()
+
+    /** 桌面歌词锁定（锁定后手势穿透，从通知栏解锁） */
+    var desktopLyricsLocked: Boolean
+        get() = sp.getBoolean(KEY_DESKTOP_LYRICS_LOCKED, false)
+        set(v) = sp.edit().putBoolean(KEY_DESKTOP_LYRICS_LOCKED, v).apply()
+
+    /** 桌面歌词字号 (sp) */
+    var desktopLyricsFontSizeSp: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_FONT_SIZE, 18).coerceIn(14, 26)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_FONT_SIZE, v.coerceIn(14, 26)).apply()
+
+    /** 桌面歌词保存的 X 轴坐标（px） */
+    var desktopLyricsX: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_X, -1)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_X, v).apply()
+
+    /** 桌面歌词保存的 Y 轴坐标（px） */
+    var desktopLyricsY: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_Y, -1)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_Y, v).apply()
+
+    /** 桌面歌词背景模式：NONE("none", 无背景), LIGHT("light", 浅色半透明), DARK("dark", 深色半透明) */
+    var desktopLyricsBgMode: String
+        get() = sp.getString(KEY_DESKTOP_LYRICS_BG_MODE, "none") ?: "none"
+        set(v) = sp.edit().putString(KEY_DESKTOP_LYRICS_BG_MODE, v).apply()
+
     /**
      * 悬浮卡片上的进度怎么显示：[MiniProgressStyle] 的 ordinal。
      *
@@ -1093,9 +1123,9 @@ class Prefs(context: Context) {
     fun setPresetIdForRoute(routeId: String, presetId: String) =
         sp.edit().putString(KEY_SOUND_ROUTE_PREFIX + routeId, presetId).apply()
 
-    /** 是否将播放器音频会话开放给手机/平板系统音效（杜比全景声 / 厂商音效等）。默认开启。 */
+    /** 是否将播放器音频会话开放给手机/平板系统音效（杜比全景声 / 厂商音效等）。默认关闭。 */
     var systemAudioEffectEnabled: Boolean
-        get() = sp.getBoolean(KEY_SYSTEM_AUDIO_EFFECT, true)
+        get() = sp.getBoolean(KEY_SYSTEM_AUDIO_EFFECT, false)
         set(v) = sp.edit().putBoolean(KEY_SYSTEM_AUDIO_EFFECT, v).apply()
 
     // ===== 播放速度 =====
@@ -1562,7 +1592,7 @@ class Prefs(context: Context) {
         private const val KEY_LYRICS_OFFSETS = "lyrics_offsets"
 
         /** 歌词偏移的步进与上限。0.1 秒的细步长（0.5 太粗，副歌前奏常常就差两三拍）；±10 秒之外基本是歌词匹配错了，调也没用 */
-        const val LYRICS_OFFSET_STEP_MS = 100L
+        const val LYRICS_OFFSET_STEP_MS = 500L
         const val MAX_LYRICS_OFFSET_MS = 10_000L
 
         private const val KEY_GLASS_CLEARED = "glass_cleared"
@@ -1584,6 +1614,12 @@ class Prefs(context: Context) {
         private const val KEY_MINI_SHOW_TIME = "mini_show_time"
         private const val KEY_MINI_SWIPE_STYLE = "mini_swipe_style"
         private const val KEY_LOCK_LYRICS = "lock_screen_lyrics"
+        private const val KEY_DESKTOP_LYRICS_ENABLED = "desktop_lyrics_enabled"
+        private const val KEY_DESKTOP_LYRICS_LOCKED = "desktop_lyrics_locked"
+        private const val KEY_DESKTOP_LYRICS_FONT_SIZE = "desktop_lyrics_font_size"
+        private const val KEY_DESKTOP_LYRICS_X = "desktop_lyrics_x"
+        private const val KEY_DESKTOP_LYRICS_Y = "desktop_lyrics_y"
+        private const val KEY_DESKTOP_LYRICS_BG_MODE = "desktop_lyrics_bg_mode"
         private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
         private const val KEY_MINI_SWIPE_RIGHT = "mini_swipe_right_pct"
         private const val KEY_MINI_HEIGHT = "mini_height_scale"
@@ -1650,6 +1686,8 @@ class Prefs(context: Context) {
             key == KEY_PLAY_BTN_ICON_STYLE ||
             key == KEY_PLAY_BTN_ICON_SCALE ||
             key == KEY_PLAY_BTN_HAPTICS
+
+        fun isLyricsScrollHapticKey(key: String?): Boolean = key == KEY_LYRICS_SCROLL_HAPTIC
     }
 }
 

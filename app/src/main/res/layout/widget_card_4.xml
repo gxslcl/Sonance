@@ -28,35 +28,35 @@
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <!-- 常态 -->
+            <!-- 常态：居中圆角大封面 + 居中歌名歌手 -->
             <LinearLayout
                 android:id="@+id/widget_info_group"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
+                android:gravity="center_horizontal"
                 android:orientation="vertical">
 
                 <ImageView
                     android:id="@+id/widget_cover"
-                    android:layout_width="54dp"
-                    android:layout_height="54dp"
-                    android:layout_gravity="start"
+                    android:layout_width="74dp"
+                    android:layout_height="74dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="2dp"
                     android:contentDescription="@string/widget_cover_desc"
                     android:scaleType="fitCenter"
                     android:src="@drawable/widget_placeholder" />
-
-                <FrameLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="0dp"
-                    android:layout_weight="1" />
 
                 <TextView
                     android:id="@+id/widget_title"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="5dp"
                     android:ellipsize="end"
                     android:fontFamily="sans-serif-medium"
+                    android:gravity="center"
                     android:includeFontPadding="false"
                     android:maxLines="1"
+                    android:paddingHorizontal="30dp"
                     android:text="@string/widget_idle_title"
                     android:textColor="#F5FFFFFF"
                     android:textSize="13.5sp" />
@@ -65,16 +65,18 @@
                     android:id="@+id/widget_artist"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
+                    android:layout_marginTop="1.5dp"
                     android:ellipsize="end"
+                    android:gravity="center"
                     android:includeFontPadding="false"
                     android:maxLines="1"
+                    android:paddingHorizontal="30dp"
                     android:text="@string/widget_idle_subtitle"
                     android:textColor="#ABFFFFFF"
                     android:textSize="10.5sp" />
             </LinearLayout>
 
-            <!-- 歌词态（右留 32dp 避开纵向角标） -->
+            <!-- 歌词态：居中小封面标题头 + 居中歌词区 -->
             <LinearLayout
                 android:id="@+id/widget_lyric_group"
                 android:layout_width="match_parent"
@@ -85,28 +87,27 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginEnd="30dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
+                    android:gravity="center"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="28dp">
 
                     <ImageView
                         android:id="@id/widget_cover_mini"
-                        android:layout_width="25dp"
-                        android:layout_height="25dp"
+                        android:layout_width="26dp"
+                        android:layout_height="26dp"
                         android:contentDescription="@string/widget_cover_desc"
                         android:scaleType="fitCenter"
                         android:src="@drawable/widget_placeholder" />
 
                     <LinearLayout
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="6dp"
-                        android:layout_weight="1"
                         android:orientation="vertical">
 
                         <TextView
                             android:id="@id/widget_lyric_song_title"
-                            android:layout_width="match_parent"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:ellipsize="end"
                             android:fontFamily="sans-serif-medium"
@@ -117,7 +118,7 @@
 
                         <TextView
                             android:id="@id/widget_lyric_song_artist"
-                            android:layout_width="match_parent"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="1dp"
                             android:ellipsize="end"
@@ -132,14 +133,16 @@
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
-                    android:gravity="center_vertical"
-                    android:orientation="vertical">
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:paddingHorizontal="12dp">
 
                     <TextView
                         android:id="@+id/widget_lyric_prev"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:ellipsize="end"
+                        android:gravity="center"
                         android:includeFontPadding="false"
                         android:maxLines="1"
                         android:textColor="#78FFFFFF"
@@ -152,6 +155,7 @@
                         android:layout_marginTop="2dp"
                         android:ellipsize="end"
                         android:fontFamily="sans-serif-medium"
+                        android:gravity="center"
                         android:includeFontPadding="false"
                         android:maxLines="2"
                         android:textColor="#F5FFFFFF"
@@ -166,13 +170,13 @@
             </LinearLayout>
         </FrameLayout>
 
-        <!-- 底部播控：紧致胶囊 -->
+        <!-- 底部播控：紧致胶囊，居中聚合 -->
         <LinearLayout
             android:id="@+id/widget_controls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:gravity="center_vertical"
+            android:gravity="center"
             android:orientation="horizontal">
 
             <ImageView
@@ -185,9 +189,8 @@
                 android:src="@drawable/widget_ic_prev" />
 
             <FrameLayout
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
+                android:layout_width="28dp"
+                android:layout_height="1dp" />
 
             <ImageView
                 android:id="@+id/widget_play"
@@ -199,9 +202,8 @@
                 android:src="@drawable/widget_ic_play" />
 
             <FrameLayout
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
+                android:layout_width="28dp"
+                android:layout_height="1dp" />
 
             <ImageView
                 android:id="@+id/widget_next"
@@ -214,35 +216,31 @@
         </LinearLayout>
     </LinearLayout>
 
-    <!-- 右上角纵向紧致堆叠：收藏 + 歌词切换 -->
-    <LinearLayout
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+    <!-- 左上角收藏胶囊 -->
+    <ImageView
+        android:id="@+id/widget_fav"
+        android:layout_width="25dp"
+        android:layout_height="25dp"
+        android:layout_gravity="top|start"
+        android:layout_marginTop="10dp"
+        android:layout_marginStart="10dp"
+        android:background="@drawable/widget_btn_ripple"
+        android:contentDescription="@string/widget_fav_desc"
+        android:scaleType="fitCenter"
+        android:src="@drawable/widget_ic_heart_outline" />
+
+    <!-- 右上角歌词切换胶囊 -->
+    <ImageView
+        android:id="@+id/widget_lyric_toggle"
+        android:layout_width="25dp"
+        android:layout_height="25dp"
         android:layout_gravity="top|end"
         android:layout_marginTop="10dp"
         android:layout_marginEnd="10dp"
-        android:gravity="center_horizontal"
-        android:orientation="vertical">
-
-        <ImageView
-            android:id="@+id/widget_fav"
-            android:layout_width="25dp"
-            android:layout_height="25dp"
-            android:background="@drawable/widget_btn_ripple"
-            android:contentDescription="@string/widget_fav_desc"
-            android:scaleType="fitCenter"
-            android:src="@drawable/widget_ic_heart_outline" />
-
-        <ImageView
-            android:id="@+id/widget_lyric_toggle"
-            android:layout_width="25dp"
-            android:layout_height="25dp"
-            android:layout_marginTop="4dp"
-            android:background="@drawable/widget_btn_ripple"
-            android:contentDescription="@string/widget_lyric_desc"
-            android:scaleType="fitCenter"
-            android:src="@drawable/widget_ic_lyric" />
-    </LinearLayout>
+        android:background="@drawable/widget_btn_ripple"
+        android:contentDescription="@string/widget_lyric_desc"
+        android:scaleType="fitCenter"
+        android:src="@drawable/widget_ic_lyric" />
 
     <ImageView
         android:id="@+id/widget_mode"

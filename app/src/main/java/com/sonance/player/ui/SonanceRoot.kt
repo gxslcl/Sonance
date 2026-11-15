@@ -575,12 +575,19 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     /** 沉浸式封面墙（原生 Compose）：与黑胶同一套「盖稳即停绘」范式 */
     var nativeWallOpen by remember { mutableStateOf(false) }
     var nativeWallCovered by remember { mutableStateOf(false) }
+    var hadOpenedWall by remember { mutableStateOf(false) }
     LaunchedEffect(nativeWallOpen) {
+        vm.isCoverWallOpen = nativeWallOpen
         if (nativeWallOpen) {
+            hadOpenedWall = true
             delay(320)
             nativeWallCovered = true
         } else {
             nativeWallCovered = false
+            if (hadOpenedWall) {
+                hadOpenedWall = false
+                vm.onExitCoverWall()
+            }
         }
     }
     // 黑胶 / 封面墙任一盖稳后，下层（主界面 + 播放页）统一停绘、冻结动画
@@ -1964,7 +1971,8 @@ private fun ScreenBody(
             is Detail.PlaylistDetail -> OnlinePlaylistScreen(
                 playlist = detail.playlist,
                 vm = vm,
-                playerState = playerState
+                currentMediaId = playerState.mediaId,
+                isPlaying = playerState.isPlaying
             )
 
             is Detail.LxSheetDetail -> LxSheetDetailScreen(
@@ -2019,7 +2027,8 @@ private fun ScreenBody(
         } else {
             OnlineScreen(
                 vm = vm,
-                playerState = playerState,
+                currentMediaId = playerState.mediaId,
+                isPlaying = playerState.isPlaying,
                 onOpenPlaylist = { onOpenDetail(Detail.PlaylistDetail(it)) }
             )
         }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -138,7 +139,14 @@ fun SongRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (showIndex) {
-            Box(Modifier.width(26.dp), contentAlignment = Alignment.Center) {
+            val numStr = (index + 1).toString()
+            val indexWidth = when {
+                numStr.length >= 5 -> 42.dp
+                numStr.length >= 4 -> 36.dp
+                numStr.length >= 3 -> 28.dp
+                else -> 24.dp
+            }
+            Box(Modifier.defaultMinSize(minWidth = indexWidth), contentAlignment = Alignment.Center) {
                 if (isCurrent) {
                     EqualizerBars(
                         active = isPlaying,
@@ -148,14 +156,16 @@ fun SongRow(
                     )
                 } else {
                     Text(
-                        text = "${index + 1}",
-                        style = MaterialTheme.typography.bodySmall,
+                        text = numStr,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
                         color = skin.textMuted,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
         }
 
         CoverArt(
@@ -672,11 +682,25 @@ fun QueueSongRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(Modifier.width(20.dp), contentAlignment = Alignment.Center) {
+        val numStr = (index + 1).toString()
+        val indexWidth = when {
+            numStr.length >= 5 -> 40.dp
+            numStr.length >= 4 -> 34.dp
+            numStr.length >= 3 -> 26.dp
+            else -> 20.dp
+        }
+        Box(Modifier.defaultMinSize(minWidth = indexWidth), contentAlignment = Alignment.Center) {
             if (isCurrent) {
                 EqualizerBars(active = isPlaying, color = skin.accent, barWidth = 2.5.dp, height = 12.dp)
             } else {
-                Text("${index + 1}", style = MaterialTheme.typography.bodySmall, color = skin.textMuted)
+                Text(
+                    text = numStr,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                    color = skin.textMuted,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    softWrap = false
+                )
             }
         }
         Column(Modifier.weight(1f)) {

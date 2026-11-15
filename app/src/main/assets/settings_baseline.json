@@ -288,7 +288,7 @@
     },
     "online_download_enabled": {
       "type": "BOOLEAN",
-      "value": true
+      "value": false
     },
     "online_download_wifi_only": {
       "type": "BOOLEAN",

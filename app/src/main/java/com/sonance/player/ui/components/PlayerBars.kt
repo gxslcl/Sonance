@@ -456,6 +456,7 @@ fun MiniPlayer(
                         }
                     }
             ) {
+                val isDragging = kotlin.math.abs(dragX) > 0.5f
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -468,9 +469,14 @@ fun MiniPlayer(
                             } else {
                                 1f - (ratio * 0.72f).coerceIn(0f, 0.72f)
                             }
+                            // 滑动产生半透明离屏层时必须按圆角裁剪，避免滑出直角矩形残影
+                            if (isDragging) {
+                                this.shape = shape
+                                this.clip = true
+                            }
                         }
-                        // 整卡模式仅在卡片外缘画柔和投影，杜绝半透明玻璃卡片透出系统阴影矩形底；槽内模式不叠加投影
-                        .let { m -> if (!isSlot) m.outerCardShadow(20.dp) else m }
+                        // 整卡模式仅在静止且卡片外缘画柔和投影；滑动期间关闭外扩投影，杜绝离屏层直角底
+                        .let { m -> if (!isSlot && !isDragging) m.outerCardShadow(20.dp) else m }
                         .clip(shape)
                         .background(skin.surface2.copy(alpha = cardOpacity / 100f))
                         // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——

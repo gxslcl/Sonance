@@ -27,6 +27,24 @@ object NeteaseAuth {
 
     private const val TAG = "SonanceNetease"
 
+    /** 保持一次会话内发送验证码与提交登录使用同一份 deviceId，降低网易云风控拦截率 */
+    private val sessionDeviceId: String by lazy {
+        java.util.UUID.randomUUID().toString().replace("-", "").uppercase()
+    }
+
+    private fun eapiLoginCookie(): String =
+        "os=pc; appver=3.0.18.203097; deviceId=$sessionDeviceId; __remember_me=true"
+
+    private fun eapiHeaderJson(): org.json.JSONObject =
+        org.json.JSONObject().apply {
+            put("os", "pc")
+            put("appver", "3.0.18.203097")
+            put("deviceId", sessionDeviceId)
+            put("requestId", "${System.currentTimeMillis()}_${(1000..9999).random()}")
+            put("osver", "Microsoft-Windows-10-Professional-build-22631-64bit")
+            put("channel", "netease")
+        }
+
     /** 二维码内容前缀。扫码后手机端会跳到确认页 */
     private const val QR_PREFIX = "/login?codekey="
 
@@ -122,58 +140,11 @@ object NeteaseAuth {
         }
     }
 
-    // ===== 手机验证码 / 密码登录 =====
-
-    sealed interface SmsSendResult {
-        data object Sent : SmsSendResult
-        data class Failed(val message: String) : SmsSendResult
-    }
+    // ===== 手机号密码登录 =====
 
     sealed interface LoginResult {
         data class Success(val account: NeteaseAccount) : LoginResult
         data class Failed(val message: String) : LoginResult
-    }
-
-    /** 发送手机登录验证码。国内手机号自动走 +86 */
-    suspend fun sendSmsCaptcha(phone: String, ctcode: String = "86"): SmsSendResult =
-        withContext(Dispatchers.IO) {
-            val cleaned = phone.trim()
-            if (cleaned.length < 6 || cleaned.any { !it.isDigit() }) {
-                return@withContext SmsSendResult.Failed("请输入正确的手机号")
-            }
-            val code = ctcode.trim().ifBlank { "86" }
-            val path = "/api/sms/captcha/sent?cellphone=${java.net.URLEncoder.encode(cleaned, "UTF-8")}" +
-                "&ctcode=${java.net.URLEncoder.encode(code, "UTF-8")}"
-            val res = NeteaseHttp.get(path)
-            val raw = res.body ?: res.errorBody
-            parseSmsSendResponse(raw)
-        }
-
-    /** 手机号 + 短信验证码登录 */
-    suspend fun loginWithPhoneCaptcha(
-        context: Context,
-        phone: String,
-        captcha: String,
-        ctcode: String = "86"
-    ): LoginResult = withContext(Dispatchers.IO) {
-        val cleanedPhone = phone.trim()
-        val cleanedCode = captcha.trim()
-        if (cleanedPhone.length < 6 || cleanedPhone.any { !it.isDigit() }) {
-            return@withContext LoginResult.Failed("请输入正确的手机号")
-        }
-        if (cleanedCode.length < 4 || cleanedCode.any { !it.isDigit() }) {
-            return@withContext LoginResult.Failed("请输入收到的短信验证码")
-        }
-        val res = NeteaseHttp.postForm(
-            "/api/login/cellphone",
-            mapOf(
-                "phone" to cleanedPhone,
-                "countrycode" to ctcode.trim().ifBlank { "86" },
-                "captcha" to cleanedCode,
-                "rememberLogin" to "true"
-            )
-        )
-        completeCellphoneLogin(context, res)
     }
 
     /** 手机号 + 密码登录（密码按网易云约定做 MD5 后提交，本地不落盘） */
@@ -190,14 +161,19 @@ object NeteaseAuth {
         if (password.isBlank()) {
             return@withContext LoginResult.Failed("请输入登录密码")
         }
-        val res = NeteaseHttp.postForm(
-            "/api/login/cellphone",
-            mapOf(
-                "phone" to cleanedPhone,
-                "countrycode" to ctcode.trim().ifBlank { "86" },
-                "password" to md5Hex(password),
-                "rememberLogin" to "true"
-            )
+        val payload = org.json.JSONObject().apply {
+            put("phone", cleanedPhone)
+            put("countrycode", ctcode.trim().ifBlank { "86" })
+            put("password", md5Hex(password))
+            put("rememberLogin", "true")
+            put("https", "true")
+            put("header", eapiHeaderJson())
+        }
+        val res = NeteaseHttp.postEapi(
+            apiPath = "/api/login/cellphone",
+            payload = payload,
+            cookie = eapiLoginCookie(),
+            userAgent = NeteaseHttp.PC_UA
         )
         completeCellphoneLogin(context, res)
     }
@@ -230,22 +206,6 @@ object NeteaseAuth {
         val errorMessage: String? = null
     )
 
-    internal fun parseSmsSendResponse(raw: String?): SmsSendResult {
-        if (raw.isNullOrBlank()) return SmsSendResult.Failed("网络不通或请求被拦截，稍后再试")
-        val json = runCatching { org.json.JSONObject(raw) }.getOrNull()
-            ?: return SmsSendResult.Failed("发送失败，响应异常")
-        val code = json.optInt("code", -1)
-        if (code == 200) return SmsSendResult.Sent
-        val msg = json.optString("message").ifBlank { json.optString("msg") }
-        val friendly = when (code) {
-            400 -> "手机号格式有误或未支持该号段"
-            405 -> "发送太频繁，请稍后再试"
-            462, 8821 -> "触发安全验证，建议改用「扫码登录」"
-            else -> msg.ifBlank { "发送失败（code=$code）" }
-        }
-        return SmsSendResult.Failed(friendly)
-    }
-
     internal fun parseCellphoneLoginPayload(
         raw: String?,
         setCookies: List<String>
@@ -262,11 +222,14 @@ object NeteaseAuth {
                 400 -> "手机号或登录方式不被接口接受，可切换扫码登录"
                 501 -> "账号不存在"
                 502 -> "手机号或密码错误"
-                503 -> "验证码错误或已失效"
                 509 -> "尝试次数过多，请稍后再试或使用扫码登录"
-                462, 8821 -> "账号需要安全校验，请使用网易云 App 扫码或 Cookie 登录"
+                250, 462, 8821 -> "触发网易云安全风控，建议改用「扫码登录」或「Cookie 登录」"
                 -460 -> "当前网络环境触发网易云校验，建议直接「扫码登录」"
-                else -> serverMsg.ifBlank { "登录失败（code=$code）" }
+                else -> if (serverMsg.contains("安全风险")) {
+                    "触发网易云安全风控，建议改用「扫码登录」或「Cookie 登录」"
+                } else {
+                    serverMsg.ifBlank { "登录失败（code=$code）" }
+                }
             }
             return ParsedLoginPayload(errorMessage = friendly)
         }

@@ -84,7 +84,7 @@ internal object WidgetSizing {
             WidgetCoverClass.CARD -> {
                 val pillReserve = if (isFourCol) 58f else 90f
                 val maxByW = w - pillReserve
-                val maxByH = h - 98f
+                val maxByH = h - 94f
                 minOf(maxByW, maxByH).coerceIn(baseCoverDp, 196f)
             }
             WidgetCoverClass.WIDE -> {

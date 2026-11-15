@@ -31,6 +31,7 @@ import com.sonance.player.data.Prefs
 import com.sonance.player.playback.PlaybackCommands
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
+import java.util.concurrent.Executors
 
 internal enum class WidgetProgressMode {
     NONE,
@@ -87,8 +88,8 @@ internal enum class WidgetStyle(
         showCover = true, hasMiniCover = true, hasAccentBar = false, hasHqBadge = false,
         showBrand = false, supportsLyricToggle = true, isCornerPillControls = true,
         isPillPlayButton = true, progressMode = WidgetProgressMode.NONE, triLineLyrics = false,
-        playBtnWdp = 56, playBtnHdp = 28, baseCoverDp = 60f, baseMiniDp = 28f,
-        coverPx = 168, miniCoverPx = 84,
+        playBtnWdp = 56, playBtnHdp = 28, baseCoverDp = 78f, baseMiniDp = 28f,
+        coverPx = 234, miniCoverPx = 84,
         coverRadiusRatio = 0.20f, defaultWidthDp = 210, defaultHeightDp = 152
     ),
     WIDE(
@@ -139,8 +140,8 @@ internal enum class WidgetStyle(
         showCover = true, hasMiniCover = true, hasAccentBar = false, hasHqBadge = false,
         showBrand = false, supportsLyricToggle = true, isCornerPillControls = true,
         isPillPlayButton = true, progressMode = WidgetProgressMode.NONE, triLineLyrics = false,
-        playBtnWdp = 46, playBtnHdp = 27, baseCoverDp = 54f, baseMiniDp = 25f,
-        coverPx = 152, miniCoverPx = 76,
+        playBtnWdp = 48, playBtnHdp = 27, baseCoverDp = 74f, baseMiniDp = 26f,
+        coverPx = 222, miniCoverPx = 78,
         coverRadiusRatio = 0.20f, defaultWidthDp = 156, defaultHeightDp = 152
     ),
     WIDE_4(
@@ -192,6 +193,7 @@ abstract class SonanceWidgetProvider internal constructor(
         val pending = goAsync()
         val app = context.applicationContext
         val ids = appWidgetIds.copyOf()
+        com.sonance.player.playback.PlaybackService.refreshLyricsIfEmpty()
         Thread {
             try {
                 ids.forEach { WidgetRenderer.render(app, appWidgetManager, it, style) }
@@ -243,6 +245,15 @@ object SonanceWidgets {
 
     internal const val RC_OPEN = 0x54
 
+    private val renderExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "sonance-widget-render").apply { isDaemon = true }
+    }
+
+    fun hasAnyWidgets(context: Context): Boolean {
+        val manager = AppWidgetManager.getInstance(context) ?: return false
+        return WidgetStyle.entries.any { widgetIds(manager, context, it).isNotEmpty() }
+    }
+
     fun onPlaybackChanged(
         context: Context,
         mediaId: Long = -1L,
@@ -278,7 +289,7 @@ object SonanceWidgets {
         )
         if (!WidgetState.write(app, snap)) return
         if (!snap.sameArtwork(previous)) WidgetCover.clear()
-        Thread { refreshAll(app) }.start()
+        renderExecutor.execute { refreshAll(app) }
     }
 
     fun onFavoriteOrModeChanged(context: Context) {
@@ -288,7 +299,7 @@ object SonanceWidgets {
         val isFav = previous.mediaId != 0L && prefs.isAnyFavoriteId(previous.mediaId)
         val mode = prefs.playMode.ifBlank { "REPEAT_ALL" }
         WidgetState.write(app, previous.copy(isFavorite = isFav, playMode = mode))
-        Thread { refreshAll(app) }.start()
+        renderExecutor.execute { refreshAll(app) }
     }
 
     fun onTick(
@@ -299,7 +310,7 @@ object SonanceWidgets {
     ) {
         val app = context.applicationContext
         if (!WidgetState.writeLive(app, positionMs, durationMs, lyric)) return
-        Thread { refreshLive(app) }.start()
+        renderExecutor.execute { refreshLive(app) }
     }
 
     fun onSkinChanged(
@@ -313,14 +324,14 @@ object SonanceWidgets {
         val app = context.applicationContext
         WidgetState.writeSkin(app, bg, text, textDim, accent, onAccent)
         WidgetRenderer.clearDecorCache()
-        Thread { refreshAll(app) }.start()
+        renderExecutor.execute { refreshAll(app) }
     }
 
     fun onAppearanceChanged(context: Context, appearance: WidgetAppearance) {
         val app = context.applicationContext
         WidgetState.writeAppearance(app, appearance)
         WidgetRenderer.clearDecorCache()
-        Thread { refreshAll(app) }.start()
+        renderExecutor.execute { refreshAll(app) }
     }
 
     /** 完整重画所有已放置的小组件（同步版本，调用方负责不在主线程上跑） */

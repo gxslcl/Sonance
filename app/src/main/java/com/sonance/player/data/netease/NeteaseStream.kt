@@ -91,6 +91,7 @@ object NeteaseStream {
     private class Entry(val info: NeteaseStreamInfo, val expireAtMs: Long)
 
     private val cache = ConcurrentHashMap<String, Entry>()
+    private val downloadCache = ConcurrentHashMap<String, Entry>()
 
     /** 每首歌最后一次失败的原因，给 UI 直接拿去提示 */
     private val errors = ConcurrentHashMap<String, String>()
@@ -109,6 +110,9 @@ object NeteaseStream {
     /** 上次取到的容器（mp3 / flac） */
     fun formatOf(remoteId: String): String? = cache[remoteId]?.info?.type
 
+    /** 上次正式下载接口取到的容器（mp3 / flac） */
+    fun downloadFormatOf(remoteId: String): String? = downloadCache[remoteId]?.info?.type
+
     /** 是否只拿到了试听片段（会员权益没生效） */
     fun isTrial(remoteId: String): Boolean = cache[remoteId]?.info?.trial == true
 
@@ -123,6 +127,7 @@ object NeteaseStream {
      */
     fun clearCache() {
         cache.clear()
+        downloadCache.clear()
         errors.clear()
     }
 
@@ -203,6 +208,88 @@ object NeteaseStream {
         if (entry.expireAtMs - System.currentTimeMillis() <= 30_000L) return null
         if (entry.info.trial && account?.isVip == true) {
             cache.remove(id)
+            return null
+        }
+        return entry.info
+    }
+
+    /**
+     * 取一首歌的正式下载地址（优先走网易云官方客户端下载接口）。
+     *
+     * @param level 用户设置的目标档位；登录态不够档会自动降到能给的最高档
+     * @param expectedDurationMs 曲目已知总时长
+     * @return 成功返回实际下载地址与档位；失败返回 null（原因用 [failureOf] 取）
+     */
+    suspend fun resolveDownload(
+        remoteId: String,
+        level: NeteaseLevel,
+        expectedDurationMs: Long = 0L
+    ): NeteaseStreamInfo? =
+        withContext(Dispatchers.IO) {
+            val id = remoteId.trim()
+            if (id.isEmpty()) return@withContext null
+
+            val account = NeteaseAuth.account
+            downloadCached(id, account)?.let { return@withContext it }
+
+            resolveLock.withLock {
+                downloadCached(id, account)?.let { return@withLock it }
+
+                val start = if (level.needsVip && (account == null || !account.isVip)) {
+                    NeteaseLevel.EXHIGH
+                } else {
+                    level
+                }
+
+                val selection = selectBestAttempt(chain(start), account?.isVip == true) { lv ->
+                    requestDownloadWithFallback(id, lv, account, expectedDurationMs)
+                }
+                when (selection) {
+                    is Selection.Found -> {
+                        if (!selection.attempt.info.trial || account?.isVip != true) {
+                            cacheDownloadAttempt(id, selection.attempt)
+                        } else {
+                            downloadCache[id] = Entry(selection.attempt.info, System.currentTimeMillis() + 10_000L)
+                            Log.w(TAG, "下载接口会员账号仍只返回试听片段 id=$id level=${selection.attempt.info.level.apiValue}")
+                        }
+                        clearError(id)
+                        return@withLock selection.attempt.info
+                    }
+                    is Selection.Denied -> {
+                        // 专有下载接口被拒时降级到普通播放流尝试兜底
+                        val fallback = resolve(id, level, expectedDurationMs)
+                        if (fallback != null) {
+                            return@withLock fallback
+                        }
+                        errors[id] = selection.message
+                        Log.i(TAG, "下载取流被拒 id=$id ${selection.message}")
+                        null
+                    }
+                    is Selection.Failed -> {
+                        // 专有下载接口失败时降级到普通播放流尝试兜底
+                        val fallback = resolve(id, level, expectedDurationMs)
+                        if (fallback != null) {
+                            return@withLock fallback
+                        }
+                        errors[id] = messageForCode(selection.lastCode, account)
+                        Log.i(TAG, "下载取流失败 id=$id code=${selection.lastCode}")
+                        null
+                    }
+                }
+            }
+        }
+
+    private fun cacheDownloadAttempt(id: String, attempt: Attempt.Ok) {
+        val ttl = (attempt.expi * 1000L - EXPIRE_SAFETY_MS)
+            .coerceAtLeast(EXPIRE_SAFETY_MS)
+        downloadCache[id] = Entry(attempt.info, System.currentTimeMillis() + ttl)
+    }
+
+    private fun downloadCached(id: String, account: NeteaseAccount? = NeteaseAuth.account): NeteaseStreamInfo? {
+        val entry = downloadCache[id] ?: return null
+        if (entry.expireAtMs - System.currentTimeMillis() <= 30_000L) return null
+        if (entry.info.trial && account?.isVip == true) {
+            downloadCache.remove(id)
             return null
         }
         return entry.info
@@ -380,11 +467,161 @@ object NeteaseStream {
         return parsePlayerUrlResponse(NeteaseHttp.get(path, account?.cookie).body, expectedDurationMs)
     }
 
+    private fun requestDownloadWithFallback(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
+        // 1. 优先官方 EAPI 下载接口 (PC UA)
+        val eapiPc = requestDownloadV1Eapi(
+            remoteId = remoteId,
+            level = level,
+            account = account,
+            os = "pc",
+            appver = "3.0.18.203097",
+            osver = "10",
+            userAgent = NeteaseHttp.PC_UA,
+            expectedDurationMs = expectedDurationMs
+        )
+        if (eapiPc is Attempt.Ok && (!eapiPc.info.trial || account?.isVip != true)) {
+            return eapiPc
+        }
+        if (eapiPc is Attempt.Denied) return eapiPc
+
+        // 2. Android UA EAPI 下载接口
+        val eapiAndroid = requestDownloadV1Eapi(
+            remoteId = remoteId,
+            level = level,
+            account = account,
+            os = "android",
+            appver = "8.10.05",
+            osver = "13",
+            userAgent = NeteaseHttp.ANDROID_UA,
+            expectedDurationMs = expectedDurationMs
+        )
+        if (eapiAndroid is Attempt.Ok && (!eapiAndroid.info.trial || account?.isVip != true)) {
+            return eapiAndroid
+        }
+        if (eapiAndroid is Attempt.Denied) return eapiAndroid
+
+        // 3. 旧版/其他下载接口 EAPI
+        val legacyEapi = requestDownloadLegacyEapi(
+            remoteId = remoteId,
+            level = level,
+            account = account,
+            expectedDurationMs = expectedDurationMs
+        )
+        if (legacyEapi is Attempt.Ok && (!legacyEapi.info.trial || account?.isVip != true)) {
+            return legacyEapi
+        }
+
+        // 4. 若下载专有接口拿不到完整流，回落到播放流接口 requestWithVipFallback 兜底
+        val streamFallback = requestWithVipFallback(remoteId, level, account, expectedDurationMs)
+        if (streamFallback is Attempt.Ok && (!streamFallback.info.trial || account?.isVip != true)) {
+            return streamFallback
+        }
+
+        return (eapiPc as? Attempt.Ok)
+            ?: (eapiAndroid as? Attempt.Ok)
+            ?: (legacyEapi as? Attempt.Ok)
+            ?: (streamFallback as? Attempt.Ok)
+            ?: eapiPc
+    }
+
+    private fun requestDownloadV1Eapi(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        os: String,
+        appver: String,
+        osver: String,
+        userAgent: String,
+        expectedDurationMs: Long
+    ): Attempt {
+        val headerObj = JSONObject().apply {
+            put("os", os)
+            put("appver", appver)
+            put("osver", osver)
+            put("channel", "netease")
+            put("requestId", "${System.currentTimeMillis()}_0001")
+            if (!account?.musicU.isNullOrBlank()) put("MUSIC_U", account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) put("__csrf", account!!.csrf)
+        }
+        val payload = JSONObject().apply {
+            put("id", remoteId)
+            put("ids", "[$remoteId]")
+            put("level", level.apiValue)
+            put("encodeType", level.encodeType)
+            put("header", headerObj.toString())
+        }
+        val cookie = buildString {
+            append("os=").append(os).append("; appver=").append(appver)
+            if (!account?.musicU.isNullOrBlank()) append("; MUSIC_U=").append(account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) append("; __csrf=").append(account!!.csrf)
+        }
+        val body = NeteaseHttp.postEapi(
+            apiPath = "/api/song/enhance/download/url/v1",
+            payload = payload,
+            cookie = cookie,
+            userAgent = userAgent
+        ).body
+        val attempt = parsePlayerUrlResponse(body, expectedDurationMs)
+        if (attempt is Attempt.Ok) {
+            val pathTag = attempt.info.url.substringAfter(".net/", "").take(24)
+            Log.i(
+                TAG,
+                "下载取流[$os] id=$remoteId req=${level.apiValue} got=${attempt.info.level.apiValue} trial=${attempt.info.trial} br=${attempt.info.br} exp=${expectedDurationMs}ms path=$pathTag"
+            )
+        }
+        return attempt
+    }
+
+    private fun requestDownloadLegacyEapi(
+        remoteId: String,
+        level: NeteaseLevel,
+        account: NeteaseAccount?,
+        expectedDurationMs: Long
+    ): Attempt {
+        val br = when (level) {
+            NeteaseLevel.HIRES, NeteaseLevel.LOSSLESS -> 999000
+            NeteaseLevel.EXHIGH -> 320000
+            NeteaseLevel.HIGHER -> 192000
+            NeteaseLevel.STANDARD -> 128000
+        }
+        val headerObj = JSONObject().apply {
+            put("os", "pc")
+            put("appver", "3.0.18.203097")
+            put("osver", "10")
+            put("channel", "netease")
+            put("requestId", "${System.currentTimeMillis()}_0001")
+            if (!account?.musicU.isNullOrBlank()) put("MUSIC_U", account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) put("__csrf", account!!.csrf)
+        }
+        val payload = JSONObject().apply {
+            put("id", remoteId)
+            put("br", br)
+            put("header", headerObj.toString())
+        }
+        val cookie = buildString {
+            append("os=pc; appver=3.0.18.203097")
+            if (!account?.musicU.isNullOrBlank()) append("; MUSIC_U=").append(account!!.musicU)
+            if (!account?.csrf.isNullOrBlank()) append("; __csrf=").append(account!!.csrf)
+        }
+        val body = NeteaseHttp.postEapi(
+            apiPath = "/api/song/enhance/download/url",
+            payload = payload,
+            cookie = cookie,
+            userAgent = NeteaseHttp.PC_UA
+        ).body
+        return parsePlayerUrlResponse(body, expectedDurationMs)
+    }
+
     internal fun parsePlayerUrlResponse(body: String?, expectedDurationMs: Long = 0L): Attempt {
         if (body == null) return Attempt.Retry(-1)
         val json = runCatching { JSONObject(body) }.getOrNull() ?: return Attempt.Retry(-1)
         val topCode = json.optInt("code", -1)
-        val item = json.optJSONArray("data")?.optJSONObject(0)
+        val item = json.optJSONObject("data") ?: json.optJSONArray("data")?.optJSONObject(0)
             ?: return Attempt.Retry(topCode)
 
         val url = item.optString("url").orEmpty()
