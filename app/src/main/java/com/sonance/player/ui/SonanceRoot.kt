@@ -960,6 +960,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 // 在线歌实际拿到的音质（本地歌为 null），显示在专辑后面
                 streamQuality = vm.nowPlayingQuality,
                 favorites = vm.favorites,
+                isSongFavorite = { vm.isSongFavorite(it) },
+                isDownloadBusy = { it.id in vm.downloadingSongIds },
+                isDownloaded = { vm.isOnlineSongDownloaded(it) },
+                onDownloadSong = { vm.downloadOnlineSong(it) },
                 onClose = {
                     fullPlayerOpen = false
                 },
@@ -1811,7 +1815,7 @@ private fun ExpandedLayout(
                     onFavorite = {
                         vm.songById(playerState.mediaId)?.let { vm.toggleFavorite(it.id) }
                     },
-                    isFavorite = vm.favorites.contains(playerState.mediaId),
+                    isFavorite = vm.isSongFavoriteId(playerState.mediaId),
                     // 沉浸皮肤：右侧面板也半透明，让整页封面玻璃透上来，
                     // 与左侧列表是同一层背景（不再是一块实心色）
                     translucent = skin.immersive,

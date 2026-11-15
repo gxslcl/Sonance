@@ -3,16 +3,45 @@ package com.sonance.player.ui.components
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import com.sonance.player.data.PlayButtonColorMode
+import com.sonance.player.data.PlayButtonShape
 import org.junit.Assert.*
 import org.junit.Test
 
 class PlayerPaletteTest {
     @Test
-    fun `three modes round trip and original is the migration default`() {
+    fun `three modes round trip and cover is the default`() {
         assertEquals(3, PlayButtonColorMode.entries.size)
         PlayButtonColorMode.entries.forEach { assertEquals(it, PlayButtonColorMode.fromId(it.id)) }
         listOf(null, "", "unknown").forEach {
-            assertEquals(PlayButtonColorMode.ORIGINAL, PlayButtonColorMode.fromId(it))
+            assertEquals(PlayButtonColorMode.COVER, PlayButtonColorMode.fromId(it))
+        }
+    }
+
+    @Test
+    fun `button shape modes round trip and droplet is default`() {
+        assertEquals(2, PlayButtonShape.entries.size)
+        PlayButtonShape.entries.forEach { assertEquals(it, PlayButtonShape.fromId(it.id)) }
+        listOf(null, "", "unknown").forEach {
+            assertEquals(PlayButtonShape.DROPLET, PlayButtonShape.fromId(it))
+        }
+    }
+
+    @Test
+    fun `blob corner radii produce exact circle at zero amplitude and valid normalized radii when morphing`() {
+        val circle = computeBlobCornerRadii(progress = 0.5f, amplitude = 0f)
+        assertEquals(8, circle.size)
+        circle.forEach { assertEquals(0.5f, it, 0.0001f) }
+
+        for (step in 0..10) {
+            val p = step / 10f
+            for (amp in listOf(0.25f, 0.6f, 1f)) {
+                val r = computeBlobCornerRadii(progress = p, amplitude = amp)
+                assertEquals(8, r.size)
+                assertTrue(r[0] + r[1] <= 1.0001f) // top horizontal sum <= 1
+                assertTrue(r[2] + r[3] <= 1.0001f) // bottom horizontal sum <= 1
+                assertTrue(r[4] + r[7] <= 1.0001f) // left vertical sum <= 1
+                assertTrue(r[5] + r[6] <= 1.0001f) // right vertical sum <= 1
+            }
         }
     }
 

@@ -105,6 +105,19 @@ class Prefs(context: Context) {
         get() = PlayButtonColorMode.fromId(sp.getString(KEY_PLAY_BTN_COLOR_MODE, null))
         set(v) = sp.edit().putString(KEY_PLAY_BTN_COLOR_MODE, v.id).apply()
 
+    /** 播放/暂停按钮形态：水滴流动形态或经典正圆普通按钮，默认水滴按钮。 */
+    var playBtnShape: PlayButtonShape
+        get() = PlayButtonShape.fromId(sp.getString(KEY_PLAY_BTN_SHAPE, null))
+        set(v) = sp.edit().putString(KEY_PLAY_BTN_SHAPE, v.id).apply()
+
+    fun registerChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) {
+        sp.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    fun unregisterChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) {
+        sp.unregisterOnSharedPreferenceChangeListener(listener)
+    }
+
     /**
      * 播放/暂停按钮内部的图标样式。0=经典（实心播放/暂停图标）、
      * 1=液态（参考样机的三杆弹簧变形）、2=极简（细线三角/双杠）。
@@ -1228,6 +1241,25 @@ class Prefs(context: Context) {
         return liked
     }
 
+    /** 在线收藏完整条目列表（支持离线保留、点播及下载落盘后自动迁移到本地收藏 ID）。 */
+    var onlineFavorites: List<OnlineFavoriteEntry>
+        get() = OnlineFavorites.decodeJson(sp.getString(KEY_ONLINE_FAVORITES, null))
+        set(v) {
+            sp.edit().putString(KEY_ONLINE_FAVORITES, OnlineFavorites.encodeJson(v)).apply()
+        }
+
+    fun isAnyFavoriteId(id: Long): Boolean =
+        OnlineFavorites.isFavoriteId(id, favorites, onlineFavorites)
+
+    /** 「转换本机缓存（免 Shizuku）」附加选择的本机 SAF 目录 URI 与可读展示名。 */
+    var localCacheTreeUri: String?
+        get() = sp.getString(KEY_LOCAL_CACHE_TREE_URI, null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString(KEY_LOCAL_CACHE_TREE_URI, v).apply()
+
+    var localCacheTreeLabel: String?
+        get() = sp.getString(KEY_LOCAL_CACHE_TREE_LABEL, null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString(KEY_LOCAL_CACHE_TREE_LABEL, v).apply()
+
     // ===== 最近播放（有序，最新在前）=====
 
     /**
@@ -1446,6 +1478,7 @@ class Prefs(context: Context) {
         private const val KEY_CROSSFADE_SEC = "crossfade_sec"
         private const val KEY_PLAY_TOAST = "play_toast_enabled"
         private const val KEY_PLAY_BTN_COLOR_MODE = "play_btn_color_mode"
+        private const val KEY_PLAY_BTN_SHAPE = "play_btn_shape"
         private const val KEY_PLAY_BTN_ICON_STYLE = "play_btn_icon_style"
         private const val KEY_PLAY_BTN_ICON_SCALE = "play_btn_icon_scale"
         private const val KEY_SKIN = "skin_id"
@@ -1454,6 +1487,7 @@ class Prefs(context: Context) {
         private const val KEY_VIEW = "view_mode"
         private const val KEY_TAB = "last_tab"
         private const val KEY_FAV = "favorites"
+        private const val KEY_ONLINE_FAVORITES = "online_favorites"
         private const val KEY_RECENT = "recent"
         private const val KEY_ONLINE_LAST = "online_last_song"
         private const val KEY_ONLINE_QUEUE = "online_queue"
@@ -1607,7 +1641,15 @@ class Prefs(context: Context) {
         private const val KEY_SAF_SCAN_TREES = "saf_scan_trees"
         private const val KEY_RESTORE_OUT_URI = "restore_out_uri"
         private const val KEY_RESTORE_OUT_LABEL = "restore_out_label"
+        private const val KEY_LOCAL_CACHE_TREE_URI = "local_cache_tree_uri"
+        private const val KEY_LOCAL_CACHE_TREE_LABEL = "local_cache_tree_label"
         private const val KEY_CONVERSION_UNLOCK_UNTIL = "conversion_unlock_until"
+
+        fun isPlayButtonPrefKey(key: String?): Boolean = key == KEY_PLAY_BTN_GLOW ||
+            key == KEY_PLAY_BTN_SHAPE ||
+            key == KEY_PLAY_BTN_ICON_STYLE ||
+            key == KEY_PLAY_BTN_ICON_SCALE ||
+            key == KEY_PLAY_BTN_HAPTICS
     }
 }
 

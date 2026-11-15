@@ -45,13 +45,43 @@ class WidgetCommandReceiver : BroadcastReceiver() {
 
             PlaybackCommands.TOGGLE_FAVORITE -> {
                 val snap = WidgetState.read(app)
-                if (snap.mediaId > 0L) {
+                if (snap.mediaId != 0L) {
                     val handler = onToggleFavorite
                     if (handler != null) {
                         handler.invoke(snap.mediaId)
-                    } else {
+                    } else if (snap.mediaId > 0L) {
                         val prefs = Prefs(app)
                         val liked = prefs.toggleFavorite(snap.mediaId)
+                        WidgetState.write(app, snap.copy(isFavorite = liked))
+                        val pending = goAsync()
+                        Thread {
+                            try {
+                                runCatching { SonanceWidgets.refreshAll(app) }
+                            } finally {
+                                runCatching { pending.finish() }
+                            }
+                        }.start()
+                    } else {
+                        val prefs = Prefs(app)
+                        val curOnline = prefs.onlineFavorites
+                        val exists = curOnline.any { it.song.songId() == snap.mediaId }
+                        val liked = if (exists) {
+                            prefs.onlineFavorites = curOnline.filterNot { it.song.songId() == snap.mediaId }
+                            false
+                        } else {
+                            val stored = prefs.lastOnlineSongJson?.let { raw ->
+                                runCatching {
+                                    com.sonance.player.data.storedOnlineSongFromJson(org.json.JSONObject(raw))
+                                }.getOrNull()
+                            }?.takeIf { it.songId() == snap.mediaId }
+                            if (stored != null) {
+                                prefs.onlineFavorites = curOnline + com.sonance.player.data.OnlineFavoriteEntry(
+                                    song = stored,
+                                    likedAt = System.currentTimeMillis()
+                                )
+                                true
+                            } else false
+                        }
                         WidgetState.write(app, snap.copy(isFavorite = liked))
                         val pending = goAsync()
                         Thread {

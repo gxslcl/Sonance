@@ -93,10 +93,12 @@ import com.sonance.player.data.OnlineMode
 import com.sonance.player.data.lx.LxQuality
 import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.PlayButtonColorMode
+import com.sonance.player.data.PlayButtonShape
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
 import com.sonance.player.ui.components.AdaptModeRow
+import com.sonance.player.ui.components.PlayPauseButton
 import com.sonance.player.ui.components.TagChip
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.components.GlassControls
@@ -429,6 +431,7 @@ private fun SettingsCategoryPage(
             )
             RestoreSection(vm = vm)
             NeteaseCacheSection(vm = vm)
+            LocalCacheSection(vm = vm)
         }
 
         // ============================================================
@@ -1460,7 +1463,7 @@ private fun PlayControlSettingsSection(vm: SonanceViewModel) {
         2 -> "极简"
         else -> "经典"
     }
-    val summary = "${vm.playBtnColorMode.label}配色 · ${styleName}图标 (${vm.playBtnIconScale}%)" +
+    val summary = "${vm.playBtnColorMode.label}配色 · ${vm.playBtnShape.label} · ${styleName}图标 (${vm.playBtnIconScale}%)" +
         if (vm.playBtnHaptics) " · 震动开启" else ""
 
     CollapsibleSection(
@@ -1469,13 +1472,79 @@ private fun PlayControlSettingsSection(vm: SonanceViewModel) {
         summary = summary,
         icon = SonanceIcons.Play
     ) {
+        var previewPlaying by remember { mutableStateOf(true) }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(skin.surface2)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "实时按钮效果预览（点击切换播放/暂停）",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = skin.text
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    if (previewPlaying && vm.playBtnShape == PlayButtonShape.DROPLET) {
+                        "水滴形态形变中，光晕随水滴轮廓同步羽化呼吸"
+                    } else if (previewPlaying) {
+                        "经典正圆形态，光晕随节奏柔和呼吸"
+                    } else {
+                        "暂停态平滑收敛为正圆，保留柔和底光"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Box(Modifier.padding(horizontal = 14.dp, vertical = 14.dp)) {
+                PlayPauseButton(
+                    isPlaying = previewPlaying,
+                    onClick = { previewPlaying = !previewPlaying },
+                    size = 50.dp,
+                    iconSize = 20.dp
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        Text("按钮形态", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlayButtonShape.entries.forEach { shape ->
+                val selected = shape == vm.playBtnShape
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) skin.accentGlow else skin.surface2)
+                        .border(
+                            if (selected) 1.dp else 0.dp,
+                            if (selected) skin.accent else Color.Transparent,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changePlayBtnShape(shape) }
+                        .padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        shape.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selected) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
         Text(
-            "全屏播放页的播放/暂停键：点击有震动反馈（可关），" +
-                "播放时光晕呼吸、图标在播放与暂停间弹簧变形。",
-            style = MaterialTheme.typography.bodySmall,
-            color = skin.textMuted
+            "「水滴按钮」播放时按流体水滴轮廓持续蠕动，光晕同步随轮廓柔光变化；「普通按钮」保持稳定正圆。",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim,
+            modifier = Modifier.padding(top = 6.dp, bottom = 12.dp)
         )
-        Spacer(Modifier.height(10.dp))
 
         Text("播放／暂停按钮配色", style = MaterialTheme.typography.titleSmall, color = skin.text)
         Spacer(Modifier.height(8.dp))

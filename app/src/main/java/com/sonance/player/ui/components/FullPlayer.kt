@@ -216,6 +216,10 @@ fun FullPlayer(
     state: PlayerUiState,
     queue: List<Song>,
     favorites: Set<Long>,
+    isSongFavorite: ((Song) -> Boolean)? = null,
+    isDownloadBusy: (Song) -> Boolean = { false },
+    isDownloaded: (Song) -> Boolean = { false },
+    onDownloadSong: (Song) -> Unit = {},
     onClose: () -> Unit,
     onPlayAt: (Int) -> Unit,
     onToggleFavorite: (Long) -> Unit,
@@ -1009,7 +1013,11 @@ fun FullPlayer(
                     Box(Modifier.fillMaxSize().clipToBounds()) {
                     PlayerPage(
                         song = song,
-                        isFavorite = song.id in favorites,
+                        isFavorite = isSongFavorite?.invoke(song) ?: (song.id in favorites),
+                        showDownloadButton = !song.isLocal && !song.isDlna,
+                        isDownloading = isDownloadBusy(song),
+                        isDownloaded = isDownloaded(song),
+                        onDownload = { onDownloadSong(song) },
                         // 只有当前页读实时播放状态；其它页给中性值，避免进度每 500ms
                         // 更新时把相邻页也拖进重组。
                         positionMs = if (isCurrent) state.positionMs else 0L,
@@ -2072,6 +2080,10 @@ private fun Modifier.swipeExitFade(pager: PagerState, page: Int): Modifier =
 private fun PlayerPage(
     song: Song,
     isFavorite: Boolean,
+    showDownloadButton: Boolean = false,
+    isDownloading: Boolean = false,
+    isDownloaded: Boolean = false,
+    onDownload: () -> Unit = {},
     positionMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
@@ -2346,7 +2358,11 @@ private fun PlayerPage(
                         volume, onVolume,
                         onOpenEqualizer,
                         dlnaActive,
-                        onOpenDlna
+                        onOpenDlna,
+                        showDownloadButton = showDownloadButton,
+                        isDownloading = isDownloading,
+                        isDownloaded = isDownloaded,
+                        onDownload = onDownload
                     )
                     }
                 }
@@ -2525,7 +2541,11 @@ private fun PlayerPage(
                     volume, onVolume,
                     onOpenEqualizer,
                     dlnaActive,
-                    onOpenDlna
+                    onOpenDlna,
+                    showDownloadButton = showDownloadButton,
+                    isDownloading = isDownloading,
+                    isDownloaded = isDownloaded,
+                    onDownload = onDownload
                 )
                 }
                 // 距底部 20dp（再叠加系统导航栏安全区）
@@ -2770,7 +2790,11 @@ private fun BottomRow(
     onVolume: (Float) -> Unit,
     onOpenEqualizer: () -> Unit,
     dlnaActive: Boolean = false,
-    onOpenDlna: () -> Unit = {}
+    onOpenDlna: () -> Unit = {},
+    showDownloadButton: Boolean = false,
+    isDownloading: Boolean = false,
+    isDownloaded: Boolean = false,
+    onDownload: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -2783,7 +2807,36 @@ private fun BottomRow(
             onVolumeChange = onVolume,
             modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.width(10.dp))
+        if (showDownloadButton) {
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(if (isDownloaded) skin.accentDim else Color.Transparent)
+                    .clickable {
+                        hapticTick(ctx)
+                        onDownload()
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (isDownloading) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        color = skin.accent,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                } else {
+                    androidx.compose.material3.Icon(
+                        imageVector = if (isDownloaded) SonanceIcons.Check else SonanceIcons.Download,
+                        contentDescription = if (isDownloaded) "已下载到本地曲库" else "下载此在线歌曲",
+                        tint = if (isDownloaded) skin.accent else skin.textDim,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(if (showDownloadButton) 4.dp else 10.dp))
         Box(
             modifier = Modifier
                 .size(34.dp)

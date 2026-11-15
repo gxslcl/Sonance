@@ -4,13 +4,6 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
-import com.sonance.player.data.CoverCache
-import com.sonance.player.data.HeaderInfo
-import com.sonance.player.data.Mp4TagWriter
-import com.sonance.player.data.OnlineCover
-import com.sonance.player.data.RestorePlan
-import com.sonance.player.data.RestorePlanner
-import com.sonance.player.data.RestoreProbe
 import com.sonance.player.data.bili.ShizukuShell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -249,21 +242,14 @@ class NeteaseCacheRepository(context: Context) {
             workDir.deleteRecursively()
             workDir.mkdirs()
             val src = pullEntry(entry, workDir)
-            // 源文件的真实扩展名：KGM / QMC 的探测与命名都要靠它
-            //（QMC 无魔数，RestorePlanner 靠文件名放行；displayName 只是去后缀的 stem）
-            val srcName = entry.fragments.firstOrNull()?.substringAfterLast('/') ?: ""
-            val srcExt = com.sonance.player.data.LockedFormat.extensionOf(srcName)
+            val containerExt = NcCacheDecodeSupport.containerExtFor(entry)
             return when (entry.kind) {
-                NcKind.NCM -> convertEncrypted(src, entry, root, existing, doneMap, ".ncm")
-                NcKind.NMS -> convertEncrypted(src, entry, root, existing, doneMap, ".nmsf")
-                NcKind.KGM -> convertEncrypted(
-                    src, entry, root, existing, doneMap,
-                    if (srcExt.isBlank()) ".kgm" else ".$srcExt"
-                )
+                NcKind.NCM, NcKind.NMS, NcKind.KGM ->
+                    convertEncrypted(src, entry, root, existing, doneMap, containerExt)
                 NcKind.QMC -> convertEncrypted(
                     src, entry, root, existing, doneMap,
-                    if (srcExt.isBlank()) ".mflac" else ".$srcExt",
-                    tail = readTail(src)
+                    containerExt,
+                    tail = NcCacheDecodeSupport.readTail(src)
                 )
                 NcKind.MDL -> NcConvertOutcome.Skipped("汽水 MDL 加密暂无公开解密方案")
                 NcKind.QQCACHE -> NcConvertOutcome.Skipped(
@@ -310,20 +296,7 @@ class NeteaseCacheRepository(context: Context) {
         if (!ok) error("复制缓存文件失败：$srcPath")
     }
 
-    /** 读文件尾部窗口（QMC 的密钥结构在最后 4KB 里），文件过短就全读 */
-    private fun readTail(src: File): ByteArray? = runCatching {
-        java.io.RandomAccessFile(src, "r").use { raf ->
-            val len = raf.length().toInt()
-            if (len <= 0) null
-            else {
-                val window = minOf(len, com.sonance.player.data.QmcDecoder.TAIL_WINDOW)
-                raf.seek((len - window).toLong())
-                ByteArray(window).also { raf.readFully(it) }
-            }
-        }
-    }.getOrNull()
-
-    /** 加密容器（NCM / NMSF / KGM / QMC）：走「私有格式还原」的探测 + 解密 + 标签组装管线 */
+    /** 加密容器（NCM / NMSF / KGM / QMC）：委托共用管线解密补全并写入 SAF 输出文件夹 */
     private suspend fun convertEncrypted(
         src: File,
         entry: NeteaseCacheEntry,
@@ -333,191 +306,90 @@ class NeteaseCacheRepository(context: Context) {
         containerExt: String,
         tail: ByteArray? = null
     ): NcConvertOutcome {
-        val scopeContext = coroutineContext
-        // plan 持有流引用、writeTo 还要继续读，整个「探测→写盘」必须包在同一个 use 里
-        src.inputStream().use { stream ->
-            val probe = RestorePlanner.plan(stream, src.length(), "${entry.displayName}$containerExt", tail)
-            val plan = when (probe) {
-                is RestoreProbe.Ready -> probe.plan
-                is RestoreProbe.Skip -> return NcConvertOutcome.Skipped(probe.reason)
+        val dec = File(src.parentFile, "dec.bin")
+        val prepared = NcCacheDecodeSupport.prepareEncrypted(
+            context = appContext,
+            src = src,
+            decFile = dec,
+            displayName = entry.displayName,
+            containerExt = containerExt,
+            tail = tail,
+            songId = NeteaseCacheParser.songIdOf(entry),
+            metaCache = metaCache,
+            scopeContext = coroutineContext,
+            legacyShouldSkip = { outName, expectedSize, enrichable ->
+                val prior = existing[outName]
+                if (prior != null && prior.second == expectedSize && !enrichable) {
+                    doneMap[entry.key] = outName
+                    true
+                } else false
+            },
+            finalShouldSkip = { outName, finalSize ->
+                val prior = existing[outName]
+                if (prior != null && prior.second == finalSize) {
+                    doneMap[entry.key] = outName
+                    true
+                } else false
             }
-
-            // 在线补全的可行性：容器没带标题（NMSF 必然如此）、文件名里有歌曲 ID
-            val songId = NeteaseCacheParser.songIdOf(entry)
-            val enrichable = songId != null && plan.info.title.isBlank()
-
-            // 旧版产物按旧规则（原名 + 原大小）能对上就直接跳过——
-            // 但 NMSF 这类可升级条目放行，让这次运行把它们补上名称与封面
-            val legacyPrior = existing[plan.outName]
-            if (legacyPrior != null && legacyPrior.second == plan.expectedSize && !enrichable) {
-                doneMap[entry.key] = plan.outName
-                return NcConvertOutcome.Skipped("已转换过")
-            }
-
-            // 按歌曲 ID 查详情接口补全歌名 / 歌手 / 专辑 / 封面（零歧义，不碰账号）。
-            // 失败返回 null：转换照旧，成品退回哈希文件名。
-            val meta = if (songId != null) metaCache.getOrPut(songId) { NcMetaFetcher.fetch(songId) } else null
-
-            // 歌手取值优先级：**原文件自带标签 → 在线接口 → 歌名「歌名 - 歌手」拆分**兜底。
-            // 在线某个字段为空时**不覆盖**原文件自带的值（空值覆盖会把好数据冲掉）。
-            val fileArtist = plan.info.artist
-            if (meta != null) {
-                val artist = listOf(fileArtist, meta.artist).firstOrNull { it.isNotBlank() }
-                    ?: splitArtistFromTitle(meta.title)
-                plan.applyMeta(
-                    newInfo = plan.info.withMetadata(NcMeta(meta.title, artist, meta.album, meta.cover)),
-                    newCover = meta.cover,
-                    outStem = NcMetaFetcher.outputStem(
-                        NcMeta(meta.title, artist, meta.album, meta.cover)
-                    )
-                )
-            } else if (fileArtist.isBlank()) {
-                // 在线没查到：歌名若是「歌名 - 歌手」拼接形态，拆出歌手兜底写进标签
-                val artist = splitArtistFromTitle(plan.info.title)
-                if (artist.isNotBlank()) {
-                    plan.applyMeta(
-                        newInfo = plan.info.withMetadata(
-                            NcMeta(plan.info.title, artist, plan.info.album, plan.cover)
-                        ),
-                        newCover = null,
-                        outStem = null
-                    )
-                }
-            }
-
-            // 先解密到本地临时文件，探测**真实音频时长**：网易云按块缓存，
-            // 试听 / 没播完的歌解出来是个几十秒的残段，一律不进曲库。
-            // 拦在写输出文件夹之前，残曲不会留下任何痕迹。
-            val dec = File(src.parentFile, "dec.bin")
-            dec.outputStream().use { out ->
-                plan.writeTo(out) { scopeContext.ensureActive() }
-            }
-            val secs = NcDuration.probeSeconds(dec)
-            if (secs != null && secs < NcDuration.TRIAL_MIN_SECONDS) {
-                dec.delete()
-                return NcConvertOutcome.Skipped("试听残曲（约 ${fmtSecs(secs)}）", trial = true)
-            }
-
-            // m4a 数据完整性：块缓存没下完的歌，moov 声明的还是整首时长（能骗过
-            // 上面的阈值），mdat 却只有前半 —— 转出去播到一半就报 2008。
-            // 这里对账采样表，把这类源拦在写输出之前（之后缓存补全了会正常转换）。
-            val integrity = NcDuration.completeness(dec)
-            if (integrity != null && !integrity.complete) {
-                dec.delete()
-                return NcConvertOutcome.Skipped(
-                    "缓存不完整（约 ${fmtSecs(integrity.playableSeconds)}/${fmtSecs(integrity.declaredSeconds)}）",
-                    incomplete = true
-                )
-            }
-
-            // m4a 的元数据住在 moov 里，前置字节没地方放 —— 就地补写。
-            // 写坏的风险由「临时文件先验证再替换」兜住，失败就退回无标签成品
-            if (plan.ext == ".m4a") {
-                Mp4TagWriter.tag(dec, plan.info, plan.cover) { f -> NcDuration.probeSeconds(f) != null }
-            }
-
-            // 跳过判定用**最终成品大小**（m4a 打完标签会变大）：同名同大小才算已转换。
-            // 旧版同名产物大小对不上 → 复用其 uri 覆盖升级，不会产生重复文件
-            val finalSize = dec.length()
-            val prior = existing[plan.outName]
-            if (prior != null && prior.second == finalSize) {
-                doneMap[entry.key] = plan.outName
-                dec.delete()
-                return NcConvertOutcome.Skipped("已转换过")
-            }
-
-            val uri = prior?.first
-                ?: DocumentsContract.createDocument(
-                    appContext.contentResolver, root.uri, mimeOf(plan.ext), plan.outName
-                )
-                ?: return NcConvertOutcome.Failed("创建输出文件失败")
-            existing[plan.outName] = uri to finalSize
-
-            val bytesOut = dec.length()
-            appContext.contentResolver.openOutputStream(uri, "wt")?.use { out ->
-                dec.inputStream().use { it.copyTo(out) }
-            } ?: run { dec.delete(); return NcConvertOutcome.Failed("打开输出流失败") }
-            dec.delete()
-
-            storeCover(plan.info, plan.cover)
-            return NcConvertOutcome.Done(plan.outName, plan.ext, bytesOut)
-        }
+        )
+        return writePreparedToSaf(prepared, root, existing)
     }
 
-    /**
-     * 在线查到的元数据覆盖进 [HeaderInfo]（其余字段保持容器自带的值）。
-     * **空值不覆盖** —— 接口偶尔有字段缺失，别把原文件自带的值冲掉。
-     */
-    private fun HeaderInfo.withMetadata(meta: NcMeta): HeaderInfo {
-        val extra = buildMap {
-            if (meta.title.isNotBlank()) put("title", meta.title)
-            if (meta.artist.isNotBlank()) put("artist", meta.artist)
-            if (meta.album.isNotBlank()) put("album", meta.album)
-        }
-        if (extra.isEmpty()) return this
-        return copy(metadata = metadata + extra)
-    }
-
-    /** 歌名是「歌名 - 歌手」拼接形态时，拆出最后一个「 - 」后面的歌手兜底 */
-    private fun splitArtistFromTitle(title: String): String {
-        val t = title.trim()
-        val i = t.lastIndexOf(" - ")
-        if (i <= 0 || i + 3 >= t.length) return ""
-        return t.substring(i + 3).trim()
-    }
-
-    /** 明文：先验时长再复制到输出文件夹。文件名本身就是哈希，输出名 = stem + 魔数判出的后缀 */
-    private fun convertPlain(
+    /** 明文：先验时长与完整性，再复制到输出文件夹。 */
+    private suspend fun convertPlain(
         src: File,
         entry: NeteaseCacheEntry,
         root: DocumentFile,
         existing: MutableMap<String, Pair<Uri, Long>>,
         doneMap: MutableMap<String, String>
     ): NcConvertOutcome {
-        val ext = entry.plainExt.ifBlank { ".mp3" }
-        val outName = "${sanitizeName(entry.displayName)}$ext"
-
-        val prior = existing[outName]
-        if (prior != null && prior.second == entry.sizeBytes) {
-            doneMap[entry.key] = outName
-            return NcConvertOutcome.Skipped("已转换过")
-        }
-
-        // 明文源本身就是音频，直接在本地副本上验时长，残曲不用碰输出文件夹
-        val secs = NcDuration.probeSeconds(src)
-        if (secs != null && secs < NcDuration.TRIAL_MIN_SECONDS) {
-            return NcConvertOutcome.Skipped("试听残曲（约 ${fmtSecs(secs)}）", trial = true)
-        }
-
-        // 明文 m4a 同样做数据完整性对账（其余格式探测不了，返回 null 放行）
-        val integrity = NcDuration.completeness(src)
-        if (integrity != null && !integrity.complete) {
-            return NcConvertOutcome.Skipped(
-                "缓存不完整（约 ${fmtSecs(integrity.playableSeconds)}/${fmtSecs(integrity.declaredSeconds)}）",
-                incomplete = true
-            )
-        }
-
-        val uri = prior?.first
-            ?: DocumentsContract.createDocument(
-                appContext.contentResolver, root.uri, mimeOf(ext), outName
-            )
-            ?: return NcConvertOutcome.Failed("创建输出文件失败")
-        existing[outName] = uri to entry.sizeBytes
-
-        appContext.contentResolver.openOutputStream(uri, "wt")?.use { out ->
-            src.inputStream().use { it.copyTo(out) }
-        } ?: return NcConvertOutcome.Failed("打开输出流失败")
-
-        return NcConvertOutcome.Done(outName, ext, src.length())
+        val prepared = NcCacheDecodeSupport.preparePlain(
+            context = appContext,
+            src = src,
+            displayName = entry.displayName,
+            plainExt = entry.plainExt,
+            songId = null,
+            metaCache = metaCache,
+            shouldSkip = { outName, sizeBytes ->
+                val prior = existing[outName]
+                if (prior != null && prior.second == sizeBytes) {
+                    doneMap[entry.key] = outName
+                    true
+                } else false
+            }
+        )
+        return writePreparedToSaf(prepared, root, existing)
     }
 
-    /** 把容器里带的封面存进 [CoverCache]，键与在线封面一致，播放管线会自动捡起来 */
-    private fun storeCover(info: HeaderInfo, cover: ByteArray?) {
-        if (cover == null || cover.isEmpty()) return
-        if (info.title.isBlank() && info.artist.isBlank()) return
-        val key = OnlineCover.keyOf(info.title, info.artist) ?: return
-        runCatching { CoverCache.store(appContext, key, cover) }
+    private fun writePreparedToSaf(
+        prepared: NcCacheDecodeSupport.PreparedAudio,
+        root: DocumentFile,
+        existing: MutableMap<String, Pair<Uri, Long>>
+    ): NcConvertOutcome {
+        when (prepared) {
+            is NcCacheDecodeSupport.PreparedAudio.Skipped ->
+                return NcConvertOutcome.Skipped(prepared.reason, trial = prepared.trial, incomplete = prepared.incomplete)
+            is NcCacheDecodeSupport.PreparedAudio.Ready -> Unit
+        }
+        val dec = prepared.tempFile
+        try {
+            val prior = existing[prepared.outName]
+            val uri = prior?.first
+                ?: DocumentsContract.createDocument(
+                    appContext.contentResolver,
+                    root.uri,
+                    NcCacheDecodeSupport.mimeOf(prepared.ext),
+                    prepared.outName
+                )
+                ?: return NcConvertOutcome.Failed("创建输出文件失败")
+            existing[prepared.outName] = uri to prepared.finalSize
+            appContext.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                dec.inputStream().use { it.copyTo(out) }
+            } ?: return NcConvertOutcome.Failed("打开输出流失败")
+            return NcConvertOutcome.Done(prepared.outName, prepared.ext, prepared.finalSize)
+        } finally {
+            if (dec.name == "dec.bin") dec.delete()
+        }
     }
 
     /** 输出根目录（平铺）里已有的成品：名字 -> (uri, 大小)，用来跳过已转换项 */
@@ -529,19 +401,6 @@ class NeteaseCacheRepository(context: Context) {
         }
         return map
     }
-
-    private fun mimeOf(ext: String): String = when (ext) {
-        ".flac" -> "audio/flac"
-        ".ogg" -> "audio/ogg"
-        ".m4a" -> "audio/mp4"
-        ".wav" -> "audio/wav"
-        else -> "audio/mpeg"
-    }
-
-    private fun sanitizeName(name: String): String =
-        name.replace('/', '_').replace('\\', '_').ifBlank { "未命名缓存" }
-
-    private fun fmtSecs(secs: Double): String = "%.0f".format(secs)
 
     private fun workKey(key: String): String =
         Integer.toHexString(key.hashCode()) + "-" + key.length

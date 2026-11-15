@@ -84,6 +84,7 @@ object SettingsBaseline {
         Spec("play_btn_haptics", Type.BOOLEAN),
         Spec("play_btn_glow", Type.BOOLEAN),
         Spec("play_btn_color_mode", Type.STRING),
+        Spec("play_btn_shape", Type.STRING),
         Spec("play_btn_icon_style", Type.INT),
         Spec("play_btn_icon_scale", Type.INT),
         Spec("eq_enabled", Type.BOOLEAN),

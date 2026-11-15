@@ -188,6 +188,7 @@ fun SongList(
     val currentId = playerState.mediaId
     val isPlaying = playerState.isPlaying
     val favorites = vm.favorites
+    val onlineFavorites = vm.onlineFavorites
 
     // 「回到当前播放」按钮的可见性：基于 LazyListState 的真实可视区间，
     // 当前歌所在行滚出屏幕才显示按钮，滚回来就隐藏。snapshotFlow 会在
@@ -344,7 +345,9 @@ fun SongList(
                         index = index,
                         isCurrent = currentId == song.id,
                         isPlaying = isPlaying,
-                        isFavorite = favorites.contains(song.id),
+                        isFavorite = favorites.contains(song.id) ||
+                            (onlineFavorites.isNotEmpty() &&
+                                com.sonance.player.data.OnlineFavorites.isFavoriteSong(song, favorites, onlineFavorites)),
                         onClick = if (vm.selectionMode) {
                             { vm.toggleSelection(song.id) }
                         } else {

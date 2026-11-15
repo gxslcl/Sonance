@@ -1,6 +1,13 @@
 package com.sonance.player.ui.components
 
+import android.graphics.BlurMaskFilter
+import android.graphics.LinearGradient
+import android.graphics.Matrix
+import android.graphics.Shader
+import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
@@ -64,7 +71,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.semantics.contentDescription
@@ -81,6 +91,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.PlayButtonShape
 import com.sonance.player.data.Prefs
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
@@ -440,12 +451,20 @@ fun PlayPauseButton(
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
-    // SP 读取极轻（框架有内存缓存），设置页改完回到播放页重组时自然拿到新值
-    val prefs = remember(context) { com.sonance.player.data.Prefs(context.applicationContext) }
-    val glowEnabled = prefs.playBtnGlow
-    val iconStyle = prefs.playBtnIconStyle
-    val iconScale = prefs.playBtnIconScale / 100f
-    val view = androidx.compose.ui.platform.LocalView.current
+    val prefs = remember(context) { Prefs(context.applicationContext) }
+    var prefsTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(prefs) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (Prefs.isPlayButtonPrefKey(key)) prefsTick++
+        }
+        prefs.registerChangeListener(listener)
+        onDispose { prefs.unregisterChangeListener(listener) }
+    }
+    val glowEnabled = remember(prefsTick, prefs) { prefs.playBtnGlow }
+    val btnShape = remember(prefsTick, prefs) { prefs.playBtnShape }
+    val iconStyle = remember(prefsTick, prefs) { prefs.playBtnIconStyle }
+    val iconScale = remember(prefsTick, prefs) { prefs.playBtnIconScale / 100f }
+    val view = LocalView.current
 
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -456,7 +475,7 @@ fun PlayPauseButton(
     )
 
     // 点击水波纹：0 → 1 的一次性扩散（只在绘制阶段读 ripple.value，避免 120fps 重组）
-    val ripple = remember { androidx.compose.animation.core.Animatable(1f) }
+    val ripple = remember { Animatable(1f) }
 
     // 播放态呼吸（幅度很小，是"活着"不是"晃眼"；仅保留 State 引用，不在组合期读 .value）
     val breathState = if (isPlaying) {
@@ -478,14 +497,9 @@ fun PlayPauseButton(
         )
     } else null
 
-    // 播放态的有机 blob 形变进度（对应样机 organicDropletMorph 5.5s alternate）。
-    // 四组关键帧取自参考样机的 border-radius 百分比，绘制时插值成圆角矩形路径。
-    //
-    // 必须是 Reverse（A→B→A 往返），不能用手误写成默认的 Restart：
-    // 关键帧的首帧（keys[0]）与末帧（keys[3]）形状不同，Restart 在循环点会
-    // 直接把形状从末帧拽回首帧 —— 表现就是「播到结尾顿一下再跳回初始」。
-    // Reverse 让它在两个端点连续折返，接缝处形状与速度都连续。
-    val morphState = if (isPlaying) {
+    // 播放态且为「水滴按钮」时开启有机 blob 形变；切到「普通按钮」或暂停时平滑回正圆。
+    val dropletActive = isPlaying && btnShape == PlayButtonShape.DROPLET
+    val morphState = if (dropletActive) {
         rememberInfiniteTransition(label = "morph").animateFloat(
             initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(
@@ -495,6 +509,12 @@ fun PlayPauseButton(
             label = "morph"
         )
     } else null
+    val morphBlendState = animateFloatAsState(
+        targetValue = if (dropletActive) 1f else 0f,
+        animationSpec = tween(durationMillis = 420),
+        label = "morphBlend"
+    )
+    val lastMorphRef = remember { floatArrayOf(0f) }
 
     // Shared colored buttons pause without abruptly dropping glow/scale.
     val playingBlendState = if (hasCustomPalette) {
@@ -502,59 +522,146 @@ fun PlayPauseButton(
     } else null
 
     val paletteState = rememberUpdatedState(palette)
-    // 复用同一条 Path：形变逐帧重算，但不再每帧新建对象（减少 GC / 分配抖动）
     val blobPath = remember { Path() }
+    val highlightPath = remember { Path() }
+    val ripplePath = remember { Path() }
+    val glowCache = remember { GlowDrawCache() }
 
     Box(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        // ---- 光晕（glow）：画在裁剪外，让它能溢出按钮圆界 ----
-        // 播放时呼吸变大、更亮；暂停时保留一圈微弱底光
+        // ---- 光晕（glow）：柔光高斯羽化 + 轮廓紧贴水滴实时形变 ----
+        // 放大画布至 2.4× 按钮尺寸，确保双层高斯羽化的尾部完全自然消散于画布边界内，
+        // 避免生硬光圈或方形裁边；水滴形变时内层光晕与外层泛光同步沿相同曲率起伏。
         if (glowEnabled) {
-            // 光晕必须是「画布边缘处透明度已经到 0」的径向渐变，否则就是一个方块。
-            //
-            // 旧实现把画布写成 matchParentSize()（只有按钮本体那么大），却画了
-            // 半径 1.4×r 的圆 —— 超出的部分被 Canvas 的绘制边界硬裁掉，留下
-            // 一个 alpha 还没归零的直角矩形，这就是用户看到的「浅色透明方块」。
-            //
-            // 现在：画布放大到 1.5 倍按钮尺寸（requiredSize 不受父约束，居中溢出
-            // 也不会被裁），渐变半径正好等于画布半径 —— 1.0 停靠点是全透明，
-            // 边缘自然消失；同时光斑仍能溢出按钮圆界，和样机一致。
             Canvas(
                 Modifier
-                    .requiredSize(size * 1.5f)
+                    .requiredSize(size * 2.4f)
                     .graphicsLayer {
                         val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
                         val b = (breathState?.value ?: 0f) * blend
-                        val s = 1f + b * 0.08f
+                        val s = 1f + b * 0.05f
                         scaleX = s
                         scaleY = s
-                        alpha = 0.5f + 0.45f * blend
+                        alpha = 0.58f + 0.42f * blend
                     }
             ) {
                 val p = paletteProvider?.invoke() ?: paletteState.value
-                val r = this.size.minDimension / 2f
-                val glowMain = p?.main ?: Color(0xFF6366F1)
-                val glowDeep = p?.deep ?: Color(0xFFEC4899)
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            glowMain.copy(alpha = 0.65f),
-                            glowDeep.copy(alpha = 0.30f),
-                            Color.Transparent
-                        ),
-                        center = center,
-                        radius = r
-                    ),
-                    radius = r
-                )
+                val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
+                val b = (breathState?.value ?: 0f) * blend
+                val morphProg = morphState?.value?.also { lastMorphRef[0] = it } ?: lastMorphRef[0]
+                val morphAmp = morphBlendState.value
+                val radii = computeBlobCornerRadii(morphProg, morphAmp)
+
+                val cLight = p?.light ?: Color(0xFFA78BFA)
+                val cMain = p?.main ?: Color(0xFF6366F1)
+                val cDeep = p?.deep ?: Color(0xFFEC4899)
+                val orbit = orbitState?.floatValue ?: orbitInfState?.value ?: 135f
+                val padPx = 2.dp.toPx()
+                val btnSpan = (size.toPx() - padPx * 2f).coerceAtLeast(1f)
+                val cx = this.size.width / 2f
+                val cy = this.size.height / 2f
+
+                val argbLight = cLight.toArgb()
+                val argbMain = cMain.toArgb()
+                val argbDeep = cDeep.toArgb()
+                if (glowCache.shader == null ||
+                    glowCache.lastLight != argbLight ||
+                    glowCache.lastMain != argbMain ||
+                    glowCache.lastDeep != argbDeep ||
+                    glowCache.lastSpan != btnSpan
+                ) {
+                    val half = btnSpan * 0.65f
+                    glowCache.shader = LinearGradient(
+                        cx - half, cy, cx + half, cy,
+                        intArrayOf(argbLight, argbMain, argbDeep),
+                        floatArrayOf(0f, 0.5f, 1f),
+                        Shader.TileMode.CLAMP
+                    )
+                    glowCache.lastLight = argbLight
+                    glowCache.lastMain = argbMain
+                    glowCache.lastDeep = argbDeep
+                    glowCache.lastSpan = btnSpan
+                }
+                glowCache.matrix.setRotate(orbit - 45f, cx, cy)
+                glowCache.shader?.setLocalMatrix(glowCache.matrix)
+                glowCache.outerPaint.shader = glowCache.shader
+                glowCache.innerPaint.shader = glowCache.shader
+
+                drawIntoCanvas { canvas ->
+                    val nc = canvas.nativeCanvas
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        val outerBlur = (btnSpan * 0.24f).coerceAtLeast(4f)
+                        val innerBlur = (btnSpan * 0.105f).coerceAtLeast(2f)
+                        if (glowCache.lastOuterBlur != outerBlur) {
+                            glowCache.outerPaint.maskFilter = BlurMaskFilter(outerBlur, BlurMaskFilter.Blur.NORMAL)
+                            glowCache.lastOuterBlur = outerBlur
+                        }
+                        if (glowCache.lastInnerBlur != innerBlur) {
+                            glowCache.innerPaint.maskFilter = BlurMaskFilter(innerBlur, BlurMaskFilter.Blur.NORMAL)
+                            glowCache.lastInnerBlur = innerBlur
+                        }
+
+                        // 外层大范围氛围晕染：随播放节奏轻柔扩张
+                        val outerSpan = btnSpan * (1.20f + 0.08f * b)
+                        glowCache.outerPaint.alpha = ((0.24f + 0.34f * blend) * 255f).toInt().coerceIn(0, 255)
+                        nc.drawPath(
+                            nativeBlobPath(
+                                glowCache.nativePath,
+                                glowCache.cornerArray,
+                                cx - outerSpan / 2f,
+                                cy - outerSpan / 2f,
+                                outerSpan,
+                                outerSpan,
+                                radii
+                            ),
+                            glowCache.outerPaint
+                        )
+
+                        // 内层紧贴轮廓的高饱和流光：完整复刻水滴每一处凸起与弧度
+                        val innerSpan = btnSpan * (1.05f + 0.035f * b)
+                        glowCache.innerPaint.alpha = ((0.32f + 0.46f * blend) * 255f).toInt().coerceIn(0, 255)
+                        nc.drawPath(
+                            nativeBlobPath(
+                                glowCache.nativePath,
+                                glowCache.cornerArray,
+                                cx - innerSpan / 2f,
+                                cy - innerSpan / 2f,
+                                innerSpan,
+                                innerSpan,
+                                radii
+                            ),
+                            glowCache.innerPaint
+                        )
+                    } else {
+                        // Android 8.1 及以下兼容：多层同形柔边扩展，无方形硬边
+                        glowCache.outerPaint.maskFilter = null
+                        val baseAlpha = 0.16f + 0.20f * blend
+                        for (step in 4 downTo 0) {
+                            val frac = step / 4f
+                            val span = btnSpan * (1.04f + 0.36f * frac + 0.05f * b)
+                            val a = baseAlpha * (1f - frac * 0.82f) * (1f - frac * 0.55f)
+                            glowCache.outerPaint.alpha = (a * 255f).toInt().coerceIn(0, 255)
+                            nc.drawPath(
+                                nativeBlobPath(
+                                    glowCache.nativePath,
+                                    glowCache.cornerArray,
+                                    cx - span / 2f,
+                                    cy - span / 2f,
+                                    span,
+                                    span,
+                                    radii
+                                ),
+                                glowCache.outerPaint
+                            )
+                        }
+                    }
+                }
             }
         }
 
-        // ---- 可点击的按钮本体（水滴 + 高光 + 波纹 + 图标）----
-        // 不加圆形裁剪：播放态的水滴会做有机 blob 形变（边角伸出圆界），
-        // 裁了就退化回圆；点击热区是按钮的方形 bounds（52dp 内），可接受
+        // ---- 可点击的按钮本体（水滴/正圆 + 贴合高光 + 波纹 + 图标）----
         Box(
             Modifier
                 .size(size)
@@ -570,7 +677,7 @@ fun PlayPauseButton(
                     onClick()
                 }
         ) {
-            // 水滴本体（有机 blob 形变 + 渐变随播放旋转 + 呼吸）
+            // 按钮本体（支持有机水滴形变 ↔ 经典正圆平滑过渡）
             Canvas(
                 Modifier
                     .matchParentSize()
@@ -590,7 +697,8 @@ fun PlayPauseButton(
                     DefaultPlayGradient
                 }
                 val orbit = orbitState?.floatValue ?: orbitInfState?.value ?: 135f
-                val morph = morphState?.value ?: -1f
+                val morphProg = morphState?.value?.also { lastMorphRef[0] = it } ?: lastMorphRef[0]
+                val morphAmp = morphBlendState.value
                 val w = this.size.width
                 val h = this.size.height
                 val angleRad = Math.toRadians(orbit.toDouble() - 45.0)
@@ -600,38 +708,59 @@ fun PlayPauseButton(
                     start = center - dir * this.size.minDimension / 2f,
                     end = center + dir * this.size.minDimension / 2f
                 )
-                if (morph < 0f) {
+                if (morphAmp <= 0.002f) {
                     drawCircle(brush = brush)
                 } else {
-                    drawPath(organicBlobPath(blobPath, w, h, morph), brush)
+                    val radii = computeBlobCornerRadii(morphProg, morphAmp)
+                    drawPath(organicBlobPath(blobPath, 0f, 0f, w, h, radii), brush)
                 }
             }
 
-            // 玻璃高光（固定光源，静态绘制）
+            // 玻璃高光（严格贴合当前水滴或正圆轮廓）
             Canvas(Modifier.matchParentSize().padding(2.dp)) {
-                drawCircle(
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.32f),
-                            Color.White.copy(alpha = 0.04f),
-                            Color.Transparent
-                        ),
-                        start = Offset(this.size.width * 0.15f, this.size.height * 0.1f),
-                        end = Offset(this.size.width * 0.65f, this.size.height * 0.6f)
-                    )
+                val morphProg = morphState?.value ?: lastMorphRef[0]
+                val morphAmp = morphBlendState.value
+                val hlBrush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.30f),
+                        Color.White.copy(alpha = 0.04f),
+                        Color.Transparent
+                    ),
+                    start = Offset(this.size.width * 0.15f, this.size.height * 0.1f),
+                    end = Offset(this.size.width * 0.65f, this.size.height * 0.6f)
                 )
+                if (morphAmp <= 0.002f) {
+                    drawCircle(brush = hlBrush)
+                } else {
+                    val radii = computeBlobCornerRadii(morphProg, morphAmp)
+                    drawPath(organicBlobPath(highlightPath, 0f, 0f, this.size.width, this.size.height, radii), hlBrush)
+                }
             }
 
             // 点击水波纹（在 Canvas 绘制期读取 Animatable.value，静止时几乎零开销、触发时不重组）
-            Canvas(Modifier.matchParentSize()) {
+            Canvas(Modifier.matchParentSize().padding(2.dp)) {
                 val t = ripple.value
                 if (t < 1f) {
-                    val r = this.size.minDimension / 2f
-                    drawCircle(
-                        color = Color.White.copy(alpha = (1f - t) * 0.55f),
-                        radius = r * (0.55f + 0.45f * t),
-                        style = Stroke(width = 1.5.dp.toPx())
-                    )
+                    val morphProg = morphState?.value ?: lastMorphRef[0]
+                    val morphAmp = morphBlendState.value
+                    val strokeColor = Color.White.copy(alpha = (1f - t) * 0.55f)
+                    val stroke = Stroke(width = 1.5.dp.toPx())
+                    if (morphAmp <= 0.002f) {
+                        val r = this.size.minDimension / 2f
+                        drawCircle(
+                            color = strokeColor,
+                            radius = r * (0.55f + 0.48f * t),
+                            style = stroke
+                        )
+                    } else {
+                        val scale = 0.55f + 0.48f * t
+                        val rw = this.size.width * scale
+                        val rh = this.size.height * scale
+                        val rx = (this.size.width - rw) / 2f
+                        val ry = (this.size.height - rh) / 2f
+                        val radii = computeBlobCornerRadii(morphProg, morphAmp)
+                        drawPath(organicBlobPath(ripplePath, rx, ry, rw, rh, radii), strokeColor, style = stroke)
+                    }
                 }
             }
 
@@ -774,21 +903,48 @@ private val BLOB_MORPH_KEYS = arrayOf(
     floatArrayOf(54f, 46f, 76f, 24f, 32f, 68f, 32f, 68f)
 )
 
-private fun organicBlobPath(path: Path, w: Float, h: Float, progress: Float): Path {
+private class GlowDrawCache {
+    val nativePath = android.graphics.Path()
+    val cornerArray = FloatArray(8)
+    val outerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+    }
+    val innerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+    }
+    val matrix = Matrix()
+    var lastLight = 0
+    var lastMain = 0
+    var lastDeep = 0
+    var lastSpan = 0f
+    var lastOuterBlur = 0f
+    var lastInnerBlur = 0f
+    var shader: LinearGradient? = null
+}
+
+/**
+ * 计算有机水滴在 [progress] ∈ [0,1] 与形变幅度 [amplitude] ∈ [0,1] 下的 8 个归一化圆角半径：
+ * `[tlH, trH, brH, blH, tlV, trV, brV, blV]`。
+ * `amplitude = 0` 时严格返回全 0.5（正圆），`amplitude = 1` 时为完整水滴曲线。
+ */
+internal fun computeBlobCornerRadii(progress: Float, amplitude: Float = 1f): FloatArray {
+    val amp = amplitude.coerceIn(0f, 1f)
+    if (amp <= 0f) return floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f)
     val keys = BLOB_MORPH_KEYS
     val seg = (progress.coerceIn(0f, 1f)) * 3f
     val i = minOf(2, seg.toInt())
     val t = seg - i
     val a = keys[i]
     val b = keys[i + 1]
-    var tlH = (a[0] + (b[0] - a[0]) * t) / 100f
-    var trH = (a[1] + (b[1] - a[1]) * t) / 100f
-    var brH = (a[2] + (b[2] - a[2]) * t) / 100f
-    var blH = (a[3] + (b[3] - a[3]) * t) / 100f
-    var tlV = (a[4] + (b[4] - a[4]) * t) / 100f
-    var trV = (a[5] + (b[5] - a[5]) * t) / 100f
-    var brV = (a[6] + (b[6] - a[6]) * t) / 100f
-    var blV = (a[7] + (b[7] - a[7]) * t) / 100f
+    var tlH = (50f + ((a[0] + (b[0] - a[0]) * t) - 50f) * amp) / 100f
+    var trH = (50f + ((a[1] + (b[1] - a[1]) * t) - 50f) * amp) / 100f
+    var brH = (50f + ((a[2] + (b[2] - a[2]) * t) - 50f) * amp) / 100f
+    var blH = (50f + ((a[3] + (b[3] - a[3]) * t) - 50f) * amp) / 100f
+    var tlV = (50f + ((a[4] + (b[4] - a[4]) * t) - 50f) * amp) / 100f
+    var trV = (50f + ((a[5] + (b[5] - a[5]) * t) - 50f) * amp) / 100f
+    var brV = (50f + ((a[6] + (b[6] - a[6]) * t) - 50f) * amp) / 100f
+    var blV = (50f + ((a[7] + (b[7] - a[7]) * t) - 50f) * amp) / 100f
+
     // CSS 归一化：每条边上相邻两个半径之和超过边长时等比缩小
     val fTop = minOf(1f, 1f / (tlH + trH).coerceAtLeast(1e-4f))
     val fBottom = minOf(1f, 1f / (brH + blH).coerceAtLeast(1e-4f))
@@ -796,18 +952,47 @@ private fun organicBlobPath(path: Path, w: Float, h: Float, progress: Float): Pa
     val fRight = minOf(1f, 1f / (trV + brV).coerceAtLeast(1e-4f))
     tlH *= fTop; trH *= fTop; brH *= fBottom; blH *= fBottom
     tlV *= fLeft; blV *= fLeft; trV *= fRight; brV *= fRight
+    return floatArrayOf(tlH, trH, brH, blH, tlV, trV, brV, blV)
+}
 
-    val rect = androidx.compose.ui.geometry.Rect(0f, 0f, w, h)
+private fun organicBlobPath(
+    path: Path,
+    x: Float,
+    y: Float,
+    w: Float,
+    h: Float,
+    r: FloatArray
+): Path {
+    val rect = androidx.compose.ui.geometry.Rect(x, y, x + w, y + h)
     path.rewind()
     path.addRoundRect(
         androidx.compose.ui.geometry.RoundRect(
             rect,
-            topLeft = CornerRadius(w * tlH, h * tlV),
-            topRight = CornerRadius(w * trH, h * trV),
-            bottomRight = CornerRadius(w * brH, h * brV),
-            bottomLeft = CornerRadius(w * blH, h * blV)
+            topLeft = CornerRadius(w * r[0], h * r[4]),
+            topRight = CornerRadius(w * r[1], h * r[5]),
+            bottomRight = CornerRadius(w * r[2], h * r[6]),
+            bottomLeft = CornerRadius(w * r[3], h * r[7])
         )
     )
+    return path
+}
+
+private fun nativeBlobPath(
+    path: android.graphics.Path,
+    cornerArray: FloatArray,
+    x: Float,
+    y: Float,
+    w: Float,
+    h: Float,
+    r: FloatArray
+): android.graphics.Path {
+    // native Path.addRoundRect radii 顺序：[tlX, tlY, trX, trY, brX, brY, blX, blY]
+    cornerArray[0] = w * r[0]; cornerArray[1] = h * r[4]
+    cornerArray[2] = w * r[1]; cornerArray[3] = h * r[5]
+    cornerArray[4] = w * r[2]; cornerArray[5] = h * r[6]
+    cornerArray[6] = w * r[3]; cornerArray[7] = h * r[7]
+    path.rewind()
+    path.addRoundRect(x, y, x + w, y + h, cornerArray, android.graphics.Path.Direction.CW)
     return path
 }
 

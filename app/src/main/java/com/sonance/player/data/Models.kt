@@ -162,7 +162,17 @@ enum class PlayButtonColorMode(val id: String, val label: String) {
     COVER("cover", "跟随封面");
 
     companion object {
-        fun fromId(id: String?): PlayButtonColorMode = entries.firstOrNull { it.id == id } ?: ORIGINAL
+        fun fromId(id: String?): PlayButtonColorMode = entries.firstOrNull { it.id == id } ?: COVER
+    }
+}
+
+/** 播放/暂停按钮形态：有机流动水滴 vs 经典正圆普通按钮。 */
+enum class PlayButtonShape(val id: String, val label: String) {
+    DROPLET("droplet", "水滴按钮"),
+    NORMAL("normal", "普通按钮");
+
+    companion object {
+        fun fromId(id: String?): PlayButtonShape = entries.firstOrNull { it.id == id } ?: DROPLET
     }
 }
 

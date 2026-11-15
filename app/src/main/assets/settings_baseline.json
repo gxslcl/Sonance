@@ -94,6 +94,10 @@
       "type": "STRING",
       "value": "cover"
     },
+    "play_btn_shape": {
+      "type": "STRING",
+      "value": "droplet"
+    },
     "play_btn_icon_style": {
       "type": "INT",
       "value": 1

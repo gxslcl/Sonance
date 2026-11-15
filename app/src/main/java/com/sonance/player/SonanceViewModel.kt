@@ -35,6 +35,8 @@ import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.MediaFileDeleter
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineDownloader
+import com.sonance.player.data.OnlineFavoriteEntry
+import com.sonance.player.data.OnlineFavorites
 import com.sonance.player.data.NeteaseSource
 import com.sonance.player.data.OnlineMode
 import com.sonance.player.data.OnlineSource
@@ -76,6 +78,7 @@ import com.sonance.player.data.DuplicateReport
 import com.sonance.player.data.LyricAdaptMode
 import com.sonance.player.data.LyricPlaybarStyle
 import com.sonance.player.data.PlayButtonColorMode
+import com.sonance.player.data.PlayButtonShape
 import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.LyricsCache
 import com.sonance.player.data.LyricsRepository
@@ -106,6 +109,11 @@ import com.sonance.player.data.DUPLICATE_DURATION_TOLERANCE_MS
 import com.sonance.player.data.RestoreEngine
 import com.sonance.player.data.RestoreResult
 import com.sonance.player.data.netease.NcConvertSummary
+import com.sonance.player.data.netease.LocalCacheCandidate
+import com.sonance.player.data.netease.LocalCacheConvertSummary
+import com.sonance.player.data.netease.LocalCacheConverter
+import com.sonance.player.data.netease.LocalCacheRules
+import com.sonance.player.data.netease.LocalCacheScanReport
 import com.sonance.player.data.netease.NeteaseAccount
 import com.sonance.player.data.netease.NeteaseAuth
 import com.sonance.player.data.netease.NeteaseExplore
@@ -666,8 +674,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 
-    var favorites by mutableStateOf(prefs.favorites)
+    var onlineFavorites by mutableStateOf(prefs.onlineFavorites)
         private set
+
+    var favorites by mutableStateOf(
+        OnlineFavorites.effectiveFavoriteIds(prefs.favorites, onlineFavorites)
+    )
+        private set
+
     var recentIds by mutableStateOf(prefs.recentIds())
         private set
 
@@ -831,6 +845,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         pushSkinToWidget()
+        seedOnlineFavoriteSongs()
         com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = { id ->
             toggleFavorite(id)
         }
@@ -1470,6 +1485,124 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         neteaseRepo.clearCached()
     }
 
+    // ===== 转换本机缓存（免 Shizuku，输出到新建独立文件夹 Music/本机缓存转换）=====
+
+    private val localCacheConverter by lazy { LocalCacheConverter(getApplication()) }
+
+    var localCacheTreeUri by mutableStateOf(prefs.localCacheTreeUri)
+        private set
+    var localCacheTreeLabel by mutableStateOf(prefs.localCacheTreeLabel)
+        private set
+    var localCacheReport by mutableStateOf<LocalCacheScanReport?>(null)
+        private set
+    var localCacheScanning by mutableStateOf(false)
+        private set
+    var localCacheConverting by mutableStateOf(false)
+        private set
+    var localCacheDone by mutableIntStateOf(0)
+        private set
+    var localCacheTotal by mutableIntStateOf(0)
+        private set
+    var localCacheCurrent by mutableStateOf("")
+        private set
+    var localCacheResult by mutableStateOf<LocalCacheConvertSummary?>(null)
+        private set
+    var localCacheConvertedKeys by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    private var localCacheJob: Job? = null
+
+    fun loadLocalCacheDoneKeys() {
+        localCacheConvertedKeys = localCacheConverter.loadDoneMap().keys
+    }
+
+    fun setLocalCacheTree(uri: Uri?, label: String?) {
+        localCacheTreeUri = uri?.toString()
+        localCacheTreeLabel = label?.takeIf { it.isNotBlank() }
+        prefs.localCacheTreeUri = localCacheTreeUri
+        prefs.localCacheTreeLabel = localCacheTreeLabel
+    }
+
+    fun scanLocalCache() {
+        localCacheJob?.cancel()
+        localCacheJob = viewModelScope.launch {
+            localCacheScanning = true
+            localCacheConvertedKeys = localCacheConverter.loadDoneMap().keys
+            try {
+                val uri = localCacheTreeUri?.let { Uri.parse(it) }
+                val report = localCacheConverter.scan(uri, localCacheTreeLabel)
+                localCacheReport = report
+                showToast(
+                    if (report.candidates.isEmpty()) "未扫描到可免 Shizuku 转换的本机缓存"
+                    else "发现 ${report.candidates.size} 个本机缓存文件"
+                )
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                throw kotlinx.coroutines.CancellationException()
+            } catch (t: Throwable) {
+                showToast("扫描本机缓存失败：${t.message ?: "未知错误"}")
+            } finally {
+                localCacheScanning = false
+            }
+        }
+    }
+
+    fun convertLocalCache(keys: List<String>? = null) {
+        val report = localCacheReport ?: run {
+            showToast("请先扫描本机缓存")
+            return
+        }
+        val targets = if (keys == null) {
+            report.candidates
+        } else {
+            val keySet = keys.toSet()
+            report.candidates.filter { it.entry.key in keySet }
+        }
+        if (targets.isEmpty()) {
+            showToast("没有可转换的本机缓存条目")
+            return
+        }
+        localCacheJob?.cancel()
+        localCacheJob = viewModelScope.launch {
+            localCacheConverting = true
+            localCacheDone = 0
+            localCacheTotal = targets.size
+            localCacheCurrent = ""
+            try {
+                val summary = localCacheConverter.convertAll(targets) { done, total, current ->
+                    localCacheDone = done
+                    localCacheTotal = total
+                    localCacheCurrent = current
+                }
+                localCacheResult = summary
+                localCacheConvertedKeys = localCacheConvertedKeys + summary.doneKeys
+                showToast(
+                    when {
+                        summary.converted > 0 ->
+                            "已存至独立文件夹「${LocalCacheRules.STANDALONE_DISPLAY_PATH}」：成功 ${summary.converted} 首"
+                        summary.failed > 0 -> "转换失败：${summary.failed} 个文件出错"
+                        else -> "没有新增可转换内容（跳过 ${summary.skipped}）"
+                    }
+                )
+                if (summary.converted > 0) rescanAfterDownload()
+            } finally {
+                localCacheConverting = false
+            }
+        }
+    }
+
+    fun cancelLocalCacheConvert() {
+        localCacheJob?.cancel()
+        localCacheJob = null
+        localCacheConverting = false
+        showToast("已取消本机缓存转换")
+    }
+
+    fun clearLocalCacheList() {
+        localCacheJob?.cancel()
+        localCacheReport = null
+        localCacheResult = null
+    }
+
     // ===== 行为 =====
 
     /**
@@ -1498,6 +1631,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         pinyinIndex = pinyin
         sortKeys = keys
         songs = visible
+        reconcileOnlineFavoritesAfterScan(visible)
         // 扫描会清掉封面缓存，这里重新预热一遍（见 warmUpCovers 的说明）
         warmUpCovers()
         albums = MediaRepository.groupAlbums(visible)
@@ -2176,6 +2310,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changePlayBtnColorMode(value: PlayButtonColorMode) {
         playBtnColorMode = value
         prefs.playBtnColorMode = value
+    }
+
+    /** 播放/暂停按钮形态（水滴按钮 vs 普通按钮） */
+    var playBtnShape by mutableStateOf(prefs.playBtnShape)
+        private set
+
+    fun changePlayBtnShape(value: PlayButtonShape) {
+        playBtnShape = value
+        prefs.playBtnShape = value
     }
 
     /** 图标样式：0=经典 1=液态 2=极简（与 Prefs.playBtnIconStyle 对应） */
@@ -3375,28 +3518,125 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         searchQuery = value
     }
 
-    fun toggleFavorite(id: Long): Boolean {
-        // 在线歌不能收藏。
-        //
-        // 「收藏」只存一个 id，而在线歌的 id 是**由 (音源, 远端 id) 哈希出来的**：
-        // 收藏页要靠 id 反查 [songMap] 才能显示，而冷启动后 onlineSongMap 是空的 ——
-        // 于是收藏页会永久少掉这一首，计数却还多着，用户找不到也删不掉。
-        //
-        // 要真正支持得把歌名/歌手/音源/远端 id 一起持久化（等于做一套"在线歌单"），
-        // 那是另一个功能。这里先明确拒绝，不制造查不到的幽灵数据。
-        if (isRemoteSongId(id)) {
-            showToast("在线歌不能收藏")
-            return false
+    fun isSongFavorite(song: Song): Boolean =
+        OnlineFavorites.isFavoriteSong(song, prefs.favorites, onlineFavorites)
+
+    fun isSongFavoriteId(id: Long): Boolean =
+        OnlineFavorites.isFavoriteId(id, prefs.favorites, onlineFavorites)
+
+    private fun seedOnlineFavoriteSongs() {
+        if (onlineFavorites.isEmpty()) return
+        onlineFavorites.forEach { entry ->
+            entry.song.toSong()?.let { s -> onlineSongMap.putIfAbsent(s.id, s) }
         }
+    }
+
+    private fun syncFavoritesState(
+        localFavs: Set<Long> = prefs.favorites,
+        onlineFavs: List<OnlineFavoriteEntry> = onlineFavorites
+    ) {
+        prefs.favorites = localFavs
+        prefs.onlineFavorites = onlineFavs
+        onlineFavorites = onlineFavs
+        favorites = OnlineFavorites.effectiveFavoriteIds(localFavs, onlineFavs)
+        seedOnlineFavoriteSongs()
+        com.sonance.player.widget.SonanceWidgets.onFavoriteOrModeChanged(getApplication())
+    }
+
+    private fun reconcileOnlineFavoritesAfterScan(scannedLocalSongs: List<Song>) {
+        if (onlineFavorites.isEmpty()) return
+        val res = OnlineFavorites.reconcileWithLibrary(scannedLocalSongs, prefs.favorites, onlineFavorites)
+        if (res.changed) {
+            syncFavoritesState(res.localFavorites, res.onlineFavorites)
+        }
+    }
+
+    private fun resolveOnlineSongForFavorite(id: Long): Song? {
+        songById(id)?.takeIf { !it.isLocal && !it.isDlna }?.let { return it }
+        recentEntries.firstOrNull { it.online?.songId() == id }?.online?.toSong()?.let { return it }
+        onlineFavorites.firstOrNull { it.song.songId() == id }?.song?.toSong()?.let { return it }
+        return null
+    }
+
+    fun toggleFavorite(id: Long): Boolean {
+        if (id == 0L) return false
         if (isExternalSongId(id)) {
             showToast("外部临时音频暂未入库，无法添加到收藏")
             return false
         }
-        val liked = prefs.toggleFavorite(id)
-        favorites = prefs.favorites
-        com.sonance.player.widget.SonanceWidgets.onFavoriteOrModeChanged(getApplication())
-        showToast(if (liked) "已添加到收藏" else "已取消收藏")
-        return liked
+
+        val currentSong = songById(id)
+        val isOnlineTarget = isRemoteSongId(id) || (currentSong != null && !currentSong.isLocal && !currentSong.isDlna)
+        if (isOnlineTarget) {
+            val currentlyLiked = isSongFavoriteId(id)
+            if (currentlyLiked) {
+                val matchedEntries = onlineFavorites.filter { entry ->
+                    entry.song.songId() == id ||
+                        entry.localSongId == id ||
+                        (currentSong != null &&
+                            entry.song.source == currentSong.source &&
+                            entry.song.remoteId == currentSong.remoteId)
+                }
+                val nextOnlineFavs = onlineFavorites.filterNot { it in matchedEntries }
+                val linkedLocalIds = matchedEntries.mapNotNull { entry ->
+                    entry.localSongId.takeIf { it > 0L }
+                }.toSet()
+                val titleArtistMatchedIds = if (currentSong != null) {
+                    songs.filter { OnlineFavorites.matchesSong(it, currentSong) }.map { it.id }.toSet()
+                } else emptySet()
+                val nextLocalFavs = prefs.favorites - linkedLocalIds - titleArtistMatchedIds
+                syncFavoritesState(nextLocalFavs, nextOnlineFavs)
+                showToast("已取消收藏")
+                return false
+            }
+
+            val song = currentSong?.takeIf { !it.isLocal && !it.isDlna }
+                ?: resolveOnlineSongForFavorite(id)
+            val stored = song?.toStoredOrNull()
+            if (song == null || stored == null) {
+                showToast("当前在线曲目信息不完整，暂无法收藏")
+                return false
+            }
+
+            // 先检查本地曲库中是否已存在对应的已下载/已转换歌曲：有则直接关联，不重复计数也不重复下载
+            val existingLocal = songs.firstOrNull { OnlineFavorites.matchesSong(stored, it) }
+            val nextOnlineFavs = onlineFavorites.filterNot {
+                it.song.source == stored.source && it.song.remoteId == stored.remoteId
+            } + OnlineFavoriteEntry(
+                song = stored,
+                likedAt = System.currentTimeMillis(),
+                localSongId = existingLocal?.id ?: 0L
+            )
+            onlineSongMap[song.id] = song
+
+            if (existingLocal != null) {
+                val nextLocalFavs = prefs.favorites + existingLocal.id
+                syncFavoritesState(nextLocalFavs, nextOnlineFavs)
+                showToast("已添加到收藏（本地曲库已存在）")
+            } else {
+                syncFavoritesState(prefs.favorites, nextOnlineFavs)
+                if (song.id in downloadingSongIds) {
+                    showToast("已添加到收藏，正在下载「${song.title}」")
+                } else {
+                    showToast("已添加到收藏，正在同时下载「${song.title}」")
+                    downloadOnlineSong(song, notifyAlreadySaved = false, notifyStart = false)
+                }
+            }
+            return true
+        }
+
+        // 本地歌曲收藏切换（若关联过在线收藏，取消收藏时同步解除在线记录）
+        val wasLiked = prefs.favorites.contains(id)
+        val nextLocalFavs = if (wasLiked) prefs.favorites - id else prefs.favorites + id
+        val nextOnlineFavs = if (wasLiked) {
+            onlineFavorites.filterNot { entry ->
+                entry.localSongId == id ||
+                    (currentSong != null && OnlineFavorites.matchesSong(entry.song, currentSong))
+            }
+        } else onlineFavorites
+        syncFavoritesState(nextLocalFavs, nextOnlineFavs)
+        showToast(if (!wasLiked) "已添加到收藏" else "已取消收藏")
+        return !wasLiked
     }
 
     fun clearRecent() {
@@ -3566,12 +3806,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var onlineDownloadWifiOnly by mutableStateOf(prefs.onlineDownloadWifiOnly)
         private set
 
-    /** 已下载的条数（设置页显示用）。文件本身在系统音乐目录里，由用户自己管理 */
-    var downloadedCount by mutableIntStateOf(prefs.downloadedKeys().size)
+    var downloadedKeysSet by mutableStateOf<Set<String>>(prefs.downloadedKeys().toSet())
         private set
 
-    /** 正在跑的下载。同时只允许一个 —— 并发下载会和播放抢带宽 */
+    /** 已下载的条数（设置页显示用）。文件本身在系统音乐目录里，由用户自己管理 */
+    var downloadedCount by mutableIntStateOf(downloadedKeysSet.size)
+        private set
+
+    /** 正在下载中的在线歌曲 ID 集合，供播放页下载按钮实时显示状态并防止同首重复下载。 */
+    var downloadingSongIds by mutableStateOf<Set<Long>>(emptySet())
+        private set
+
+    /** 正在跑的自动下载定时器。同时只允许一个 —— 并发自动下载会和播放抢带宽 */
     private var downloadJob: Job? = null
+    private var downloadJobSongId: Long = 0L
+
+    private fun markKeyDownloaded(key: String) {
+        prefs.markDownloaded(key)
+        val next = prefs.downloadedKeys().toSet()
+        downloadedKeysSet = next
+        downloadedCount = next.size
+    }
+
+    /** 当前在线歌曲是否已有完整本地副本（结合记录与当前已扫描本地曲库核对，避免删文件后状态失真）。 */
+    fun isOnlineSongDownloaded(song: Song): Boolean {
+        if (song.isLocal || song.isDlna) return true
+        val key = OnlineDownloader.downloadKeyOf(song.source, song.remoteId) ?: return false
+        if (key !in downloadedKeysSet) return false
+        return songs.isEmpty() || songs.any { it.isLocal && OnlineFavorites.matchesSong(it, song) }
+    }
 
     fun changeOnlineDownload(enabled: Boolean) {
         onlineDownloadEnabled = enabled
@@ -3598,6 +3861,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun clearDownloadRecords() {
         prefs.clearDownloadedKeys()
+        downloadedKeysSet = emptySet()
         downloadedCount = 0
         showToast("已清除下载记录（文件未删除）")
     }
@@ -3614,46 +3878,115 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun maybeDownload(song: Song) {
         if (!isAutoDownloadEnabledFor(song)) return
-        if (song.isLocal) return
+        if (song.isLocal || song.isDlna) return
         lxRepo.rememberSongHint(song)
         val src = OnlineSources.byId(song.source) ?: return
-        lxRepo.rememberSongHint(song)
         val remoteId = song.remoteId ?: return
         val key = OnlineDownloader.downloadKeyOf(song.source, remoteId) ?: return
-        if (key in prefs.downloadedKeys()) return
+        if (key in downloadedKeysSet) return
+        if (song.id in downloadingSongIds) return
         // 上一首还没下完就跳过这一首。用队列会更"完整"，但并发下载会和播放抢带宽，
         // 而这首歌下次再播还会触发 —— 不值得为它引入一个队列
         if (downloadJob?.isActive == true) return
 
+        downloadJobSongId = song.id
         downloadJob = viewModelScope.launch {
             // ★ 先等一会儿再下。
-            //
-            // 用户连点十几首跳着听的时候，一开播就下会把每一首都存下来
-            // （实测一首 4.3 MB，十几首就是 50 MB+）。等够 [DOWNLOAD_ARM_DELAY_MS]
-            // 说明他确实在听这一首。
+            // 用户连点十几首跳着听的时候，一开播就下会把每一首都存下来，
+            // 等够 [DOWNLOAD_ARM_DELAY_MS] 说明确实在听这一首。
             delay(DOWNLOAD_ARM_DELAY_MS)
-
-            // 等待期间可能已经切歌 / 关掉开关了
             if (player.state.value.mediaId != song.id) return@launch
             if (!isAutoDownloadEnabledFor(song)) return@launch
 
-            val app = getApplication<Application>()
-            // 只在 Wi-Fi 下下载：判断不出来时**跳过**而不是赌一把
-            if (onlineDownloadWifiOnly && !OnlineDownloader.isOnUnmeteredNetwork(app)) {
-                android.util.Log.i("SonanceDownload", "非 Wi-Fi，跳过「${song.title}」")
-                return@launch
-            }
+            executeOnlineDownload(
+                song = song,
+                src = src,
+                remoteId = remoteId,
+                key = key,
+                honorWifiOnly = onlineDownloadWifiOnly,
+                notifyUser = false
+            )
+        }
+    }
 
-            // 下载和播放走同一条取流：音质跟随设置，容器（mp3/flac）也有了依据。
-            // 这里通常已经命中播放时建立的缓存，不会多一次网络请求
-            // 仅极短试听片段绝不落盘为本地副本（否则下次 localCopyOf 会一直播 30s 本地文件）
+    /**
+     * 播放页下载按钮与在线收藏触发的单曲下载：
+     * **完整复用** 8 秒自动下载的取流与写盘链路（跟随「播放音质」、复用播放流地址与试听保护），
+     * 不另调独立官方下载接口。
+     */
+    fun downloadOnlineSong(
+        song: Song,
+        notifyAlreadySaved: Boolean = true,
+        notifyStart: Boolean = true
+    ) {
+        if (song.isLocal || song.isDlna) return
+        lxRepo.rememberSongHint(song)
+        val src = OnlineSources.byId(song.source) ?: run {
+            showToast("当前音源不可用，无法下载「${song.title}」")
+            return
+        }
+        val remoteId = song.remoteId ?: return
+        val key = OnlineDownloader.downloadKeyOf(song.source, remoteId) ?: return
+
+        if (isOnlineSongDownloaded(song)) {
+            if (notifyAlreadySaved) showToast("「${song.title}」已保存到「${OnlineDownloader.FOLDER_NAME}」")
+            return
+        }
+        if (song.id in downloadingSongIds) {
+            showToast("「${song.title}」正在下载中")
+            return
+        }
+
+        // 若正等待同一首歌的 8 秒延时自动下载，立即接管，避免等满 8 秒或重复执行
+        if (downloadJob?.isActive == true && downloadJobSongId == song.id) {
+            downloadJob?.cancel()
+            downloadJobSongId = 0L
+        }
+        if (notifyStart) {
+            showToast("开始下载「${song.title}」…")
+        }
+        viewModelScope.launch {
+            executeOnlineDownload(
+                song = song,
+                src = src,
+                remoteId = remoteId,
+                key = key,
+                honorWifiOnly = false,
+                notifyUser = true
+            )
+        }
+    }
+
+    /**
+     * [maybeDownload]、播放主界面下载按钮与「在线收藏同时下载」共用的唯一取流落盘通道：
+     * 走与播放相同的 [OnlineSource.resolveStream] 播放流接口，跳过 30 秒试听残曲并写入「山水有清音下载」。
+     */
+    private suspend fun executeOnlineDownload(
+        song: Song,
+        src: OnlineSource,
+        remoteId: String,
+        key: String,
+        honorWifiOnly: Boolean,
+        notifyUser: Boolean
+    ): Boolean {
+        if (song.id in downloadingSongIds) return false
+        val app = getApplication<Application>()
+        if (honorWifiOnly && !OnlineDownloader.isOnUnmeteredNetwork(app)) {
+            android.util.Log.i("SonanceDownload", "非 Wi-Fi，跳过「${song.title}」")
+            return false
+        }
+
+        downloadingSongIds = downloadingSongIds + song.id
+        try {
             val url = src.resolveStream(remoteId, song.durationMs) ?: run {
                 android.util.Log.i("SonanceDownload", "取流失败，跳过「${song.title}」")
-                return@launch
+                if (notifyUser) showToast("未获取到可下载音频流：「${song.title}」")
+                return false
             }
             if (src.id == NeteaseSource.id && com.sonance.player.data.netease.NeteaseStream.isTrial(remoteId)) {
-                android.util.Log.i("SonanceDownload", "仅获取到试听片段，跳过自动下载「${song.title}」")
-                return@launch
+                android.util.Log.i("SonanceDownload", "仅获取到试听片段，跳过下载「${song.title}」")
+                if (notifyUser) showToast("「${song.title}」当前仅获取到试听片段，无法完整下载")
+                return false
             }
             val outcome = OnlineDownloader.download(
                 context = app,
@@ -3666,22 +3999,29 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 coverBytes = coverBytesForTag(song),
                 format = src.streamFormat(remoteId) ?: "mp3"
             )
-            when (outcome) {
+            return when (outcome) {
                 is OnlineDownloader.Outcome.Saved -> {
-                    prefs.markDownloaded(key)
-                    downloadedCount = prefs.downloadedKeys().size
+                    markKeyDownloaded(key)
                     showToast("已存到「${OnlineDownloader.FOLDER_NAME}」")
-                    // 立刻并进曲库，否则「文件夹」页看不到这个分类
                     rescanAfterDownload()
+                    true
                 }
-                // 会员歌 / 版权下架：静默跳过。它本来也播不了，
-                // 弹一句"下载失败"只会让用户以为哪里坏了
-                OnlineDownloader.Outcome.Unavailable -> Unit
-                // 没有下载权益时也不吵：自动下载是后台行为，为它弹一句"没权限"没必要
-                OnlineDownloader.Outcome.NoPermission -> Unit
-                OnlineDownloader.Outcome.Failed -> showToast("「${song.title}」保存失败")
-                OnlineDownloader.Outcome.Skipped -> Unit
+                OnlineDownloader.Outcome.Unavailable -> {
+                    if (notifyUser) showToast("「${song.title}」暂无可用音源，无法下载")
+                    false
+                }
+                OnlineDownloader.Outcome.NoPermission -> {
+                    if (notifyUser) showToast("没有写入存储权限，无法保存「${song.title}」")
+                    false
+                }
+                OnlineDownloader.Outcome.Failed -> {
+                    showToast("「${song.title}」保存失败")
+                    false
+                }
+                OnlineDownloader.Outcome.Skipped -> false
             }
+        } finally {
+            downloadingSongIds = downloadingSongIds - song.id
         }
     }
 
@@ -5535,8 +5875,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     when (outcome) {
                         is OnlineDownloader.Outcome.Saved -> {
-                            key?.let { prefs.markDownloaded(it) }
-                            downloadedCount = prefs.downloadedKeys().size
+                            key?.let { markKeyDownloaded(it) }
                             playlistDownloadSaved++
                         }
                         OnlineDownloader.Outcome.Unavailable -> playlistDownloadSkipped++
@@ -5695,8 +6034,21 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun favoriteSongs(): List<Song> {
+        val localFavIds = prefs.favorites
+        val favLocals = songs.filter { localFavIds.contains(it.id) }
+        val favLocalIdSet = favLocals.mapTo(HashSet(favLocals.size)) { it.id }
+        val pendingOnline = onlineFavorites
+            .asSequence()
+            .filter { it.localSongId <= 0L || it.localSongId !in favLocalIdSet }
+            .filter { entry -> favLocals.none { OnlineFavorites.matchesSong(entry.song, it) } }
+            .mapNotNull { entry ->
+                val s = entry.song.toSong() ?: return@mapNotNull null
+                onlineSongMap.putIfAbsent(s.id, s)
+                s
+            }
+            .toList()
         val searched = MediaRepository.search(
-            songs.filter { favorites.contains(it.id) },
+            favLocals + pendingOnline,
             searchQuery,
             pinyinIndex
         )
@@ -7146,6 +7498,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        localCacheJob?.cancel()
         dlnaDiscoverJob?.cancel()
         dlnaBrowseJob?.cancel()
         dlnaPollJob?.cancel()

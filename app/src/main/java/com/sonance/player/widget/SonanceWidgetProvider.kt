@@ -257,7 +257,7 @@ object SonanceWidgets {
         val previous = WidgetState.read(app)
         val prefs = Prefs(app)
         val resolvedMediaId = if (mediaId != -1L) mediaId else previous.mediaId
-        val isFav = resolvedMediaId > 0L && prefs.favorites.contains(resolvedMediaId)
+        val isFav = resolvedMediaId != 0L && prefs.isAnyFavoriteId(resolvedMediaId)
         val mode = prefs.playMode.ifBlank { "REPEAT_ALL" }
         val snap = WidgetState.Snapshot(
             hasSong = title.isNotBlank(),
@@ -285,7 +285,7 @@ object SonanceWidgets {
         val app = context.applicationContext
         val previous = WidgetState.read(app)
         val prefs = Prefs(app)
-        val isFav = previous.mediaId > 0L && prefs.favorites.contains(previous.mediaId)
+        val isFav = previous.mediaId != 0L && prefs.isAnyFavoriteId(previous.mediaId)
         val mode = prefs.playMode.ifBlank { "REPEAT_ALL" }
         WidgetState.write(app, previous.copy(isFavorite = isFav, playMode = mode))
         Thread { refreshAll(app) }.start()
@@ -632,7 +632,7 @@ internal object WidgetRenderer {
             renderIcon(context, R.drawable.widget_ic_next, 96, palette.textPrimary, 0.88f, pillBg = 0)
         )
 
-        val isFav = snap.mediaId > 0L && (snap.isFavorite || prefs.favorites.contains(snap.mediaId))
+        val isFav = snap.mediaId != 0L && (snap.isFavorite || prefs.isAnyFavoriteId(snap.mediaId))
         val favIcon = if (isFav) R.drawable.widget_ic_heart_filled else R.drawable.widget_ic_heart_outline
         val cornerBg = if (style.isCornerPillControls) palette.pillBg else 0
         views.setImageViewBitmap(
