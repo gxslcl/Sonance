@@ -17,8 +17,9 @@
 - **音效工作室** —— 全屏四页签（音色预设 / 均衡器 / 声场效果 / 伴奏消音）：13 套按设备分类的预设、竖向推子与精细滑条双视图、A/B 旁通对比、虚拟低音与 Freeverb 混响、BS2B 双耳交叉馈送、外放高通保护、频带限制的中置人声消除；可按输出设备（外放 / 平板 / 有线 / 蓝牙 / USB）自动记忆音色（默认关闭）。
 - **系统音效接入** —— `SystemAudioEffects` 用 `AudioEffect` 的 OPEN/CLOSE_AUDIO_EFFECT_CONTROL_SESSION 把播放会话交给系统音效链（杜比全景声 / SoundAlive / MiSound / OReality / Histen / MusicFX），会话状态机抽成纯 Kotlin 的 `SystemEffectSessionTracker` 可单测；清单用 `<queries>` 声明厂商音效包可见性，可直接拉起厂商面板；USB 独占直通时明确提示不生效。
 - **播放顺序** —— 随机（`ShuffleOrder`：一轮不重复、回绕自动重洗、未听/少听逆频加权优先、最近听过的按新旧压到环尾、同歌手/同专辑打散、当前下标不动）、列表循环、单曲循环、顺序播放（不循环）；播放模式原子设置，小组件与播放页图标同步。
-- **封面 / 歌词** —— 读取音频内嵌的封面与歌词；可选联网补全（iTunes 封面 / LrcAPI 歌词），支持手动搜索 / 导入 `.lrc`·`.txt` / 删除歌词，并支持把下载到的封面**写回原文件**（ID3v2.3，保留原有帧）。
-- **在线音乐（内置在线模式）** —— 搜索、试听、播放并下载，落盘走 MediaStore；可登录网易云账号（扫码 / 短信验证码 / 密码 / Cookie 四种方式），按会员权益播放 VIP 曲目，取流走官方 EAPI 以保证无损与 Hi-Res 完整下发；音质可选 128k / 192k / 320k / 无损 / Hi-Res 并如实显示实际档位。登录后首页为「杂志画报」版（每日私人推荐 / 我喜欢的 / 私人 FM / 云歌单 / 精选探索广场）。在线歌可收藏（`OnlineFavorites` 存完整条目，收藏即按当前音质下载入库，扫描后自动迁移到本地 ID、不重复计数），播放页行内提供下载按钮（走播放流通道，带试听保护）。
+- **封面 / 歌词** —— 读取音频内嵌的封面与歌词；可选联网补全双源互补（LrcAPI + 网易云，带时长校验防同名异版、合并 tlyric 译文），支持 TTML / Apple Music (AMLL) 逐字歌词（行级时间轴 + 行内 span 高亮 + 内嵌翻译），手动搜索 / 导入 `.lrc`·`.txt`·`.ttml` / 删除歌词；内存 LRU + 磁盘哨兵缓存不重复请求；繁转简只改显示层；封面可**写回原文件**（ID3v2.3，保留原有帧）。
+- **桌面歌词** —— `desktoplyrics` 模块：`SYSTEM_ALERT_WINDOW` 悬浮窗逐行歌词（250ms 同步），三种背景（无背景立体字 / 浅色磨砂 / 深色磨砂）循环、自由拖动记忆坐标、单击展开迷你播控、锁定后 `FLAG_NOT_TOUCHABLE` 手势完全穿透 + 通知栏一键解锁；`canonicalLyricKey` 统一曲目键随歌词版本失效；入口在「歌词显示与外观」与播放页「更多」面板。
+- **在线音乐（内置在线模式）** —— 搜索、试听、播放并下载，落盘走 MediaStore；可登录网易云账号（扫码 / 密码 / Cookie 三种方式；短信验证码因风控拦截率高已收回），按会员权益播放 VIP 曲目，取流走官方 EAPI 以保证无损与 Hi-Res 完整下发；音质可选 128k / 192k / 320k / 无损 / Hi-Res 并如实显示实际档位。登录后首页为「杂志画报」版（每日私人推荐 / 我喜欢的 / 私人 FM / 云歌单 / 精选探索广场）。在线歌可收藏（`OnlineFavorites` 存完整条目，收藏即按当前音质下载入库，扫描后自动迁移到本地 ID、不重复计数），播放页行内提供下载按钮（走播放流通道，带试听保护）。
 - **本机缓存转换（免 Shizuku）** —— `LocalCacheConverter` 三路扫描本机可读存储 / 自身缓存 / 用户 SAF 授权目录，按容器类型与大小过滤候选，借用已登录网易云会话从文件名歌曲 ID 补全元数据，解密后先验真实时长与 m4a 采样表完整性，再写入延迟创建的 `Music/本机缓存转换/`；无需 Shizuku 或 Root，`Android/data` 私有目录读不到时如实提示不绕过。
 - **洛雪自定义音源（lx 模式）** —— 导入标准洛雪 `globalThis.lx` v2 `.js` 脚本，接上酷我 / QQ / 酷狗 / 网易云四平台曲库：`LxRuntime` 在离线 WebView 内执行脚本（`blockNetworkLoads` 禁浏览器直连，请求统一经 `lx.request` 走原生 `HttpURLConnection`，并提供 `utils.crypto` / `utils.zlib`）；`LxCatalogProvider` 供搜索 / 歌单 / 榜单 / 封面 / 歌词元数据，**播放地址只由用户脚本解析**；`LxPlatformSource` 以 `lx:<平台>` 接入 `OnlineSources` 复用播放与下载管线。与内置在线二选一互斥，切模式会清空上一模式在线队列。原 MusicFree 插件体系已移除。
 - **桌面小组件** —— 10 套（5 列与 4 列各 5 种尺寸，各自独立 receiver，共用同一套渲染基类）；封面改圆角方图，莫兰迪取色压制饱和度（黑白封面锁 0），卡片明暗可选「深色烟熏 / 浅色磨砂 / 跟随皮肤」；封面解码 ≤384px、背景 ≤240px 以控住 RemoteViews 1MB 预算。
@@ -87,6 +88,21 @@ app/src/main/java/com/sonance/player/
 ```
 
 ## 更新日志
+
+### v2.5（2026-11-16）
+
+- **桌面歌词（新模块 `desktoplyrics`）** —— `DesktopLyricsManager`：`SYSTEM_ALERT_WINDOW` 悬浮窗（`view_desktop_lyrics.xml` + 4 组 drawable），三种背景 `DesktopLyricsBgMode`（NONE 立体字 / LIGHT 磨砂白 / DARK 磨砂黑）单击循环；自由拖动 + 坐标持久化（`desktopLyricsX/Y`），单击展开迷你播控（上下曲·播暂·背景·字号 14–26sp·锁定·关闭）；锁定态 `FLAG_NOT_TOUCHABLE` 手势完全穿透 + 常驻通知一键解锁；`PlaybackService` 每 250ms 经 `WidgetState.LyricTriplet` 推送逐行歌词与偏移。入口：设置「歌词显示与外观」+ 播放页「更多」半屏面板（新收纳睡眠定时 / DLNA / 桌面歌词）。
+- **歌词键统一** —— `canonicalLyricKey(mediaId, title, artist, revision)` 规范化空白并随歌词修订失效，`matchesSameTrack` 防止换词后悬浮歌词仍挂旧句（`WidgetLyricsSyncTest`）。
+- **TTML / AMLL 逐字歌词** —— `Lyrics.kt` 新增 `.ttml` 解析：`<p begin end>` 行级时间轴、行内 `<span>` 逐字片段（逐字高亮）、`ttm:role="x-translation"` 内嵌翻译并跳过 `x-roman`；时间字符串兼容 `hh:mm:ss.mmm` / `mm:ss.mmm` / `12.345s` / `12345ms` / `hh:mm:ss:ff`。
+- **在线歌词双源互补** —— 加载分级「手动导入 > 内嵌 > 本地缓存 > 在线」；LrcAPI 无结果或洛雪平台无词 → 网易云兜底（**时长校验**拒绝同名异版）；LrcAPI 有词无译文时补问网易云 `tlyric` 合并；内存 LRU + 磁盘哨兵缓存（无结果也落空文件防限流）；手动搜索结果按 songId 存别名，歌名被编辑仍可找回；繁转简仅作用于展示，缓存保留原文。
+- **播放页信息行重排** —— 自定义 `Layout`：收藏 | 三行曲目信息（空行占位恒高，防翻页跳动）| 右侧「下载 | 词」微磨砂胶囊（在线歌合入下载态）；文本块始终居中整行中轴，修掉滑动切歌封面跳位；收起播放页热区扩至顶栏左侧约 55%；右上角改「黑胶模式 | 更多」双联胶囊。
+- **蓝牙无声修复** —— `PlaybackService` 挂 `AudioDeviceCallback`：A2DP/LE Audio 并存的机型连蓝牙后 AudioTrack 仍挂旧输出通道（进度走、耳机无声），进入蓝牙时清过期首选设备、HAL 稳定后原地 seek 强制重建 AudioSink；`TransitionEffects` 防止蓝牙打断曲尾淡出把音量写到 0。
+- **USB 独占抗抖** —— DAC 切采样率瞬断重枚举不再立刻关独占（延迟 500ms 复核后自动恢复）；混音器规则修改挪主线程防抖，避免解码线程同步改规则引发死锁。
+- **网易云登录收回短信验证码** —— 风控拦截率高，登录页只剩扫码 / 密码 / Cookie；密码登录会话内固定 deviceId（`NeteaseAuth` 移除 `sendSmsCaptcha` / `loginWithPhoneCaptcha`）。
+- **网易云正式下载接口** —— `NeteaseStream` EAPI 下载三级尝试（PC UA → Android UA → 旧版）+ 档位自动降级（会员不够降到能拿的最高档），失败回落播放流；结果按 `expi` TTL 缓存。
+- **已下载判定 O(1) 化** —— `OnlineFavorites.buildLocalIndex` 曲库扫描后预建标准化哈希索引（无标签 FLAC 按「歌手 - 歌名」文件名兜底），在线列表 / 歌单逐首判定改索引查询；会话内刚下载立即隐藏下载按钮；歌单统计「已下载 / 可下载」。
+- **界面细节** —— 全屏歌词横竖屏分开定标（竖屏原样、横屏按高度等比放大）；播放条滑动关外扩投影 + 圆角裁剪离屏层；列表序号 `tnum` 等宽；在线封面缩略图缓存加大；设置页五分类副标题重写。
+- **测试** —— 新增 `WidgetLyricsSyncTest`(2)，扩充 `OnlineFavoritesTest`；全量 **73 组 703 用例**通过。release 包入库 `releases/山水有清音-v2.5-release.apk`。
 
 ### v2.4（2026-11-15）
 
