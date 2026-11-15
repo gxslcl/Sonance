@@ -11,13 +11,15 @@
 - **本地曲库** —— 四层扫描兜底（`Audio.Media` 不再依赖 `IS_MUSIC` + `MediaStore.Files` 补漏 + 磁盘直扫未入库文件 + SAF 授权的外置盘目录）+ 文件头二次确认，自动去重、排序、按专辑 / 艺术家 / 文件夹归类；支持收藏、最近播放、播放次数统计。`ExternalStoragePaths` 探测 `/storage/<UUID>` / `/mnt/usb_storage` / `/mnt/media_rw` 等车机挂载点供勾选，拔盘静默跳过。
 - **外部打开** —— 文件管理器 / 其他应用用「打开方式」选 Sonance 即可直接播放（`ACTION_VIEW`，含无 MIME 时按扩展名兜底）；优先绑定曲库已有曲目，其次查 MediaStore，最后读标签作为临时曲目（临时曲目不可收藏）。
 - **播放页手势** —— 上下滑动切换「晕染背景」模式，颜色过渡无缝；左右滑动在歌词与律动柱之间切换。
+- **播放按钮双形态** —— 水滴（默认，播放态有机形变）与普通正圆两种形态；光晕用 2.4× 画布 + 双层高斯羽化并沿水滴轮廓实时重算圆角，消除绘制边界硬裁出的浅色方块；形态 / 图标风格 / 大小 / 辉光走 `SharedPreferences` 监听即时生效，设置页带实时预览卡片。
 - **音频可视化** —— 自研 FFT + AGC 的律动柱；物理模拟用解析解实现，帧率无关，60Hz / 120Hz 下衰减速度一致。
 - **软件均衡器** —— 64 位双精度 biquad 的 10 段图形 EQ，绕开系统 `AudioEffect` 在部分机型（如 ColorOS）被拒的兼容坑；取样点在 EQ 之后，可视化读到的是「用户实际听到的声音」。
 - **音效工作室** —— 全屏四页签（音色预设 / 均衡器 / 声场效果 / 伴奏消音）：13 套按设备分类的预设、竖向推子与精细滑条双视图、A/B 旁通对比、虚拟低音与 Freeverb 混响、BS2B 双耳交叉馈送、外放高通保护、频带限制的中置人声消除；可按输出设备（外放 / 平板 / 有线 / 蓝牙 / USB）自动记忆音色（默认关闭）。
 - **系统音效接入** —— `SystemAudioEffects` 用 `AudioEffect` 的 OPEN/CLOSE_AUDIO_EFFECT_CONTROL_SESSION 把播放会话交给系统音效链（杜比全景声 / SoundAlive / MiSound / OReality / Histen / MusicFX），会话状态机抽成纯 Kotlin 的 `SystemEffectSessionTracker` 可单测；清单用 `<queries>` 声明厂商音效包可见性，可直接拉起厂商面板；USB 独占直通时明确提示不生效。
 - **播放顺序** —— 随机（`ShuffleOrder`：一轮不重复、回绕自动重洗、未听/少听逆频加权优先、最近听过的按新旧压到环尾、同歌手/同专辑打散、当前下标不动）、列表循环、单曲循环、顺序播放（不循环）；播放模式原子设置，小组件与播放页图标同步。
 - **封面 / 歌词** —— 读取音频内嵌的封面与歌词；可选联网补全（iTunes 封面 / LrcAPI 歌词），支持手动搜索 / 导入 `.lrc`·`.txt` / 删除歌词，并支持把下载到的封面**写回原文件**（ID3v2.3，保留原有帧）。
-- **在线音乐（内置在线模式）** —— 搜索、试听、播放并下载，落盘走 MediaStore；可登录网易云账号（扫码 / 短信验证码 / 密码 / Cookie 四种方式），按会员权益播放 VIP 曲目，取流走官方 EAPI 以保证无损与 Hi-Res 完整下发；音质可选 128k / 192k / 320k / 无损 / Hi-Res 并如实显示实际档位。登录后首页为「杂志画报」版（每日私人推荐 / 我喜欢的 / 私人 FM / 云歌单 / 精选探索广场）。
+- **在线音乐（内置在线模式）** —— 搜索、试听、播放并下载，落盘走 MediaStore；可登录网易云账号（扫码 / 短信验证码 / 密码 / Cookie 四种方式），按会员权益播放 VIP 曲目，取流走官方 EAPI 以保证无损与 Hi-Res 完整下发；音质可选 128k / 192k / 320k / 无损 / Hi-Res 并如实显示实际档位。登录后首页为「杂志画报」版（每日私人推荐 / 我喜欢的 / 私人 FM / 云歌单 / 精选探索广场）。在线歌可收藏（`OnlineFavorites` 存完整条目，收藏即按当前音质下载入库，扫描后自动迁移到本地 ID、不重复计数），播放页行内提供下载按钮（走播放流通道，带试听保护）。
+- **本机缓存转换（免 Shizuku）** —— `LocalCacheConverter` 三路扫描本机可读存储 / 自身缓存 / 用户 SAF 授权目录，按容器类型与大小过滤候选，借用已登录网易云会话从文件名歌曲 ID 补全元数据，解密后先验真实时长与 m4a 采样表完整性，再写入延迟创建的 `Music/本机缓存转换/`；无需 Shizuku 或 Root，`Android/data` 私有目录读不到时如实提示不绕过。
 - **洛雪自定义音源（lx 模式）** —— 导入标准洛雪 `globalThis.lx` v2 `.js` 脚本，接上酷我 / QQ / 酷狗 / 网易云四平台曲库：`LxRuntime` 在离线 WebView 内执行脚本（`blockNetworkLoads` 禁浏览器直连，请求统一经 `lx.request` 走原生 `HttpURLConnection`，并提供 `utils.crypto` / `utils.zlib`）；`LxCatalogProvider` 供搜索 / 歌单 / 榜单 / 封面 / 歌词元数据，**播放地址只由用户脚本解析**；`LxPlatformSource` 以 `lx:<平台>` 接入 `OnlineSources` 复用播放与下载管线。与内置在线二选一互斥，切模式会清空上一模式在线队列。原 MusicFree 插件体系已移除。
 - **桌面小组件** —— 10 套（5 列与 4 列各 5 种尺寸，各自独立 receiver，共用同一套渲染基类）；封面改圆角方图，莫兰迪取色压制饱和度（黑白封面锁 0），卡片明暗可选「深色烟熏 / 浅色磨砂 / 跟随皮肤」；封面解码 ≤384px、背景 ≤240px 以控住 RemoteViews 1MB 预算。
 - **D-LAN（DLNA / UPnP）** —— 纯 Kotlin 实现：SSDP 发现 + 手动 IP 探测、`ContentDirectory:Browse` 浏览 NAS / 电脑共享目录并直连播放、`AVTransport` / `RenderingControl` 向音箱电视投屏与远程遥控；本机内置只服务已登记条目的 HTTP/1.1 Range 服务（支持 206 拖进度），不暴露目录。
@@ -86,8 +88,14 @@ app/src/main/java/com/sonance/player/
 
 ## 更新日志
 
-### v2.4（2026-11-14）
+### v2.4（2026-11-15）
 
+- **本机缓存转换（免 Shizuku）** —— 新增 `LocalCacheConverter` + 纯规则层 `LocalCacheRules`：三路来源合并去重（`SAF_TREE` 用户授权目录 / `PUBLIC_CACHE` 公开存储目录 / `SONANCE_CACHE` 自身缓存），`shouldIncludeScannedFile` 按容器类型分档过滤（加密容器 ≥64KB，明文仅缓存目录或歌曲 ID 命名且 ≥256KB，避免误吞 Download 里的成品歌）；`isExcludedPath` 排除独立输出目录、下载器输出与封面 / 缩略图缓存；`extractNeteaseSongId` 从文件名取 ID 走已登录会话补全元数据；`STANDALONE_DISPLAY_PATH = Music/本机缓存转换` **延迟创建**（至少 1 首成功才建目录）；已完成条目按源键记入 `files.txt` 跳过；`Android/data` 私有目录在 Android 11+ 读不到时由 `androidDataBlocked` 如实上报，不绕过。
+- **缓存解码管线抽共用层** —— 新增 `NcCacheDecodeSupport`：容器解密、在线元数据补全（空值不覆盖原标签）、真实时长探测、m4a 采样表完整性对账、MP4 标签就地补写、`CoverCache` 封面入库全部收敛为一份实现；`NeteaseCacheRepository`（Shizuku 路径）改为委托调用，删掉约 300 行重复逻辑，两条路径行为完全一致。
+- **在线收藏与曲库打通** —— 新增 `OnlineFavorites`（`OnlineFavoriteEntry` 存完整 `StoredOnlineSong` + `likedAt` + `localSongId`）：`effectiveFavoriteIds` 合并本地与在线集合不重复计数；`reconcileWithLibrary` 在扫描后按「标题 / 歌手 / 时长窗口」把已下载的在线收藏迁到本地 ID，本地文件消失时保留在线条目；`isFavoriteSong` / `isFavoriteId` 统一播放页、迷你条、通知、小组件的判定；`toggleFavorite` 对在线曲目落 `OnlineFavoriteEntry` 并触发 `downloadOnlineSong`（`notifyAlreadySaved = false`，已存在本地副本则直接关联）。
+- **播放页在线歌曲下载按钮** —— 行内 `showDownloadButton`（仅 `!isLocal && !isDlna`），三态渲染（未下载 / 下载中转圈 / 已下载对勾，`downloadingSongIds` 供状态复用）；`downloadOnlineSong` 复用 8 秒自动下载的 `executeOnlineDownload` 通道（同 `OnlineSource.resolveStream`、跟随播放音质、跳过 30 秒试听残曲）。
+- **播放按钮双形态** —— 新增 `PlayButtonShape`（`DROPLET` 水滴 / `NORMAL` 普通正圆）与 `play_btn_shape` 基线项；`PlayPauseButton` 光晕重画：画布由 1.5× 放大到 **2.4×** 并用双层高斯羽化，轮廓 `computeBlobCornerRadii` 随水滴实时起伏（彻底修掉超出绘制边界被裁出的浅色方块）；水滴仅在 `isPlaying && shape == DROPLET` 时形变，暂停或切普通形态平滑回正圆；`Prefs.registerChangeListener` 让形态 / 图标风格 / 大小 / 辉光即时生效，不必退出播放页；`PlayButtonColorMode` 默认值改为 `COVER`；设置页新增「实时按钮效果预览」卡片。
+- **测试** —— 新增 `OnlineFavoritesTest`(5)、`LocalCacheRulesTest`(4)，全量 **72 组 699 用例**通过。
 - **洛雪自定义音源（新目录 `data/lx`）** —— `LxRuntime` 离线 WebView 执行洛雪 v2 脚本（禁浏览器直连、`lx.request` 走原生 HTTP、内置 `utils.crypto` / `utils.zlib`、播放流短时缓存供边听边存复用）；`LxRepository` 导入即 `inited` 握手校验、脚本存 `filesDir/lx_sources` 并记能力索引与曲目 hints；`LxCatalogProvider` 供酷我 / QQ / 酷狗 / 网易云的搜索、歌单、榜单、封面、歌词；`LxPlatformSource` 以 `lx:<平台>` 注册进 `OnlineSources`；新增 `LxOnlineScreen` / `LxSheetDetailScreen`，设置新增「在线音源模式」（`OnlineMode.BUILTIN` / `LX`，互斥切换会停播并清空上一模式队列与恢复现场）、脚本管理、默认音质（128k/320k/flac/flac24bit）、独立「播放并下载」。**原 `data/plugin` 四个文件整体移除**。
 - **系统音效接入** —— 新增 `SystemAudioEffects`：向系统广播 OPEN/CLOSE 音频效果会话，让杜比 / SoundAlive / MiSound / OReality / Histen / MusicFX 作用于本应用播放会话；`SystemEffectSessionTracker` 为纯状态机；清单加 `<queries>`（效果面板 action + 7 个厂商包）；设置与音效工作室共用同一张接入卡，并提供「打开系统音效控制面板」。
 - **车载 U 盘 / 外置存储扫描** —— 新增 `ExternalStoragePaths`（挂载点探测、SAF 授权列表序列化、路径规整）；`MediaRepository` 新增 SAF 兜底 Pass 4，`ScanScopeSheet` 支持用 `OpenDocumentTree` 添加 / 移除 U 盘目录，ViewModel 的 `addSafScanTree` / `removeSafScanTree` 同步清理该目录缓存曲目；拔盘或权限回收静默跳过。
@@ -97,7 +105,7 @@ app/src/main/java/com/sonance/player/
 - **播放页对位与稳定 key** —— `FullPlayer` 以「实际播放的 mediaId 在展示队列中的下标」为视觉基准，队列条目加 occurrence key，重排队列（随机 ↔ 其他）时当前页不再销毁重建而闪封面。
 - **排序稳定性** —— 排序键改为一次性物化的不可变 `SongSortKey`，避免「有键走拼音、缺键退码点」的混合比较破坏全序导致 `TimSort` 抛 `IllegalArgumentException`（中英混排曲库闪退）。
 - **界面** —— 悬浮播放条新增「数字时间进度」（`miniShowTime`，外观界面 → 底部播放条）；`MainActivity` 设 `volumeControlStream = STREAM_MUSIC`；歌词外观面板改两排自适应胶囊、打开面板时顶栏不淡出、手动滑歌词跨行轻震；`ArtworkLoader` 先查单曲内嵌 URI 键再查专辑共用键（同专辑不同封面不再闪旧图）。
-- **测试** —— 新增 `PlaybackIntentTest`(10)、`MediaFileDeleterTest`(3)、`ShuffleOrderTest`(4)、`ExternalStoragePathsTest`(3)、`SongSortContractTest`(2)、`SystemAudioEffectsTest`(4)、`UiFeatureFixesTest`(3)、`LxModelsTest`、`LxCatalogParserTest`；全量 70 组 688 用例通过。
+- **测试** —— 新增 `PlaybackIntentTest`(10)、`MediaFileDeleterTest`(3)、`ShuffleOrderTest`(4)、`ExternalStoragePathsTest`(3)、`SongSortContractTest`(2)、`SystemAudioEffectsTest`(4)、`UiFeatureFixesTest`(3)、`LxModelsTest`、`LxCatalogParserTest`；当时全量 70 组 688 用例通过。
 - **D-LAN 无线投屏与局域网曲库** —— 新增 `data/dlna`（`DlnaClient` SSDP/探测 + Browse + AVTransport）、`DlnaXmlParser`（纯 JDK DOM，禁用 DOCTYPE 与外部实体）、`DlnaHttpMediaServer`（Range 流媒体，仅暴露登记条目）、`DlnaScreen`（局域网曲库 / 投屏设备两分页 + 播放页快速投屏面板）；ViewModel 用 `dlnaSongMap` + `dlnaRevision` 接入队列，`effectivePlayerState` 把远端状态映射回 UI；新增 `ACCESS_WIFI_STATE` / `CHANGE_WIFI_MULTICAST_STATE`，`network_security_config` 的 `base-config` 放开明文（设备 IP 无法枚举）。
 - **全屏音效工作室** —— `EqualizerStudioScreen` 四页签：13 套按设备分类的预设（自然 / 耳机 / 外放 / 空间）、10 段 EQ 双视图（竖向混音台 / 精细滑条）、A/B 旁通、声场微调、伴奏消音、按输出设备自动记忆（`OutputAudioRouter` 监听 `AudioDeviceCallback`，默认关闭）。
 - **音效链重写** —— 新增 `PcmCodec` 统一 16/24/32 位与 float PCM 读写（16 位 TPDF 抖动）、共用 64 位 RBJ biquad；EQ 改双精度 DF2T 状态修掉 96/192 kHz 低频极点漂移；`effectPreampBudgetDb` 统一余量（声场按 `3*log10(width)`，旧版 12 倍会误压 4~5 dB 中频）；外放先合成低音谐波再过高通；伴奏消音改为 160 Hz–4.8 kHz 频带限制中置消除，修掉旧版砍空低频与单声道反相静音；USB 独占切歌时按曲目规格动态重协商（`syncTrackFormat`）。
