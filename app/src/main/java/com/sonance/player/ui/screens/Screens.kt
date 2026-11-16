@@ -226,6 +226,9 @@ fun SongList(
     // 确认后把三个字段交给 vm（真正写盘还要过系统的「允许修改此文件？」）。
     var editTarget by remember { mutableStateOf<Song?>(null) }
 
+    // 「查看歌曲信息」面板。同样放列表层：覆盖整屏，所有列表Tab都复用。
+    var infoTarget by remember { mutableStateOf<Song?>(null) }
+
     // 滚动期间**降低**封面解码并发（不是停掉，见 ArtworkLoader.withDecodeGate）。
     // 这一句同时被下面几个列表复用，所以放在 SongList 里，不散到每个调用点。
     LaunchedEffect(listState) {
@@ -343,6 +346,9 @@ fun SongList(
                     SongRow(
                         song = song,
                         index = index,
+                        showIndex = showIndex && !vm.hideListIndex,
+                        showDuration = !vm.hideListDuration,
+                        onShowInfo = { infoTarget = song },
                         isCurrent = currentId == song.id,
                         isPlaying = isPlaying,
                         isFavorite = favorites.contains(song.id) ||
@@ -520,6 +526,15 @@ fun SongList(
             dismissButton = {
                 TextButton(onClick = { editTarget = null }) { Text("取消") }
             }
+        )
+    }
+
+    infoTarget?.let { target ->
+        com.sonance.player.ui.sheets.SongInfoSheet(
+            song = target,
+            isFavorite = vm.isSongFavorite(target),
+            onToggleFavorite = { toggleFav(target.id) },
+            onDismiss = { infoTarget = null }
         )
     }
 }

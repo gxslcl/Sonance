@@ -58,6 +58,14 @@
       "type": "INT",
       "value": 1
     },
+    "hide_list_index": {
+      "type": "BOOLEAN",
+      "value": false
+    },
+    "hide_list_duration": {
+      "type": "BOOLEAN",
+      "value": false
+    },
     "scroll_haptic_enabled": {
       "type": "BOOLEAN",
       "value": true

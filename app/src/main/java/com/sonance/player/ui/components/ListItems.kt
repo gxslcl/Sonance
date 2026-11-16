@@ -69,6 +69,10 @@ fun SongRow(
     compact: Boolean = false,
     showAlbum: Boolean = true,
     showIndex: Boolean = true,
+    /** 行尾时长。设置里「显示时长」关掉时由列表层传 false */
+    showDuration: Boolean = true,
+    /** 查看歌曲信息。**传 null 就不显示这一项**（所有歌曲都支持，由调用方提供详情页） */
+    onShowInfo: (() -> Unit)? = null,
     /**
      * 从列表移除这一首。**传 null 就不显示这一项** —— 在线搜索结果之类的
      * 列表里没有"曲库"这个概念，摆一个"从列表移除"只会让人以为能删远程数据。
@@ -216,7 +220,7 @@ fun SongRow(
             }
         }
 
-        if (!compact) {
+        if (!compact && showDuration) {
             Spacer(Modifier.width(10.dp))
             Text(
                 text = song.durationText,
@@ -260,6 +264,7 @@ fun SongRow(
                 .ifBlank { null },
             actions = buildList {
                 add(RowSheetAction("下一首播放") { onPlayNext() })
+                onShowInfo?.let { add(RowSheetAction("查看歌曲信息", onClick = it)) }
                 onEditInfo?.let { add(RowSheetAction("编辑信息…", onClick = it)) }
                 onRecognize?.let { add(RowSheetAction("识别歌曲", onClick = it)) }
                 onRemoveFromLibrary?.let {

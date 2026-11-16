@@ -704,6 +704,16 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_LIST_COVER_SCALE, ListCoverScale.X12.ordinal)
         set(v) = sp.edit().putInt(KEY_LIST_COVER_SCALE, v).apply()
 
+    /** 隐藏列表行首的序号（正在播放的均衡器动画仍然保留）。默认显示 */
+    var hideListIndex: Boolean
+        get() = sp.getBoolean(KEY_HIDE_LIST_INDEX, false)
+        set(v) = sp.edit().putBoolean(KEY_HIDE_LIST_INDEX, v).apply()
+
+    /** 隐藏列表行尾的时长。默认显示 */
+    var hideListDuration: Boolean
+        get() = sp.getBoolean(KEY_HIDE_LIST_DURATION, false)
+        set(v) = sp.edit().putBoolean(KEY_HIDE_LIST_DURATION, v).apply()
+
     // ===== 播放页 Hi-Res 小金标 =====
 
     /** 是否在播放主界面高音质/无损歌曲的封面外右下角显示「Hi·Res AUDIO」小金标 */
@@ -1626,6 +1636,8 @@ class Prefs(context: Context) {
         private const val KEY_MINI_COVER = "mini_cover_scale"
         private const val KEY_LIST_ROW_STYLE = "list_row_style"
         private const val KEY_LIST_COVER_SCALE = "list_cover_scale"
+        private const val KEY_HIDE_LIST_INDEX = "hide_list_index"
+        private const val KEY_HIDE_LIST_DURATION = "hide_list_duration"
         private const val KEY_HIRES_BADGE_ENABLED = "hires_badge_enabled"
         private const val KEY_HIRES_BADGE_SIZE = "hires_badge_size"
         private const val KEY_TOP_BAR_LOGO = "top_bar_logo_id"

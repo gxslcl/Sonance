@@ -71,6 +71,8 @@ object SettingsBaseline {
         Spec("view_mode", Type.STRING),
         Spec("list_row_style", Type.INT),
         Spec("list_cover_scale", Type.INT),
+        Spec("hide_list_index", Type.BOOLEAN),
+        Spec("hide_list_duration", Type.BOOLEAN),
         Spec("scroll_haptic_enabled", Type.BOOLEAN),
         Spec("right_rail_letters", Type.BOOLEAN),
 

@@ -360,23 +360,27 @@ class MediaRepository(private val context: Context) {
         }
 
         // 兜底 Pass 3：扫描共享存储中尚未入库（MediaScanner 延迟 / .nomedia 音乐目录）的本地音频
+        val shouldScanFilesystem = folderPaths == null ||
+            folderPaths.any { !it.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX) }
         val fsFoundPathsToIndex = ArrayList<String>()
-        scanUnindexedFilesystem(
-            filterShortAudio = filterShortAudio,
-            filters = filters,
-            folderPaths = folderPaths,
-            seenPathKeys = seenPathKeys,
-            seenRawPaths = seenRawPaths,
-            onScannedStep = {
-                scanned++
-                if (scanned % 64 == 0) onProgress?.invoke(scanned)
-            },
-            onExcludedUnsupported = { excludedUnsupported++ },
-            onExcludedShort = { excludedShort++ },
-            out = out,
-            suspicious = suspicious,
-            toMediaScan = fsFoundPathsToIndex
-        )
+        if (shouldScanFilesystem) {
+            scanUnindexedFilesystem(
+                filterShortAudio = filterShortAudio,
+                filters = filters,
+                folderPaths = folderPaths,
+                seenPathKeys = seenPathKeys,
+                seenRawPaths = seenRawPaths,
+                onScannedStep = {
+                    scanned++
+                    if (scanned % 64 == 0) onProgress?.invoke(scanned)
+                },
+                onExcludedUnsupported = { excludedUnsupported++ },
+                onExcludedShort = { excludedShort++ },
+                out = out,
+                suspicious = suspicious,
+                toMediaScan = fsFoundPathsToIndex
+            )
+        }
         if (fsFoundPathsToIndex.isNotEmpty()) {
             runCatching {
                 MediaScannerConnection.scanFile(
@@ -561,48 +565,65 @@ class MediaRepository(private val context: Context) {
         }
 
         // 补充当前可直接访问的外置 USB / OTG 目录（若 MediaStore 未索引也能在扫描范围中看到）
-        val roots = storageRoots()
-        for (rootInfo in roots) {
-            if (!rootInfo.isExternalVolume) continue
-            val rootPath = rootInfo.dir.absolutePath.trimEnd('/')
-            val stack = ArrayDeque<Pair<File, Int>>()
-            stack.addLast(rootInfo.dir to 0)
-            var visitedDirs = 0
-            var countedFiles = 0
-            while (stack.isNotEmpty() && visitedDirs < 300 && countedFiles < 2_000) {
-                coroutineContext.ensureActive()
-                val (dir, depth) = stack.removeLast()
-                if (depth > FS_MAX_DEPTH || !dir.canRead()) continue
-                visitedDirs++
-                val folder = filesystemFolderOf(dir.absolutePath, rootPath, rootInfo.volumeLabel, isExternalVolume = true)
-                val leaf = dir.name.lowercase()
-                if (depth > 0 && (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES)) continue
-                if (LockedFormat.isNonSongFolder(folder)) continue
-                val children = dir.listFiles() ?: continue
-                for (child in children) {
-                    coroutineContext.ensureActive()
-                    val name = child.name
-                    if (name.startsWith(".")) continue
-                    if (child.isDirectory) {
-                        if (depth < FS_MAX_DEPTH) stack.addLast(child to (depth + 1))
-                        continue
+        try {
+            val roots = storageRoots()
+            for (rootInfo in roots) {
+                if (!rootInfo.isExternalVolume) continue
+                try {
+                    val rootPath = rootInfo.dir.absolutePath.trimEnd('/')
+                    val stack = ArrayDeque<Pair<File, Int>>()
+                    stack.addLast(rootInfo.dir to 0)
+                    var visitedDirs = 0
+                    var countedFiles = 0
+                    while (stack.isNotEmpty() && visitedDirs < 300 && countedFiles < 2_000) {
+                        coroutineContext.ensureActive()
+                        val (dir, depth) = stack.removeLast()
+                        if (depth > FS_MAX_DEPTH || !dir.canRead()) continue
+                        visitedDirs++
+                        val folder = filesystemFolderOf(dir.absolutePath, rootPath, rootInfo.volumeLabel, isExternalVolume = true)
+                        val leaf = dir.name.lowercase()
+                        if (depth > 0 && (leaf.startsWith(".") || leaf in FS_PRUNED_DIR_NAMES)) continue
+                        if (LockedFormat.isNonSongFolder(folder)) continue
+                        val children = dir.listFiles() ?: continue
+                        for (child in children) {
+                            coroutineContext.ensureActive()
+                            val name = child.name
+                            if (name.startsWith(".")) continue
+                            if (child.isDirectory) {
+                                if (depth < FS_MAX_DEPTH) stack.addLast(child to (depth + 1))
+                                continue
+                            }
+                            if (!child.isFile || !child.canRead() || child.length() <= 0L) continue
+                            if (!isAudioCandidate(name, null)) continue
+                            val pk = pathKeyOf(folder, name)
+                            if (seenKeys.add(pk)) {
+                                counts[folder] = (counts[folder] ?: 0) + 1
+                                countedFiles++
+                            }
+                        }
                     }
-                    if (!child.isFile || !child.canRead() || child.length() <= 0L) continue
-                    if (!isAudioCandidate(name, null)) continue
-                    val pk = pathKeyOf(folder, name)
-                    if (seenKeys.add(pk)) {
-                        counts[folder] = (counts[folder] ?: 0) + 1
-                        countedFiles++
-                    }
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (_: Throwable) {
                 }
             }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
         }
 
         val safFolders = safTrees.map { tree ->
+            val count = try {
+                countSafTreeAudioFiles(tree)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                0
+            }
             ScanFolderInfo(
                 path = ExternalStoragePaths.safScopePathOf(tree.uriString),
                 name = "外置 · ${tree.label}",
-                songCount = countSafTreeAudioFiles(tree)
+                songCount = count
             )
         }
 
@@ -789,14 +810,21 @@ class MediaRepository(private val context: Context) {
         suspicious: MutableList<Pair<Song, Long>>,
         toMediaScan: MutableList<String>
     ) {
-        val roots = storageRoots()
+        val roots = try {
+            storageRoots()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            return
+        }
         if (roots.isEmpty()) return
 
         val seenCanonicalDirs = HashSet<String>()
         var visitedDirs = 0
 
         for (rootInfo in roots) {
-            val root = rootInfo.dir
+            try {
+                val root = rootInfo.dir
             val rootPath = root.absolutePath.trimEnd('/')
             val stack = ArrayDeque<Pair<File, Int>>()
             if (folderPaths != null) {
@@ -899,6 +927,10 @@ class MediaRepository(private val context: Context) {
                         out += song
                     }
                 }
+            }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
             }
         }
     }
@@ -1058,7 +1090,11 @@ class MediaRepository(private val context: Context) {
             visitedDirs++
             if (!shouldEnterDir(relSubDir)) continue
 
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            val childrenUri = try {
+                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            } catch (_: Throwable) {
+                continue
+            }
             try {
                 context.contentResolver.query(
                     childrenUri,
@@ -1115,8 +1151,8 @@ class MediaRepository(private val context: Context) {
                 }
             } catch (c: CancellationException) {
                 throw c
-            } catch (_: Exception) {
-                // 外置存储被拔出或权限被收回时静默跳过，保留其它可用目录
+            } catch (_: Throwable) {
+                // 外置存储被拔出、系统组件缺失或权限被收回时静默跳过，保留其它可用目录
             }
         }
     }
@@ -1224,7 +1260,7 @@ class MediaRepository(private val context: Context) {
             }
             off == header.size && ContainerRestorer.looksLocked(header)
         } ?: false
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
         false
     }
 

@@ -63,32 +63,36 @@ object ExternalStoragePaths {
 
         // 1. StorageManager.storageVolumes（标准 Android USB OTG / 可移动卷发现入口）
         val sm = runCatching { context.getSystemService(StorageManager::class.java) }.getOrNull()
-        sm?.storageVolumes?.forEach { vol ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                consider(vol.directory)
-            } else {
-                // Android 7~10（含大量车机系统）：通过反射读 getPathFile / getPath，以及 /storage/<uuid> 兜底
-                val byMethod = runCatching {
-                    vol.javaClass.getMethod("getPathFile").invoke(vol) as? File
-                }.getOrNull() ?: runCatching {
-                    (vol.javaClass.getMethod("getPath").invoke(vol) as? String)?.let(::File)
-                }.getOrNull()
-                consider(byMethod)
-            }
-            val uuid = vol.uuid?.takeIf { it.isNotBlank() }
-            if (uuid != null && !vol.isPrimary) {
-                consider(File("/storage/$uuid"))
+        runCatching { sm?.storageVolumes }.getOrNull()?.forEach { vol ->
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    consider(vol.directory)
+                } else {
+                    // Android 7~10（含大量车机系统）：通过反射读 getPathFile / getPath，以及 /storage/<uuid> 兜底
+                    val byMethod = runCatching {
+                        vol.javaClass.getMethod("getPathFile").invoke(vol) as? File
+                    }.getOrNull() ?: runCatching {
+                        (vol.javaClass.getMethod("getPath").invoke(vol) as? String)?.let(::File)
+                    }.getOrNull()
+                    consider(byMethod)
+                }
+                val uuid = vol.uuid?.takeIf { it.isNotBlank() }
+                if (uuid != null && !vol.isPrimary) {
+                    consider(File("/storage/$uuid"))
+                }
             }
         }
 
         // 2. 常见车机 / Android TV / 定制 ROM 的 USB 静态与容器挂载点
-        STATIC_USB_CANDIDATES.forEach { consider(File(it)) }
+        STATIC_USB_CANDIDATES.forEach { runCatching { consider(File(it)) } }
         PARENT_PROBE_DIRS.forEach { parentPath ->
-            val parent = File(parentPath)
-            if (!parent.isDirectory || !parent.canRead()) return@forEach
-            parent.listFiles()?.forEach { child ->
-                if (child.isDirectory && child.name !in NON_REMOVABLE_STORAGE_NAMES) {
-                    consider(child)
+            runCatching {
+                val parent = File(parentPath)
+                if (!parent.isDirectory || !parent.canRead()) return@runCatching
+                parent.listFiles()?.forEach { child ->
+                    if (child.isDirectory && child.name !in NON_REMOVABLE_STORAGE_NAMES) {
+                        consider(child)
+                    }
                 }
             }
         }

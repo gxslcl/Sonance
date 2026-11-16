@@ -1,6 +1,8 @@
 package com.sonance.player.ui.sheets
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -28,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,7 +56,59 @@ import com.sonance.player.ui.theme.solidSurface
 @Composable
 fun ScanScopeSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
     val skin = LocalSkin.current
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (!runCatching { DocumentsContract.isTreeUri(uri) }.getOrDefault(true)) {
+            vm.showToast("所选路径不是有效目录，请重新选择")
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val fallback = runCatching {
+            uri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.let { seg -> seg.substringAfter(':', "").trim('/').ifBlank { seg.trimEnd(':') } }
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+        val label = runCatching { DocumentFile.fromTreeUri(context, uri)?.name }
+            .getOrNull()
+            ?.trimEnd(':')
+            ?.takeIf { it.isNotBlank() }
+            ?: fallback
+            ?: "U盘 / 外置目录"
+        runCatching { vm.addSafScanTree(uri, label) }
+            .onFailure { vm.showToast("无法读取所选外置目录：${it.message ?: "权限受限"}") }
+    }
+
+    val launchExternalFolderPicker: () -> Unit = {
+        val hasPicker = runCatching {
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).resolveActivity(context.packageManager) != null
+        }.getOrDefault(true)
+        if (!hasPicker) {
+            vm.showToast("当前系统未提供目录选择器，将直接查找已挂载外置目录")
+            vm.loadScanFolders()
+        } else {
+            runCatching { folderPicker.launch(null) }
+                .onFailure { err ->
+                    val msg = if (err is ActivityNotFoundException) {
+                        "当前系统未提供目录选择器，将直接查找已挂载外置目录"
+                    } else {
+                        "无法打开目录选择器：${err.message ?: "系统受限"}"
+                    }
+                    vm.showToast(msg)
+                    vm.loadScanFolders()
+                }
+        }
+    }
 
     LaunchedEffect(Unit) {
         vm.clearScopedScanResult()
@@ -92,7 +147,10 @@ fun ScanScopeSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
             when {
                 vm.scopedScanRunning -> ScanProgress(vm = vm)
                 vm.scopedScanResult != null -> ScanResult(vm = vm, onDismiss = onDismiss)
-                else -> ScanScopeList(vm = vm)
+                else -> ScanScopeList(
+                    vm = vm,
+                    onPickExternalFolder = launchExternalFolderPicker
+                )
             }
         }
     }
@@ -142,32 +200,12 @@ private fun Header(vm: SonanceViewModel) {
 }
 
 @Composable
-private fun ScanScopeList(vm: SonanceViewModel) {
+private fun ScanScopeList(
+    vm: SonanceViewModel,
+    onPickExternalFolder: () -> Unit
+) {
     val skin = LocalSkin.current
-    val context = LocalContext.current
-    val folderPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            val fallback = uri.lastPathSegment
-                ?.substringAfterLast('/')
-                ?.let { seg -> seg.substringAfter(':', "").trim('/').ifBlank { seg.trimEnd(':') } }
-                ?.takeIf { it.isNotBlank() }
-            val label = runCatching { DocumentFile.fromTreeUri(context, uri)?.name }
-                .getOrNull()
-                ?.trimEnd(':')
-                ?.takeIf { it.isNotBlank() }
-                ?: fallback
-                ?: "U盘 / 外置目录"
-            vm.addSafScanTree(uri, label)
-        }
-    }
+    val uniqueFolders = remember(vm.scanFolders) { vm.scanFolders.distinctBy { it.path } }
 
     if (vm.scanFoldersLoading) {
         Text(
@@ -179,7 +217,7 @@ private fun ScanScopeList(vm: SonanceViewModel) {
         return
     }
 
-    if (vm.scanFolders.isEmpty()) {
+    if (uniqueFolders.isEmpty()) {
         Text(
             text = "没有读到任何音频目录。\n如在车机中扫描 U 盘或外置目录，请点击下方「选择 U 盘 / 外置文件夹」。",
             style = MaterialTheme.typography.bodyMedium,
@@ -188,7 +226,7 @@ private fun ScanScopeList(vm: SonanceViewModel) {
         )
     } else {
         LazyColumn(Modifier.heightIn(max = 360.dp)) {
-            items(vm.scanFolders, key = { it.path }) { folder ->
+            items(uniqueFolders, key = { it.path }) { folder ->
                 val isSaf = folder.path.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX)
                 FolderRow(
                     folder = folder,
@@ -205,7 +243,7 @@ private fun ScanScopeList(vm: SonanceViewModel) {
 
     TextButton(
         enabled = !vm.scopedScanRunning,
-        onClick = { folderPicker.launch(null) },
+        onClick = onPickExternalFolder,
         modifier = Modifier.padding(horizontal = 12.dp)
     ) {
         Text(

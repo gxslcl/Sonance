@@ -1,5 +1,7 @@
 package com.sonance.player.ui.components
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -44,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.BuiltinCovers
 import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.ui.theme.LocalSkin
@@ -95,6 +99,9 @@ fun CoverPickerDialog(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     var title by remember(songId) { mutableStateOf(song.title) }
     var artist by remember(songId) { mutableStateOf(song.artist) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.applyPickedCover(songId, uri)
+    }
 
     AlertDialog(
         onDismissRequest = { vm.closeCoverPicker() },
@@ -132,6 +139,71 @@ fun CoverPickerDialog(vm: SonanceViewModel) {
                     }
                 }
 
+                // ---- 内置封面：封面墙那套几何母题，点一下就落到这首歌上 ----
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "内置封面",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = skin.text
+                )
+                Text(
+                    "取自封面墙的图形母题，选一张即刻生效，不用重新画。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+                BuiltinCovers.presets.chunked(4).forEach { row ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        row.forEach { preset ->
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .border(1.dp, skin.border, RoundedCornerShape(9.dp))
+                                    .clickable { vm.applyBuiltinCover(songId, preset.id) }
+                            ) {
+                                val bitmap = remember(preset.id) {
+                                    BuiltinCovers.render(preset, 240).asImageBitmap()
+                                }
+                                Image(
+                                    bitmap = bitmap,
+                                    contentDescription = preset.label,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                Box(
+                                    Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .background(Color.Black.copy(alpha = 0.38f))
+                                        .padding(vertical = 3.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        preset.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                        repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                PillButton(label = "从相册选择图片…", onClick = { imagePicker.launch("image/*") }, filled = false)
+
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "或者按歌名搜索",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = skin.text
+                )
                 PickerField("歌曲名", title, { title = it }, skin)
                 PickerField("歌手", artist, { artist = it }, skin)
 

@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -25,10 +27,12 @@ import com.sonance.player.data.Album
 import com.sonance.player.data.AppIconSwitcher
 import com.sonance.player.data.Artist
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.BuiltinCovers
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTagWriter
+import java.io.ByteArrayOutputStream
 import com.sonance.player.data.ExternalStoragePaths
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
@@ -392,19 +396,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scanFoldersLoading = true
         val currentSafTrees = safScanTrees
         viewModelScope.launch {
-            val listed = withContext(Dispatchers.IO) { repo.listFolders(currentSafTrees) }
-            val known = listed.mapTo(HashSet()) { it.path }
-            val missing = scanScopeSelection
-                .filter { it !in known && !it.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX) }
-                .map {
-                    ScanFolderInfo(
-                        path = it,
-                        name = it.substringAfterLast('/').ifBlank { "根目录" },
-                        songCount = 0
-                    )
-                }
-            scanFolders = listed + missing
-            scanFoldersLoading = false
+            try {
+                val listed = withContext(Dispatchers.IO) { repo.listFolders(currentSafTrees) }
+                val known = listed.mapTo(HashSet()) { it.path }
+                val missing = scanScopeSelection
+                    .filter { it !in known && !it.startsWith(ExternalStoragePaths.SAF_SCOPE_PREFIX) }
+                    .map {
+                        ScanFolderInfo(
+                            path = it,
+                            name = it.substringAfterLast('/').ifBlank { "根目录" },
+                            songCount = 0
+                        )
+                    }
+                scanFolders = (listed + missing).distinctBy { it.path }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                android.util.Log.w("SonanceScan", "读取扫描目录失败: ${t.message}")
+                showToast("读取外置存储目录失败，可尝试直接选择目录或重新扫描")
+            } finally {
+                scanFoldersLoading = false
+            }
         }
     }
 
@@ -416,7 +428,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         safScanTrees = ExternalStoragePaths.parseSafScanTrees(nextRaw)
         val scopePath = ExternalStoragePaths.safScopePathOf(uriString)
         updateScanScopeSelection(scanScopeSelection + scopePath)
-        loadScanFolders()
+        val pendingEntry = ScanFolderInfo(
+            path = scopePath,
+            name = "外置 · ${label.ifBlank { "U盘目录" }}",
+            songCount = 0
+        )
+        scanFolders = (listOf(pendingEntry) + scanFolders.filterNot { it.path == scopePath })
+            .distinctBy { it.path }
         startScopedScan(setOf(scopePath))
     }
 
@@ -1999,12 +2017,20 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val beforeIds = songs.mapTo(HashSet()) { it.id }
             scanState = ScanState.SCANNING
-            runScan()
-            scanState = ScanState.READY
-            // 没有歌曲缓存时（首次启动）init 里那次恢复会跳过，扫完再试一次
-            restorePlaybackState()
-            val added = songs.count { it.id !in beforeIds }
-            flashScanHint(if (added > 0) "已扫描 · 新增 $added 首" else "已扫描 · 暂无新增")
+            try {
+                runScan()
+                // 没有歌曲缓存时（首次启动）init 里那次恢复会跳过，扫完再试一次
+                restorePlaybackState()
+                val added = songs.count { it.id !in beforeIds }
+                flashScanHint(if (added > 0) "已扫描 · 新增 $added 首" else "已扫描 · 暂无新增")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                android.util.Log.w("SonanceScan", "重新扫描失败: ${t.message}")
+                showToast("扫描失败：${t.message ?: "存储目录不可读"}")
+            } finally {
+                scanState = ScanState.READY
+            }
         }
     }
 
@@ -2567,6 +2593,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeListCoverScale(value: ListCoverScale) {
         listCoverScale = value
         prefs.listCoverScale = value.ordinal
+    }
+
+    /** 隐藏列表行首序号（正在播放的均衡器动画不受影响） */
+    var hideListIndex by mutableStateOf(prefs.hideListIndex)
+        private set
+
+    fun changeHideListIndex(value: Boolean) {
+        hideListIndex = value
+        prefs.hideListIndex = value
+    }
+
+    /** 隐藏列表行尾时长 */
+    var hideListDuration by mutableStateOf(prefs.hideListDuration)
+        private set
+
+    fun changeHideListDuration(value: Boolean) {
+        hideListDuration = value
+        prefs.hideListDuration = value
     }
 
     // ===== 顶栏品牌 =====
@@ -3189,6 +3233,100 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             refreshCoverCacheStats()
             showToast(coverAppliedMessage(writeOutcome))
         }
+    }
+
+    /**
+     * 选一张内置封面（封面墙那套渐变 + 几何母题）落到当前歌曲。
+     * 和手动搜索共用同一个「手选封面」缓存槽，所以列表、播放页、通知、小组件
+     * 会一起变，不需要给内置图再开一条显示路径。
+     */
+    fun applyBuiltinCover(songId: Long, presetId: String) {
+        val preset = BuiltinCovers.find(presetId) ?: return
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val song = songById(songId)
+            if (song == null) {
+                coverNotice = "歌曲已不存在，无法设置封面"
+                return@launch
+            }
+            val (raw, bmp) = withContext(Dispatchers.IO) {
+                val bitmap = BuiltinCovers.render(preset, 900)
+                val bytes = ByteArrayOutputStream().use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                    out.toByteArray()
+                }
+                bytes to bitmap
+            }
+            persistCustomCover(app, song, raw, bmp, writeTag = true)
+            coverNotice = null
+            showToast("已换成内置封面「${preset.label}」")
+        }
+    }
+
+    /** 从相册 / 文件管理器挑一张图片作为这首歌的封面。 */
+    fun applyPickedCover(songId: Long, imageUri: Uri) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val song = songById(songId)
+            if (song == null) {
+                coverNotice = "歌曲已不存在，无法设置封面"
+                return@launch
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val source = app.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
+                        ?: return@runCatching null
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(source, 0, source.size, bounds)
+                    val scale = maxOf(1, (maxOf(bounds.outWidth, bounds.outHeight) / 1200f).toInt())
+                    val opts = BitmapFactory.Options().apply { inSampleSize = scale }
+                    val bitmap = BitmapFactory.decodeByteArray(source, 0, source.size, opts)
+                        ?: return@runCatching null
+                    val bytes = ByteArrayOutputStream().use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                        out.toByteArray()
+                    }
+                    bytes to bitmap
+                }.getOrNull()
+            }
+            if (result == null) {
+                coverNotice = "这张图片读不出来，换一张试试"
+                return@launch
+            }
+            persistCustomCover(app, song, result.first, result.second, writeTag = true)
+            coverNotice = null
+            showToast("已把选中的图片设为封面")
+        }
+    }
+
+    /** 内置封面 / 上传图片共用的落盘与刷新步骤。 */
+    private suspend fun persistCustomCover(
+        app: android.app.Application,
+        song: com.sonance.player.data.Song,
+        raw: ByteArray,
+        bitmap: Bitmap,
+        writeTag: Boolean
+    ) {
+        ArtworkLoader.invalidateSelected(song.id)
+        val version = ArtworkLoader.selectedGeneration(song.id)
+        val saved = withContext(Dispatchers.IO) {
+            ArtworkLoader.ifSelectedGeneration(song.id, version) {
+                CoverCache.storeSelected(app, song.id, song.uri, raw)
+            }
+        }
+        if (saved != true) {
+            coverNotice = "封面保存失败，请检查设备存储空间后重试"
+            return
+        }
+        withContext(Dispatchers.IO) {
+            CoverCache.store(app, OnlineCover.keyOf(song.title, song.artist), raw)
+            if (writeTag && song.isLocal) CoverTagWriter.write(app, song, raw)
+        }
+        ArtworkLoader.invalidateSelected(song.id)
+        ArtworkLoader.putOnline(song.id, bitmap.asImageBitmap())
+        coverTried.add(song.id)
+        player.refreshCurrentArtwork(song)
+        refreshCoverCacheStats()
     }
 
     /** 封面应用后给用户的一句话 —— 写文件的结果不同，说法也该不同 */

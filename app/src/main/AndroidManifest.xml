@@ -61,6 +61,9 @@
         <intent>
             <action android:name="android.settings.SOUND_SETTINGS" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE" />
+        </intent>
         <package android:name="com.dolby.daxappui" />
         <package android:name="com.motorola.dolby.dolbyui" />
         <package android:name="com.sec.android.app.soundalive" />

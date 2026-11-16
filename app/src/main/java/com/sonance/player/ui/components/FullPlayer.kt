@@ -318,6 +318,12 @@ fun FullPlayer(
      */
     var lyricsExpanded by rememberSaveable { mutableStateOf(false) }
 
+    /**
+     * 胶囊「词」：封面下方显示两行歌词（当前 + 下一句），不再把封面藏掉。
+     * 原来「封面位置换成歌词」的行为改由单击封面触发。
+     */
+    var coverLyricsInline by rememberSaveable { mutableStateOf(false) }
+
     /** 双击封面打开的「晕染」面板 */
     var showGlowSheet by rememberSaveable { mutableStateOf(false) }
 
@@ -1090,7 +1096,9 @@ fun FullPlayer(
                         hiResBadgeEnabled = hiResBadgeEnabled,
                         hiResBadgeSize = hiResBadgeSize,
                         lyricsExpanded = lyricsExpanded,
-                        onToggleLyrics = { lyricsExpanded = !lyricsExpanded },
+                        coverLyricsInline = coverLyricsInline,
+                        onToggleLyrics = { coverLyricsInline = !coverLyricsInline },
+                        onCoverTap = { lyricsExpanded = !lyricsExpanded },
                         onOpenGlow = { showGlowSheet = true },
                         // 量出来的是 root 坐标，换算成本页（根 Box）坐标再交给晕染。
                         //
@@ -1628,10 +1636,10 @@ private fun HeaderPlayingIndicator(
 }
 
 /**
- * 封面的手势：**长按换封面、双击开晕染**。
+ * 封面的手势：**单击在封面位置看歌词、长按换封面、双击开晕染**。
  *
- * 上一版是"单击换封面"，太容易误触 —— 播放页上点封面本就是最随手的动作。
- * 换成长按之后单击完全空着，误触就没有了。
+ * 单击现在是「把封面换成整块歌词」的入口（胶囊「词」只负责封面下方的两行歌词）。
+ * 换封面仍保留在长按，避免误触。
  *
  * 这里不用 `detectTapGestures`：它的双击窗口只有 300ms，而且早先实测
  * `pointerInput` 那条路上 up 事件会被判成"已消费"（见 git 历史里的注释）。
@@ -1641,10 +1649,10 @@ private fun HeaderPlayingIndicator(
 @Composable
 private fun Modifier.onCoverGesture(
     onLongPress: () -> Unit,
-    onDoubleTap: () -> Unit
+    onDoubleTap: () -> Unit,
+    onTap: () -> Unit = {}
 ): Modifier = this.combinedClickable(
-    // 单击什么都不做 —— 这是刻意的，播放页最容易误碰的就是封面
-    onClick = {},
+    onClick = onTap,
     onDoubleClick = onDoubleTap,
     onLongClick = onLongPress,
     // 不画涟漪：封面是圆的、手势挂在方形容器上，默认 ripple 会闪出一个半透明方框
@@ -2423,10 +2431,14 @@ private fun PlayerPage(
     hiResBadgeEnabled: Boolean,
     /** 小金标尺寸档位 */
     hiResBadgeSize: HiResBadgeSize,
-    /** 「歌词」那一行是否已展开成单行滚动歌词 */
+    /** 「封面换成歌词」是否已展开（单击封面切换） */
     lyricsExpanded: Boolean,
-    /** 展开 / 收起那一行（不切页、不改布局） */
+    /** 封面下方两行歌词（点胶囊「词」切换） */
+    coverLyricsInline: Boolean,
+    /** 展开 / 收起封面下方两行歌词 */
     onToggleLyrics: () -> Unit,
+    /** 单击封面：把封面位置换成整块歌词（原逻辑） */
+    onCoverTap: () -> Unit,
     /** 双击封面 → 打开晕染设置面板 */
     onOpenGlow: () -> Unit,
     /** 把封面的位置量出来上报 —— 晕染画在整页背景层，需要知道封面画在哪 */
@@ -2556,7 +2568,7 @@ private fun PlayerPage(
                                         scaleY = coverScale.value
                                         translationY = -COVER_LIFT_PX
                                     }
-                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow)
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow, onTap = onCoverTap)
                             )
                         } else {
                             CoverArt(
@@ -2576,13 +2588,24 @@ private fun PlayerPage(
                                     .shadow(18.dp, RoundedCornerShape(CoverCornerRadius), clip = false)
                                     .clip(RoundedCornerShape(CoverCornerRadius))
                                     // 位置由左栏那一层上报（见上面的注释）
-                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow),
+                                    .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow, onTap = onCoverTap),
                                 cornerRadius = CoverCornerRadius,
                                 sizePx = 900,
                                 sourceUri = song.uri,
                                 songId = song.id,
                                 coverKey = coverKey
                             )
+                        }
+                    }
+                    // 胶囊「词」：封面下方的两行歌词（当前 + 下一句），封面照旧显示
+                    if (coverLyricsInline && !lyricsExpanded) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            CoverInlineLyrics(song = song, positionMs = positionMs, prefs = prefs)
                         }
                     }
                     // 横屏 / 宽屏模式：静止放在封面外右边靠底部，脱离 coverScale 缩放层以消除呼吸抖动
@@ -2618,7 +2641,7 @@ private fun PlayerPage(
                         album = song.album,
                         quality = streamQuality,
                         isFavorite = isFavorite,
-                        lyricsExpanded = lyricsExpanded,
+                        lyricsExpanded = coverLyricsInline,
                         showDownloadButton = showDownloadButton,
                         isDownloading = isDownloading,
                         isDownloaded = isDownloaded,
@@ -2717,7 +2740,7 @@ private fun PlayerPage(
                                             scaleX = coverScale.value
                                             scaleY = coverScale.value
                                         }
-                                        .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow)
+                                        .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow, onTap = onCoverTap)
                                 )
                             }
                         } else {
@@ -2739,7 +2762,7 @@ private fun PlayerPage(
                                         .clip(RoundedCornerShape(CoverCornerRadius))
                                         // 位置由主区域那一层上报（见上面的注释）——
                                         // 挂在这里的话歌词态就断了
-                                        .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow),
+                                        .onCoverGesture(onLongPress = onOpenCover, onDoubleTap = onOpenGlow, onTap = onCoverTap),
                                     cornerRadius = CoverCornerRadius,
                                     sizePx = 900,
                                     sourceUri = song.uri,
@@ -2747,6 +2770,17 @@ private fun PlayerPage(
                                     coverKey = coverKey
                                 )
                             }
+                        }
+                    }
+                    // 胶囊「词」：封面下方两行歌词，不占用封面本身
+                    if (coverLyricsInline && !lyricsExpanded) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            CoverInlineLyrics(song = song, positionMs = positionMs, prefs = prefs)
                         }
                     }
                     // 手机竖屏：放在封面外右下角正下方；平板 / 横向容器且右侧余量充足时：移动到封面右边靠底部
@@ -2800,7 +2834,7 @@ private fun PlayerPage(
                     album = song.album,
                     quality = streamQuality,
                     isFavorite = isFavorite,
-                    lyricsExpanded = lyricsExpanded,
+                    lyricsExpanded = coverLyricsInline,
                     showDownloadButton = showDownloadButton,
                     isDownloading = isDownloading,
                     isDownloaded = isDownloaded,

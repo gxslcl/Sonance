@@ -1177,7 +1177,13 @@ private fun IconSetSettingsSection(vm: SonanceViewModel) {
 @Composable
 private fun ListAppearanceSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
-    val summary = "${vm.listRowStyle.label} · 封面${vm.listCoverScale.label} · " +
+    val infoSummary = when {
+        vm.hideListIndex && vm.hideListDuration -> "无序号·无时长"
+        vm.hideListIndex -> "无序号"
+        vm.hideListDuration -> "无时长"
+        else -> "序号·时长"
+    }
+    val summary = "${vm.listRowStyle.label} · 封面${vm.listCoverScale.label} · $infoSummary · " +
         if (vm.rightRailLetters) "A–Z 字母索引" else "右侧滑块"
 
     CollapsibleSection(
@@ -1253,6 +1259,30 @@ private fun ListAppearanceSection(vm: SonanceViewModel) {
                 }
             }
         }
+
+        // ---- 行内信息：序号 / 时长 ----
+        Spacer(Modifier.height(16.dp))
+        Text("行内信息", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "两个开关互不影响。序号隐藏后，正在播放那首仍会显示跳动的均衡器。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "显示序号",
+            subtitle = "关闭后列表行首不再显示 1、2、3……，正在播放的均衡器动画仍保留",
+            checked = !vm.hideListIndex,
+            onCheckedChange = { vm.changeHideListIndex(!it) }
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "显示时长",
+            subtitle = "关闭后列表行尾不再显示每首歌的时长，歌名可用宽度相应变宽",
+            checked = !vm.hideListDuration,
+            onCheckedChange = { vm.changeHideListDuration(!it) }
+        )
 
         // ---- 右侧轨道：字母索引 / 比例滑块 ----
         Spacer(Modifier.height(16.dp))

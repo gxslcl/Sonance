@@ -1,6 +1,11 @@
 package com.sonance.player.ui.components
 
 import android.os.Build
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -2422,4 +2427,92 @@ fun LyricStrip(
         overflow = TextOverflow.Ellipsis,
         modifier = modifier.fillMaxWidth()
     )
+}
+
+/**
+ * 封面下方的两行歌词：第一行是当前句，第二行是即将到来的下一句。
+ *
+ * 与 [InlineLyrics] 的区别：这里不接管封面、不占整块主区域，只是封面下面的一条
+ * 轻量字幕 —— 主次靠字号、字重和透明度拉开，切句用淡入淡出，不上下跳动。
+ * 数据加载走同一个 [LyricsRepository]，所以手动导入、在线补全、繁转简都与全屏歌词一致。
+ */
+@Composable
+fun CoverInlineLyrics(
+    song: Song,
+    positionMs: Long,
+    prefs: Prefs,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val skin = LocalSkin.current
+    var lines by remember(song.id) { mutableStateOf(emptyList<LyricLine>()) }
+    var loaded by remember(song.id) { mutableStateOf(false) }
+    val lyricsRev by LyricsRepository.revision.collectAsState()
+
+    LaunchedEffect(song.id, song.uri, prefs.onlineLyricsEnabled, prefs.lyricsApiBase,
+        prefs.lyricsConvertToSimplified, prefs.neteaseFillEnabled, lyricsRev) {
+        val result = LyricsRepository.load(
+            context = context,
+            songId = song.id,
+            uri = song.uri,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            onlineEnabled = prefs.onlineLyricsEnabled,
+            apiBase = prefs.lyricsApiBase,
+            convertToSimplified = prefs.lyricsConvertToSimplified,
+            durationMs = song.durationMs,
+            neteaseEnabled = prefs.neteaseFillEnabled,
+            remoteSource = song.source,
+            remoteId = song.remoteId
+        )
+        lines = (result.lyrics as? Lyrics.Synced)?.lines.orEmpty()
+        loaded = true
+    }
+
+    val currentIndex = if (lines.isEmpty()) -1 else lines.indexAt(positionMs)
+    val current = lines.getOrNull(currentIndex)
+    val next = lines.getOrNull(currentIndex + 1)
+
+    Column(
+        modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        if (current == null) {
+            Text(
+                if (loaded) "这首歌还没有歌词" else "歌词加载中…",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim,
+                maxLines = 1
+            )
+        } else {
+            AnimatedContent(
+                targetState = current.timeMs,
+                transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
+                label = "coverLyricCurrent"
+            ) {
+                Text(
+                    current.text,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    ),
+                    color = skin.accent,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(
+                next?.text ?: "· · ·",
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                color = skin.textMuted,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
 }
