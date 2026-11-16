@@ -22,6 +22,9 @@
 - **在线音乐（内置在线模式）** —— 搜索、试听、播放并下载，落盘走 MediaStore；可登录网易云账号（扫码 / 密码 / Cookie 三种方式；短信验证码因风控拦截率高已收回），按会员权益播放 VIP 曲目，取流走官方 EAPI 以保证无损与 Hi-Res 完整下发；音质可选 128k / 192k / 320k / 无损 / Hi-Res 并如实显示实际档位。登录后首页为「杂志画报」版（每日私人推荐 / 我喜欢的 / 私人 FM / 云歌单 / 精选探索广场）。在线歌可收藏（`OnlineFavorites` 存完整条目，收藏即按当前音质下载入库，扫描后自动迁移到本地 ID、不重复计数），播放页行内提供下载按钮（走播放流通道，带试听保护）。
 - **本机缓存转换（免 Shizuku）** —— `LocalCacheConverter` 三路扫描本机可读存储 / 自身缓存 / 用户 SAF 授权目录，按容器类型与大小过滤候选，借用已登录网易云会话从文件名歌曲 ID 补全元数据，解密后先验真实时长与 m4a 采样表完整性，再写入延迟创建的 `Music/本机缓存转换/`；无需 Shizuku 或 Root，`Android/data` 私有目录读不到时如实提示不绕过。
 - **洛雪自定义音源（lx 模式）** —— 导入标准洛雪 `globalThis.lx` v2 `.js` 脚本，接上酷我 / QQ / 酷狗 / 网易云四平台曲库：`LxRuntime` 在离线 WebView 内执行脚本（`blockNetworkLoads` 禁浏览器直连，请求统一经 `lx.request` 走原生 `HttpURLConnection`，并提供 `utils.crypto` / `utils.zlib`）；`LxCatalogProvider` 供搜索 / 歌单 / 榜单 / 封面 / 歌词元数据，**播放地址只由用户脚本解析**；`LxPlatformSource` 以 `lx:<平台>` 接入 `OnlineSources` 复用播放与下载管线。与内置在线二选一互斥，切模式会清空上一模式在线队列。原 MusicFree 插件体系已移除。
+- **列表展示控制** —— 设置「列表外观与索引 → 行内信息」两个独立开关：隐藏行首序号（正在播放的均衡器动画仍保留）与隐藏行尾时长；所有歌曲列表统一生效，偏好写入 `hide_list_index` / `hide_list_duration` 基线。
+- **查看歌曲信息** —— 长按列表任意歌曲 →「查看歌曲信息」：`SongInfoSheet` 三段卡片展示身份、文件（路径/大小/时间）与真实音频参数（`MediaExtractor` 读 MIME / 采样率 / 位深 / 码率 / 声道，读不到如实写「未知」）；在线歌说明无本地文件。
+- **自定义封面** —— 封面对话框提供 8 套取自封面墙视觉语言的内置封面（`BuiltinCovers`，Canvas 渲染无新增资源），并支持 `GetContent` 从相册选图（压到 1200px）；两条路都写 `CoverCache.storeSelected` 手选封面槽，列表/播放页/通知/小组件同步生效，本地歌额外写回文件标签。
 - **桌面小组件** —— 10 套（5 列与 4 列各 5 种尺寸，各自独立 receiver，共用同一套渲染基类）；封面改圆角方图，莫兰迪取色压制饱和度（黑白封面锁 0），卡片明暗可选「深色烟熏 / 浅色磨砂 / 跟随皮肤」；封面解码 ≤384px、背景 ≤240px 以控住 RemoteViews 1MB 预算。
 - **D-LAN（DLNA / UPnP）** —— 纯 Kotlin 实现：SSDP 发现 + 手动 IP 探测、`ContentDirectory:Browse` 浏览 NAS / 电脑共享目录并直连播放、`AVTransport` / `RenderingControl` 向音箱电视投屏与远程遥控；本机内置只服务已登记条目的 HTTP/1.1 Range 服务（支持 206 拖进度），不暴露目录。
 - **桌面图标变体** —— 53 款自适应图标（`activity-alias` 实现），设置里点一下即时切换，不用重装。
@@ -91,6 +94,11 @@ app/src/main/java/com/sonance/player/
 
 ### v2.5（2026-11-16）
 
+- **列表序号 / 时长独立开关** —— `hide_list_index` / `hide_list_duration` 两个偏好 + 基线项；设置「外观界面 → 列表外观与索引 → 行内信息」两个 `SettingsSwitchRow`；`SongList` 统一把状态传给所有子列表，关序号时保留正在播放的均衡器动画，关时长后标题可用宽度变宽。
+- **查看歌曲信息** —— 新 `SongInfoSheet`（三段卡片：这首歌 / 文件 / 声音）+ `data/SongInfo.kt`：用 `MediaExtractor` 的 `MediaFormat` 读 MIME、采样率、位深（含 PCM 24bit 数值兼容）、码率、声道，读不到写「未知」；格式化纯函数 + `SongInfoTest`(4)；长按菜单新增入口，行尾收藏胶囊可切状态。全量 **74 组 707 用例**通过。
+- **自定义封面** —— 新 `data/BuiltinCovers.kt`：8 套 Canvas 渲染的「渐变 + 几何母题」封面（与封面墙占位图同一视觉语言），零新增图片资源；封面对话框加内置封面网格 + `GetContent` 选本机图片（缩到 1200px / JPEG 后写盘）；两条路都复用 `CoverCache.storeSelected` 手选封面槽，`ArtworkLoader.loadSelected` 优先读，列表/播放页/通知/小组件自动同步；本地歌额外写回文件标签。
+- **播放页歌词按钮语义对调** —— 胶囊「词」改为封面下方两行（`CoverInlineLyrics`：当前句 15sp/半粗/强调色，下一句 11sp/弱化色，`AnimatedContent` 淡入淡出、固定行高）；`onCoverGesture` 的单击改为切到「封面位置整块歌词」（原行为），双击晕染、长按换封面不变；两处共用 `LyricsRepository`。
+- **扫描范围修正（用户自带改动）** —— `ScanScopeSheet` 改用系统目录选择器并处理无 Activity 机型；`ExternalStoragePaths` 调整 Android 7~10 反射取路径兜底；`MediaRepository` 限定目录时不再跑文件系统直扫；Manifest 加 `OPEN_DOCUMENT_TREE` 查询声明。
 - **桌面歌词（新模块 `desktoplyrics`）** —— `DesktopLyricsManager`：`SYSTEM_ALERT_WINDOW` 悬浮窗（`view_desktop_lyrics.xml` + 4 组 drawable），三种背景 `DesktopLyricsBgMode`（NONE 立体字 / LIGHT 磨砂白 / DARK 磨砂黑）单击循环；自由拖动 + 坐标持久化（`desktopLyricsX/Y`），单击展开迷你播控（上下曲·播暂·背景·字号 14–26sp·锁定·关闭）；锁定态 `FLAG_NOT_TOUCHABLE` 手势完全穿透 + 常驻通知一键解锁；`PlaybackService` 每 250ms 经 `WidgetState.LyricTriplet` 推送逐行歌词与偏移。入口：设置「歌词显示与外观」+ 播放页「更多」半屏面板（新收纳睡眠定时 / DLNA / 桌面歌词）。
 - **歌词键统一** —— `canonicalLyricKey(mediaId, title, artist, revision)` 规范化空白并随歌词修订失效，`matchesSameTrack` 防止换词后悬浮歌词仍挂旧句（`WidgetLyricsSyncTest`）。
 - **TTML / AMLL 逐字歌词** —— `Lyrics.kt` 新增 `.ttml` 解析：`<p begin end>` 行级时间轴、行内 `<span>` 逐字片段（逐字高亮）、`ttm:role="x-translation"` 内嵌翻译并跳过 `x-roman`；时间字符串兼容 `hh:mm:ss.mmm` / `mm:ss.mmm` / `12.345s` / `12345ms` / `hh:mm:ss:ff`。
@@ -102,7 +110,7 @@ app/src/main/java/com/sonance/player/
 - **网易云正式下载接口** —— `NeteaseStream` EAPI 下载三级尝试（PC UA → Android UA → 旧版）+ 档位自动降级（会员不够降到能拿的最高档），失败回落播放流；结果按 `expi` TTL 缓存。
 - **已下载判定 O(1) 化** —— `OnlineFavorites.buildLocalIndex` 曲库扫描后预建标准化哈希索引（无标签 FLAC 按「歌手 - 歌名」文件名兜底），在线列表 / 歌单逐首判定改索引查询；会话内刚下载立即隐藏下载按钮；歌单统计「已下载 / 可下载」。
 - **界面细节** —— 全屏歌词横竖屏分开定标（竖屏原样、横屏按高度等比放大）；播放条滑动关外扩投影 + 圆角裁剪离屏层；列表序号 `tnum` 等宽；在线封面缩略图缓存加大；设置页五分类副标题重写。
-- **测试** —— 新增 `WidgetLyricsSyncTest`(2)，扩充 `OnlineFavoritesTest`；全量 **73 组 703 用例**通过。release 包入库 `releases/山水有清音-v2.5-release.apk`。
+- **测试** —— 新增 `WidgetLyricsSyncTest`(2)，扩充 `OnlineFavoritesTest`；当时全量 73 组 703 用例通过。release 包入库 `releases/山水有清音-v2.5-release.apk`。
 
 ### v2.4（2026-11-15）
 
