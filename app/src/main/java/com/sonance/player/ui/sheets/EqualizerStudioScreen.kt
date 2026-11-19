@@ -1,8 +1,14 @@
 package com.sonance.player.ui.sheets
 
+import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,7 +55,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -64,6 +69,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -78,6 +84,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.playback.AudioOutputRoute
 import com.sonance.player.playback.EQ_BAND_COUNT
@@ -86,20 +93,27 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqPreset
 import com.sonance.player.playback.EqResponse
+import com.sonance.player.playback.PresetIntensity
 import com.sonance.player.playback.SoundFxParams
 import com.sonance.player.playback.SoundPreset
 import com.sonance.player.playback.SoundPresetCategory
 import com.sonance.player.playback.SoundPresets
+import com.sonance.player.playback.TONE_MAX_DB
 import com.sonance.player.playback.effectPreampBudgetDb
 import com.sonance.player.playback.eqAutoPreampDb
 import com.sonance.player.playback.eqBandLabel
 import com.sonance.player.playback.eqDbFromSlider
 import com.sonance.player.playback.presetNetCurve
-import com.sonance.player.ui.components.PillButton
+import com.sonance.player.playback.presetToneBands
+import com.sonance.player.ui.components.GlassActionChip
 import com.sonance.player.ui.components.SonanceSlider
 import com.sonance.player.ui.components.hapticTick
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.Skin
+import com.sonance.player.ui.theme.SonanceTheme
+import com.sonance.player.ui.theme.glassCardBg
+import com.sonance.player.ui.theme.glassCardBorder
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -120,6 +134,72 @@ private enum class PresetFilter(val label: String, val category: SoundPresetCate
     ORIGINAL("原声", SoundPresetCategory.ORIGINAL)
 }
 
+private val StudioBg = Color(0xFF1A090B)
+private val StudioWellBg = Color(0xFF110507)
+private val StudioWellBorder = Color(0xFF3D191D)
+private val StudioCardTop = Color(0xFF2B1215)
+private val StudioCardBottom = Color(0xFF210D10)
+private val StudioHeroTop = Color(0xFF38151A)
+private val StudioHeroBottom = Color(0xFF240E11)
+private val StudioPillBg = Color(0xFF321519)
+private val StudioTrackBg = Color(0xFF451D22)
+private val StudioBorder = Color(0xFF471E22)
+private val StudioBorderStrong = Color(0xFF5E282E)
+private val StudioText = Color(0xFFFAF0EE)
+private val StudioTextDim = Color(0xFFDCC2BF)
+private val StudioTextMuted = Color(0xFFA07E7B)
+private val StudioCrimson = Color(0xFFE03E44)
+private val StudioCoral = Color(0xFFFF6B6B)
+private val StudioCrimsonDark = Color(0xFFC8161D)
+private val StudioOnRed = Color(0xFFFFF7F6)
+private val StudioCrimsonGlow = Color(0x2EE03E44)
+private val StudioChipSelectedBg = Color(0xFF4C161C)
+private val StudioChipSelectedText = Color(0xFFFFD6D8)
+private val StudioGold = Color(0xFFF0B44C)
+private val StudioGoldSoft = Color(0x2EF0B44C)
+
+private val StudioCardBrush = Brush.verticalGradient(listOf(StudioCardTop, StudioCardBottom))
+private val StudioHeroBrush = Brush.verticalGradient(listOf(StudioHeroTop, StudioHeroBottom))
+
+/**
+ * 音效工作室专属中国红丹漆暗金配色：完全独立于应用主题，不跟随浅色/沉浸/高饱和皮肤变化。
+ */
+internal val StudioConsoleSkin = Skin(
+    id = "studio_console",
+    name = "中国红调音台",
+    tagline = "丹漆暗金 · 独立专业调音台配色",
+    isLight = false,
+    bg = StudioBg,
+    surface = Color(0xFF250F12),
+    surface2 = StudioPillBg,
+    surface3 = StudioTrackBg,
+    border = StudioBorder,
+    border2 = StudioBorderStrong,
+    text = StudioText,
+    textDim = StudioTextDim,
+    textMuted = StudioTextMuted,
+    accent = StudioCrimson,
+    accentDim = StudioCrimsonDark,
+    onAccent = StudioOnRed,
+    accentGlow = StudioCrimsonGlow,
+    danger = Color(0xFFFF7A5A),
+    gradients = listOf(listOf(StudioHeroTop, StudioBg)),
+    glass = null,
+    immersive = false
+)
+
+private fun Modifier.studioCardContainer(
+    radius: androidx.compose.ui.unit.Dp = 20.dp,
+    highlighted: Boolean = false
+): Modifier = this
+    .clip(RoundedCornerShape(radius))
+    .background(StudioCardBrush)
+    .border(
+        width = 0.8.dp,
+        color = if (highlighted) StudioCrimson.copy(alpha = 0.45f) else StudioBorder,
+        shape = RoundedCornerShape(radius)
+    )
+
 /**
  * 全屏音效工作室：整合精选音色预设、实时 10 段图形均衡器（竖向混音台/精细滑条双视图）、
  * DSP 空间微调、输出通道自动记忆与伴奏消音。
@@ -129,114 +209,127 @@ fun EqualizerStudioScreen(
     vm: SonanceViewModel,
     onDismiss: () -> Unit
 ) {
-    val skin = LocalSkin.current
+    val outerSkin = LocalSkin.current
+    val view = LocalView.current
     var selectedTab by rememberSaveable { mutableStateOf(StudioTab.PRESETS) }
     var presetFilter by rememberSaveable { mutableStateOf(PresetFilter.ALL) }
     var horizontalEqMode by rememberSaveable { mutableStateOf(false) }
 
     BackHandler(enabled = true) { onDismiss() }
 
-    // 面板销毁时确保退出 A/B 旁通，防止用户按住对比时关闭而停留在原声。
-    DisposableEffect(Unit) {
-        onDispose { vm.setSoundFxBypass(false) }
+    // 面板销毁时确保退出 A/B 旁通，并恢复外层主题对应的状态栏/导航栏明暗。
+    DisposableEffect(outerSkin.isLight) {
+        onDispose {
+            vm.setSoundFxBypass(false)
+            if (!view.isInEditMode) {
+                (view.context as? Activity)?.window?.let { window ->
+                    WindowCompat.getInsetsController(window, view).apply {
+                        isAppearanceLightStatusBars = outerSkin.isLight
+                        isAppearanceLightNavigationBars = outerSkin.isLight
+                    }
+                }
+            }
+        }
     }
 
     val hasAnyProcessing = vm.soundFxEnabled || vm.eqEnabled
     val scrollState = rememberScrollState()
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(skin.bg)
-            // 吸收底层页面点击，避免退出动画或空白区域的点击穿透到底层播放页或曲库列表。
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = {}
-            )
-    ) {
-        // 顶部柔和工作室氛围光晕
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(260.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            skin.accent.copy(alpha = if (skin.isLight) 0.09f else 0.16f),
-                            skin.accentGlow.copy(alpha = if (skin.isLight) 0.04f else 0.06f),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-
+    SonanceTheme(StudioConsoleSkin) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding(),
-            contentAlignment = Alignment.TopCenter
+                .background(StudioBg)
+                // 吸收底层页面点击，避免退出动画或空白区域的点击穿透到底层播放页或曲库列表。
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = {}
+                )
         ) {
-            Column(
+            // 顶部中国红丹漆氛围光晕
+            Box(
                 modifier = Modifier
-                    .widthIn(max = 820.dp)
+                    .fillMaxWidth()
+                    .height(250.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0xFF5C1118).copy(alpha = 0.72f),
+                                Color(0xFF330A0E).copy(alpha = 0.36f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+
+            Box(
+                modifier = Modifier
                     .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+                contentAlignment = Alignment.TopCenter
             ) {
-                StudioTopHeader(
-                    route = vm.currentOutputRoute,
-                    processingActive = hasAnyProcessing,
-                    bypassing = vm.soundFxBypassed,
-                    onBypassHold = { vm.setSoundFxBypass(it) },
-                    onDismiss = onDismiss
-                )
-
-                StudioSegmentedTabs(
-                    selected = selectedTab,
-                    onSelect = { selectedTab = it },
-                    presetsActive = vm.soundFxEnabled && vm.soundPreset.id != SoundPresets.OFF.id,
-                    eqActive = vm.eqEnabled,
-                    fxActive = vm.soundFxEnabled && !vm.soundFxParams.isNeutral,
-                    karaokeActive = vm.karaokeEnabled,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                )
-
                 Column(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .verticalScroll(scrollState)
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 8.dp, bottom = 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .widthIn(max = 820.dp)
+                        .fillMaxSize()
                 ) {
-                    when (selectedTab) {
-                        StudioTab.PRESETS -> PresetsTabContent(
-                            vm = vm,
-                            filter = presetFilter,
-                            onFilterChange = { presetFilter = it }
-                        )
-
-                        StudioTab.EQUALIZER -> EqualizerTabContent(
-                            vm = vm,
-                            horizontalMode = horizontalEqMode,
-                            onToggleMode = { horizontalEqMode = !horizontalEqMode }
-                        )
-
-                        StudioTab.EFFECTS -> EffectsTabContent(vm = vm)
-
-                        StudioTab.KARAOKE -> KaraokeTabContent(vm = vm)
-                    }
-
-                    Text(
-                        text = SoundPreset.ORIGIN_SELF,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = skin.textMuted,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 6.dp)
+                    StudioTopHeader(
+                        route = vm.currentOutputRoute,
+                        processingActive = hasAnyProcessing,
+                        bypassing = vm.soundFxBypassed,
+                        onBypassHold = { vm.setSoundFxBypass(it) },
+                        onDismiss = onDismiss
                     )
+
+                    StudioSegmentedTabs(
+                        selected = selectedTab,
+                        onSelect = { selectedTab = it },
+                        presetsActive = vm.soundFxEnabled && vm.soundPreset.id != SoundPresets.OFF.id,
+                        eqActive = vm.eqEnabled,
+                        fxActive = vm.soundFxEnabled && !vm.soundFxParams.isNeutral,
+                        karaokeActive = vm.karaokeEnabled,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState)
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 8.dp, bottom = 28.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        when (selectedTab) {
+                            StudioTab.PRESETS -> PresetsTabContent(
+                                vm = vm,
+                                filter = presetFilter,
+                                onFilterChange = { presetFilter = it }
+                            )
+
+                            StudioTab.EQUALIZER -> EqualizerTabContent(
+                                vm = vm,
+                                horizontalMode = horizontalEqMode,
+                                onToggleMode = { horizontalEqMode = !horizontalEqMode }
+                            )
+
+                            StudioTab.EFFECTS -> EffectsTabContent(vm = vm)
+
+                            StudioTab.KARAOKE -> KaraokeTabContent(vm = vm)
+                        }
+
+                        Text(
+                            text = SoundPreset.ORIGIN_SELF,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StudioTextMuted,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp)
+                        )
+                    }
                 }
             }
         }
@@ -255,7 +348,6 @@ private fun StudioTopHeader(
     onBypassHold: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val skin = LocalSkin.current
     val context = LocalContext.current
     Row(
         modifier = Modifier
@@ -268,15 +360,15 @@ private fun StudioTopHeader(
             modifier = Modifier
                 .size(38.dp)
                 .clip(CircleShape)
-                .background(skin.surface2.copy(alpha = 0.9f))
-                .border(1.dp, skin.border2, CircleShape)
+                .background(StudioPillBg)
+                .border(0.8.dp, StudioBorder, CircleShape)
                 .clickable(onClick = onDismiss),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = SonanceIcons.ArrowLeft,
                 contentDescription = "返回",
-                tint = skin.text,
+                tint = StudioText,
                 modifier = Modifier.size(18.dp)
             )
         }
@@ -286,7 +378,7 @@ private fun StudioTopHeader(
                 text = "音效工作室",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                color = skin.text,
+                color = StudioText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -300,20 +392,24 @@ private fun StudioTopHeader(
                         .clip(CircleShape)
                         .background(
                             when {
-                                bypassing -> skin.textMuted
-                                processingActive -> skin.accent
-                                else -> skin.textMuted.copy(alpha = 0.55f)
+                                bypassing -> StudioGold
+                                processingActive -> StudioCrimson
+                                else -> StudioTextMuted
                             }
                         )
                 )
                 Text(
                     text = when {
-                        bypassing -> "${route.label} · 正在对比原声"
+                        bypassing -> "${route.label} · 原声对比中"
                         processingActive -> "${route.label} · 软 DSP 实时处理"
                         else -> "${route.label} · 原声直通"
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (bypassing) skin.accent else skin.textMuted,
+                    color = when {
+                        bypassing -> StudioGold
+                        processingActive -> StudioCoral
+                        else -> StudioTextMuted
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -322,23 +418,32 @@ private fun StudioTopHeader(
 
         val abBg by animateColorAsState(
             targetValue = when {
-                bypassing -> skin.accent
-                processingActive -> skin.surface2
-                else -> skin.surface2.copy(alpha = 0.55f)
+                bypassing -> StudioGold
+                processingActive -> Color(0xFF3D141A)
+                else -> Color(0xFF230E11)
             },
             animationSpec = tween(150),
             label = "abHoldBg"
         )
-        Box(
+        val abBorderColor = when {
+            bypassing -> Color(0xFFF7C96E)
+            processingActive -> StudioCrimson.copy(alpha = 0.65f)
+            else -> Color(0xFF3A181C)
+        }
+        val abTextColor = when {
+            bypassing -> Color(0xFF1A090B)
+            processingActive -> StudioText
+            else -> Color(0xFF7D5C5A)
+        }
+        Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(18.dp))
+                .clip(CircleShape)
                 .background(abBg)
                 .border(
-                    width = 1.dp,
-                    color = if (bypassing) skin.accent else skin.border2,
-                    shape = RoundedCornerShape(18.dp)
+                    width = if (processingActive || bypassing) 1.dp else 0.8.dp,
+                    color = abBorderColor,
+                    shape = CircleShape
                 )
-                .alpha(if (processingActive) 1f else 0.45f)
                 .semantics {
                     contentDescription = "按住对比原声"
                     stateDescription = if (bypassing) "当前为原声" else "当前为已处理音效"
@@ -361,13 +466,22 @@ private fun StudioTopHeader(
                     )
                 }
                 .padding(horizontal = 12.dp, vertical = 8.dp),
-            contentAlignment = Alignment.Center
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            if (processingActive && !bypassing) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(StudioCrimson)
+                )
+            }
             Text(
-                text = if (bypassing) "听原声中" else "按住对比",
+                text = if (bypassing) "原声监听中" else "按住对比",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = if (bypassing) skin.onAccent else skin.text
+                color = abTextColor
             )
         }
     }
@@ -383,13 +497,12 @@ private fun StudioSegmentedTabs(
     karaokeActive: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val skin = LocalSkin.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(skin.surface2.copy(alpha = 0.9f))
-            .border(1.dp, skin.border, RoundedCornerShape(16.dp))
+            .background(Color(0xFF140709))
+            .border(0.8.dp, Color(0xFF3A181C), RoundedCornerShape(16.dp))
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -401,19 +514,19 @@ private fun StudioSegmentedTabs(
                 StudioTab.EFFECTS -> fxActive
                 StudioTab.KARAOKE -> karaokeActive
             }
-            val bgColor by animateColorAsState(
-                targetValue = if (isSelected) skin.surface else Color.Transparent,
-                animationSpec = tween(180),
-                label = "tabBg"
-            )
+            val bgBrush = if (isSelected) {
+                Brush.verticalGradient(listOf(Color(0xFF42171D), Color(0xFF311116)))
+            } else {
+                Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
+            }
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(bgColor)
+                    .background(bgBrush)
                     .then(
                         if (isSelected) {
-                            Modifier.border(1.dp, skin.border2, RoundedCornerShape(12.dp))
+                            Modifier.border(0.9.dp, StudioCrimson.copy(alpha = 0.50f), RoundedCornerShape(12.dp))
                         } else {
                             Modifier
                         }
@@ -435,14 +548,14 @@ private fun StudioSegmentedTabs(
                             modifier = Modifier
                                 .size(5.dp)
                                 .clip(CircleShape)
-                                .background(skin.accent)
+                                .background(StudioCrimson)
                         )
                     }
                     Text(
                         text = tab.label,
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isSelected) skin.text else skin.textMuted,
+                        color = if (isSelected) StudioText else StudioTextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -453,7 +566,7 @@ private fun StudioSegmentedTabs(
 }
 
 /* ============================================================
- * 页签 1：音色预设（总览仪表盘 + 输出硬件记忆 + 分类精选卡片）
+ * 页签 1：音色预设（精简监测卡 + 强度切换 + 分类精选网格 + 底部设备/系统协同）
  * ============================================================ */
 
 @Composable
@@ -463,8 +576,6 @@ private fun PresetsTabContent(
     onFilterChange: (PresetFilter) -> Unit
 ) {
     StudioHeroCard(vm = vm)
-    OutputRouteAutoCard(vm = vm)
-    SystemAudioEffectBridgeCard(vm = vm)
     PresetFilterBar(selected = filter, onSelect = onFilterChange)
 
     val presets = remember(filter) {
@@ -490,6 +601,7 @@ private fun PresetsTabContent(
                             (preset.id == SoundPresets.OFF.id || vm.soundFxEnabled)
                         PresetStudioCard(
                             preset = preset,
+                            intensity = vm.presetIntensity,
                             selected = selected,
                             onClick = { vm.chooseSoundPreset(preset) },
                             modifier = Modifier.weight(1f)
@@ -502,12 +614,13 @@ private fun PresetsTabContent(
             }
         }
     }
+
+    OutputRouteAutoCard(vm = vm)
+    SystemAudioEffectBridgeCard(vm = vm)
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun StudioHeroCard(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
     val fxOn = vm.soundFxEnabled
     val eqOn = vm.eqEnabled
     val preset = vm.soundPreset
@@ -526,8 +639,8 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
     val statusBadge = when {
         vm.soundFxBypassed -> "临时旁通"
         vm.soundFxCustom || (eqOn && vm.eqCustom) -> "已微调"
-        !isPurePassThrough -> "工作中"
-        else -> "未开启"
+        !isPurePassThrough -> vm.presetIntensity.label
+        else -> "直通"
     }
 
     val netCurve = remember(vm.eqBands, eqOn, vm.soundFxParams, fxOn) {
@@ -549,27 +662,29 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
         )
     }
 
-    val moduleTags = remember(vm.soundFxParams, fxOn, eqOn) {
-        buildActiveDspTags(vm.soundFxParams, fxOn, eqOn)
+    val ghostCurve = remember(eqOn, fxOn, vm.eqCustom, preset.id, vm.presetIntensity) {
+        if (eqOn && fxOn && vm.eqCustom && preset.id != SoundPresets.OFF.id) {
+            presetNetCurve(preset, 56, intensity = vm.presetIntensity)
+        } else {
+            null
+        }
+    }
+
+    val heroBorder = when {
+        vm.soundFxBypassed -> StudioGold.copy(alpha = 0.60f)
+        !isPurePassThrough -> StudioCrimson.copy(alpha = 0.45f)
+        else -> StudioBorder
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(
-                Brush.verticalGradient(
-                    listOf(skin.surface2, skin.surface)
-                )
-            )
+            .clip(RoundedCornerShape(20.dp))
+            .background(StudioHeroBrush)
             .border(
-                width = 1.dp,
-                color = if (!isPurePassThrough && !vm.soundFxBypassed) {
-                    skin.accent.copy(alpha = 0.45f)
-                } else {
-                    skin.border2
-                },
-                shape = RoundedCornerShape(22.dp)
+                width = if (!isPurePassThrough || vm.soundFxBypassed) 1.dp else 0.8.dp,
+                color = heroBorder,
+                shape = RoundedCornerShape(20.dp)
             )
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -587,27 +702,28 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
                         text = activeTitle,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = skin.text,
+                        color = StudioText,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     StudioTagPill(
                         label = statusBadge,
-                        highlighted = !isPurePassThrough || vm.soundFxBypassed
+                        highlighted = !isPurePassThrough,
+                        bypassing = vm.soundFxBypassed
                     )
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     text = if (isPurePassThrough) {
-                        "保持原始音频帧逐样本无损直出，选择下方音色卡片即可实时调音"
-                    } else if (fxOn && preset.id != SoundPresets.OFF.id) {
-                        preset.description
+                        "无损原始音频直出，选择下方预设即可实时调音"
                     } else {
-                        "当前运行实时均衡与声场处理链路"
+                        "低 ${formatShortDb(toneBands[0])} · 中 ${formatShortDb(toneBands[1])} · 高 ${formatShortDb(toneBands[2])} dB" +
+                            if (fxOn && preset.id != SoundPresets.OFF.id) "  ·  ${preset.character}" else ""
                     },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.textDim,
-                    maxLines = 2,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioTextDim,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -619,37 +735,69 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
             )
         }
 
-        val ghostCurve = remember(eqOn, fxOn, vm.eqCustom, preset.id) {
-            if (eqOn && fxOn && vm.eqCustom && preset.id != SoundPresets.OFF.id) {
-                presetNetCurve(preset, 56)
-            } else {
-                null
-            }
-        }
-
         StudioCurveGraph(
             curve = netCurve,
             ghostCurve = ghostCurve,
-            heightDp = 96f,
+            heightDp = 84f,
             accentActive = !isPurePassThrough && !vm.soundFxBypassed
         )
 
+        // 预设强度三档切换（低 / 中 / 高）
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF140709))
+                .border(0.8.dp, StudioWellBorder, RoundedCornerShape(14.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            ToneMeterPill("低频", toneBands[0], Modifier.weight(1f))
-            ToneMeterPill("中频", toneBands[1], Modifier.weight(1f))
-            ToneMeterPill("高频", toneBands[2], Modifier.weight(1f))
-        }
-
-        if (moduleTags.isNotEmpty()) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                moduleTags.forEach { tag ->
-                    StudioTagPill(label = tag, highlighted = false)
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "预设强度",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = StudioText
+                )
+                Text(
+                    text = vm.presetIntensity.shortDesc,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = StudioTextMuted
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PresetIntensity.entries.forEach { level ->
+                    val on = level == vm.presetIntensity
+                    val pillBrush = if (on) {
+                        Brush.horizontalGradient(listOf(StudioCrimsonDark, StudioCrimson))
+                    } else {
+                        Brush.horizontalGradient(listOf(Color(0xFF281014), Color(0xFF281014)))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(pillBrush)
+                            .border(
+                                width = if (on) 0.dp else 0.7.dp,
+                                color = if (on) Color.Transparent else StudioBorder,
+                                shape = CircleShape
+                            )
+                            .selectable(
+                                selected = on,
+                                role = Role.RadioButton,
+                                onClick = { vm.changePresetIntensity(level) }
+                            )
+                            .padding(horizontal = 14.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = level.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
+                            color = if (on) StudioOnRed else StudioTextDim
+                        )
+                    }
                 }
             }
         }
@@ -658,50 +806,48 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
 
 @Composable
 private fun OutputRouteAutoCard(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
     val route = vm.currentOutputRoute
     val routeIcon = routeIconOf(route)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(skin.surface2.copy(alpha = 0.85f))
-            .border(1.dp, skin.border, RoundedCornerShape(18.dp))
+            .studioCardContainer(radius = 18.dp, highlighted = vm.autoPresetByOutputEnabled)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(skin.accent.copy(alpha = 0.14f)),
+                .size(36.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(StudioChipSelectedBg)
+                .border(0.7.dp, StudioCrimson.copy(alpha = 0.35f), RoundedCornerShape(11.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = routeIcon,
                 contentDescription = null,
-                tint = skin.accent,
-                modifier = Modifier.size(19.dp)
+                tint = StudioCoral,
+                modifier = Modifier.size(18.dp)
             )
         }
         Column(Modifier.weight(1f)) {
             Text(
-                text = "当前输出：${route.label}",
+                text = "输出记忆 · ${route.label}",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
-                color = skin.text
+                color = StudioText
             )
             Text(
                 text = if (vm.autoPresetByOutputEnabled) {
-                    "已启用按输出设备记忆 · 切换耳机/蓝牙/外放自动还原调音"
+                    "已启用 · 切换耳机/蓝牙/外放自动还原各自音效"
                 } else {
-                    "开启后将为不同输出设备分别记住专属音效"
+                    "开启后按输出设备分别记忆专属调音"
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted,
-                maxLines = 2,
+                color = StudioTextMuted,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -724,20 +870,25 @@ internal fun SystemAudioEffectBridgeCard(vm: SonanceViewModel) {
     val context = LocalContext.current
     val hasInternalProcessing = vm.eqEnabled || vm.soundFxEnabled
     val hasPanel = remember(context) { vm.hasDedicatedSystemAudioEffectPanel() }
+    val isConsole = skin.id == StudioConsoleSkin.id
+    val highlighted = vm.systemAudioEffectEnabled && !vm.usbExclusiveEnabled
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(skin.surface2.copy(alpha = 0.85f))
-            .border(
-                width = 1.dp,
-                color = if (vm.systemAudioEffectEnabled && !vm.usbExclusiveEnabled) {
-                    skin.accent.copy(alpha = 0.30f)
+            .then(
+                if (isConsole) {
+                    Modifier.studioCardContainer(radius = 18.dp, highlighted = highlighted)
                 } else {
-                    skin.border
-                },
-                shape = RoundedCornerShape(18.dp)
+                    Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(skin.glassCardBg())
+                        .border(
+                            width = 0.8.dp,
+                            color = skin.glassCardBorder(highlighted = highlighted),
+                            shape = RoundedCornerShape(18.dp)
+                        )
+                }
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -749,16 +900,21 @@ internal fun SystemAudioEffectBridgeCard(vm: SonanceViewModel) {
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(skin.accent.copy(alpha = 0.14f)),
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(if (isConsole) StudioChipSelectedBg else skin.accentGlow)
+                    .then(
+                        if (isConsole) {
+                            Modifier.border(0.7.dp, StudioCrimson.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                        } else Modifier
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = SonanceIcons.Equalizer,
                     contentDescription = null,
-                    tint = skin.accent,
-                    modifier = Modifier.size(19.dp)
+                    tint = if (isConsole) StudioCoral else skin.accent,
+                    modifier = Modifier.size(18.dp)
                 )
             }
             Column(Modifier.weight(1f)) {
@@ -771,13 +927,15 @@ internal fun SystemAudioEffectBridgeCard(vm: SonanceViewModel) {
                 Text(
                     text = when {
                         vm.usbExclusiveEnabled ->
-                            "USB 独占直通模式开启中，音频绕过系统混音与系统音效"
+                            "USB 独占直通开启中，将绕过系统混音与系统音效"
+                        !vm.systemAudioEffectEnabled && hasInternalProcessing ->
+                            "内置调音工作中（已关闭会话级系统音效防叠加）；若控制中心开着全局杜比建议关闭"
                         !vm.systemAudioEffectEnabled ->
-                            "已关闭系统音频会话开放，仅走内置 DSP 或原声直出"
+                            "已关闭本应用系统音频会话接入"
                         hasInternalProcessing ->
-                            "已接入系统音效会话 · 内置音效同时开启会叠加，可一键切为仅用系统音效"
+                            "当前与内置音效同时开启可能重复叠加发闷，建议仅保留一种"
                         else ->
-                            "已向系统开放音频会话 · 手机/平板杜比音效等可正常生效"
+                            "已开放系统音频会话 · 本机杜比全景声 / 音效可生效"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = skin.textMuted,
@@ -796,16 +954,15 @@ internal fun SystemAudioEffectBridgeCard(vm: SonanceViewModel) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            PillButton(
+            GlassActionChip(
                 label = if (hasPanel) "打开系统音效面板" else "前往系统声音设置",
-                onClick = { vm.openSystemAudioEffectPanel(context) },
-                filled = true
+                accent = true,
+                onClick = { vm.openSystemAudioEffectPanel(context) }
             )
             if (hasInternalProcessing) {
-                PillButton(
+                GlassActionChip(
                     label = "仅用系统音效",
-                    onClick = { vm.useSystemAudioEffectOnly() },
-                    filled = false
+                    onClick = { vm.useSystemAudioEffectOnly() }
                 )
             }
         }
@@ -817,7 +974,6 @@ private fun PresetFilterBar(
     selected: PresetFilter,
     onSelect: (PresetFilter) -> Unit
 ) {
-    val skin = LocalSkin.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -825,30 +981,13 @@ private fun PresetFilterBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         PresetFilter.entries.forEach { item ->
-            val isSelected = item == selected
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (isSelected) skin.accent else skin.surface2)
-                    .border(
-                        width = 1.dp,
-                        color = if (isSelected) skin.accent else skin.border,
-                        shape = RoundedCornerShape(20.dp)
-                    )
-                    .selectable(
-                        selected = isSelected,
-                        role = Role.RadioButton,
-                        onClick = { onSelect(item) }
-                    )
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
-            ) {
-                Text(
-                    text = item.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                    color = if (isSelected) skin.onAccent else skin.textDim
-                )
-            }
+            StudioFilterPillChip(
+                label = item.label,
+                selected = item == selected,
+                onClick = { onSelect(item) },
+                horizontalPadding = 14.dp,
+                verticalPadding = 7.dp
+            )
         }
     }
 }
@@ -856,24 +995,27 @@ private fun PresetFilterBar(
 @Composable
 private fun PresetStudioCard(
     preset: SoundPreset,
+    intensity: PresetIntensity,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val skin = LocalSkin.current
-    val previewCurve = remember(preset.id) { presetNetCurve(preset, 32) }
-    val featureLabel = remember(preset.id) { buildPresetSummaryChip(preset) }
+    val previewCurve = remember(preset.id, intensity) {
+        presetNetCurve(preset, 32, intensity = intensity)
+    }
+    val cardBg = if (selected) {
+        Brush.verticalGradient(listOf(Color(0xFF45151B), Color(0xFF2A0E12)))
+    } else {
+        StudioCardBrush
+    }
 
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(
-                if (selected) skin.accent.copy(alpha = if (skin.isLight) 0.12f else 0.16f)
-                else skin.surface2.copy(alpha = 0.85f)
-            )
+            .background(cardBg)
             .border(
-                width = if (selected) 1.4.dp else 1.dp,
-                color = if (selected) skin.accent else skin.border,
+                width = if (selected) 1.2.dp else 0.8.dp,
+                color = if (selected) StudioCrimson else StudioBorder,
                 shape = RoundedCornerShape(18.dp)
             )
             .selectable(
@@ -881,7 +1023,7 @@ private fun PresetStudioCard(
                 role = Role.RadioButton,
                 onClick = onClick
             )
-            .padding(12.dp),
+            .padding(horizontal = 13.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
@@ -893,7 +1035,7 @@ private fun PresetStudioCard(
                 text = preset.name,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = if (selected) skin.accent else skin.text,
+                color = if (selected) StudioOnRed else StudioText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
@@ -901,23 +1043,24 @@ private fun PresetStudioCard(
             if (selected) {
                 Box(
                     modifier = Modifier
-                        .size(18.dp)
+                        .size(17.dp)
                         .clip(CircleShape)
-                        .background(skin.accent),
+                        .background(StudioCrimson),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = SonanceIcons.Check,
                         contentDescription = "已选中",
-                        tint = skin.onAccent,
-                        modifier = Modifier.size(11.dp)
+                        tint = StudioOnRed,
+                        modifier = Modifier.size(10.dp)
                     )
                 }
             } else {
+                val isReference = preset.id == SoundPresets.EXTREME_HIFI.id
                 Text(
-                    text = preset.category.label,
+                    text = if (isReference) "参考" else preset.category.label,
                     style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
+                    color = if (isReference) StudioGold else StudioTextMuted
                 )
             }
         }
@@ -927,21 +1070,13 @@ private fun PresetStudioCard(
             highlighted = selected,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(30.dp)
+                .height(28.dp)
         )
 
         Text(
             text = preset.character,
             style = MaterialTheme.typography.labelSmall,
-            color = if (selected) skin.text else skin.textDim,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Text(
-            text = featureLabel,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (selected) skin.accent else skin.textMuted,
+            color = if (selected) StudioChipSelectedText else StudioTextMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -959,7 +1094,6 @@ private fun EqualizerTabContent(
     horizontalMode: Boolean,
     onToggleMode: () -> Unit
 ) {
-    val skin = LocalSkin.current
     val eqLabel = when {
         vm.eqCustom -> "自定义调音"
         vm.eqFromSoundPreset -> "随预设：${vm.soundPreset.name}"
@@ -979,9 +1113,7 @@ private fun EqualizerTabContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(skin.surface2.copy(alpha = 0.9f))
-            .border(1.dp, skin.border, RoundedCornerShape(20.dp))
+            .studioCardContainer(radius = 20.dp, highlighted = vm.eqEnabled)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -994,12 +1126,12 @@ private fun EqualizerTabContent(
                     text = "10 段图形均衡器",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = skin.text
+                    color = StudioText
                 )
                 Text(
                     text = if (vm.eqEnabled) "$eqLabel · 双击频段标签可单项归零" else "当前已关闭（拖动任一频段自动激活）",
                     style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
+                    color = if (vm.eqEnabled) StudioTextDim else StudioTextMuted
                 )
             }
             StudioSwitch(
@@ -1012,7 +1144,7 @@ private fun EqualizerTabContent(
         StudioCurveGraph(
             curve = curve,
             ghostCurve = null,
-            heightDp = 104f,
+            heightDp = 96f,
             accentActive = vm.eqEnabled
         )
 
@@ -1021,18 +1153,14 @@ private fun EqualizerTabContent(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            PillButton(
+            GlassActionChip(
                 label = if (horizontalMode) "竖向混音台" else "精细横条",
-                onClick = onToggleMode,
-                filled = false,
-                compact = true
+                onClick = onToggleMode
             )
             Spacer(Modifier.weight(1f))
-            PillButton(
+            GlassActionChip(
                 label = "全部归零",
                 onClick = { vm.resetEqBands() },
-                filled = false,
-                compact = true,
                 enabled = vm.eqEnabled || vm.eqBands.any { abs(it) > 0.05f }
             )
         }
@@ -1070,9 +1198,7 @@ private fun EqualizerTabContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(skin.surface2.copy(alpha = 0.85f))
-            .border(1.dp, skin.border, RoundedCornerShape(18.dp))
+            .studioCardContainer(radius = 18.dp)
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -1080,7 +1206,7 @@ private fun EqualizerTabContent(
             text = "曲风快捷曲线",
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
-            color = skin.text
+            color = StudioText
         )
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1090,28 +1216,13 @@ private fun EqualizerTabContent(
                 val isSelected = !vm.eqCustom && !vm.eqFromSoundPreset &&
                     preset == vm.eqPreset &&
                     (preset != EqPreset.OFF || !vm.eqEnabled)
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(if (isSelected) skin.accent else skin.surface3)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) skin.accent else skin.border2,
-                            shape = RoundedCornerShape(20.dp)
-                        )
-                        .selectable(
-                            selected = isSelected,
-                            role = Role.RadioButton,
-                            onClick = { vm.chooseEqPreset(preset) }
-                        )
-                        .padding(horizontal = 13.dp, vertical = 7.dp)
-                ) {
-                    Text(
-                        text = preset.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (isSelected) skin.onAccent else skin.textDim
-                    )
-                }
+                StudioFilterPillChip(
+                    label = preset.label,
+                    selected = isSelected,
+                    onClick = { vm.chooseEqPreset(preset) },
+                    horizontalPadding = 13.dp,
+                    verticalPadding = 7.dp
+                )
             }
         }
     }
@@ -1126,7 +1237,6 @@ private fun VerticalEqMixerBank(
     maxDb: Float,
     onChangeBand: (Int, Float) -> Unit
 ) {
-    val skin = LocalSkin.current
     val context = LocalContext.current
     val span = (maxDb - minDb).coerceAtLeast(0.001f)
 
@@ -1134,8 +1244,8 @@ private fun VerticalEqMixerBank(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(skin.surface.copy(alpha = 0.72f))
-            .border(1.dp, skin.border, RoundedCornerShape(16.dp))
+            .background(StudioWellBg)
+            .border(1.dp, StudioWellBorder, RoundedCornerShape(16.dp))
             .padding(horizontal = 6.dp, vertical = 12.dp)
     ) {
         Row(
@@ -1158,7 +1268,7 @@ private fun VerticalEqMixerBank(
                             fontFamily = FontFamily.Monospace,
                             fontFeatureSettings = "tnum"
                         ),
-                        color = if (active) skin.accent else skin.textMuted,
+                        color = if (active) StudioChipSelectedText else StudioTextMuted,
                         maxLines = 1,
                         softWrap = false,
                         modifier = Modifier
@@ -1238,52 +1348,74 @@ private fun VerticalEqMixerBank(
                             val trackBottom = size.height - padV
                             val trackLen = (trackBottom - trackTop).coerceAtLeast(1f)
                             val trackW = 4.dp.toPx()
-                            val zeroRatio = ((0f - minDb) / span).coerceIn(0f, 1f)
-                            val zeroY = trackBottom - zeroRatio * trackLen
+                            val halfGain = maxOf(abs(minDb), abs(maxDb)) * 0.5f
+
+                            fun yForDb(targetDb: Float): Float {
+                                val r = ((targetDb - minDb) / span).coerceIn(0f, 1f)
+                                return trackBottom - r * trackLen
+                            }
+
+                            val zeroY = yForDb(0f)
                             val thumbY = trackBottom - normalized * trackLen
 
-                            // 中性 0dB 横标与半程参考线
+                            // 调音台刻度横标（±半程细刻 + 0 dB 中线）
+                            listOf(halfGain, -halfGain).forEach { refDb ->
+                                val ry = yForDb(refDb)
+                                drawLine(
+                                    color = Color(0xFF2B1216),
+                                    start = Offset(3.dp.toPx(), ry),
+                                    end = Offset(size.width - 3.dp.toPx(), ry),
+                                    strokeWidth = 0.7.dp.toPx()
+                                )
+                            }
                             drawLine(
-                                color = skin.border2.copy(alpha = 0.7f),
+                                color = Color(0xFF4F2328),
                                 start = Offset(2.dp.toPx(), zeroY),
                                 end = Offset(size.width - 2.dp.toPx(), zeroY),
                                 strokeWidth = 1.dp.toPx()
                             )
 
-                            // 轨道底槽
+                            // 轨道凹槽
                             drawRoundRect(
-                                color = skin.surface3,
+                                color = Color(0xFF2D1317),
                                 topLeft = Offset(cx - trackW / 2f, trackTop),
                                 size = Size(trackW, trackLen),
                                 cornerRadius = CornerRadius(trackW / 2f)
                             )
 
-                            // 0 dB 起点的填充段
+                            // 0 dB 起点的信号能量填充段
                             val fillTop = minOf(zeroY, thumbY)
                             val fillH = abs(thumbY - zeroY)
                             if (fillH > 0.5f) {
+                                val barBrush = if (eqEnabled) {
+                                    Brush.verticalGradient(listOf(StudioCoral, StudioCrimsonDark))
+                                } else {
+                                    Brush.verticalGradient(listOf(Color(0xFF5C383B), Color(0xFF5C383B)))
+                                }
                                 drawRoundRect(
-                                    color = if (eqEnabled) skin.accent else skin.textMuted,
+                                    brush = barBrush,
                                     topLeft = Offset(cx - trackW / 2f, fillTop),
                                     size = Size(trackW, fillH),
                                     cornerRadius = CornerRadius(trackW / 2f)
                                 )
                             }
 
-                            // 推子滑块头
+                            // 精密推子旋钮头（开/关保持丹漆/暖铜金属质感）
                             val thumbR = 6.5.dp.toPx()
+                            if (eqEnabled) {
+                                drawCircle(
+                                    color = StudioCrimson.copy(alpha = 0.26f),
+                                    radius = thumbR + 3.dp.toPx(),
+                                    center = Offset(cx, thumbY)
+                                )
+                            }
                             drawCircle(
-                                color = if (eqEnabled) skin.accent.copy(alpha = 0.24f) else Color.Transparent,
-                                radius = thumbR + 3.dp.toPx(),
-                                center = Offset(cx, thumbY)
-                            )
-                            drawCircle(
-                                color = if (active || eqEnabled) skin.accent else skin.textDim,
+                                color = if (active || eqEnabled) StudioCrimson else Color(0xFF8F6B69),
                                 radius = thumbR,
                                 center = Offset(cx, thumbY)
                             )
                             drawCircle(
-                                color = skin.surface,
+                                color = StudioWellBg,
                                 radius = thumbR * 0.36f,
                                 center = Offset(cx, thumbY)
                             )
@@ -1296,7 +1428,7 @@ private fun VerticalEqMixerBank(
                         text = eqBandLabel(hz),
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                         fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                        color = if (active) skin.text else skin.textMuted,
+                        color = if (active) StudioText else StudioTextDim,
                         maxLines = 1,
                         softWrap = false,
                         modifier = Modifier
@@ -1326,7 +1458,6 @@ private fun HorizontalEqBandRow(
     onDrag: (Float) -> Unit,
     onResetBand: () -> Unit
 ) {
-    val skin = LocalSkin.current
     val span = (maxDb - minDb).coerceAtLeast(0.001f)
     Row(
         modifier = Modifier
@@ -1337,7 +1468,7 @@ private fun HorizontalEqBandRow(
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (highlighted) skin.accent else skin.textMuted,
+            color = if (highlighted) StudioCoral else StudioTextMuted,
             modifier = Modifier
                 .width(36.dp)
                 .clickable(onClick = onResetBand)
@@ -1367,7 +1498,7 @@ private fun HorizontalEqBandRow(
                 fontFamily = FontFamily.Monospace,
                 fontFeatureSettings = "tnum"
             ),
-            color = if (highlighted) skin.accent else skin.textDim,
+            color = if (highlighted) StudioChipSelectedText else StudioTextDim,
             textAlign = TextAlign.End,
             modifier = Modifier
                 .width(44.dp)
@@ -1383,49 +1514,44 @@ private fun HorizontalEqBandRow(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EffectsTabContent(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
     val fx = vm.soundFxParams
 
     // 顶栏状态与一键还原
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(skin.surface2.copy(alpha = 0.9f))
-            .border(1.dp, skin.border, RoundedCornerShape(18.dp))
+            .studioCardContainer(radius = 18.dp, highlighted = vm.soundFxEnabled)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                text = "DSP 声场与保护引擎",
+                text = "DSP 声场与色调引擎",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = skin.text
+                color = StudioText
             )
             Text(
                 text = when {
-                    !vm.soundFxEnabled -> "当前已旁路 · 调节任一参数将自动开启"
+                    !vm.soundFxEnabled -> "当前已旁路 · 调节任一滑杆自动开启"
                     vm.soundFxCustom -> "已基于「${vm.soundPreset.name}」手动微调"
-                    else -> "当前使用「${vm.soundPreset.name}」默认配方"
+                    else -> "当前使用「${vm.soundPreset.name}」· 强度 ${vm.presetIntensity.label}"
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted
+                color = if (vm.soundFxEnabled) StudioTextDim else StudioTextMuted
             )
         }
         if (vm.soundFxCustom) {
-            PillButton(
+            GlassActionChip(
                 label = "还原预设",
                 onClick = {
                     if (vm.soundPreset.id == SoundPresets.OFF.id) {
                         vm.chooseSoundPreset(SoundPresets.OFF)
                     } else {
-                        vm.updateSoundFx(vm.soundPreset.fx)
+                        vm.updateSoundFx(vm.soundPreset.scaled(vm.presetIntensity).second)
                     }
                     vm.showToast("已还原当前预设效果参数")
                 },
-                filled = false,
-                compact = true,
                 modifier = Modifier.padding(end = 8.dp)
             )
         }
@@ -1436,21 +1562,105 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
         )
     }
 
-    // 模块一：低频与扬声器保护
-    FxModuleCard(title = "低频增强与扬声器保护", subtitle = "谐波合成低音 · 物理振膜过载拦截") {
+    // 模块一：Poweramp 式高低音宽搁架与谐波低音
+    FxModuleCard(title = "高低音色调校", subtitle = "双二阶宽搁架滤波 · 低音气垫与空气光泽") {
         FxSliderControl(
-            label = "虚拟低音下潜",
-            hint = "在高通滤波之前提取基频，动态生成二/三次谐波，小单元也能感受到低音弹性",
+            label = "低音气垫（Bass 90Hz）",
+            hint = "整体托起 30~110 Hz 下潜饱满度与弹跳感",
+            value = fx.bassBoostDb,
+            min = -TONE_MAX_DB,
+            max = TONE_MAX_DB,
+            valueLabel = formatDbSigned(fx.bassBoostDb),
+            neutralPoint = 0.5f,
+            onValue = { raw ->
+                val snapped = if (abs(raw) < 0.25f) 0f else raw
+                vm.updateSoundFx(fx.copy(bassBoostDb = snapped))
+            }
+        )
+
+        FxSliderControl(
+            label = "高音通透（Treble 9.5kHz）",
+            hint = "丝滑平托极高频泛音与空气亮度，清澈不刺耳",
+            value = fx.trebleBoostDb,
+            min = -TONE_MAX_DB,
+            max = TONE_MAX_DB,
+            valueLabel = formatDbSigned(fx.trebleBoostDb),
+            neutralPoint = 0.5f,
+            onValue = { raw ->
+                val snapped = if (abs(raw) < 0.25f) 0f else raw
+                vm.updateSoundFx(fx.copy(trebleBoostDb = snapped))
+            }
+        )
+
+        FxSliderControl(
+            label = "虚拟低音谐波",
+            hint = "动态合成二/三次谐波，小耳机与外放也能听清鼓点轮廓",
             value = fx.virtualBass,
             min = 0f,
             max = 1f,
             valueLabel = percent(fx.virtualBass),
             onValue = { vm.updateSoundFx(fx.copy(virtualBass = it)) }
         )
+    }
+
+    // 模块二：双耳声场与空间
+    FxModuleCard(title = "声场定位与空间反射", subtitle = "低音锁相展宽 · BS2B 串扰 · 立体空间反射") {
+        FxSliderControl(
+            label = "立体声宽度",
+            hint = "210 Hz 以下稳固锁定中心，展宽或收束中高频声像",
+            value = fx.stereoWidth,
+            min = 0f,
+            max = 2f,
+            valueLabel = "${percent(fx.stereoWidth)}${if (abs(fx.stereoWidth - 1f) < 0.015f) " · 原宽" else ""}",
+            neutralPoint = 0.5f,
+            onValue = { raw ->
+                val snapped = if (abs(raw - 1f) < 0.025f) 1f else raw
+                vm.updateSoundFx(fx.copy(stereoWidth = snapped))
+            }
+        )
 
         FxSliderControl(
+            label = "双耳交叉馈送（BS2B）",
+            hint = "模拟近场音箱自然串扰，缓解耳机头中压迫感",
+            value = fx.crossfeed,
+            min = 0f,
+            max = 1f,
+            valueLabel = percent(fx.crossfeed),
+            onValue = { vm.updateSoundFx(fx.copy(crossfeed = it)) }
+        )
+
+        FxSliderControl(
+            label = "空间混响湿度",
+            hint = "保留 22 ms 纯净直达人声，营造现场或厅堂空气包围",
+            value = fx.reverbWet,
+            min = 0f,
+            max = 0.6f,
+            valueLabel = percent(fx.reverbWet),
+            onValue = { vm.updateSoundFx(fx.copy(reverbWet = it)) }
+        )
+
+        AnimatedVisibility(
+            visible = fx.reverbWet > 0.005f,
+            enter = expandVertically(tween(180)) + fadeIn(tween(160)),
+            exit = shrinkVertically(tween(150)) + fadeOut(tween(120))
+        ) {
+            FxSliderControl(
+                label = "混响衰减长度",
+                hint = "小值偏紧凑舞台，大值偏空灵厅堂",
+                value = fx.reverbDecay,
+                min = 0f,
+                max = 1f,
+                valueLabel = percent(fx.reverbDecay),
+                onValue = { vm.updateSoundFx(fx.copy(reverbDecay = it)) }
+            )
+        }
+    }
+
+    // 模块三：外放保护与峰值限幅
+    FxModuleCard(title = "外放保护与增益余量", subtitle = "物理护喇叭高通 · 防削波安全保护") {
+        FxSliderControl(
             label = "外放保护高通截止",
-            hint = "切除微型喇叭无法还原的超低频震动防止破音；耳机/Hi-Fi 建议设为关闭",
+            hint = "切除外放易破音的超低频震动；耳机建议保持关闭",
             value = fx.speakerHpfHz,
             min = 0f,
             max = 160f,
@@ -1467,9 +1677,9 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
         ) {
             listOf(
                 0f to "关闭（耳机）",
-                40f to "车载 40Hz",
-                48f to "平板 48Hz",
-                65f to "手机 65Hz"
+                38f to "车载 38Hz",
+                46f to "平板 46Hz",
+                58f to "手机 58Hz"
             ).forEach { (hz, tag) ->
                 val active = (hz == 0f && fx.speakerHpfHz < 20f) ||
                     (hz > 0f && abs(fx.speakerHpfHz - hz) < 2f)
@@ -1480,63 +1690,10 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
                 )
             }
         }
-    }
 
-    // 模块二：双耳声场与空间
-    FxModuleCard(title = "声场定位与空间反射", subtitle = "BS2B 双耳交叉馈送 · 改良 Freeverb") {
-        FxSliderControl(
-            label = "立体声宽度",
-            hint = "210 Hz 以下低频保持锁定单声道稳固中心，仅展宽或收束中高频横向声像",
-            value = fx.stereoWidth,
-            min = 0f,
-            max = 2f,
-            valueLabel = "${percent(fx.stereoWidth)}${if (abs(fx.stereoWidth - 1f) < 0.015f) " · 原宽" else ""}",
-            neutralPoint = 0.5f,
-            onValue = { raw ->
-                val snapped = if (abs(raw - 1f) < 0.025f) 1f else raw
-                vm.updateSoundFx(fx.copy(stereoWidth = snapped))
-            }
-        )
-
-        FxSliderControl(
-            label = "双耳交叉馈送（BS2B）",
-            hint = "模拟近场音箱双耳自然串扰，缓解入耳与头戴耳机的“头中效应”，久听更松弛",
-            value = fx.crossfeed,
-            min = 0f,
-            max = 1f,
-            valueLabel = percent(fx.crossfeed),
-            onValue = { vm.updateSoundFx(fx.copy(crossfeed = it)) }
-        )
-
-        FxSliderControl(
-            label = "空间混响湿度",
-            hint = "自研早期反射与长尾混合比，0% 为纯干声，调大营造现场或厅堂空气感",
-            value = fx.reverbWet,
-            min = 0f,
-            max = 0.6f,
-            valueLabel = percent(fx.reverbWet),
-            onValue = { vm.updateSoundFx(fx.copy(reverbWet = it)) }
-        )
-
-        val decayActive = fx.reverbWet > 0.005f
-        Box(Modifier.alpha(if (decayActive) 1f else 0.55f)) {
-            FxSliderControl(
-                label = "混响衰减长度",
-                hint = if (decayActive) "控制空间余韵散去快慢：小值偏紧凑现场，大值偏空灵厅堂" else "先将上方混响湿度调至大于 0% 后生效",
-                value = fx.reverbDecay,
-                min = 0f,
-                max = 1f,
-                valueLabel = percent(fx.reverbDecay),
-                onValue = { vm.updateSoundFx(fx.copy(reverbDecay = it)) }
-            )
-        }
-    }
-
-    // 模块三：余量控制与峰值限幅
-    FxModuleCard(title = "增益余量与峰值限幅", subtitle = "数字防削波 · 透明软拐点保护") {
         FxSliderControl(
             label = "前置余量补偿（Preamp）",
-            hint = "在 EQ 与效果处理前额外压低输入电平，搭配大增益手调曲线防止数字削顶失真",
+            hint = "手动大幅推高 EQ 后可适当下压防止数字削波",
             value = fx.preampDb,
             min = -12f,
             max = 0f,
@@ -1555,12 +1712,12 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
                 Text(
                     text = "软拐点峰值保护（Limiter）",
                     style = MaterialTheme.typography.labelLarge,
-                    color = skin.text
+                    color = StudioText
                 )
                 Text(
-                    text = "自动软压瞬态高峰值，消除重低音叠加后的爆音破响",
+                    text = "开启外放或超大重低音时建议开启防止爆音",
                     style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
+                    color = StudioTextMuted
                 )
             }
             StudioSwitch(
@@ -1574,7 +1731,7 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
             Spacer(Modifier.height(10.dp))
             FxSliderControl(
                 label = "限幅启动阈值",
-                hint = "瞬态高于此电平开始柔和压缩，日常推荐 -1.0 dB",
+                hint = "高于此电平开始柔和收口，外放推荐 -0.4 dB",
                 value = fx.limiterThresholdDb,
                 min = -12f,
                 max = 0f,
@@ -1592,18 +1749,11 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
 
 @Composable
 private fun KaraokeTabContent(vm: SonanceViewModel) {
-    val skin = LocalSkin.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(skin.surface2.copy(alpha = 0.9f))
-            .border(
-                width = 1.dp,
-                color = if (vm.karaokeEnabled) skin.accent.copy(alpha = 0.5f) else skin.border,
-                shape = RoundedCornerShape(20.dp)
-            )
-            .padding(18.dp),
+            .studioCardContainer(radius = 20.dp, highlighted = vm.karaokeEnabled)
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(
@@ -1613,19 +1763,21 @@ private fun KaraokeTabContent(vm: SonanceViewModel) {
         ) {
             Box(
                 modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(
-                        if (vm.karaokeEnabled) skin.accent.copy(alpha = 0.18f)
-                        else skin.surface3
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(if (vm.karaokeEnabled) StudioChipSelectedBg else StudioPillBg)
+                    .border(
+                        width = 0.7.dp,
+                        color = if (vm.karaokeEnabled) StudioCrimson.copy(alpha = 0.45f) else StudioBorder,
+                        shape = RoundedCornerShape(13.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = SonanceIcons.Mic,
                     contentDescription = null,
-                    tint = if (vm.karaokeEnabled) skin.accent else skin.textDim,
-                    modifier = Modifier.size(22.dp)
+                    tint = if (vm.karaokeEnabled) StudioCoral else StudioTextDim,
+                    modifier = Modifier.size(21.dp)
                 )
             }
             Column(Modifier.weight(1f)) {
@@ -1633,12 +1785,12 @@ private fun KaraokeTabContent(vm: SonanceViewModel) {
                     text = "人声消音 / 伴奏模式",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = skin.text
+                    color = StudioText
                 )
                 Text(
                     text = if (vm.karaokeEnabled) "正在消减中置人声频段，保留两侧乐器伴奏" else "当前保持完整原唱立体声输出",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (vm.karaokeEnabled) skin.accent else skin.textMuted
+                    color = if (vm.karaokeEnabled) StudioChipSelectedText else StudioTextMuted
                 )
             }
         }
@@ -1667,7 +1819,8 @@ private fun KaraokeTabContent(vm: SonanceViewModel) {
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(skin.surface.copy(alpha = 0.7f))
+                .background(StudioWellBg)
+                .border(0.8.dp, StudioWellBorder, RoundedCornerShape(14.dp))
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -1675,14 +1828,14 @@ private fun KaraokeTabContent(vm: SonanceViewModel) {
                 text = "处理原理与说明",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = skin.text
+                color = StudioText
             )
             Text(
                 text = "• 保留超低频贝斯与底鼓重心不空虚，仅对中置人声核心频段做相位相消。\n" +
                     "• 消音效果取决于录音混音时主唱是否居正中，对带有强混响的双声道现场录音残留会略多。\n" +
                     "• 此模式独立于上方的均衡器与音效预设，切回原唱即刻无损还原。",
                 style = MaterialTheme.typography.bodySmall,
-                color = skin.textMuted
+                color = StudioTextMuted
             )
         }
     }
@@ -1699,13 +1852,12 @@ private fun StudioCurveGraph(
     heightDp: Float,
     accentActive: Boolean
 ) {
-    val skin = LocalSkin.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(skin.surface.copy(alpha = 0.75f))
-            .border(1.dp, skin.border, RoundedCornerShape(14.dp))
+            .background(StudioWellBg)
+            .border(1.dp, StudioWellBorder, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Canvas(
@@ -1724,10 +1876,10 @@ private fun StudioCurveGraph(
             listOf(6f, 0f, -6f).forEach { refDb ->
                 val y = yFor(refDb)
                 drawLine(
-                    color = if (refDb == 0f) skin.border2 else skin.border.copy(alpha = 0.55f),
+                    color = if (refDb == 0f) Color(0xFF4F2328) else Color(0xFF301418),
                     start = Offset(0f, y),
                     end = Offset(size.width, y),
-                    strokeWidth = 1.dp.toPx(),
+                    strokeWidth = if (refDb == 0f) 1.dp.toPx() else 0.7.dp.toPx(),
                     pathEffect = if (refDb == 0f) null else dash
                 )
             }
@@ -1737,26 +1889,36 @@ private fun StudioCurveGraph(
                 val ratio = (kotlin.math.ln(hz / 31.0) / kotlin.math.ln(16_000.0 / 31.0)).toFloat()
                 val x = size.width * ratio
                 drawLine(
-                    color = skin.border.copy(alpha = 0.4f),
+                    color = Color(0xFF260F12),
                     start = Offset(x, 0f),
                     end = Offset(x, size.height),
-                    strokeWidth = 0.8.dp.toPx()
+                    strokeWidth = 0.7.dp.toPx()
                 )
             }
 
             val middleY = yFor(0f)
 
+            fun addSmoothSegments(path: Path, samples: FloatArray) {
+                val step = size.width / (samples.size - 1)
+                var prevX = 0f
+                var prevY = yFor(samples[0])
+                path.moveTo(prevX, prevY)
+                for (i in 1 until samples.size) {
+                    val x = i * step
+                    val y = yFor(samples[i])
+                    val midX = (prevX + x) * 0.5f
+                    path.cubicTo(midX, prevY, midX, y, x, y)
+                    prevX = x
+                    prevY = y
+                }
+            }
+
             if (ghostCurve != null && ghostCurve.size >= 2) {
                 val ghostPath = Path()
-                val gStep = size.width / (ghostCurve.size - 1)
-                ghostCurve.forEachIndexed { idx, db ->
-                    val x = idx * gStep
-                    val y = yFor(db)
-                    if (idx == 0) ghostPath.moveTo(x, y) else ghostPath.lineTo(x, y)
-                }
+                addSmoothSegments(ghostPath, ghostCurve)
                 drawPath(
                     path = ghostPath,
-                    color = skin.textMuted.copy(alpha = 0.45f),
+                    color = StudioGold.copy(alpha = 0.48f),
                     style = Stroke(
                         width = 1.3.dp.toPx(),
                         pathEffect = dash,
@@ -1766,37 +1928,56 @@ private fun StudioCurveGraph(
             }
 
             if (curve.size >= 2) {
-                val strokeColor = if (accentActive) skin.accent else skin.textMuted.copy(alpha = 0.65f)
+                val inactiveStroke = Color(0xFF6E4B4E)
                 val line = Path()
-                val fill = Path()
-                val step = size.width / (curve.size - 1)
-                fill.moveTo(0f, middleY)
-                curve.forEachIndexed { i, db ->
-                    val x = i * step
-                    val y = yFor(db)
-                    if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
-                    fill.lineTo(x, y)
+                addSmoothSegments(line, curve)
+                val fill = Path().apply {
+                    addPath(line)
+                    lineTo(size.width, middleY)
+                    lineTo(0f, middleY)
+                    close()
                 }
-                fill.lineTo(size.width, middleY)
-                fill.close()
-                drawPath(
-                    path = fill,
-                    brush = Brush.verticalGradient(
-                        listOf(
-                            strokeColor.copy(alpha = if (accentActive) 0.28f else 0.10f),
-                            Color.Transparent
+                if (accentActive) {
+                    drawPath(
+                        path = fill,
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                StudioCrimson.copy(alpha = 0.28f),
+                                Color.Transparent
+                            )
                         )
                     )
-                )
-                drawPath(
-                    path = line,
-                    color = strokeColor,
-                    style = Stroke(
-                        width = 2.2.dp.toPx(),
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round
+                    drawPath(
+                        path = line,
+                        brush = Brush.horizontalGradient(
+                            listOf(StudioCrimsonDark, StudioCrimson, StudioCoral, StudioGold)
+                        ),
+                        style = Stroke(
+                            width = 2.3.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
                     )
-                )
+                } else {
+                    drawPath(
+                        path = fill,
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                inactiveStroke.copy(alpha = 0.12f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    drawPath(
+                        path = line,
+                        color = inactiveStroke,
+                        style = Stroke(
+                            width = 1.8.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
+                    )
+                }
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -1808,7 +1989,7 @@ private fun StudioCurveGraph(
                 Text(
                     text = freq,
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    color = skin.textMuted
+                    color = if (accentActive) StudioTextDim else StudioTextMuted
                 )
             }
         }
@@ -1821,7 +2002,6 @@ private fun PresetMiniSparkline(
     highlighted: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val skin = LocalSkin.current
     Canvas(modifier = modifier) {
         val minDb = -8f
         val maxDb = 8f
@@ -1831,32 +2011,39 @@ private fun PresetMiniSparkline(
 
         val zeroY = yFor(0f)
         drawLine(
-            color = skin.border2.copy(alpha = 0.55f),
+            color = Color(0xFF3A181C),
             start = Offset(0f, zeroY),
             end = Offset(size.width, zeroY),
-            strokeWidth = 0.8.dp.toPx()
+            strokeWidth = 0.7.dp.toPx()
         )
 
         if (curve.size >= 2) {
             val path = Path()
-            val fill = Path()
             val step = size.width / (curve.size - 1)
-            fill.moveTo(0f, zeroY)
-            curve.forEachIndexed { idx, db ->
+            var prevX = 0f
+            var prevY = yFor(curve[0])
+            path.moveTo(prevX, prevY)
+            for (idx in 1 until curve.size) {
                 val x = idx * step
-                val y = yFor(db)
-                if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                fill.lineTo(x, y)
+                val y = yFor(curve[idx])
+                val midX = (prevX + x) * 0.5f
+                path.cubicTo(midX, prevY, midX, y, x, y)
+                prevX = x
+                prevY = y
             }
-            fill.lineTo(size.width, zeroY)
-            fill.close()
+            val fill = Path().apply {
+                addPath(path)
+                lineTo(size.width, zeroY)
+                lineTo(0f, zeroY)
+                close()
+            }
 
-            val strokeColor = if (highlighted) skin.accent else skin.textDim
+            val strokeColor = if (highlighted) StudioCoral else StudioTextMuted
             drawPath(
                 path = fill,
                 brush = Brush.verticalGradient(
                     listOf(
-                        strokeColor.copy(alpha = if (highlighted) 0.24f else 0.12f),
+                        strokeColor.copy(alpha = if (highlighted) 0.28f else 0.14f),
                         Color.Transparent
                     )
                 )
@@ -1864,63 +2051,8 @@ private fun PresetMiniSparkline(
             drawPath(
                 path = path,
                 color = strokeColor,
-                style = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
-        }
-    }
-}
-
-@Composable
-private fun ToneMeterPill(label: String, db: Float, modifier: Modifier = Modifier) {
-    val skin = LocalSkin.current
-    val norm = ((db + 6f) / 12f).coerceIn(0f, 1f)
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(skin.surface.copy(alpha = 0.72f))
-            .border(1.dp, skin.border, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted
-            )
-            Text(
-                text = formatDbSigned(db),
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontFeatureSettings = "tnum"
-                ),
-                fontWeight = FontWeight.SemiBold,
-                color = if (abs(db) > 0.25f) skin.accent else skin.textDim
-            )
-        }
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(3.dp)
-        ) {
-            val r = CornerRadius(size.height / 2f)
-            drawRoundRect(color = skin.surface3, cornerRadius = r)
-            val center = size.width * 0.5f
-            val target = size.width * norm
-            val startX = minOf(center, target)
-            val width = abs(target - center)
-            if (width > 0.5f) {
-                drawRoundRect(
-                    color = skin.accent,
-                    topLeft = Offset(startX, 0f),
-                    size = Size(width, size.height),
-                    cornerRadius = r
-                )
-            }
         }
     }
 }
@@ -1931,13 +2063,10 @@ private fun FxModuleCard(
     subtitle: String,
     content: @Composable () -> Unit
 ) {
-    val skin = LocalSkin.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(skin.surface2.copy(alpha = 0.9f))
-            .border(1.dp, skin.border, RoundedCornerShape(20.dp))
+            .studioCardContainer(radius = 20.dp)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -1946,12 +2075,12 @@ private fun FxModuleCard(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = skin.text
+                color = StudioText
             )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.textMuted
+                color = StudioTextMuted
             )
         }
         content()
@@ -1969,7 +2098,6 @@ private fun FxSliderControl(
     neutralPoint: Float? = null,
     onValue: (Float) -> Unit
 ) {
-    val skin = LocalSkin.current
     val span = (max - min).coerceAtLeast(0.0001f)
     val fraction = ((value - min) / span).coerceIn(0f, 1f)
     Column(Modifier.fillMaxWidth()) {
@@ -1980,7 +2108,7 @@ private fun FxSliderControl(
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelLarge,
-                color = skin.text
+                color = StudioText
             )
             Spacer(Modifier.weight(1f))
             Text(
@@ -1990,7 +2118,7 @@ private fun FxSliderControl(
                     fontFeatureSettings = "tnum"
                 ),
                 fontWeight = FontWeight.SemiBold,
-                color = skin.accent
+                color = StudioChipSelectedText
             )
         }
         SonanceSlider(
@@ -2015,7 +2143,7 @@ private fun FxSliderControl(
         Text(
             text = hint,
             style = MaterialTheme.typography.labelSmall,
-            color = skin.textMuted
+            color = StudioTextMuted
         )
     }
 }
@@ -2028,14 +2156,13 @@ private fun ModeChoiceTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val skin = LocalSkin.current
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(if (selected) skin.accent else skin.surface)
+            .background(if (selected) StudioChipSelectedBg else StudioPillBg)
             .border(
-                width = 1.dp,
-                color = if (selected) skin.accent else skin.border2,
+                width = if (selected) 1.1.dp else 0.8.dp,
+                color = if (selected) StudioCrimson else StudioBorder,
                 shape = RoundedCornerShape(16.dp)
             )
             .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
@@ -2046,12 +2173,12 @@ private fun ModeChoiceTile(
             text = title,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.Bold,
-            color = if (selected) skin.onAccent else skin.text
+            color = if (selected) StudioOnRed else StudioText
         )
         Text(
             text = subtitle,
             style = MaterialTheme.typography.labelSmall,
-            color = if (selected) skin.onAccent.copy(alpha = 0.85f) else skin.textMuted,
+            color = if (selected) StudioChipSelectedText else StudioTextMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -2059,42 +2186,72 @@ private fun ModeChoiceTile(
 }
 
 @Composable
-private fun StudioMiniFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    val skin = LocalSkin.current
+private fun StudioFilterPillChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    horizontalPadding: androidx.compose.ui.unit.Dp,
+    verticalPadding: androidx.compose.ui.unit.Dp
+) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (selected) skin.accent else skin.surface3)
+            .clip(CircleShape)
+            .background(if (selected) StudioChipSelectedBg else Color(0xFF240E12))
             .border(
-                width = 1.dp,
-                color = if (selected) skin.accent else skin.border2,
-                shape = RoundedCornerShape(16.dp)
+                width = if (selected) 1.dp else 0.8.dp,
+                color = if (selected) StudioCrimson.copy(alpha = 0.82f) else StudioBorder,
+                shape = CircleShape
             )
             .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 5.dp)
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding)
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (selected) skin.onAccent else skin.textDim
+            style = if (verticalPadding <= 5.dp) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) StudioOnRed else StudioTextDim
         )
     }
 }
 
 @Composable
-private fun StudioTagPill(label: String, highlighted: Boolean) {
-    val skin = LocalSkin.current
+private fun StudioMiniFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    StudioFilterPillChip(
+        label = label,
+        selected = selected,
+        onClick = onClick,
+        horizontalPadding = 11.dp,
+        verticalPadding = 5.dp
+    )
+}
+
+@Composable
+private fun StudioTagPill(
+    label: String,
+    highlighted: Boolean,
+    bypassing: Boolean = false
+) {
+    val bg = when {
+        bypassing -> StudioGoldSoft
+        highlighted -> StudioChipSelectedBg
+        else -> StudioPillBg
+    }
+    val fg = when {
+        bypassing -> StudioGold
+        highlighted -> StudioChipSelectedText
+        else -> StudioTextMuted
+    }
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (highlighted) skin.accent.copy(alpha = 0.16f) else skin.surface3)
-            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .clip(CircleShape)
+            .background(bg)
+            .padding(horizontal = 8.dp, vertical = 2.5.dp)
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (highlighted) skin.accent else skin.textDim
+            fontWeight = if (highlighted || bypassing) FontWeight.SemiBold else FontWeight.Medium,
+            color = fg
         )
     }
 }
@@ -2102,6 +2259,17 @@ private fun StudioTagPill(label: String, highlighted: Boolean) {
 @Composable
 private fun StudioSwitch(checked: Boolean, onChange: (Boolean) -> Unit, label: String) {
     val skin = LocalSkin.current
+    val trackBg = when {
+        checked -> skin.accent
+        skin.immersive -> Color.White.copy(alpha = 0.14f)
+        else -> skin.surface2
+    }
+    val trackBorder = when {
+        checked -> skin.accent
+        skin.immersive -> Color.White.copy(alpha = 0.18f)
+        else -> skin.border2
+    }
+    val thumbBg = if (checked) Color.White else skin.textMuted
     Box(
         modifier = Modifier
             .size(width = 48.dp, height = 36.dp)
@@ -2114,7 +2282,8 @@ private fun StudioSwitch(checked: Boolean, onChange: (Boolean) -> Unit, label: S
                 .width(42.dp)
                 .height(24.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(if (checked) skin.accent else skin.surface3),
+                .background(trackBg)
+                .border(0.9.dp, trackBorder, RoundedCornerShape(12.dp)),
             contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
         ) {
             Box(
@@ -2122,7 +2291,7 @@ private fun StudioSwitch(checked: Boolean, onChange: (Boolean) -> Unit, label: S
                     .padding(horizontal = 3.dp)
                     .size(18.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(if (checked) skin.onAccent else skin.textDim)
+                    .background(thumbBg)
             )
         }
     }
@@ -2141,10 +2310,13 @@ private fun computeLiveNetCurve(
 ): FloatArray {
     val safePoints = points.coerceAtLeast(2)
     val bands = if (eqEnabled) eqBands else FloatArray(EQ_BAND_COUNT)
-    val response = EqResponse(bands, 48_000)
+    val bassTone = if (fxEnabled) fxParams.bassBoostDb else 0f
+    val trebleTone = if (fxEnabled) fxParams.trebleBoostDb else 0f
+    val response = EqResponse(bands, 48_000, bassTone, trebleTone)
     val fxBudget = if (fxEnabled) effectPreampBudgetDb(fxParams, channels = 2) else 0f
     val manualPreamp = if (fxEnabled) fxParams.preampDb else 0f
-    val autoTrim = if (eqEnabled) eqAutoPreampDb(response.maxBoostDb() + fxBudget) else -fxBudget
+    val hasTone = fxEnabled && (abs(bassTone) > 0.01f || abs(trebleTone) > 0.01f)
+    val autoTrim = if (eqEnabled || hasTone) eqAutoPreampDb(response.maxBoostDb() + fxBudget) else -fxBudget
     return FloatArray(safePoints) { i ->
         val hz = 31.0 * (16_000.0 / 31.0).pow(i.toDouble() / (safePoints - 1))
         response.dbAt(hz) + autoTrim + manualPreamp
@@ -2158,10 +2330,13 @@ private fun computeLiveToneBands(
     fxEnabled: Boolean
 ): FloatArray {
     val bands = if (eqEnabled) eqBands else FloatArray(EQ_BAND_COUNT)
-    val response = EqResponse(bands, 48_000)
+    val bassTone = if (fxEnabled) fxParams.bassBoostDb else 0f
+    val trebleTone = if (fxEnabled) fxParams.trebleBoostDb else 0f
+    val response = EqResponse(bands, 48_000, bassTone, trebleTone)
     val fxBudget = if (fxEnabled) effectPreampBudgetDb(fxParams, channels = 2) else 0f
     val manualPreamp = if (fxEnabled) fxParams.preampDb else 0f
-    val trim = if (eqEnabled) eqAutoPreampDb(response.maxBoostDb() + fxBudget) else -fxBudget
+    val hasTone = fxEnabled && (abs(bassTone) > 0.01f || abs(trebleTone) > 0.01f)
+    val trim = if (eqEnabled || hasTone) eqAutoPreampDb(response.maxBoostDb() + fxBudget) else -fxBudget
     fun avg(vararg hz: Double): Float {
         var sum = 0.0
         for (frequency in hz) sum += response.dbAt(frequency)
@@ -2172,35 +2347,6 @@ private fun computeLiveToneBands(
         avg(250.0, 500.0, 1000.0, 2000.0),
         avg(4000.0, 8000.0, 16000.0)
     )
-}
-
-private fun buildActiveDspTags(
-    fx: SoundFxParams,
-    fxEnabled: Boolean,
-    eqEnabled: Boolean
-): List<String> = buildList {
-    if (eqEnabled) add("10 段均衡器")
-    if (fxEnabled) {
-        if (fx.virtualBass > 0.01f) add("虚拟低音 ${percent(fx.virtualBass)}")
-        if (fx.speakerHpfHz >= 20f) add("外放高通 ${fx.speakerHpfHz.roundToInt()}Hz")
-        if (fx.crossfeed > 0.01f) add("BS2B ${percent(fx.crossfeed)}")
-        if (abs(fx.stereoWidth - 1f) > 0.015f) add("声场 ${percent(fx.stereoWidth)}")
-        if (fx.reverbWet > 0.01f) add("混响 ${percent(fx.reverbWet)}")
-        if (fx.limiter) add("峰值保护")
-    }
-}
-
-private fun buildPresetSummaryChip(preset: SoundPreset): String {
-    if (preset.id == SoundPresets.OFF.id) return "逐样本直通"
-    val p = preset.fx
-    val parts = buildList {
-        if (p.speakerHpfHz >= 20f) add("高通 ${p.speakerHpfHz.roundToInt()}Hz")
-        if (p.crossfeed > 0.01f) add("BS2B")
-        if (p.virtualBass > 0.01f) add("谐波低音")
-        if (p.reverbWet > 0.01f) add("空间反射")
-        if (abs(p.stereoWidth - 1f) > 0.015f) add("声场${if (p.stereoWidth > 1f) "+" else ""}${((p.stereoWidth - 1f) * 100f).roundToInt()}%")
-    }
-    return if (parts.isEmpty()) "零染色 · 净空解析" else parts.take(2).joinToString(" · ")
 }
 
 private fun routeIconOf(route: AudioOutputRoute): ImageVector = when (route) {

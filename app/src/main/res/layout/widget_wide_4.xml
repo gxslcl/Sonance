@@ -7,7 +7,8 @@
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/transparent">
+    android:background="@drawable/widget_clip_bg_dark"
+    android:clipToOutline="true">
 
     <ImageView
         android:id="@+id/widget_bg_img"
@@ -22,7 +23,10 @@
         android:layout_height="match_parent"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="12dp">
+        android:paddingStart="13dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="17dp">
 
         <ImageView
             android:id="@+id/widget_cover"
@@ -131,20 +135,21 @@
 
                     <ImageView
                         android:id="@+id/widget_fav"
-                        android:layout_width="24dp"
-                        android:layout_height="24dp"
+                        android:layout_width="34dp"
+                        android:layout_height="34dp"
                         android:background="@drawable/widget_btn_ripple"
                         android:contentDescription="@string/widget_fav_desc"
+                        android:padding="5dp"
                         android:scaleType="fitCenter"
                         android:src="@drawable/widget_ic_heart_outline" />
 
                     <ImageView
                         android:id="@+id/widget_lyric_toggle"
-                        android:layout_width="24dp"
-                        android:layout_height="24dp"
-                        android:layout_marginStart="2dp"
+                        android:layout_width="34dp"
+                        android:layout_height="34dp"
                         android:background="@drawable/widget_btn_ripple"
                         android:contentDescription="@string/widget_lyric_desc"
+                        android:padding="5dp"
                         android:scaleType="fitCenter"
                         android:src="@drawable/widget_ic_lyric" />
                 </LinearLayout>
@@ -192,16 +197,18 @@
                 android:id="@+id/widget_controls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
+                android:layout_marginTop="3dp"
                 android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:orientation="horizontal"
+                android:paddingEnd="2dp">
 
                 <ImageView
                     android:id="@+id/widget_mode"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_mode_desc"
+                    android:padding="4dp"
                     android:scaleType="fitCenter"
                     android:src="@drawable/widget_ic_mode_shuffle" />
 
@@ -212,10 +219,11 @@
 
                 <ImageView
                     android:id="@+id/widget_prev"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_prev_desc"
+                    android:padding="4dp"
                     android:scaleType="fitCenter"
                     android:src="@drawable/widget_ic_prev" />
 
@@ -226,10 +234,11 @@
 
                 <ImageView
                     android:id="@+id/widget_play"
-                    android:layout_width="34dp"
-                    android:layout_height="34dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_play_desc"
+                    android:padding="3dp"
                     android:scaleType="fitCenter"
                     android:src="@drawable/widget_ic_play" />
 
@@ -240,10 +249,11 @@
 
                 <ImageView
                     android:id="@+id/widget_next"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
                     android:background="@drawable/widget_btn_ripple"
                     android:contentDescription="@string/widget_next_desc"
+                    android:padding="4dp"
                     android:scaleType="fitCenter"
                     android:src="@drawable/widget_ic_next" />
 
@@ -254,7 +264,7 @@
 
                 <TextView
                     android:id="@id/widget_hq_badge"
-                    android:layout_width="24dp"
+                    android:layout_width="22dp"
                     android:layout_height="wrap_content"
                     android:fontFamily="sans-serif-medium"
                     android:gravity="center"

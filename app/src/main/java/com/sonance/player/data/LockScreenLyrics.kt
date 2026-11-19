@@ -22,35 +22,66 @@ import org.json.JSONObject
  */
 object LockScreenLyrics {
 
-    /** 写进 `MediaMetadata` extras 的键名，**不能改** —— 这是系统认的名字 */
+    /** 写进 `MediaMetadata` extras 的键名，**不能改** —— ColorOS / OPlus 系统认这个名字 */
     const val EXTRA_KEY = "lyricInfo"
+
+    /** vivo OriginOS（原子随身听 / JoviInCar / 原子通道）读取的整段 LRC 歌词键名 */
+    const val EXTRA_KEY_VIVO_WHOLE = "ucar.media.metadata.LYRICS_WHOLE"
+
+    /** 通用系统 / 车载 / 第三方状态栏歌词扩展键 */
+    const val EXTRA_KEY_GENERIC_LYRIC = "android.media.metadata.LYRIC"
 
     /** 诊断用：系统/桥接模块看到这个字段就知道歌词是谁写的 */
     private const val PROVIDER = "com.sonance.player"
 
     /**
-     * 组装 `lyricInfo` JSON。
-     *
-     * @param lyrics 解析好的歌词；null 或没有时间轴时按"无歌词"发布
-     *   （`noLyric = true`）—— 这样系统不会去猜、也不会沿用上一首的残留。
-     * @param generation 真实换曲时递增的代次
+     * 从已解析歌词（或纯时间轴行列表）构建标准 `[mm:ss.SSS]` 逐行 LRC 字符串，
+     * 供 ColorOS `lyricInfo` 与 vivo 原子随身听 `ucar.media.metadata.LYRICS_WHOLE` 共用。
      */
+    fun toLrcText(lyrics: Lyrics?): String? {
+        val synced = (lyrics as? Lyrics.Synced)?.lines?.filter { it.text.isNotBlank() }
+        return synced?.takeIf { it.isNotEmpty() }?.let { toLrc(it) }
+    }
+
+    fun toLrcText(lines: List<LyricLine>): String? {
+        val cleaned = lines.filter { it.text.isNotBlank() }
+        return if (cleaned.isEmpty()) null else toLrc(cleaned)
+    }
+
     fun buildJson(
         song: Song,
         lyrics: Lyrics?,
         generation: Int
     ): String {
-        val synced = (lyrics as? Lyrics.Synced)?.lines?.filter { it.text.isNotBlank() }
-        val lrc = synced?.takeIf { it.isNotEmpty() }?.let { toLrc(it) }
+        val lrc = toLrcText(lyrics)
+        return buildJsonFromLrc(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            durationMs = song.durationMs,
+            lrc = lrc,
+            generation = generation
+        )
+    }
 
+    fun buildJsonFromLrc(
+        songId: Long,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Long,
+        lrc: String?,
+        generation: Int
+    ): String {
         return JSONObject().apply {
-            put("songName", song.title)
-            put("artist", song.artist)
-            if (song.album.isNotBlank()) put("album", song.album)
-            put("songId", song.id.toString())
+            put("songName", title)
+            put("artist", artist)
+            if (album.isNotBlank()) put("album", album)
+            put("songId", songId.toString())
             // 0 = 标准时间轴
             put("lyricType", 0)
-            if (lrc != null) {
+            if (!lrc.isNullOrBlank()) {
                 put("lyric", lrc)
                 put("noLyric", false)
             } else {
@@ -59,7 +90,7 @@ object LockScreenLyrics {
             put("provider", PROVIDER)
             put("source", "$PROVIDER-v1")
             // 稳定性键：同一会话里用它拒绝过期 payload
-            put("trackKey", "${song.id}|${song.title}|${song.artist}|${song.durationMs / 1000}")
+            put("trackKey", "${songId}|${title}|${artist}|${durationMs / 1000}")
             put("sessionGeneration", generation)
         }.toString()
     }

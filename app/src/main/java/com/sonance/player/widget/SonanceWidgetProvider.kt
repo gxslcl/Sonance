@@ -185,6 +185,17 @@ abstract class SonanceWidgetProvider internal constructor(
     private val style: WidgetStyle
 ) : AppWidgetProvider() {
 
+    override fun onEnabled(context: Context) {
+        super.onEnabled(context)
+        SonanceWidgets.invalidateWidgetPresence(true)
+        com.sonance.player.playback.PlaybackService.wakePlaybackTicker()
+    }
+
+    override fun onDisabled(context: Context) {
+        super.onDisabled(context)
+        SonanceWidgets.invalidateWidgetPresence(false)
+    }
+
     override fun onUpdate(
         context: Context,
         appWidgetManager: AppWidgetManager,
@@ -193,7 +204,9 @@ abstract class SonanceWidgetProvider internal constructor(
         val pending = goAsync()
         val app = context.applicationContext
         val ids = appWidgetIds.copyOf()
+        SonanceWidgets.invalidateWidgetPresence(if (ids.isNotEmpty()) true else null)
         com.sonance.player.playback.PlaybackService.refreshLyricsIfEmpty()
+        com.sonance.player.playback.PlaybackService.wakePlaybackTicker()
         Thread {
             try {
                 ids.forEach { WidgetRenderer.render(app, appWidgetManager, it, style) }
@@ -221,7 +234,9 @@ abstract class SonanceWidgetProvider internal constructor(
     }
 
     override fun onDeleted(context: Context, appWidgetIds: IntArray) {
-        WidgetState.clearWidget(context.applicationContext, appWidgetIds)
+        val app = context.applicationContext
+        WidgetState.clearWidget(app, appWidgetIds)
+        SonanceWidgets.invalidateWidgetPresence(null)
         super.onDeleted(context, appWidgetIds)
     }
 }
@@ -249,9 +264,19 @@ object SonanceWidgets {
         Thread(runnable, "sonance-widget-render").apply { isDaemon = true }
     }
 
+    @Volatile
+    private var cachedHasWidgets: Boolean? = null
+
+    fun invalidateWidgetPresence(known: Boolean? = null) {
+        cachedHasWidgets = known
+    }
+
     fun hasAnyWidgets(context: Context): Boolean {
-        val manager = AppWidgetManager.getInstance(context) ?: return false
-        return WidgetStyle.entries.any { widgetIds(manager, context, it).isNotEmpty() }
+        cachedHasWidgets?.let { return it }
+        val app = context.applicationContext
+        val manager = AppWidgetManager.getInstance(app) ?: return false
+        return WidgetStyle.entries.any { widgetIds(manager, app, it).isNotEmpty() }
+            .also { cachedHasWidgets = it }
     }
 
     fun onPlaybackChanged(
@@ -262,7 +287,8 @@ object SonanceWidgets {
         isPlaying: Boolean,
         albumId: Long,
         sourceUri: String?,
-        coverKey: String?
+        coverKey: String?,
+        refreshUi: Boolean = true
     ) {
         val app = context.applicationContext
         val previous = WidgetState.read(app)
@@ -287,9 +313,11 @@ object SonanceWidgets {
             colorAccent = previous.colorAccent,
             colorOnAccent = previous.colorOnAccent
         )
-        if (!WidgetState.write(app, snap)) return
+        val changed = WidgetState.write(app, snap)
         if (!snap.sameArtwork(previous)) WidgetCover.clear()
-        renderExecutor.execute { refreshAll(app) }
+        if (refreshUi && changed && hasAnyWidgets(app)) {
+            renderExecutor.execute { refreshAll(app) }
+        }
     }
 
     fun onFavoriteOrModeChanged(context: Context) {
@@ -299,7 +327,7 @@ object SonanceWidgets {
         val isFav = previous.mediaId != 0L && prefs.isAnyFavoriteId(previous.mediaId)
         val mode = prefs.playMode.ifBlank { "REPEAT_ALL" }
         WidgetState.write(app, previous.copy(isFavorite = isFav, playMode = mode))
-        renderExecutor.execute { refreshAll(app) }
+        if (hasAnyWidgets(app)) renderExecutor.execute { refreshAll(app) }
     }
 
     fun onTick(
@@ -310,7 +338,7 @@ object SonanceWidgets {
     ) {
         val app = context.applicationContext
         if (!WidgetState.writeLive(app, positionMs, durationMs, lyric)) return
-        renderExecutor.execute { refreshLive(app) }
+        if (hasAnyWidgets(app)) renderExecutor.execute { refreshLive(app) }
     }
 
     fun onSkinChanged(
@@ -324,14 +352,14 @@ object SonanceWidgets {
         val app = context.applicationContext
         WidgetState.writeSkin(app, bg, text, textDim, accent, onAccent)
         WidgetRenderer.clearDecorCache()
-        renderExecutor.execute { refreshAll(app) }
+        if (hasAnyWidgets(app)) renderExecutor.execute { refreshAll(app) }
     }
 
     fun onAppearanceChanged(context: Context, appearance: WidgetAppearance) {
         val app = context.applicationContext
         WidgetState.writeAppearance(app, appearance)
         WidgetRenderer.clearDecorCache()
-        renderExecutor.execute { refreshAll(app) }
+        if (hasAnyWidgets(app)) renderExecutor.execute { refreshAll(app) }
     }
 
     /** 完整重画所有已放置的小组件（同步版本，调用方负责不在主线程上跑） */
@@ -435,23 +463,27 @@ internal object WidgetRenderer {
 
     fun clearDecorCache() = decorCache.evictAll()
 
-    fun resolveIsLight(context: Context): Boolean {
+    fun resolveAppearanceStyle(context: Context): Pair<Boolean, Boolean> {
         return when (WidgetState.readAppearance(context)) {
-            WidgetAppearance.DARK -> false
-            WidgetAppearance.LIGHT -> true
+            WidgetAppearance.DARK -> false to false
+            WidgetAppearance.LIGHT -> true to false
+            WidgetAppearance.LIQUID_GLASS -> false to true
             WidgetAppearance.FOLLOW_SKIN -> {
                 val skinId = Prefs(context).skinId
-                runCatching { Skins.byId(skinId).isLight }.getOrDefault(false)
+                val isLight = runCatching { Skins.byId(skinId).isLight }.getOrDefault(false)
+                isLight to false
             }
         }
     }
+
+    fun resolveIsLight(context: Context): Boolean = resolveAppearanceStyle(context).first
 
     fun resolveCurrentPalette(
         context: Context,
         snap: WidgetState.Snapshot,
         extractIfMissing: Boolean
     ): WidgetAuraPalette {
-        val isLight = resolveIsLight(context)
+        val (isLight, isLiquidGlass) = resolveAppearanceStyle(context)
         val sig = WidgetState.artworkSignature(snap)
         val (hit, savedRgb) = WidgetState.readExtractedRgb(context, sig)
         val rawRgb = when {
@@ -460,7 +492,7 @@ internal object WidgetRenderer {
             extractIfMissing -> WidgetCover.extractRawRgb(context, snap)
             else -> null
         }
-        return WidgetAuraPalette.fromRgb(rawRgb, isLight)
+        return WidgetAuraPalette.fromRgb(rawRgb, isLight = isLight, isLiquidGlass = isLiquidGlass)
     }
 
     fun render(
@@ -473,7 +505,7 @@ internal object WidgetRenderer {
         val snap = WidgetState.read(context)
         val live = WidgetState.readLive(context)
         val prefs = Prefs(context)
-        val isLight = resolveIsLight(context)
+        val (isLight, isLiquidGlass) = resolveAppearanceStyle(context)
         val lyricOn = style.supportsLyricToggle && WidgetState.isLyricOn(context, widgetId)
         val views = RemoteViews(context.packageName, style.layoutId)
 
@@ -493,7 +525,11 @@ internal object WidgetRenderer {
         } else 0
 
         // ---- 1. 封面解码（仅读一次） + 克制莫兰迪配色提取 ----
-        val coverStroke = if (isLight) 0x1A151822 else 0x26FFFFFF
+        val coverStroke = when {
+            isLiquidGlass -> 0x33FFFFFF
+            isLight -> 0x1A151822
+            else -> 0x26FFFFFF
+        }
         val coverBundle = if (style.showCover) {
             WidgetCover.loadRoundedCover(context, snap, coverTargetPx, style.coverRadiusRatio, coverStroke)
         } else null
@@ -502,8 +538,17 @@ internal object WidgetRenderer {
             coverBundle != null -> coverBundle.rawRgb
             else -> WidgetCover.extractRawRgb(context, snap)
         }
-        val palette = WidgetAuraPalette.fromRgb(rawRgb, isLight)
+        val palette = WidgetAuraPalette.fromRgb(rawRgb, isLight = isLight, isLiquidGlass = isLiquidGlass)
 
+        views.setInt(
+            R.id.widget_root,
+            "setBackgroundResource",
+            when {
+                isLiquidGlass -> R.drawable.widget_clip_bg_glass
+                isLight -> R.drawable.widget_clip_bg_light
+                else -> R.drawable.widget_clip_bg_dark
+            }
+        )
         views.setImageViewBitmap(R.id.widget_bg_img, renderAuraBackground(palette, widthDp, heightDp))
 
         if (style.showCover) {
@@ -740,71 +785,112 @@ internal object WidgetRenderer {
         )
     }
 
+    private val frostedGrainBitmap: Bitmap by lazy {
+        val size = 64
+        val pixels = IntArray(size * size)
+        var seed = 0x517CC1B7
+        for (i in pixels.indices) {
+            seed = seed * 1664525 + 1013904223
+            val v = (seed ushr 24) and 0xFF
+            // 细微黑白雾面散射颗粒，营造重度磨砂液态玻璃的雾度层次
+            pixels[i] = if ((seed and 1) == 0) {
+                val a = (6 + (v % 13))
+                (a shl 24) or 0x00FFFFFF
+            } else {
+                val a = (5 + (v % 10))
+                a shl 24
+            }
+        }
+        Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
+    }
+
     /**
-     * STYLE A 克制莫兰迪磨砂底图：
-     * - 低饱和斜向烟熏/白磨砂底色；
-     * - 左上仅叠加极其收敛的 14~17% 封面色调辉光；
-     * - 顶沿内侧微弱高光 + 1dp 玻璃描边，确保不喧宾夺主且与任何壁纸自然融入。
+     * STYLE A 克制莫兰迪磨砂 / 苹果风液态玻璃底图：
+     * - 常规深色/浅色：低饱和斜向烟熏/白磨砂底色 + 收敛辉光 + 顶沿柔光；
+     * - 液态玻璃：半透明雾面基底（透出桌面壁纸）+ 广域高模糊漫射光晕 + 弧面斜向折射高光 + 磨砂雾粒层，无任何硬边框。
      */
     private fun renderAuraBackground(palette: WidgetAuraPalette, widthDp: Int, heightDp: Int): Bitmap {
         val maxSide = maxOf(widthDp, heightDp).coerceAtLeast(1)
-        val scale = minOf(1.5f, WidgetSizing.MAX_BG_W_PX.toFloat() / maxSide.toFloat())
-        val wPx = (widthDp * scale).toInt().coerceIn(120, WidgetSizing.MAX_BG_W_PX)
-        val hPx = (heightDp * scale).toInt().coerceIn(64, WidgetSizing.MAX_BG_H_PX)
-        val key = "bg_a|${palette.isLight}|${palette.bgTopLeft}|${palette.bgBottomRight}|$wPx|$hPx"
+        val scale = minOf(2.0f, WidgetSizing.MAX_BG_W_PX.toFloat() / maxSide.toFloat())
+        val wPx = (widthDp * scale).toInt().coerceIn(144, WidgetSizing.MAX_BG_W_PX)
+        val hPx = (heightDp * scale).toInt().coerceIn(80, WidgetSizing.MAX_BG_H_PX)
+        val key = "bg_noborder|${palette.isLiquidGlass}|${palette.isLight}|${palette.bgTopLeft}|${palette.bgBottomRight}|$wPx|$hPx"
         decorCache.get(key)?.let { return it }
 
         val out = Bitmap.createBitmap(wPx, hPx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
-        val radius = (22f * scale).coerceAtMost(minOf(wPx, hPx) * 0.44f)
-        val inset = 0.75f * scale
-        val rect = RectF(inset, inset, wPx - inset, hPx - inset)
+        val fullW = wPx.toFloat()
+        val fullH = hPx.toFloat()
 
         val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
-                0f, 0f, wPx.toFloat(), hPx.toFloat(),
+                0f, 0f, fullW, fullH,
                 intArrayOf(palette.bgTopLeft, palette.bgMid, palette.bgBottomRight),
                 floatArrayOf(0f, 0.54f, 1f),
                 Shader.TileMode.CLAMP
             )
         }
-        canvas.drawRoundRect(rect, radius, radius, basePaint)
+        canvas.drawRect(0f, 0f, fullW, fullH, basePaint)
 
-        // 左上微弱冷暖辉光（不铺满整卡，仅做封面衬托）
+        val glow1Radius = if (palette.isLiquidGlass) maxOf(fullW, fullH) * 1.15f else maxOf(fullW, fullH) * 0.72f
         val glow1 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = RadialGradient(
-                wPx * 0.18f, hPx * 0.24f, maxOf(wPx, hPx) * 0.72f,
+                fullW * 0.18f, fullH * 0.24f, glow1Radius,
                 palette.glowTopLeft, 0x00000000, Shader.TileMode.CLAMP
             )
         }
-        canvas.drawRoundRect(rect, radius, radius, glow1)
+        canvas.drawRect(0f, 0f, fullW, fullH, glow1)
 
         if (Color.alpha(palette.glowBottomRight) > 0) {
+            val glow2Radius = if (palette.isLiquidGlass) maxOf(fullW, fullH) * 1.05f else maxOf(fullW, fullH) * 0.64f
             val glow2 = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 shader = RadialGradient(
-                    wPx * 0.88f, hPx * 0.82f, maxOf(wPx, hPx) * 0.64f,
+                    fullW * 0.86f, fullH * 0.80f, glow2Radius,
                     palette.glowBottomRight, 0x00000000, Shader.TileMode.CLAMP
                 )
             }
-            canvas.drawRoundRect(rect, radius, radius, glow2)
+            canvas.drawRect(0f, 0f, fullW, fullH, glow2)
         }
 
-        // 顶部柔和微光边（类似磨砂玻璃上缘反光）
-        val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, 0f, hPx * 0.18f,
-                palette.topSheen and 0x44FFFFFF, 0x00000000, Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRoundRect(rect, radius, radius, sheenPaint)
+        if (palette.isLiquidGlass) {
+            // 苹果液态玻璃标志：高模糊雾面弥散 + 对角空气折射柔光 + 弧面顶部柔光衰减
+            val causticPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, fullW * 0.85f, fullH,
+                    intArrayOf(0x34FFFFFF, 0x18FFFFFF, 0x00FFFFFF, 0x22FFFFFF),
+                    floatArrayOf(0f, 0.30f, 0.68f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(0f, 0f, fullW, fullH, causticPaint)
 
-        // 外沿 1dp 内敛玻璃描边
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = maxOf(1f, 1f * scale)
-            color = palette.borderColor
+            val topGlassSheen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, 0f, fullH * 0.34f,
+                    intArrayOf(palette.topSheen, palette.topSheen and 0x22FFFFFF, 0x00000000),
+                    floatArrayOf(0f, 0.38f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(0f, 0f, fullW, fullH * 0.34f, topGlassSheen)
+
+            val grainPaint = Paint().apply {
+                shader = android.graphics.BitmapShader(
+                    frostedGrainBitmap,
+                    Shader.TileMode.REPEAT,
+                    Shader.TileMode.REPEAT
+                )
+            }
+            canvas.drawRect(0f, 0f, fullW, fullH, grainPaint)
+        } else {
+            val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, 0f, fullH * 0.18f,
+                    palette.topSheen and 0x44FFFFFF, 0x00000000, Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(0f, 0f, fullW, fullH * 0.20f, sheenPaint)
         }
-        canvas.drawRoundRect(rect, radius, radius, borderPaint)
 
         decorCache.put(key, out)
         return out

@@ -88,6 +88,12 @@
         android:theme="@style/Theme.Sonance"
         tools:targetApi="35">
 
+        <!-- ColorOS / OPlus 部分版本会过滤未登记播放器的媒体历史，导致锁屏歌词入口不出现。
+             这是社区协议里的可选 opt-in：只影响媒体历史策略，不伪装包名、不申请权限。 -->
+        <meta-data
+            android:name="io.github.andrealtb.lockscreenlyrics.OPLUS_MEDIA_HISTORY"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -142,7 +148,9 @@
             android:exported="true"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
+                <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="androidx.media3.session.MediaSessionService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
 

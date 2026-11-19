@@ -1796,15 +1796,18 @@ fun decodeSongsFromJson(json: String): List<Song> {
     val arr = JSONArray(json)
     val out = ArrayList<Song>(arr.length())
     for (i in 0 until arr.length()) {
-        val o = arr.getJSONObject(i)
+        val o = arr.optJSONObject(i) ?: continue
+        if (!o.has("id")) continue
+        val uriText = o.optString("uri")
+        if (uriText.isBlank()) continue
         out += Song(
-            id = o.getLong("id"),
+            id = o.optLong("id"),
             title = o.optString("title"),
             artist = o.optString("artist"),
             album = o.optString("album"),
             albumId = o.optLong("albumId"),
             durationMs = o.optLong("durationMs"),
-            uri = Uri.parse(o.optString("uri")),
+            uri = Uri.parse(uriText),
             folderPath = o.optString("folderPath"),
             folderName = o.optString("folderName"),
             displayName = o.optString("displayName"),

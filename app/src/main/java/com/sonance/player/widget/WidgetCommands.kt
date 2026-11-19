@@ -125,13 +125,24 @@ class WidgetCommandReceiver : BroadcastReceiver() {
             }
         }
 
-        // 服务还活着（听得到歌时必然活着）→ 在同一个进程里直接操作 Player：
-        // 同步、零延迟，也完全绕开「后台启动前台服务」的系统限制。
-        //
-        // 服务不在时如实忽略。此刻播放队列已经没了，冷启动一个空媒体服务既放不出
-        // 声音，又可能撞上 Android 12+ 的前台服务启动限制、甚至因没及时
-        // startForeground 而被系统判异常。用户点卡片空白处打开应用即可重建现场。
-        PlaybackService.executeWidgetCommand(command)
+        // 服务还活着且队列非空 → 在同一个进程里同步操作 Player，零延迟也绕开前台服务启动开销；
+        // 服务未运行或队列为空（如用户关闭应用后点桌面小组件）→ 借桌面小组件官方白名单用
+        // startForegroundService 拉起 PlaybackService，服务端从磁盘缓存恢复上次歌单/进度并直接开播。
+        if (PlaybackService.executeWidgetCommand(command)) return
+        if (command == PlaybackCommands.PLAY_PAUSE ||
+            command == PlaybackCommands.PREVIOUS ||
+            command == PlaybackCommands.NEXT
+        ) {
+            if (!PlaybackService.hasRestorableSession(app)) return
+            val serviceIntent = Intent(app, PlaybackService::class.java).apply {
+                action = PlaybackService.ACTION_WIDGET_COMMAND
+                putExtra(EXTRA_COMMAND, command)
+                putExtra(EXTRA_WIDGET_ID, widgetId)
+            }
+            runCatching {
+                androidx.core.content.ContextCompat.startForegroundService(app, serviceIntent)
+            }
+        }
     }
 
     companion object {

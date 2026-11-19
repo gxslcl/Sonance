@@ -66,6 +66,10 @@
       "type": "BOOLEAN",
       "value": false
     },
+    "stats_overview_card": {
+      "type": "BOOLEAN",
+      "value": true
+    },
     "scroll_haptic_enabled": {
       "type": "BOOLEAN",
       "value": true
@@ -245,6 +249,14 @@
     "mini_cover_scale": {
       "type": "INT",
       "value": 135
+    },
+    "mini_float_bottom_dp": {
+      "type": "INT",
+      "value": 10
+    },
+    "mini_float_corner_dp": {
+      "type": "INT",
+      "value": 20
     },
     "viz_style": {
       "type": "INT",

@@ -5,8 +5,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import com.sonance.player.data.Prefs
+import kotlin.math.abs
 
 internal interface TransitionConfig {
     val crossfadeEnabled: Boolean
@@ -77,6 +80,12 @@ internal class TransitionEffects internal constructor(
      */
     private var lastWrittenVolume = Float.NaN
 
+    /** 正在同步执行 `player.volume = v` 的重入深度（ExoPlayer 会同步回吐 `onVolumeChanged`）。 */
+    private var writingVolumeDepth = 0
+
+    /** 已发出但尚未消费的自身 `onVolumeChanged` 回声队列（含 `ListenerSet` 延迟 FIFO 排空）。 */
+    private val pendingSelfVolumeEvents = ArrayDeque<Float>()
+
     private var fading = false
     private var fadeOut = false
     private var fadeStart = 0L
@@ -101,7 +110,7 @@ internal class TransitionEffects internal constructor(
     private val tick = object : Runnable {
         override fun run() {
             step()
-            scheduler.postDelayed(this, TICK_MS)
+            scheduleNextTick()
         }
     }
 
@@ -112,9 +121,37 @@ internal class TransitionEffects internal constructor(
     }
 
     fun start() {
-        userVolume = player.volume
-        lastWrittenVolume = player.volume
-        scheduler.postDelayed(tick, TICK_MS)
+        pendingSelfVolumeEvents.clear()
+        userVolume = player.volume.coerceIn(0f, 1f)
+        lastWrittenVolume = userVolume
+        scheduleNextTick()
+    }
+
+    /** 根据当前是否需要淡化以及距曲尾淡出的剩余时间安排下一次唤醒；无需淡化时保持 0 定时器。 */
+    private fun scheduleNextTick() {
+        scheduler.removeCallbacks(tick)
+        if (switchFading) return
+        if (fading) {
+            if (player.isPlaying) {
+                scheduler.postDelayed(tick, TICK_MS)
+            }
+            return
+        }
+        if (!player.isPlaying || awaitingTransition || !config.crossfadeEnabled) return
+        val dur = player.duration
+        val fadeMs = config.crossfadeSec * 1000L
+        if (dur <= 0L || fadeMs <= 0L || !player.hasNextMediaItem()) return
+        val remaining = dur - player.currentPosition
+        val delayMs = if (remaining <= fadeMs + 200L) {
+            TICK_MS
+        } else {
+            ((remaining - fadeMs - 150L) / 3L).coerceIn(TICK_MS, IDLE_MONITOR_MAX_MS)
+        }
+        scheduler.postDelayed(tick, delayMs)
+    }
+
+    internal fun onConfigChanged() {
+        scheduleNextTick()
     }
 
     fun release() {
@@ -126,6 +163,7 @@ internal class TransitionEffects internal constructor(
         awaitingTransition = false
         switchFading = false
         switchCommit = null
+        pendingSelfVolumeEvents.clear()
         if (hadActiveState) {
             writeVolume(userVolume)
         }
@@ -140,8 +178,9 @@ internal class TransitionEffects internal constructor(
             return
         }
         if (fading) {
-            retargetCrossfade(player.volume)
-            lastWrittenVolume = player.volume
+            fading = false
+            writeVolume(v)
+            scheduleNextTick()
         } else if (!awaitingTransition) {
             writeVolume(v)
         }
@@ -153,13 +192,14 @@ internal class TransitionEffects internal constructor(
      */
     fun beginSwitchFade(durMs: Long, onCommitSwitch: () -> Unit) {
         scheduler.removeCallbacks(switchTick)
+        scheduler.removeCallbacks(tick)
         cancelGap()
         // 非淡化期间若有外部改动（例如未走 setUserVolume 的 MediaController 调音），先吸收
         if (!switchFading && !fading && !awaitingTransition &&
-            !lastWrittenVolume.isNaN() && player.volume != lastWrittenVolume
+            !lastWrittenVolume.isNaN() && abs(player.volume - lastWrittenVolume) > 1e-5f
         ) {
-            userVolume = player.volume
-            lastWrittenVolume = player.volume
+            userVolume = player.volume.coerceIn(0f, 1f)
+            lastWrittenVolume = userVolume
         }
         fading = false
         awaitingTransition = false
@@ -170,6 +210,7 @@ internal class TransitionEffects internal constructor(
         if (clampedDur == 0L) {
             writeVolume(userVolume)
             commitSwitch(onCommitSwitch)
+            scheduleNextTick()
             return
         }
 
@@ -190,11 +231,26 @@ internal class TransitionEffects internal constructor(
         if (restoreVolume) {
             writeVolume(userVolume)
         }
+        scheduleNextTick()
     }
 
     private fun writeVolume(v: Float) {
-        player.volume = v
-        lastWrittenVolume = v
+        val clamped = v.coerceIn(0f, 1f)
+        // 先更新 lastWrittenVolume 并登记回声：ExoPlayerImpl.setVolume 会同步回调 onVolumeChanged，
+        // 若先写 player.volume 再改 lastWrittenVolume，淡入首帧的微小音量会被误采纳为 userVolume。
+        lastWrittenVolume = clamped
+        val current = player.volume
+        if (abs(current - clamped) <= 1e-6f && current == clamped) return
+        if (pendingSelfVolumeEvents.size >= 16) {
+            pendingSelfVolumeEvents.removeFirst()
+        }
+        pendingSelfVolumeEvents.addLast(clamped)
+        writingVolumeDepth++
+        try {
+            player.volume = clamped
+        } finally {
+            writingVolumeDepth--
+        }
     }
 
     private fun retargetCrossfade(currentVolume: Float) {
@@ -217,6 +273,7 @@ internal class TransitionEffects internal constructor(
             // 或直通播放会读到/停留在 0
             writeVolume(userVolume)
             commitSwitch(commit)
+            scheduleNextTick()
             return
         }
         writeVolume(switchFadeFrom * (1f - t))
@@ -236,10 +293,12 @@ internal class TransitionEffects internal constructor(
     private fun step() {
         if (switchFading) return
         if (fading) {
-            if (player.volume != lastWrittenVolume) {
+            if (lastWrittenVolume.isNaN() || abs(player.volume - lastWrittenVolume) > 1e-5f) {
                 // 淡化进行中用户拖了音量条：采纳为新基准，剩余时长按新目标重新定向
-                userVolume = player.volume
-                retargetCrossfade(player.volume)
+                val extVol = player.volume.coerceIn(0f, 1f)
+                userVolume = extVol
+                retargetCrossfade(extVol)
+                lastWrittenVolume = extVol
             }
             if (!player.isPlaying) return
             val t = ((scheduler.uptimeMillis() - fadeStart).toFloat() / fadeDur).coerceIn(0f, 1f)
@@ -252,9 +311,9 @@ internal class TransitionEffects internal constructor(
         }
         if (!player.isPlaying || awaitingTransition) return
         // 只在播放器音量与上次本类写入值不一致时才采纳，避免无意义的跨状态重写
-        if (lastWrittenVolume.isNaN() || player.volume != lastWrittenVolume) {
-            userVolume = player.volume
-            lastWrittenVolume = player.volume
+        if (lastWrittenVolume.isNaN() || abs(player.volume - lastWrittenVolume) > 1e-5f) {
+            userVolume = player.volume.coerceIn(0f, 1f)
+            lastWrittenVolume = userVolume
         }
         if (!config.crossfadeEnabled) return
         val dur = player.duration
@@ -275,6 +334,28 @@ internal class TransitionEffects internal constructor(
         fadeOut = out
         fading = true
         lastWrittenVolume = from
+        scheduleNextTick()
+    }
+
+    override fun onVolumeChanged(volume: Float) {
+        val matchedIdx = pendingSelfVolumeEvents.indexOfFirst { abs(it - volume) <= 1e-6f }
+        if (matchedIdx >= 0) {
+            repeat(matchedIdx + 1) { pendingSelfVolumeEvents.removeFirst() }
+            return
+        }
+        if (writingVolumeDepth > 0) return
+        if (switchFading || awaitingTransition) return
+        val v = volume.coerceIn(0f, 1f)
+        if (fading) {
+            if (lastWrittenVolume.isNaN() || abs(v - lastWrittenVolume) > 1e-5f) {
+                userVolume = v
+                retargetCrossfade(v)
+                lastWrittenVolume = v
+            }
+        } else if (lastWrittenVolume.isNaN() || abs(v - lastWrittenVolume) > 1e-5f) {
+            userVolume = v
+            lastWrittenVolume = v
+        }
     }
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -288,9 +369,15 @@ internal class TransitionEffects internal constructor(
             cancelSwitchFade(restoreVolume = true)
         }
         awaitingTransition = false
+        // 同曲单曲循环重头再来时不做交叉淡入，避免循环瞬间音量骤降
+        val willCrossfadeIn = reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+            config.crossfadeEnabled &&
+            player.playWhenReady
         if (fading) {
             fading = false
-            writeVolume(userVolume)
+            if (!willCrossfadeIn) {
+                writeVolume(userVolume)
+            }
         }
         cancelGap()
         // 关闭无缝：只在自动续播时插停顿。pause 触发的 playWhenReady 回调由 gapPending 豁免
@@ -310,14 +397,11 @@ internal class TransitionEffects internal constructor(
             gapRunnable = r
             scheduler.postDelayed(r, GAP_MS)
         }
-        // 同曲单曲循环重头再来时不做交叉淡入，避免循环瞬间音量骤降
-        if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
-            config.crossfadeEnabled &&
-            player.playWhenReady
-        ) {
+        if (willCrossfadeIn) {
             writeVolume(0f)
             beginFade(0f, userVolume, config.crossfadeSec * 1000L, out = false)
         }
+        scheduleNextTick()
     }
 
     internal fun isSwitchFadingNow(): Boolean = switchFading
@@ -326,6 +410,18 @@ internal class TransitionEffects internal constructor(
         if (!fading && !switchFading && player.volume <= 0f && userVolume > 0f) {
             writeVolume(userVolume)
         }
+    }
+
+    override fun onIsPlayingChanged(isPlaying: Boolean) {
+        scheduleNextTick()
+    }
+
+    override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+        scheduleNextTick()
+    }
+
+    override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+        scheduleNextTick()
     }
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -342,8 +438,10 @@ internal class TransitionEffects internal constructor(
             ensureActiveVolume()
         }
         // 插停顿期间的 pause 是自己触发的，不算用户操作
-        if (gapPending) return
-        cancelGap()
+        if (!gapPending) {
+            cancelGap()
+        }
+        scheduleNextTick()
     }
 
     override fun onPositionDiscontinuity(
@@ -351,7 +449,10 @@ internal class TransitionEffects internal constructor(
         newPosition: Player.PositionInfo,
         reason: Int
     ) {
-        if (reason != Player.DISCONTINUITY_REASON_SEEK) return
+        if (reason != Player.DISCONTINUITY_REASON_SEEK) {
+            scheduleNextTick()
+            return
+        }
         if (switchFading && !committingSwitchSeek) {
             cancelSwitchFade(restoreVolume = true)
         }
@@ -361,6 +462,7 @@ internal class TransitionEffects internal constructor(
             fading = false
             writeVolume(userVolume)
         }
+        scheduleNextTick()
     }
 
     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -376,6 +478,7 @@ internal class TransitionEffects internal constructor(
                 writeVolume(userVolume)
             }
         }
+        scheduleNextTick()
     }
 
     private fun cancelGap() {
@@ -387,6 +490,7 @@ internal class TransitionEffects internal constructor(
     companion object {
         internal const val TICK_MS = 50L
         internal const val SWITCH_TICK_MS = 15L
+        internal const val IDLE_MONITOR_MAX_MS = 2_000L
 
         /** 关闭无缝时的曲间停顿 */
         internal const val GAP_MS = 500L

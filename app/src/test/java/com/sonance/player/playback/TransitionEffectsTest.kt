@@ -183,6 +183,99 @@ class TransitionEffectsTest {
         assertEquals(0.45f, harness.volume, 1e-3f)
     }
 
+    @Test
+    fun `disabled crossfade schedules zero background ticks and absorbs onVolumeChanged`() {
+        val scheduler = FakeScheduler()
+        val config = MutableTransitionConfig(crossfadeEnabled = false, crossfadeSec = 3, gaplessEnabled = true)
+        val harness = FakePlayerHarness(initialVolume = 0.8f)
+        val fx = TransitionEffects(harness.player, config, scheduler)
+        harness.listeners.add(fx)
+        fx.start()
+
+        assertEquals(0, scheduler.pendingCount())
+        harness.player.volume = 0.6f
+        assertEquals(0, scheduler.pendingCount())
+
+        fx.beginSwitchFade(150L) {
+            harness.player.seekToDefaultPosition(1)
+            harness.player.play()
+        }
+        scheduler.advanceBy(200L)
+        assertEquals(0.6f, harness.volume, 1e-3f)
+        assertEquals(0, scheduler.pendingCount())
+    }
+
+    @Test
+    fun `pausing cancels crossfade monitoring timer and playing re-arms it`() {
+        val scheduler = FakeScheduler()
+        val config = MutableTransitionConfig(crossfadeEnabled = true, crossfadeSec = 3, gaplessEnabled = true)
+        val harness = FakePlayerHarness(initialVolume = 1f)
+        val fx = TransitionEffects(harness.player, config, scheduler)
+        harness.listeners.add(fx)
+        fx.start()
+
+        assertTrue("playing with crossfade should arm future check", scheduler.pendingCount() > 0)
+        harness.player.pause()
+        assertEquals("paused player must keep zero pending timers", 0, scheduler.pendingCount())
+
+        harness.player.play()
+        assertTrue("resuming playback should re-arm monitoring timer", scheduler.pendingCount() > 0)
+    }
+
+    @Test
+    fun `single and rapid consecutive track switches preserve full userVolume under real ExoPlayer volume callbacks`() {
+        val scheduler = FakeScheduler()
+        val config = MutableTransitionConfig(crossfadeEnabled = true, crossfadeSec = 3, gaplessEnabled = true)
+        val harness = FakePlayerHarness(initialVolume = 1.0f)
+        val fx = TransitionEffects(harness.player, config, scheduler)
+        harness.listeners.add(fx)
+        fx.start()
+
+        // 单次切歌：进 50ms 淡入首帧后仍必须顺利恢复到 1.0f
+        PlaybackCommands.execute(harness.player, PlaybackCommands.NEXT)
+        scheduler.advanceBy(50L)
+        scheduler.advanceBy(3_100L)
+        assertEquals(1.0f, harness.volume, 1e-3f)
+
+        // 快速连续切歌 10 次，覆盖淡入半途切歌及 flushEvents 批量回调
+        val gaps = longArrayOf(40L, 90L, 50L, 120L, 35L, 75L, 60L, 100L, 45L, 80L)
+        for (gap in gaps) {
+            PlaybackCommands.execute(harness.player, PlaybackCommands.NEXT)
+            scheduler.advanceBy(gap)
+        }
+        scheduler.advanceBy(3_200L)
+        assertEquals(1.0f, harness.volume, 1e-3f)
+    }
+
+    @Test
+    fun `rapid switch fades interrupted by manual next keep exact userVolume`() {
+        val scheduler = FakeScheduler()
+        val config = MutableTransitionConfig(crossfadeEnabled = true, crossfadeSec = 3, gaplessEnabled = true)
+        val harness = FakePlayerHarness(initialVolume = 0.85f)
+        val fx = TransitionEffects(harness.player, config, scheduler)
+        harness.listeners.add(fx)
+        fx.start()
+
+        fx.beginSwitchFade(150L) {
+            harness.player.seekToDefaultPosition(1)
+            harness.player.play()
+        }
+        scheduler.advanceBy(50L)
+        fx.cancelSwitchFade(restoreVolume = true)
+        PlaybackCommands.execute(harness.player, PlaybackCommands.NEXT)
+        scheduler.advanceBy(40L)
+        fx.beginSwitchFade(150L) {
+            harness.player.seekToDefaultPosition(4)
+            harness.player.play()
+        }
+        scheduler.advanceBy(45L)
+        fx.cancelSwitchFade(restoreVolume = true)
+        PlaybackCommands.execute(harness.player, PlaybackCommands.NEXT)
+
+        scheduler.advanceBy(3_200L)
+        assertEquals(0.85f, harness.volume, 1e-3f)
+    }
+
     private class MutableTransitionConfig(
         override var crossfadeEnabled: Boolean,
         override var crossfadeSec: Int,
@@ -213,6 +306,8 @@ class TransitionEffectsTest {
             queue.removeIf { it.runnable === runnable }
         }
 
+        fun pendingCount(): Int = queue.size
+
         fun advanceBy(ms: Long) {
             val target = nowMs + ms.coerceAtLeast(0L)
             while (true) {
@@ -237,20 +332,40 @@ class TransitionEffectsTest {
         var playerError: PlaybackException? = null
         val listeners = CopyOnWriteArrayList<Player.Listener>()
         val seekIndices = mutableListOf<Int>()
+        private var flushDepth = 0
+        private val deferredEvents = ArrayDeque<() -> Unit>()
 
         private val isPlayingNow: Boolean
             get() = playWhenReady && playbackState == Player.STATE_READY && playerError == null
 
+        private fun flushListeners(block: () -> Unit) {
+            flushDepth++
+            try {
+                block()
+            } finally {
+                flushDepth--
+                if (flushDepth == 0) {
+                    while (deferredEvents.isNotEmpty()) {
+                        deferredEvents.removeFirst().invoke()
+                    }
+                }
+            }
+        }
+
         fun simulateAutoTransition(newIndex: Int) {
             currentIndex = newIndex
-            listeners.forEach {
-                it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
+            flushListeners {
+                listeners.forEach {
+                    it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
+                }
             }
         }
 
         fun simulateEnded() {
             playbackState = Player.STATE_ENDED
-            listeners.forEach { it.onPlaybackStateChanged(Player.STATE_ENDED) }
+            flushListeners {
+                listeners.forEach { it.onPlaybackStateChanged(Player.STATE_ENDED) }
+            }
         }
 
         val player: Player = Proxy.newProxyInstance(
@@ -260,7 +375,17 @@ class TransitionEffectsTest {
             when (method.name) {
                 "getVolume" -> volume
                 "setVolume" -> {
-                    volume = args[0] as Float
+                    val clamped = (args[0] as Float).coerceIn(0f, 1f)
+                    if (volume != clamped) {
+                        volume = clamped
+                        if (flushDepth > 0) {
+                            deferredEvents.addLast {
+                                listeners.forEach { it.onVolumeChanged(clamped) }
+                            }
+                        } else {
+                            listeners.forEach { it.onVolumeChanged(clamped) }
+                        }
+                    }
                     Unit
                 }
                 "isPlaying" -> isPlayingNow
@@ -286,11 +411,13 @@ class TransitionEffectsTest {
                     seekIndices.add(idx)
                     playbackState = Player.STATE_READY
                     val dummyPos = Player.PositionInfo(null, idx, null, null, idx, 0L, 0L, -1, -1)
-                    listeners.forEach {
-                        it.onPositionDiscontinuity(dummyPos, dummyPos, Player.DISCONTINUITY_REASON_SEEK)
-                    }
-                    listeners.forEach {
-                        it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_SEEK)
+                    flushListeners {
+                        listeners.forEach {
+                            it.onPositionDiscontinuity(dummyPos, dummyPos, Player.DISCONTINUITY_REASON_SEEK)
+                        }
+                        listeners.forEach {
+                            it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_SEEK)
+                        }
                     }
                     Unit
                 }
@@ -298,8 +425,10 @@ class TransitionEffectsTest {
                     val changed = !playWhenReady
                     playWhenReady = true
                     if (changed) {
-                        listeners.forEach {
-                            it.onPlayWhenReadyChanged(true, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                        flushListeners {
+                            listeners.forEach {
+                                it.onPlayWhenReadyChanged(true, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                            }
                         }
                     }
                     Unit
@@ -308,8 +437,10 @@ class TransitionEffectsTest {
                     val changed = playWhenReady
                     playWhenReady = false
                     if (changed) {
-                        listeners.forEach {
-                            it.onPlayWhenReadyChanged(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                        flushListeners {
+                            listeners.forEach {
+                                it.onPlayWhenReadyChanged(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                            }
                         }
                     }
                     Unit
@@ -317,7 +448,9 @@ class TransitionEffectsTest {
                 "prepare" -> {
                     if (playbackState == Player.STATE_IDLE) {
                         playbackState = Player.STATE_READY
-                        listeners.forEach { it.onPlaybackStateChanged(Player.STATE_READY) }
+                        flushListeners {
+                            listeners.forEach { it.onPlaybackStateChanged(Player.STATE_READY) }
+                        }
                     }
                     Unit
                 }

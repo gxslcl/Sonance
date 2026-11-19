@@ -15,9 +15,17 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import java.net.URLDecoder
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.GZIPInputStream
 
 /**
  * 洛雪自定义音源脚本仓库。
@@ -74,6 +82,119 @@ class LxRepository private constructor(context: Context) {
         }
         val content = LyricsRepository.decodeLyricsBytes(bytes)
         importScript(content, displayName)
+    }
+
+    /**
+     * 通过直链 URL（http/https）拉取远程洛雪 `.js` 脚本并自动校验、持久化启用。
+     * 支持跨协议重定向、gzip 压缩、字节上限保护及常见 HTML 网页链接误填提示。
+     */
+    suspend fun importFromUrl(rawUrl: String): Result<LxScriptRecord> = withContext(Dispatchers.IO) {
+        val initialUrl = validateAndNormalizeScriptUrl(rawUrl).getOrElse {
+            return@withContext Result.failure(it)
+        }
+        val fetched = fetchRemoteScript(initialUrl).getOrElse {
+            return@withContext Result.failure(it)
+        }
+        val content = LyricsRepository.decodeLyricsBytes(fetched.bytes)
+        if (looksLikeHtmlDocument(fetched.contentType, content)) {
+            return@withContext Result.failure(
+                IllegalStateException("该链接返回的是网页（HTML）而非 .js 脚本，请使用脚本直链（如 Raw 链接）")
+            )
+        }
+        importScript(content, fetched.fileName)
+    }
+
+    private data class RemoteScriptPayload(
+        val bytes: ByteArray,
+        val fileName: String,
+        val contentType: String?
+    )
+
+    private fun fetchRemoteScript(initialUrl: URL): Result<RemoteScriptPayload> {
+        var currentUrl = initialUrl
+        var redirects = 0
+        while (true) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (currentUrl.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = URL_CONNECT_TIMEOUT_MS
+                    readTimeout = URL_READ_TIMEOUT_MS
+                    instanceFollowRedirects = false
+                    setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Sonance/2.5"
+                    )
+                    setRequestProperty("Accept", "application/javascript, text/javascript, text/plain, */*")
+                    setRequestProperty("Accept-Encoding", "gzip, identity")
+                }
+
+                val code = conn.responseCode
+                val location = conn.getHeaderField("Location")
+                if (code in 300..399 && !location.isNullOrBlank()) {
+                    if (redirects >= MAX_URL_REDIRECTS) {
+                        return Result.failure(IllegalStateException("链接重定向次数过多"))
+                    }
+                    val nextUrl = runCatching { URL(currentUrl, location) }.getOrNull()
+                        ?: return Result.failure(IllegalStateException("重定向地址无效"))
+                    if (nextUrl.protocol.lowercase(Locale.ROOT) !in setOf("http", "https")) {
+                        return Result.failure(IllegalStateException("重定向目标协议不受支持（${nextUrl.protocol}）"))
+                    }
+                    redirects++
+                    currentUrl = nextUrl
+                    continue
+                }
+
+                if (code !in 200..299) {
+                    val hint = conn.responseMessage?.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+                    return Result.failure(IllegalStateException("下载脚本失败（HTTP $code$hint）"))
+                }
+
+                val contentLength = conn.contentLengthLong
+                if (contentLength > MAX_SCRIPT_BYTES) {
+                    return Result.failure(IllegalStateException("远程脚本文件过大（超过 2 MB）"))
+                }
+
+                val encoding = conn.contentEncoding.orEmpty().lowercase(Locale.ROOT)
+                val rawStream = conn.inputStream
+                    ?: return Result.failure(IllegalStateException("服务器未返回脚本内容"))
+                val decodedStream = BufferedInputStream(
+                    if ("gzip" in encoding) GZIPInputStream(rawStream) else rawStream
+                )
+                val bytes = decodedStream.use { stream ->
+                    readBytesCapped(stream, MAX_SCRIPT_BYTES)
+                } ?: return Result.failure(IllegalStateException("远程脚本文件过大（超过 2 MB）"))
+
+                val fileName = deriveScriptFileName(currentUrl, conn.getHeaderField("Content-Disposition"))
+                return Result.success(
+                    RemoteScriptPayload(
+                        bytes = bytes,
+                        fileName = fileName,
+                        contentType = conn.contentType
+                    )
+                )
+            } catch (t: Throwable) {
+                return Result.failure(
+                    IllegalStateException("下载脚本失败：${t.message ?: t.javaClass.simpleName}", t)
+                )
+            } finally {
+                runCatching { conn?.disconnect() }
+            }
+        }
+    }
+
+    private fun readBytesCapped(stream: BufferedInputStream, maxBytes: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val read = stream.read(buf)
+            if (read < 0) break
+            total += read
+            if (total > maxBytes) return null
+            out.write(buf, 0, read)
+        }
+        return out.toByteArray()
     }
 
     suspend fun importScript(rawContent: String, fileName: String): Result<LxScriptRecord> =
@@ -303,6 +424,61 @@ class LxRepository private constructor(context: Context) {
 
     companion object {
         private const val MAX_SCRIPT_BYTES = 2 * 1024 * 1024
+        private const val MAX_URL_REDIRECTS = 5
+        private const val URL_CONNECT_TIMEOUT_MS = 15_000
+        private const val URL_READ_TIMEOUT_MS = 20_000
+
+        private val DISPOSITION_EXT_FILENAME_RE =
+            Regex("""filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\s]+)""")
+        private val DISPOSITION_FILENAME_RE =
+            Regex("""filename\s*=\s*"?([^";]+)"?""", RegexOption.IGNORE_CASE)
+
+        internal fun validateAndNormalizeScriptUrl(rawUrl: String): Result<URL> {
+            val cleaned = rawUrl.trim().trim('"', '\'', '“', '”', '<', '>')
+            if (cleaned.isEmpty()) {
+                return Result.failure(IllegalStateException("请输入音源脚本 URL"))
+            }
+            val parsedUri = runCatching { URI(cleaned) }.getOrElse {
+                return Result.failure(IllegalStateException("URL 格式无效，请检查是否包含非法字符"))
+            }
+            val scheme = parsedUri.scheme?.lowercase(Locale.ROOT).orEmpty()
+            if (scheme !in setOf("http", "https")) {
+                return Result.failure(IllegalStateException("仅支持 http:// 或 https:// 开头的脚本链接"))
+            }
+            if (parsedUri.host.isNullOrBlank()) {
+                return Result.failure(IllegalStateException("URL 缺少有效的域名或主机地址"))
+            }
+            val parsedUrl = runCatching { parsedUri.toURL() }.getOrElse {
+                return Result.failure(IllegalStateException("无法解析脚本链接地址"))
+            }
+            return Result.success(parsedUrl)
+        }
+
+        internal fun deriveScriptFileName(finalUrl: URL, contentDisposition: String?): String {
+            val dispName = contentDisposition?.let { header ->
+                val extMatch = DISPOSITION_EXT_FILENAME_RE.find(header)?.groupValues?.getOrNull(1)
+                val decoded = extMatch?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+                decoded ?: DISPOSITION_FILENAME_RE.find(header)?.groupValues?.getOrNull(1)?.trim()
+            }
+            val urlTail = finalUrl.path
+                ?.substringAfterLast('/')
+                ?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() ?: it }
+                ?.trim()
+            val chosen = dispName?.takeIf { it.isNotBlank() }
+                ?: urlTail?.takeIf { it.isNotBlank() }
+                ?: "lx_source.js"
+            val sanitized = chosen.replace(Regex("""[\\/:*?"<>|]"""), "_").trim()
+            if (sanitized.isEmpty()) return "lx_source.js"
+            return if (sanitized.endsWith(".js", ignoreCase = true)) sanitized else "$sanitized.js"
+        }
+
+        internal fun looksLikeHtmlDocument(contentType: String?, content: String): Boolean {
+            if (contentType != null && contentType.contains("text/html", ignoreCase = true)) {
+                return true
+            }
+            val head = content.removePrefix("\uFEFF").trimStart().take(64).lowercase(Locale.ROOT)
+            return head.startsWith("<!doctype html") || head.startsWith("<html")
+        }
 
         @Volatile
         private var instance: LxRepository? = null

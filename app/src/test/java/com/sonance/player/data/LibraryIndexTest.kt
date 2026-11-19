@@ -2,6 +2,7 @@ package com.sonance.player.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -61,5 +62,53 @@ class LibraryIndexTest {
             setOf(SortField.TITLE, SortField.ARTIST, SortField.ALBUM, SortField.FILE_NAME),
             INDEXABLE_SORT_FIELDS
         )
+    }
+
+    // ===== 索引缓存编解码：冷启动首帧即最终排序的关键（见 encodeLibraryIndexJson）=====
+
+    @Test
+    fun `index cache round trip keeps both maps`() {
+        val pinyin = mapOf(1L to "qinghuaci qinghuaci", 2L to "beatles letitbe", -7L to "zaixian")
+        val keys = mapOf(
+            1L to IndexKeys("qinghuaci", "zhoujielun", "shiyiyuedexiaobang", "01qinghuaci.mp3"),
+            2L to IndexKeys("letitbe", "beatles", "letitbe", "letitbe.flac"),
+            -7L to IndexKeys("", "", "", "")
+        )
+        val decoded = decodeLibraryIndexJson(encodeLibraryIndexJson(pinyin, keys))
+        assertEquals(pinyin to keys, decoded)
+    }
+
+    @Test
+    fun `empty index round trips`() {
+        val decoded = decodeLibraryIndexJson(encodeLibraryIndexJson(emptyMap(), emptyMap()))
+        assertEquals(emptyMap<Long, String>() to emptyMap<Long, IndexKeys>(), decoded)
+    }
+
+    @Test
+    fun `corrupt or foreign index cache decodes to null`() {
+        assertNull(decodeLibraryIndexJson("not json"))
+        assertNull(decodeLibraryIndexJson(""))
+        assertNull(decodeLibraryIndexJson("{\"v\":1,\"p\":{}}")) // 缺 k
+        assertNull(decodeLibraryIndexJson("{\"v\":999,\"p\":{},\"k\":{}}")) // 版本不符
+        assertNull(decodeLibraryIndexJson("{\"v\":1,\"p\":{\"abc\":\"x\"},\"k\":{}}")) // id 不是数字
+        assertNull(decodeLibraryIndexJson("{\"v\":1,\"p\":{},\"k\":{\"1\":[\"a\"]}}")) // 键数组缺字段
+        // 截断的串（写盘被打断）也不能抛
+        val full = encodeLibraryIndexJson(mapOf(1L to "x"), mapOf(1L to IndexKeys("a", "b", "c", "d")))
+        assertNull(decodeLibraryIndexJson(full.substring(0, full.length / 2)))
+    }
+
+    @Test
+    fun `coverage requires every id in both maps`() {
+        val p = mapOf(1L to "a", 2L to "b")
+        val k = mapOf(1L to IndexKeys("a", "", "", ""), 2L to IndexKeys("b", "", "", ""))
+        assertTrue(libraryIndexCovers(listOf(1L, 2L), p, k))
+        assertTrue(libraryIndexCovers(emptyList(), p, k))
+        // 超集（索引里还留着已隐藏的歌）也算覆盖
+        assertTrue(libraryIndexCovers(listOf(1L), p, k))
+        // 新增歌缺键 → 不覆盖，触发重建
+        assertEquals(false, libraryIndexCovers(listOf(1L, 3L), p, k))
+        // 只缺排序键 / 只缺拼音索引都不行
+        assertEquals(false, libraryIndexCovers(listOf(1L, 2L), p, mapOf(1L to IndexKeys("a", "", "", ""))))
+        assertEquals(false, libraryIndexCovers(listOf(1L, 2L), mapOf(1L to "a"), k))
     }
 }

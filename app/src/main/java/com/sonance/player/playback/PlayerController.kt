@@ -123,6 +123,7 @@ class PlayerController(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var controller: MediaController? = null
     private var ticker: Job? = null
+    private var uiVisible: Boolean = true
 
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
@@ -278,24 +279,52 @@ class PlayerController(private val context: Context) {
                 }
                 sync(c, null)
             }
-            startTicker()
+            updateTickerState()
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun startTicker() {
-        ticker?.cancel()
+    /** 应用退居后台时暂停 500ms UI 进度轮询，回前台瞬间立即对齐当前位置，减少后台 CPU 唤醒。 */
+    fun setUiVisible(visible: Boolean) {
+        if (uiVisible == visible) return
+        uiVisible = visible
+        if (visible) {
+            val c = controller
+            if (c != null) {
+                _state.update {
+                    it.copy(
+                        positionMs = c.currentPosition.coerceAtLeast(0L),
+                        durationMs = if (c.duration > 0) c.duration else it.durationMs,
+                        isPlaying = c.isPlaying
+                    )
+                }
+            }
+        }
+        updateTickerState()
+    }
+
+    private fun updateTickerState() {
+        val shouldRun = uiVisible && (controller?.isPlaying == true)
+        if (!shouldRun) {
+            ticker?.cancel()
+            ticker = null
+            return
+        }
+        if (ticker?.isActive == true) return
         ticker = scope.launch {
-            while (isActive) {
-                val c = controller
-                if (c != null && c.isPlaying) {
+            try {
+                while (isActive && uiVisible) {
+                    val c = controller ?: break
+                    if (!c.isPlaying) break
                     _state.update {
                         it.copy(
                             positionMs = c.currentPosition.coerceAtLeast(0L),
                             durationMs = if (c.duration > 0) c.duration else it.durationMs
                         )
                     }
+                    delay(500)
                 }
-                delay(500)
+            } finally {
+                ticker = null
             }
         }
     }
@@ -337,6 +366,7 @@ class PlayerController(private val context: Context) {
         }
 
         if (queueChanged) refreshQueue(player, pendingReorder)
+        updateTickerState()
 
         // ⚠️ 判据是 `id != 0L`，**不能写 `id > 0`** ——
         // 在线歌的 mediaId 是负数（见 `data/remoteSongId`），写成 `> 0` 的话
@@ -509,20 +539,54 @@ class PlayerController(private val context: Context) {
      * @param json null = 清除（换到没有歌词的歌时要把上一首的歌词收掉，
      *   否则锁屏会一直挂着上一首的句子）
      */
-    fun publishLyricsInfo(json: String?, expectedMediaId: Long? = null) {
+    fun publishLyricsInfo(
+        json: String?,
+        lrcText: String? = null,
+        expectedMediaId: Long? = null
+    ) {
         updateCurrentMediaMetadata(
             expectedMediaId = expectedMediaId,
             logTag = "SonanceLyrics",
             failPrefix = "发布锁屏歌词失败"
         ) { current ->
-            if (current.mediaMetadata.extras?.getString(LockScreenLyrics.EXTRA_KEY) == json) {
+            val curExtras = current.mediaMetadata.extras
+            if (curExtras?.getString(LockScreenLyrics.EXTRA_KEY) == json &&
+                curExtras?.getString(LockScreenLyrics.EXTRA_KEY_VIVO_WHOLE) == lrcText
+            ) {
                 return@updateCurrentMediaMetadata null
             }
-            val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle())
+            val extras = android.os.Bundle(curExtras ?: android.os.Bundle())
             if (json == null) extras.remove(LockScreenLyrics.EXTRA_KEY)
             else extras.putString(LockScreenLyrics.EXTRA_KEY, json)
-            current.mediaMetadata.buildUpon().setExtras(extras).build()
+            if (lrcText.isNullOrBlank()) {
+                extras.remove(LockScreenLyrics.EXTRA_KEY_VIVO_WHOLE)
+                extras.remove(LockScreenLyrics.EXTRA_KEY_GENERIC_LYRIC)
+            } else {
+                extras.putString(LockScreenLyrics.EXTRA_KEY_VIVO_WHOLE, lrcText)
+                extras.putString(LockScreenLyrics.EXTRA_KEY_GENERIC_LYRIC, lrcText)
+            }
+            // Media3 的 MediaMetadata.equals() 不比较 extras：只改歌词字段的话
+            // 平台会话认为元数据没变，系统锁屏 / 原子随身听永远拿不到新歌词。
+            // 顺带翻转一个不影响展示的字段（compilation），强制发出一次真实的
+            // metadata 变更，extras 才会一起送到 SystemUI。
+            val flip = if (current.mediaMetadata.compilation?.toString() == "1") "0" else "1"
+            current.mediaMetadata.buildUpon()
+                .setExtras(extras)
+                .setCompilation(flip)
+                .build()
         }
+    }
+
+    /** 定时关闭触发：停播以释放音频焦点、移除通知栏并安全同步本地暂停状态。 */
+    fun stopForSleepTimer() {
+        cancelPendingSwitchFade()
+        PlaybackService.stopAndReleaseForSleep()
+        controller?.let { c ->
+            c.playWhenReady = false
+            c.pause()
+            c.stop()
+        }
+        _state.update { it.copy(isPlaying = false, isBuffering = false, playWhenReady = false) }
     }
 
     /**
@@ -923,8 +987,9 @@ class PlayerController(private val context: Context) {
         val c = controller ?: return
         val v = value.coerceIn(0f, 1f)
         cancelPendingSwitchFade()
-        c.volume = v
-        PlaybackService.syncUserVolume(v)
+        if (!PlaybackService.syncUserVolume(v)) {
+            c.volume = v
+        }
         _state.update { it.copy(volume = v, userVolume = v) }
     }
 
@@ -1052,6 +1117,19 @@ class PlayerController(private val context: Context) {
             return
         }
         c.addMediaItems(songs.map { it.toMediaItem(context) })
+        refreshQueue(c)
+    }
+
+    /** 批量插入到当前正在播放曲目的下一首位置；当前队列为空时按第一首预备（不自动开播） */
+    fun insertNextToQueue(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        val c = controller
+        if (c == null || c.mediaItemCount == 0) {
+            play(songs, 0, autoplay = false, notifyStart = false)
+            return
+        }
+        val idx = (c.currentMediaItemIndex + 1).coerceIn(0, c.mediaItemCount)
+        c.addMediaItems(idx, songs.map { it.toMediaItem(context) })
         refreshQueue(c)
     }
 

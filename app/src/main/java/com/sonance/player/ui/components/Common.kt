@@ -1,21 +1,17 @@
 package com.sonance.player.ui.components
 
+import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.LinearGradient
-import android.graphics.Matrix
 import android.graphics.Shader
-import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -25,6 +21,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -45,6 +42,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -69,11 +67,10 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
@@ -84,10 +81,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
@@ -97,6 +98,7 @@ import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
 import kotlinx.coroutines.delay
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** 矮屏（手机横屏等）紧凑布局开关 */
@@ -477,49 +479,45 @@ fun PlayPauseButton(
     // 点击水波纹：0 → 1 的一次性扩散（只在绘制阶段读 ripple.value，避免 120fps 重组）
     val ripple = remember { Animatable(1f) }
 
-    // 播放态呼吸（幅度很小，是"活着"不是"晃眼"；仅保留 State 引用，不在组合期读 .value）
-    val breathState = if (isPlaying) {
-        rememberInfiniteTransition(label = "breath").animateFloat(
-            initialValue = 0f, targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(2200), RepeatMode.Reverse),
-            label = "breath"
-        )
-    } else null
-
     val hasCustomPalette = palette != null || paletteProvider != null
-    // 播放态渐变缓旋（对应样机的 slowOrbit 11s）
-    val orbitState = if (hasCustomPalette) rememberButtonOrbit(isPlaying) else null
-    val orbitInfState = if (!hasCustomPalette && isPlaying) {
-        rememberInfiniteTransition(label = "orbit").animateFloat(
-            initialValue = 0f, targetValue = 360f,
-            animationSpec = infiniteRepeatable(tween(11000, easing = LinearEasing)),
-            label = "orbit"
-        )
-    } else null
-
-    // 播放态且为「水滴按钮」时开启有机 blob 形变；切到「普通按钮」或暂停时平滑回正圆。
     val dropletActive = isPlaying && btnShape == PlayButtonShape.DROPLET
-    val morphState = if (dropletActive) {
-        rememberInfiniteTransition(label = "morph").animateFloat(
-            initialValue = 0f, targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                tween(5500, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "morph"
-        )
-    } else null
     val morphBlendState = animateFloatAsState(
         targetValue = if (dropletActive) 1f else 0f,
         animationSpec = tween(durationMillis = 420),
         label = "morphBlend"
     )
-    val lastMorphRef = remember { floatArrayOf(0f) }
-
     // Shared colored buttons pause without abruptly dropping glow/scale.
     val playingBlendState = if (hasCustomPalette) {
         animateFloatAsState(if (isPlaying) 1f else 0f, tween(350), label = "mainButtonGlow")
     } else null
+
+    val animRunning = isPlaying || (playingBlendState?.value ?: 0f) > 0.01f
+    val morphRunning = dropletActive || morphBlendState.value > 0.01f
+
+    // 装饰性慢速动效统一按 ~30fps 发布且仅在播放 + 前台可见时运行；暂停后即刻进入 0fps 静止态。
+    val breathState = rememberThrottledPhase(
+        active = animRunning,
+        periodMs = 2200,
+        reverse = true,
+        stepMs = 33L
+    )
+    val orbitState = if (hasCustomPalette) rememberButtonOrbit(isPlaying) else null
+    val orbitPhaseState = if (!hasCustomPalette) {
+        rememberThrottledPhase(
+            active = animRunning,
+            periodMs = 11000,
+            reverse = false,
+            stepMs = 33L,
+            initial = 135f / 360f
+        )
+    } else null
+    val morphState = rememberThrottledPhase(
+        active = morphRunning,
+        periodMs = 5500,
+        reverse = true,
+        stepMs = 33L
+    )
+    val lastMorphRef = remember { floatArrayOf(0f) }
 
     val paletteState = rememberUpdatedState(palette)
     val blobPath = remember { Path() }
@@ -531,133 +529,31 @@ fun PlayPauseButton(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        // ---- 光晕（glow）：柔光高斯羽化 + 轮廓紧贴水滴实时形变 ----
-        // 放大画布至 2.4× 按钮尺寸，确保双层高斯羽化的尾部完全自然消散于画布边界内，
-        // 避免生硬光圈或方形裁边；水滴形变时内层光晕与外层泛光同步沿相同曲率起伏。
+        // ---- 光晕（glow）：预烘焙双层高斯柔光纹理 + GPU 层旋转/缩放，告别每帧 120Hz 实时模糊重栅格化 ----
         if (glowEnabled) {
             Canvas(
                 Modifier
                     .requiredSize(size * 2.4f)
                     .graphicsLayer {
                         val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
-                        val b = (breathState?.value ?: 0f) * blend
+                        val b = breathState.value * blend
                         val s = 1f + b * 0.05f
                         scaleX = s
                         scaleY = s
-                        alpha = 0.58f + 0.42f * blend
+                        alpha = 0.42f + 0.58f * blend
+                        val orbit = orbitState?.floatValue ?: (orbitPhaseState!!.value * 360f)
+                        rotationZ = orbit - 45f
                     }
             ) {
                 val p = paletteProvider?.invoke() ?: paletteState.value
-                val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
-                val b = (breathState?.value ?: 0f) * blend
-                val morphProg = morphState?.value?.also { lastMorphRef[0] = it } ?: lastMorphRef[0]
-                val morphAmp = morphBlendState.value
-                val radii = computeBlobCornerRadii(morphProg, morphAmp)
-
                 val cLight = p?.light ?: Color(0xFFA78BFA)
                 val cMain = p?.main ?: Color(0xFF6366F1)
                 val cDeep = p?.deep ?: Color(0xFFEC4899)
-                val orbit = orbitState?.floatValue ?: orbitInfState?.value ?: 135f
-                val padPx = 2.dp.toPx()
-                val btnSpan = (size.toPx() - padPx * 2f).coerceAtLeast(1f)
-                val cx = this.size.width / 2f
-                val cy = this.size.height / 2f
-
-                val argbLight = cLight.toArgb()
-                val argbMain = cMain.toArgb()
-                val argbDeep = cDeep.toArgb()
-                if (glowCache.shader == null ||
-                    glowCache.lastLight != argbLight ||
-                    glowCache.lastMain != argbMain ||
-                    glowCache.lastDeep != argbDeep ||
-                    glowCache.lastSpan != btnSpan
-                ) {
-                    val half = btnSpan * 0.65f
-                    glowCache.shader = LinearGradient(
-                        cx - half, cy, cx + half, cy,
-                        intArrayOf(argbLight, argbMain, argbDeep),
-                        floatArrayOf(0f, 0.5f, 1f),
-                        Shader.TileMode.CLAMP
-                    )
-                    glowCache.lastLight = argbLight
-                    glowCache.lastMain = argbMain
-                    glowCache.lastDeep = argbDeep
-                    glowCache.lastSpan = btnSpan
-                }
-                glowCache.matrix.setRotate(orbit - 45f, cx, cy)
-                glowCache.shader?.setLocalMatrix(glowCache.matrix)
-                glowCache.outerPaint.shader = glowCache.shader
-                glowCache.innerPaint.shader = glowCache.shader
-
-                drawIntoCanvas { canvas ->
-                    val nc = canvas.nativeCanvas
-                    if (Build.VERSION.SDK_INT >= 28) {
-                        val outerBlur = (btnSpan * 0.24f).coerceAtLeast(4f)
-                        val innerBlur = (btnSpan * 0.105f).coerceAtLeast(2f)
-                        if (glowCache.lastOuterBlur != outerBlur) {
-                            glowCache.outerPaint.maskFilter = BlurMaskFilter(outerBlur, BlurMaskFilter.Blur.NORMAL)
-                            glowCache.lastOuterBlur = outerBlur
-                        }
-                        if (glowCache.lastInnerBlur != innerBlur) {
-                            glowCache.innerPaint.maskFilter = BlurMaskFilter(innerBlur, BlurMaskFilter.Blur.NORMAL)
-                            glowCache.lastInnerBlur = innerBlur
-                        }
-
-                        // 外层大范围氛围晕染：随播放节奏轻柔扩张
-                        val outerSpan = btnSpan * (1.20f + 0.08f * b)
-                        glowCache.outerPaint.alpha = ((0.24f + 0.34f * blend) * 255f).toInt().coerceIn(0, 255)
-                        nc.drawPath(
-                            nativeBlobPath(
-                                glowCache.nativePath,
-                                glowCache.cornerArray,
-                                cx - outerSpan / 2f,
-                                cy - outerSpan / 2f,
-                                outerSpan,
-                                outerSpan,
-                                radii
-                            ),
-                            glowCache.outerPaint
-                        )
-
-                        // 内层紧贴轮廓的高饱和流光：完整复刻水滴每一处凸起与弧度
-                        val innerSpan = btnSpan * (1.05f + 0.035f * b)
-                        glowCache.innerPaint.alpha = ((0.32f + 0.46f * blend) * 255f).toInt().coerceIn(0, 255)
-                        nc.drawPath(
-                            nativeBlobPath(
-                                glowCache.nativePath,
-                                glowCache.cornerArray,
-                                cx - innerSpan / 2f,
-                                cy - innerSpan / 2f,
-                                innerSpan,
-                                innerSpan,
-                                radii
-                            ),
-                            glowCache.innerPaint
-                        )
-                    } else {
-                        // Android 8.1 及以下兼容：多层同形柔边扩展，无方形硬边
-                        glowCache.outerPaint.maskFilter = null
-                        val baseAlpha = 0.16f + 0.20f * blend
-                        for (step in 4 downTo 0) {
-                            val frac = step / 4f
-                            val span = btnSpan * (1.04f + 0.36f * frac + 0.05f * b)
-                            val a = baseAlpha * (1f - frac * 0.82f) * (1f - frac * 0.55f)
-                            glowCache.outerPaint.alpha = (a * 255f).toInt().coerceIn(0, 255)
-                            nc.drawPath(
-                                nativeBlobPath(
-                                    glowCache.nativePath,
-                                    glowCache.cornerArray,
-                                    cx - span / 2f,
-                                    cy - span / 2f,
-                                    span,
-                                    span,
-                                    radii
-                                ),
-                                glowCache.outerPaint
-                            )
-                        }
-                    }
-                }
+                val bmp = glowCache.ensureBitmap(cLight.toArgb(), cMain.toArgb(), cDeep.toArgb())
+                drawImage(
+                    image = bmp,
+                    dstSize = IntSize(this.size.width.roundToInt(), this.size.height.roundToInt())
+                )
             }
         }
 
@@ -684,7 +580,7 @@ fun PlayPauseButton(
                     .padding(2.dp)
                     .graphicsLayer {
                         val blend = playingBlendState?.value ?: if (isPlaying) 1f else 0f
-                        val b = (breathState?.value ?: 0f) * blend
+                        val b = breathState.value * blend
                         val s = 1f + b * 0.035f
                         scaleX = s
                         scaleY = s
@@ -696,8 +592,8 @@ fun PlayPauseButton(
                 } else {
                     DefaultPlayGradient
                 }
-                val orbit = orbitState?.floatValue ?: orbitInfState?.value ?: 135f
-                val morphProg = morphState?.value?.also { lastMorphRef[0] = it } ?: lastMorphRef[0]
+                val orbit = orbitState?.floatValue ?: (orbitPhaseState!!.value * 360f)
+                val morphProg = morphState.value.also { lastMorphRef[0] = it }
                 val morphAmp = morphBlendState.value
                 val w = this.size.width
                 val h = this.size.height
@@ -718,7 +614,7 @@ fun PlayPauseButton(
 
             // 玻璃高光（严格贴合当前水滴或正圆轮廓）
             Canvas(Modifier.matchParentSize().padding(2.dp)) {
-                val morphProg = morphState?.value ?: lastMorphRef[0]
+                val morphProg = morphState.value
                 val morphAmp = morphBlendState.value
                 val hlBrush = Brush.linearGradient(
                     colors = listOf(
@@ -741,7 +637,7 @@ fun PlayPauseButton(
             Canvas(Modifier.matchParentSize().padding(2.dp)) {
                 val t = ripple.value
                 if (t < 1f) {
-                    val morphProg = morphState?.value ?: lastMorphRef[0]
+                    val morphProg = morphState.value
                     val morphAmp = morphBlendState.value
                     val strokeColor = Color.White.copy(alpha = (1f - t) * 0.55f)
                     val stroke = Stroke(width = 1.5.dp.toPx())
@@ -903,23 +799,113 @@ private val BLOB_MORPH_KEYS = arrayOf(
     floatArrayOf(54f, 46f, 76f, 24f, 32f, 68f, 32f, 68f)
 )
 
+/**
+ * 节流且感知生命周期的 0..1 相位源（替代无限 Running 的 `rememberInfiniteTransition`）：
+ * - [active] == false 或界面退居后台（`< STARTED`）时立刻退出 `withFrameNanos` 帧循环（0fps 休眠），
+ *   同时保持当前相位不回跳；
+ * - 仅当累计经过 [stepMs]（默认 33ms ≈ 30fps）才发布状态，兼顾丝滑视觉与高刷屏低功耗；
+ * - 返回只读 [State<Float>] 供 `graphicsLayer` / `Canvas` 在绘制阶段读取，避免逐帧触发重组。
+ */
+@Composable
+internal fun rememberThrottledPhase(
+    active: Boolean,
+    periodMs: Int,
+    reverse: Boolean = false,
+    stepMs: Long = 33L,
+    initial: Float = 0f
+): State<Float> {
+    val safePeriod = periodMs.coerceAtLeast(1)
+    val state = remember { mutableFloatStateOf(initial.coerceIn(0f, 1f)) }
+    val progressRef = remember { floatArrayOf(initial.coerceIn(0f, 1f), 1f) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(active, safePeriod, reverse, stepMs, lifecycleOwner) {
+        if (!active) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var last = withFrameNanos { it }
+            var accNs = 0L
+            val stepNs = stepMs.coerceAtLeast(1L) * 1_000_000L
+            while (true) {
+                val now = withFrameNanos { it }
+                val dtNs = (now - last).coerceIn(0L, 100_000_000L)
+                last = now
+                accNs += dtNs
+                if (accNs >= stepNs) {
+                    val delta = (accNs / 1_000_000f) / safePeriod.toFloat()
+                    accNs = 0L
+                    var p = progressRef[0] + progressRef[1] * delta
+                    if (reverse) {
+                        while (p > 1f || p < 0f) {
+                            if (p > 1f) {
+                                p = 2f - p
+                                progressRef[1] = -1f
+                            }
+                            if (p < 0f) {
+                                p = -p
+                                progressRef[1] = 1f
+                            }
+                        }
+                    } else {
+                        p %= 1f
+                        if (p < 0f) p += 1f
+                    }
+                    progressRef[0] = p
+                    state.floatValue = p
+                }
+            }
+        }
+    }
+    return state
+}
+
+private const val GLOW_BMP_PX = 128
+
 private class GlowDrawCache {
-    val nativePath = android.graphics.Path()
-    val cornerArray = FloatArray(8)
-    val outerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    private val outerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.FILL
     }
-    val innerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    private val innerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.FILL
     }
-    val matrix = Matrix()
     var lastLight = 0
     var lastMain = 0
     var lastDeep = 0
-    var lastSpan = 0f
-    var lastOuterBlur = 0f
-    var lastInnerBlur = 0f
-    var shader: LinearGradient? = null
+    var glowBitmap: ImageBitmap? = null
+
+    fun ensureBitmap(argbLight: Int, argbMain: Int, argbDeep: Int): ImageBitmap {
+        glowBitmap?.let { cached ->
+            if (lastLight == argbLight && lastMain == argbMain && lastDeep == argbDeep) {
+                return cached
+            }
+        }
+        val sizePx = GLOW_BMP_PX
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val cx = sizePx / 2f
+        val cy = sizePx / 2f
+        val btnSpan = sizePx / 2.4f
+        val half = btnSpan * 0.65f
+        val shader = LinearGradient(
+            cx - half, cy, cx + half, cy,
+            intArrayOf(argbLight, argbMain, argbDeep),
+            floatArrayOf(0f, 0.5f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        outerPaint.shader = shader
+        innerPaint.shader = shader
+        outerPaint.maskFilter = BlurMaskFilter(btnSpan * 0.24f, BlurMaskFilter.Blur.NORMAL)
+        innerPaint.maskFilter = BlurMaskFilter(btnSpan * 0.105f, BlurMaskFilter.Blur.NORMAL)
+        outerPaint.alpha = 158
+        c.drawCircle(cx, cy, btnSpan * 1.20f / 2f, outerPaint)
+        innerPaint.alpha = 216
+        c.drawCircle(cx, cy, btnSpan * 1.05f / 2f, innerPaint)
+
+        val img = bmp.asImageBitmap()
+        lastLight = argbLight
+        lastMain = argbMain
+        lastDeep = argbDeep
+        glowBitmap = img
+        return img
+    }
 }
 
 /**
@@ -974,25 +960,6 @@ private fun organicBlobPath(
             bottomLeft = CornerRadius(w * r[3], h * r[7])
         )
     )
-    return path
-}
-
-private fun nativeBlobPath(
-    path: android.graphics.Path,
-    cornerArray: FloatArray,
-    x: Float,
-    y: Float,
-    w: Float,
-    h: Float,
-    r: FloatArray
-): android.graphics.Path {
-    // native Path.addRoundRect radii 顺序：[tlX, tlY, trX, trY, brX, brY, blX, blY]
-    cornerArray[0] = w * r[0]; cornerArray[1] = h * r[4]
-    cornerArray[2] = w * r[1]; cornerArray[3] = h * r[5]
-    cornerArray[4] = w * r[2]; cornerArray[5] = h * r[6]
-    cornerArray[6] = w * r[3]; cornerArray[7] = h * r[7]
-    path.rewind()
-    path.addRoundRect(x, y, x + w, y + h, cornerArray, android.graphics.Path.Direction.CW)
     return path
 }
 
@@ -1386,6 +1353,60 @@ fun PillButton(
     }
 }
 
+/**
+ * 与主页「随便听听」同款的轻玻璃操作胶囊，供专辑、文件夹等次级页操作按钮统一风格。
+ */
+@Composable
+fun GlassActionChip(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    accent: Boolean = false,
+    enabled: Boolean = true
+) {
+    val skin = LocalSkin.current
+    val shape = RoundedCornerShape(16.dp)
+    val bg = when {
+        accent -> skin.accent.copy(alpha = if (skin.isLight) 0.12f else 0.17f)
+        skin.immersive -> Color.White.copy(alpha = 0.09f)
+        else -> skin.surface2
+    }
+    val stroke = when {
+        accent -> skin.accent.copy(alpha = 0.38f)
+        skin.immersive -> Color.White.copy(alpha = 0.12f)
+        else -> skin.border.copy(alpha = 0.35f)
+    }
+    val fg = if (accent) skin.accent else skin.textDim
+    Row(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.42f)
+            .clip(shape)
+            .background(bg)
+            .border(0.8.dp, stroke, shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (accent) FontWeight.SemiBold else FontWeight.Medium,
+            color = fg,
+            maxLines = 1
+        )
+    }
+}
+
 @Composable
 fun TagChip(
     label: String,
@@ -1461,21 +1482,15 @@ fun EqualizerBars(
         return
     }
 
-    val transition = rememberInfiniteTransition(label = "eq")
-    // 刻意不用 by 委托：把动画值的读取推迟到 draw 阶段，
-    // 这样每帧只触发重绘、不触发重组（律动条在列表行里，重组代价会被放大）
-    val phase = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2 * Math.PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
+    val phaseState = rememberThrottledPhase(
+        active = true,
+        periodMs = 1100,
+        reverse = false,
+        stepMs = 33L
     )
 
     Canvas(boxModifier) {
-        val p = phase.value
+        val p = phaseState.value * (2f * Math.PI.toFloat())
         drawEqBars(
             barWidth = barWidth,
             color = color,

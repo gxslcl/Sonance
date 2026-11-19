@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.sqrt
 
 /**
@@ -89,6 +90,24 @@ object PcmBus {
      */
     @Volatile
     var rms: Float = 0f
+
+    private val activeConsumers = AtomicInteger(0)
+
+    /** 仅当封面呼吸页或律动柱真正可见时才开启逐缓冲 PCM 复制与 RMS 计算。 */
+    val hasConsumers: Boolean
+        get() = activeConsumers.get() > 0
+
+    fun acquireConsumer() {
+        activeConsumers.incrementAndGet()
+    }
+
+    fun releaseConsumer() {
+        if (activeConsumers.decrementAndGet() <= 0) {
+            activeConsumers.set(0)
+            ready = false
+            rms = 0f
+        }
+    }
 }
 
 /**
@@ -104,6 +123,7 @@ class PcmTapProcessor : BaseAudioProcessor() {
 
     /** 预分配的单声道转换区（在 onConfigure 里定尺寸，queueInput 里不再分配） */
     private var scratch = FloatArray(0)
+    private var wasTapping = false
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val enc = inputAudioFormat.encoding
@@ -129,10 +149,19 @@ class PcmTapProcessor : BaseAudioProcessor() {
         val remaining = inputBuffer.remaining()
         if (remaining <= 0) return
 
-        // 先取样：读完把 position 退回去，再原样透传给下游
-        val start = inputBuffer.position()
-        runCatching { tap(inputBuffer) }
-        inputBuffer.position(start)
+        // 没有可见的律动柱或封面呼吸消费者时完全零拷贝透传，省去后台/列表页每帧浮点转换与 RMS 开方
+        if (PcmBus.hasConsumers) {
+            val start = inputBuffer.position()
+            runCatching { tap(inputBuffer) }
+            inputBuffer.position(start)
+            wasTapping = true
+        } else if (wasTapping) {
+            PcmBus.ring.reset()
+            PcmBus.ready = false
+            PcmBus.buffersSeen = 0L
+            PcmBus.rms = 0f
+            wasTapping = false
+        }
 
         val out = replaceOutputBuffer(remaining)
         out.put(inputBuffer)

@@ -75,6 +75,7 @@ import com.sonance.player.ui.components.CoverArt
 import com.sonance.player.ui.components.hapticTick
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 import java.net.URI
 import java.util.Locale
 
@@ -232,7 +233,7 @@ fun DlnaCastSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = skin.surface,
+        containerColor = skin.surface.solidSurface(),
         contentColor = skin.text
     ) {
         Column(
@@ -1388,7 +1389,7 @@ private fun DlnaManualHostDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = skin.surface,
+        containerColor = skin.surface.solidSurface(),
         titleContentColor = skin.text,
         textContentColor = skin.text,
         title = {

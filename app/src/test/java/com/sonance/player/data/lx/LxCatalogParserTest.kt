@@ -258,6 +258,62 @@ class LxCatalogParserTest {
     }
 
     @Test
+    fun `tx sheet privacy rejection falls back to uniform_get_Dissinfo parser`() {
+        // 旧 Qzone 接口对部分歌单返回隐私拒绝（无 cdlist）——解析必须给出 null 才能触发兜底
+        val privacyBody = """{"code":0,"subcode":4000,"msg":"check privacy error!"}"""
+        assertNull(LxCatalogProvider.parseTxSheetTracks(privacyBody))
+
+        val uniformJson = """
+            {
+              "code": 0,
+              "req_1": {
+                "code": 0,
+                "data": {
+                  "total_song_num": 2,
+                  "songlist": [
+                    {
+                      "mid": "001aaa",
+                      "id": 111,
+                      "title": "免费歌",
+                      "interval": 200,
+                      "album": {"mid": "001alb", "name": "专辑一"},
+                      "singer": [{"name": "歌手甲"}],
+                      "file": {"media_mid": "001media"},
+                      "action": {"switch": 65535}
+                    },
+                    {
+                      "mid": "002bbb",
+                      "id": 222,
+                      "title": "VIP歌",
+                      "interval": 240,
+                      "album": {"mid": "002alb", "name": "专辑二"},
+                      "singer": [{"name": "歌手乙"}],
+                      "file": {"media_mid": "002media"},
+                      "pay": {"pay_play": 1, "pay_month": 1},
+                      "action": {"switch": 65535}
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+        val tracks = LxCatalogProvider.parseTxSheetTracksUniform(uniformJson)
+        assertNotNull(tracks)
+        assertEquals(2, tracks!!.size)
+        assertEquals("免费歌", tracks[0].title)
+        assertEquals("歌手甲", tracks[0].artist)
+        assertEquals(200_000L, tracks[0].durationMs)
+        assertTrue(tracks[0].playable)
+        assertFalse(tracks[0].vip)
+        assertEquals("VIP歌", tracks[1].title)
+        assertTrue(tracks[1].vip)
+
+        // 新接口自身报错（如歌单不存在）→ null，不能把错误响应当成空歌单
+        assertNull(LxCatalogProvider.parseTxSheetTracksUniform("""{"req_1":{"code":40000}}"""))
+        assertNull(LxCatalogProvider.parseTxSheetTracksUniform("""{"code":0}"""))
+    }
+
+    @Test
     fun `kugou song, sheet, toplist, track info and lyric parsers handle tags and filenames`() {
         val searchJson = """
             {

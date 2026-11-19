@@ -386,15 +386,20 @@ private fun CurrentSoundCard(vm: SonanceViewModel) {
         // 把"这套预设到底改了什么"摊开说：低频/中频/高频各自多少 dB，比形容词可信。
         // 外放档例外：它的低频数字是负的（切掉喇叭放不出的部分），靠谐波补回来，
         // 只报 dB 会让人以为"外放反而减了低音"。
-        val tone = remember(vm.soundPreset.id) { presetToneBands(vm.soundPreset) }
+        val tone = remember(vm.soundPreset.id, vm.presetIntensity) {
+            presetToneBands(vm.soundPreset, intensity = vm.presetIntensity)
+        }
+        val activeFx = remember(vm.soundPreset.id, vm.presetIntensity) {
+            vm.soundPreset.scaled(vm.presetIntensity).second
+        }
         val toneLine = when {
             !vm.soundFxEnabled || vm.eqCustom || vm.soundPreset.id == SoundPresets.OFF.id -> null
             vm.soundPreset.id == SoundPresets.PHONE_SPEAKER.id ->
-                "31 Hz 切超低防破音 + 250~500 Hz 胸腔厚度与 0.65x 低音谐波重建，温和饱满"
+                "${activeFx.speakerHpfHz.roundToInt()} Hz 护喇叭高通 + 谐波重建低音与胸腔厚度（强度：${vm.presetIntensity.label}）"
             vm.soundPreset.id == SoundPresets.TABLET_SPEAKER.id ->
-                "48 Hz 温和保护留住平板浑厚低音，宽距横向展宽与轻早期空间同步生效"
-            vm.soundPreset.fx.speakerHpfHz >= 20f ->
-                "相对原声（${vm.soundPreset.fx.speakerHpfHz.roundToInt()} Hz 高通）· 低 ${signedDb(tone[0])}  中 ${signedDb(tone[1])}  高 ${signedDb(tone[2])}"
+                "${activeFx.speakerHpfHz.roundToInt()} Hz 温和保护留住浑厚低音，宽距环绕与人声提亮（强度：${vm.presetIntensity.label}）"
+            activeFx.speakerHpfHz >= 20f ->
+                "相对原声（${activeFx.speakerHpfHz.roundToInt()} Hz 高通）· 低 ${signedDb(tone[0])}  中 ${signedDb(tone[1])}  高 ${signedDb(tone[2])}"
             else -> "相对原声 · 低 ${signedDb(tone[0])}  中 ${signedDb(tone[1])}  高 ${signedDb(tone[2])}"
         }
         if (toneLine != null) {
@@ -758,7 +763,7 @@ fun SleepTimerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                         color = skin.text
                     )
                     Text(
-                        label?.let { "剩余 $it，到点自动暂停" } ?: "未开启 · 到点自动暂停播放",
+                        label?.let { "剩余 $it，到点暂停播放并关闭应用" } ?: "未开启 · 到点暂停播放并关闭应用",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (label != null) skin.accent else skin.textMuted
                     )

@@ -74,8 +74,8 @@
         <!-- 上一首 -->
         <ImageButton
             android:id="@+id/btn_prev"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/widget_ic_prev"
             android:contentDescription="上一首" />
@@ -83,9 +83,9 @@
         <!-- 播放/暂停 -->
         <ImageButton
             android:id="@+id/btn_play_pause"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/widget_ic_play"
             android:contentDescription="播放暂停" />
@@ -93,9 +93,9 @@
         <!-- 下一首 -->
         <ImageButton
             android:id="@+id/btn_next"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/widget_ic_next"
             android:contentDescription="下一首" />
@@ -105,25 +105,35 @@
             android:id="@+id/controls_divider"
             android:layout_width="1dp"
             android:layout_height="16dp"
-            android:layout_marginStart="8dp"
-            android:layout_marginEnd="8dp"
+            android:layout_marginStart="6dp"
+            android:layout_marginEnd="6dp"
             android:background="#33FFFFFF" />
 
         <!-- 背景样式切换（无背景 / 浅色半透明 / 深色半透明） -->
         <ImageButton
             android:id="@+id/btn_bg_style"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/ic_dl_palette"
             android:contentDescription="背景样式" />
 
+        <!-- 歌词字体颜色切换 -->
+        <ImageButton
+            android:id="@+id/btn_text_color"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
+            android:background="@drawable/desktop_lyrics_btn_bg"
+            android:src="@drawable/ic_dl_text_color"
+            android:contentDescription="歌词颜色" />
+
         <!-- 字号切换 -->
         <ImageButton
             android:id="@+id/btn_font_size"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/ic_dl_text_size"
             android:contentDescription="字号" />
@@ -131,9 +141,9 @@
         <!-- 锁定 -->
         <ImageButton
             android:id="@+id/btn_lock"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/ic_dl_lock"
             android:contentDescription="锁定" />
@@ -141,9 +151,9 @@
         <!-- 关闭 -->
         <ImageButton
             android:id="@+id/btn_close"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="6dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
             android:src="@drawable/ic_dl_close"
             android:contentDescription="关闭" />

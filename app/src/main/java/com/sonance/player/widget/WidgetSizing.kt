@@ -18,9 +18,9 @@ internal object WidgetSizing {
     /** 单张封面解码像素上限，兼顾高分屏锐度与 RemoteViews Binder 1MB IPC 预算。 */
     const val MAX_COVER_PX = 384
 
-    /** 背景磨砂位图像素上限，保证渐变平滑同时避免占用过多 Binder 字节。 */
-    const val MAX_BG_W_PX = 240
-    const val MAX_BG_H_PX = 240
+    /** 背景磨砂位图像素上限，仅绘制平滑渐变、高雾散射光晕与磨砂纹理（圆角由原生矢量轮廓承担）。 */
+    const val MAX_BG_W_PX = 420
+    const val MAX_BG_H_PX = 420
 
     fun pickSizeFromPairs(
         isLandscape: Boolean,
@@ -94,7 +94,7 @@ internal object WidgetSizing {
                 minOf(maxByH, maxByRatio, maxByControls).coerceIn(baseCoverDp, 224f)
             }
             WidgetCoverClass.LARGE -> {
-                val chromeH = if (isFourCol) 168f else 176f
+                val chromeH = if (isFourCol) 176f else 184f
                 val maxByW = w * 0.66f
                 val maxByH = h - chromeH
                 minOf(maxByW, maxByH).coerceIn(baseCoverDp, 280f)

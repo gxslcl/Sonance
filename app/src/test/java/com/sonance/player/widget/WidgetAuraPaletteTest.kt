@@ -85,7 +85,18 @@ class WidgetAuraPaletteTest {
         assertEquals(WidgetAppearance.DARK, WidgetAppearance.fromPref(null))
         assertEquals(WidgetAppearance.DARK, WidgetAppearance.fromPref("unknown"))
         assertEquals(WidgetAppearance.LIGHT, WidgetAppearance.fromPref("light"))
+        assertEquals(WidgetAppearance.LIQUID_GLASS, WidgetAppearance.fromPref("liquid_glass"))
         assertEquals(WidgetAppearance.FOLLOW_SKIN, WidgetAppearance.fromPref("FOLLOW_SKIN"))
+    }
+
+    @Test
+    fun `liquid glass palette is translucent frosted without border`() {
+        val glass = WidgetAuraPalette.fromRgb(0xFF3A7AFE.toInt(), isLight = false, isLiquidGlass = true)
+        assertTrue(glass.isLiquidGlass)
+        assertFalse(glass.isLight)
+        val midAlpha = (glass.bgMid ushr 24) and 0xFF
+        assertTrue("Expected translucent liquid glass mid alpha, got $midAlpha", midAlpha in 170..220)
+        assertEquals(0, (glass.borderColor ushr 24) and 0xFF)
     }
 
     private fun assertNeutralGray(argb: Int) {

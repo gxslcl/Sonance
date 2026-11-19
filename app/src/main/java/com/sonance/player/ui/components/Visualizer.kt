@@ -65,6 +65,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -679,6 +683,28 @@ private fun VisualizerCanvas(
     /** 物理的输入：目标高度。live 时是 FFT 结果，否则是程序化回退动画 */
     val targets = remember(viz) { FloatArray(viz.bars) }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        var acquired = false
+        fun sync(state: Lifecycle.State) {
+            val want = state.isAtLeast(Lifecycle.State.STARTED)
+            if (want && !acquired) {
+                PcmBus.acquireConsumer()
+                acquired = true
+            } else if (!want && acquired) {
+                PcmBus.releaseConsumer()
+                acquired = false
+            }
+        }
+        sync(lifecycleOwner.lifecycle.currentState)
+        val observer = LifecycleEventObserver { _, _ -> sync(lifecycleOwner.lifecycle.currentState) }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (acquired) PcmBus.releaseConsumer()
+        }
+    }
+
     /**
      * ★ 帧回调：**采样与渲染解耦**，物理迭代由它驱动。
      *
@@ -738,34 +764,39 @@ private fun VisualizerCanvas(
     }
 
     if (showFps) {
-        LaunchedEffect(Unit) {
-            while (true) {
-                delay(1000)
-                fps = framesInWindow[0]
-                framesInWindow[0] = 0
+        LaunchedEffect(lifecycleOwner) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    delay(1000)
+                    fps = framesInWindow[0]
+                    framesInWindow[0] = 0
+                }
             }
         }
     }
 
     // FFT 工作线程：整条流水线（环形缓冲读取 + 加窗 + FFT + 频段映射）
     // 全部挪到 Dispatchers.Default，主线程只负责绘制。
+    // 仅在界面前台可见（STARTED）期间运行，退居后台或息屏立即挂起；
     // poll() 内部还有"新数据门控"，没有新 PCM 时直接返回，不会空转 FFT。
-    LaunchedEffect(viz, sensitivity, isPlaying) {
-        var lastReady = PcmBus.ready
-        withContext(Dispatchers.Default) {
-            while (isActive) {
-                val ready = PcmBus.ready
-                if (ready != lastReady) {
-                    lastReady = ready
-                    withContext(Dispatchers.Main) { onLiveChange(ready) }
+    LaunchedEffect(viz, sensitivity, isPlaying, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var lastReady = PcmBus.ready
+            withContext(Dispatchers.Default) {
+                while (isActive) {
+                    val ready = PcmBus.ready
+                    if (ready != lastReady) {
+                        lastReady = ready
+                        withContext(Dispatchers.Main) { onLiveChange(ready) }
+                    }
+                    if (ready) {
+                        if (!viz.poll(sensitivity, isPlaying)) viz.decayToZero()
+                    } else {
+                        viz.decayToZero()
+                    }
+                    // 4ms ≈ 250Hz 轮询：有新数据才算 FFT，没新数据只是两次 volatile 读
+                    delay(4)
                 }
-                if (ready) {
-                    if (!viz.poll(sensitivity, isPlaying)) viz.decayToZero()
-                } else {
-                    viz.decayToZero()
-                }
-                // 4ms ≈ 250Hz 轮询：有新数据才算 FFT，没新数据只是两次 volatile 读
-                delay(4)
             }
         }
     }

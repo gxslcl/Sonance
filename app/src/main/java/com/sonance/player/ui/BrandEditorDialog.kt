@@ -30,6 +30,7 @@ import com.sonance.player.SonanceViewModel
 import com.sonance.player.ui.components.PillButton
 import com.sonance.player.ui.screens.AppIconGrid
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /**
  * 「应用名称 + 顶栏图标」编辑面板。
@@ -53,7 +54,7 @@ fun BrandEditorDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = skin.surface2,
+        containerColor = skin.surface2.solidSurface(),
         title = {
             Text(
                 "名称与图标",

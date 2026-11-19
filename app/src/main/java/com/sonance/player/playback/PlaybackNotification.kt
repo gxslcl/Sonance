@@ -51,6 +51,9 @@ object PlaybackNotification {
             .setChannelId(CHANNEL_ID)
             .setChannelName(R.string.playback_channel_name)
             .build()
+            .apply {
+                setSmallIcon(R.drawable.ic_stat_music)
+            }
 
     /**
      * 渠道属性决定了通知在锁屏、胶囊、背屏上的可见性：

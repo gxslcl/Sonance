@@ -44,6 +44,19 @@ import kotlin.math.hypot
  */
 object DesktopLyricsManager {
 
+    val TEXT_COLOR_OPTIONS: List<Pair<Int, String>> = listOf(
+        0 to "自动",
+        0xFFFFFFFF.toInt() to "纯白",
+        0xFFFFD98A.toInt() to "暖黄",
+        0xFF9BE8C1.toInt() to "薄荷",
+        0xFF9CD3FF.toInt() to "天蓝",
+        0xFFFFAFA4.toInt() to "珊瑚",
+        0xFFC7AEFF.toInt() to "紫罗兰"
+    )
+
+    @Volatile
+    var onTextColorChanged: ((Int) -> Unit)? = null
+
     private const val CHANNEL_ID = "sonance_desktop_lyrics"
     private const val NOTIFICATION_ID = 20048
 
@@ -67,6 +80,7 @@ object DesktopLyricsManager {
     private var btnPrev: ImageButton? = null
     private var btnNext: ImageButton? = null
     private var btnBgStyle: ImageButton? = null
+    private var btnTextColor: ImageButton? = null
     private var btnFontSize: ImageButton? = null
     private var btnLock: ImageButton? = null
     private var btnClose: ImageButton? = null
@@ -159,6 +173,30 @@ object DesktopLyricsManager {
         }
     }
 
+    /** 用户在设置里改了歌词颜色：按当前背景模式整份重刷一遍 */
+    fun applyTextColor(context: Context) {
+        val app = context.applicationContext
+        mainHandler.post {
+            applyBgMode(app, DesktopLyricsBgMode.fromId(Prefs(app).desktopLyricsBgMode))
+        }
+    }
+
+    /** 在桌面控制栏直接循环切换桌面歌词字体颜色 */
+    fun cycleTextColor(context: Context) {
+        val app = context.applicationContext
+        val prefs = Prefs(app)
+        val cur = prefs.desktopLyricsTextColor
+        val curIdx = TEXT_COLOR_OPTIONS.indexOfFirst { it.first == cur }
+        val nextIdx = if (curIdx < 0) 0 else (curIdx + 1) % TEXT_COLOR_OPTIONS.size
+        val (nextColor, label) = TEXT_COLOR_OPTIONS[nextIdx]
+        prefs.desktopLyricsTextColor = nextColor
+        mainHandler.post {
+            onTextColorChanged?.invoke(nextColor)
+            applyBgMode(app, DesktopLyricsBgMode.fromId(prefs.desktopLyricsBgMode))
+            Toast.makeText(app, "桌面歌词颜色: $label", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** 应用背景模式到当前悬浮窗 */
     private fun applyBgMode(context: Context, mode: DesktopLyricsBgMode) {
         val root = rootView ?: return
@@ -185,6 +223,7 @@ object DesktopLyricsManager {
                 btnPlayPause?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnNext?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnTextColor?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnFontSize?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x33FFFFFF)
@@ -206,6 +245,7 @@ object DesktopLyricsManager {
                 btnPlayPause?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnNext?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
+                btnTextColor?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnFontSize?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x26000000)
@@ -227,12 +267,25 @@ object DesktopLyricsManager {
                 btnPlayPause?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnNext?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnTextColor?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnFontSize?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x33FFFFFF)
             }
         }
         btnClose?.setColorFilter(0xFFEF5350.toInt(), PorterDuff.Mode.SRC_IN)
+
+        // 用户自定义文字颜色覆盖背景模式自带的配色。下一句用同样的色相降透明度，
+        // 保留「当前 / 即将播放」的主次关系；没有背景时给阴影兜住对比度。
+        val custom = Prefs(context).desktopLyricsTextColor
+        if (custom != 0) {
+            curTv.setTextColor(custom)
+            val alpha = (Color.alpha(custom) * 0.68f).toInt().coerceIn(80, 255)
+            nextTv.setTextColor(Color.argb(alpha, Color.red(custom), Color.green(custom), Color.blue(custom)))
+            val tint = custom and 0x00FFFFFF or (0xD9 shl 24)
+            listOf(btnPrev, btnPlayPause, btnNext, btnBgStyle, btnTextColor, btnFontSize, btnLock)
+                .forEach { it?.setColorFilter(tint, PorterDuff.Mode.SRC_IN) }
+        }
     }
 
     /** 显示桌面悬浮歌词 */
@@ -294,6 +347,7 @@ object DesktopLyricsManager {
             btnPlayPause = view.findViewById(R.id.btn_play_pause)
             btnNext = view.findViewById(R.id.btn_next)
             btnBgStyle = view.findViewById(R.id.btn_bg_style)
+            btnTextColor = view.findViewById(R.id.btn_text_color)
             btnFontSize = view.findViewById(R.id.btn_font_size)
             btnLock = view.findViewById(R.id.btn_lock)
             btnClose = view.findViewById(R.id.btn_close)
@@ -372,6 +426,10 @@ object DesktopLyricsManager {
                 cycleBgMode(app)
                 scheduleAutoHide()
             }
+            btnTextColor?.setOnClickListener {
+                cycleTextColor(app)
+                scheduleAutoHide()
+            }
             btnFontSize?.setOnClickListener {
                 val curSize = prefs.desktopLyricsFontSizeSp
                 val nextSize = when (curSize) {
@@ -395,6 +453,7 @@ object DesktopLyricsManager {
             }
 
             runCatching { wm.addView(view, params) }
+            PlaybackService.wakePlaybackTicker()
 
             if (locked) {
                 showUnlockNotification(app)
@@ -424,6 +483,7 @@ object DesktopLyricsManager {
             btnPlayPause = null
             btnNext = null
             btnBgStyle = null
+            btnTextColor = null
             btnFontSize = null
             btnLock = null
             btnClose = null

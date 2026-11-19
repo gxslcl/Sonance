@@ -8,7 +8,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
 import com.sonance.player.ui.SonanceRoot
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -27,6 +29,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         if (savedInstanceState == null) {
             handleIncomingAudioIntent(intent)
+        }
+        // 不限制在 STARTED 生命周期：定时结束后即便应用已退居后台或锁屏，也要立刻释放服务并关闭任务
+        lifecycleScope.launch {
+            vm.closeAppEvents.collect {
+                vm.persistPlayback()
+                com.sonance.player.playback.PlaybackService.stopAndReleaseForSleep()
+                finishAndRemoveTask()
+            }
         }
         setContent {
             SonanceRoot(vm)
@@ -120,6 +130,7 @@ class MainActivity : ComponentActivity() {
 
             window.attributes = window.attributes.apply {
                 preferredDisplayModeId = best.modeId
+                preferredRefreshRate = best.refreshRate
             }
         }
     }

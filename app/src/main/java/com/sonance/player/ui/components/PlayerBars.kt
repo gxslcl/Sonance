@@ -126,7 +126,9 @@ fun TransportControls(
     playIcon: Dp = 22.dp,
     gap: Dp = 6.dp,
     playButtonPalette: PlayButtonPalette? = null,
-    playButtonPaletteProvider: (() -> PlayButtonPalette)? = null
+    playButtonPaletteProvider: (() -> PlayButtonPalette)? = null,
+    prevTranslationX: (() -> Float)? = null,
+    nextTranslationX: (() -> Float)? = null
 ) {
     Row(
         modifier = modifier,
@@ -146,7 +148,10 @@ fun TransportControls(
             contentDescription = "上一首",
             onClick = onPrev,
             size = ctrlSize,
-            iconSize = ctrlIcon
+            iconSize = ctrlIcon,
+            modifier = if (prevTranslationX != null) {
+                Modifier.graphicsLayer { translationX = prevTranslationX() }
+            } else Modifier
         )
         PlayPauseButton(
             isPlaying = isPlaying,
@@ -161,7 +166,10 @@ fun TransportControls(
             contentDescription = "下一首",
             onClick = onNext,
             size = ctrlSize,
-            iconSize = ctrlIcon
+            iconSize = ctrlIcon,
+            modifier = if (nextTranslationX != null) {
+                Modifier.graphicsLayer { translationX = nextTranslationX() }
+            } else Modifier
         )
         if (onOpenQueue != null) {
             CtrlButton(
@@ -291,7 +299,11 @@ fun MiniPlayer(
     /** 卡片高度倍数（1.0 = 现在） */
     heightScale: Float = 1f,
     /** 卡片里封面倍数（1.0 = 现在） */
-    coverScale: Float = 1f
+    coverScale: Float = 1f,
+    /** 悬浮卡片距屏幕底部留白 (dp) */
+    bottomDp: Int = 10,
+    /** 悬浮卡片圆角 (dp) */
+    cornerDp: Int = 20
 ) {
     val skin = LocalSkin.current
     val frac = progressFraction(state)
@@ -337,7 +349,7 @@ fun MiniPlayer(
         }
 
         MiniPlayerStyle.FLOAT -> {
-            val shape = RoundedCornerShape(20.dp)
+            val shape = RoundedCornerShape(cornerDp.dp)
 
             // ---- 轮播式左右滑动切歌 ----
             //
@@ -375,7 +387,7 @@ fun MiniPlayer(
                     // 16dp 与列表高亮框、搜索框同一条边线 —— 12dp 的时候
                     // 三个"左右边界"是三套数，纵着看下来是歪的
                     .padding(horizontal = 16.dp)
-                    .padding(bottom = 10.dp)
+                    .padding(bottom = bottomDp.dp)
                     .fillMaxWidth()
                     .onSizeChanged { cardW = it.width.toFloat().coerceAtLeast(1f) }
                     .let { m ->
@@ -476,7 +488,9 @@ fun MiniPlayer(
                             }
                         }
                         // 整卡模式仅在静止且卡片外缘画柔和投影；滑动期间关闭外扩投影，杜绝离屏层直角底
-                        .let { m -> if (!isSlot && !isDragging) m.outerCardShadow(20.dp) else m }
+                        // 投影的圆角必须跟卡片一致，否则调小/调大圆角后
+                        // 后面还留着一圈按 20dp 画出来的暗底，看起来像两层卡片
+                        .let { m -> if (!isSlot && !isDragging) m.outerCardShadow(cornerDp.dp) else m }
                         .clip(shape)
                         .background(skin.surface2.copy(alpha = cardOpacity / 100f))
                         // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——
@@ -923,17 +937,11 @@ fun NowPlayingPanel(
     val skin = LocalSkin.current
     val frac = progressFraction(state)
     val duration = if (state.durationMs > 0) state.durationMs else (song?.durationMs ?: 0L)
-    // 刻意不用 by 委托：把动画值读取推迟到 layer 阶段，
-    // 否则这个常驻面板会每帧重组一次
-    val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "pulse")
-    val dotAlpha = pulse.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.25f,
-        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-            animation = androidx.compose.animation.core.tween(900),
-            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
-        ),
-        label = "dot"
+    val pulsePhase = rememberThrottledPhase(
+        active = state.isPlaying,
+        periodMs = 1800,
+        reverse = true,
+        stepMs = 40L
     )
 
     // ---- 面板内手势：上下切歌 / 左右切层 ----
@@ -1029,7 +1037,9 @@ fun NowPlayingPanel(
                     .size(6.dp)
                     .clip(CircleShape)
                     .background(if (state.isPlaying) skin.accent else skin.textMuted)
-                    .graphicsLayer { alpha = if (state.isPlaying) dotAlpha.value else 1f }
+                    .graphicsLayer {
+                        alpha = if (state.isPlaying) (1f - 0.75f * pulsePhase.value) else 1f
+                    }
             )
             Text(
                 text = if (state.isPlaying) "正在播放" else "已暂停",

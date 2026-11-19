@@ -849,20 +849,25 @@ object NeteaseSource : OnlineSource {
      * `n=1` 是故意的：只要 `trackIds`，`tracks` 那 1 首白送的不用，省流量。
      */
     override suspend fun playlistTracks(playlistId: String): List<RemoteTrack>? =
+        playlistDetailWithName(playlistId)?.second
+
+    /** 拉取网易云歌单标题与完整曲目列表。 */
+    internal suspend fun playlistDetailWithName(playlistId: String): Pair<String, List<RemoteTrack>>? =
         withContext(Dispatchers.IO) {
             val body = get("$BASE/api/v6/playlist/detail?id=$playlistId&n=1")
                 ?: return@withContext null
             val playlist = runCatching {
                 JSONObject(body).optJSONObject("playlist")
             }.getOrNull() ?: return@withContext null
-            val idsArr = playlist.optJSONArray("trackIds") ?: return@withContext emptyList()
+            val name = playlist.optString("name").trim()
+            val idsArr = playlist.optJSONArray("trackIds") ?: return@withContext (name to emptyList())
 
             val ids = ArrayList<String>(idsArr.length())
             for (i in 0 until idsArr.length()) {
                 val id = idsArr.optJSONObject(i)?.optLong("id") ?: continue
                 if (id > 0L) ids += id.toString()
             }
-            if (ids.isEmpty()) return@withContext emptyList()
+            if (ids.isEmpty()) return@withContext (name to emptyList())
 
             val out = ArrayList<RemoteTrack>(ids.size)
             for (chunk in ids.chunked(DETAIL_BATCH)) {
@@ -871,7 +876,7 @@ object NeteaseSource : OnlineSource {
                 val part = fetchTrackDetails(chunk) ?: return@withContext null
                 out += part
             }
-            out
+            name to out
         }
 
     /**

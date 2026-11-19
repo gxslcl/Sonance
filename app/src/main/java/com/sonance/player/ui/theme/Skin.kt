@@ -638,7 +638,25 @@ val LocalSkin = staticCompositionLocalOf { Skins.MidnightAmber }
 
 /**
  * 弹窗/浮层面板背景：沉浸皮肤的 surface 家族带透明度（叠在页面上是玻璃卡片），
- * 但用作**整块弹窗背景**时会透出后面的页面内容。这里把 alpha 抬到 ≥0.96，
- * 保留一丝层次观感的同时保证弹窗内容可读。
+ * 但用作**整块弹窗背景**时会透出后面的页面内容，干扰阅读。这里直接抬到完全不透明，
+ * 弹窗背后不再透出列表/封面。页面内的玻璃卡片仍走原始半透明 surface，不受影响。
  */
-fun Color.solidSurface(): Color = copy(alpha = alpha.coerceAtLeast(0.96f))
+fun Color.solidSurface(): Color = copy(alpha = 1f)
+
+/** 统一轻玻璃卡片底色：沉浸皮肤采用柔和半透明白雾，非沉浸皮肤沿用 surface 保持分层。 */
+fun Skin.glassCardBg(highlighted: Boolean = false): Color = when {
+    immersive -> Color.White.copy(alpha = if (highlighted) 0.125f else 0.085f)
+    else -> surface
+}
+
+/** 统一轻玻璃卡片描边：去掉高对比白框，常规态极淡发丝边，聚焦/选中态叠加主题柔光。 */
+fun Skin.glassCardBorder(highlighted: Boolean = false): Color = when {
+    highlighted -> accent.copy(alpha = if (immersive) 0.44f else 0.36f)
+    immersive -> Color.White.copy(alpha = 0.085f)
+    isLight -> border.copy(alpha = 0.45f)
+    else -> border.copy(alpha = 0.25f)
+}
+
+/** 次级胶囊 / 图标底座底色：与主页、设置页、统计页共用。 */
+fun Skin.softPillBg(): Color =
+    if (immersive) Color.White.copy(alpha = 0.10f) else surface2

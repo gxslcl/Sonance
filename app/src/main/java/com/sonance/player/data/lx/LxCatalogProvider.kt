@@ -241,16 +241,62 @@ object LxCatalogProvider {
             "kw" -> httpGet(
                 "http://nplserver.kuwo.cn/pl.svc?op=getlistinfo&pid=${enc(sheetId)}&pn=0&rn=100&encode=utf8&keyset=pl2012&vipver=MUSIC_9.1.1.2_BCS2&newver=1"
             )?.let(::parseKuwoSheetTracks)
-            "tx" -> httpGet(
-                "https://i.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${enc(sheetId)}&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0",
-                TX_PLAYLIST_HEADERS
-            )?.let(::parseTxSheetTracks)
-            "kg" -> httpGet(
-                "http://mobilecdn.kugou.com/api/v3/special/song?specialid=${enc(sheetId)}&plat=0&page=1&pagesize=100&version=9108"
-            )?.let(::parseKgSheetTracks)
+            "tx" -> fetchTxSheetTracks(sheetId)
+            "kg" -> com.sonance.player.data.OnlinePlaylistImporter.fetchKugouTracksByTarget(sheetId)
+                ?: httpGet(
+                    "http://mobilecdn.kugou.com/api/v3/special/song?specialid=${enc(sheetId)}&plat=0&page=1&pagesize=100&version=9108"
+                )?.let(::parseKgSheetTracks)
             "wy" -> NeteaseSource.playlistTracks(sheetId)?.let { enrichWyTracks(it) }
             else -> null
         }
+    }
+
+    /**
+     * QQ 歌单：旧 Qzone 接口对部分歌单返回 subcode=4000「check privacy error!」（无 cdlist），
+     * 与网络无关、重试也没用。此时兜底 lx-music-desktop 同款 musicu.fcg uniform_get_Dissinfo，
+     * 匿名即可取回完整 songlist（字段结构与旧接口一致，复用同一套解析）。
+     */
+    private fun fetchTxSheetTracks(sheetId: String): List<RemoteTrack>? {
+        val oldBody = httpGet(
+            "https://i.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${enc(sheetId)}&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0",
+            TX_PLAYLIST_HEADERS
+        )
+        oldBody?.let(::parseTxSheetTracks)?.let { return it }
+        val disstid = sheetId.toLongOrNull() ?: return null
+        val body = httpPostJson(
+            url = "https://u.y.qq.com/cgi-bin/musicu.fcg",
+            body = JSONObject().apply {
+                put("comm", JSONObject().apply {
+                    put("cv", 4747474)
+                    put("ct", 24)
+                    put("format", "json")
+                    put("inCharset", "utf-8")
+                    put("outCharset", "utf-8")
+                    put("platform", "yqq.json")
+                    put("needNewCode", 1)
+                    put("uin", 0)
+                })
+                put("req_1", JSONObject().apply {
+                    put("module", "music.srfDissInfo.aiDissInfo")
+                    put("method", "uniform_get_Dissinfo")
+                    put("param", JSONObject().apply {
+                        put("disstid", disstid)
+                        put("userinfo", 1)
+                        put("tag", 1)
+                        put("orderlist", 1)
+                        put("song_begin", 0)
+                        put("song_num", 100000)
+                        put("onlysonglist", 0)
+                        put("enc_host_uin", "")
+                    })
+                })
+            }.toString(),
+            headers = mapOf(
+                "Origin" to "https://y.qq.com",
+                "Referer" to "https://y.qq.com/n/yqq/playsquare/$sheetId.html"
+            )
+        ) ?: return null
+        return parseTxSheetTracksUniform(body)
     }
 
     suspend fun fetchLyric(
@@ -835,6 +881,14 @@ object LxCatalogProvider {
         parseTxSongListArray(songList)
     }.getOrNull()
 
+    /** musicu.fcg uniform_get_Dissinfo 兜底响应：req_1.data.songlist 与旧接口同构 */
+    internal fun parseTxSheetTracksUniform(raw: String): List<RemoteTrack>? = runCatching {
+        val req = JSONObject(stripJsonpCallback(raw)).optJSONObject("req_1") ?: return@runCatching null
+        if (req.optInt("code", -1) != 0) return@runCatching null
+        val songList = req.optJSONObject("data")?.optJSONArray("songlist") ?: return@runCatching null
+        parseTxSongListArray(songList)
+    }.getOrNull()
+
     internal fun parseTxLyric(raw: String): LxLyricData? = runCatching {
         val obj = JSONObject(stripJsonpCallback(raw))
         val lrcB64 = obj.optString("lyric")
@@ -844,7 +898,7 @@ object LxCatalogProvider {
         LxLyricData(lrc = decodeHtmlEntities(lrc), tlyric = decodeHtmlEntities(trans))
     }.getOrNull()
 
-    private fun parseTxSongListArray(arr: JSONArray): List<RemoteTrack> {
+    internal fun parseTxSongListArray(arr: JSONArray): List<RemoteTrack> {
         val list = ArrayList<RemoteTrack>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
@@ -916,7 +970,10 @@ object LxCatalogProvider {
         val list = ArrayList<LxSheetSummary>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("specialid").trim()
+            val gid = o.optString("gid").trim()
+            val specialId = o.optString("specialid").trim()
+            val positiveSpecial = specialId.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }.orEmpty()
+            val id = gid.ifBlank { positiveSpecial }
             if (id.isEmpty()) continue
             list += LxSheetSummary(
                 id = id,
@@ -975,23 +1032,36 @@ object LxCatalogProvider {
         if (b64.isBlank()) null else decodeBase64Utf8(b64)
     }.getOrNull()
 
-    private fun parseKgTrackInfoArray(arr: JSONArray): List<RemoteTrack> {
+    internal fun parseKgTrackInfoArray(arr: JSONArray): List<RemoteTrack> {
         val list = ArrayList<RemoteTrack>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val hash = o.optString("hash").trim()
             if (hash.isEmpty()) continue
+            val albumInfo = o.optJSONObject("albuminfo")
             val albumId = o.optString("album_id").trim()
-            val (artist, title) = splitKugouFilename(o.optString("filename"))
+                .ifBlank { albumInfo?.optString("id")?.trim().orEmpty() }
+            val rawName = o.optString("filename").ifBlank { o.optString("name") }
+            val (splitArtist, title) = splitKugouFilename(rawName)
+            val artist = splitArtist.ifBlank { joinTxSingers(o.optJSONArray("singerinfo")) }
             val coverRaw = o.optString("album_sizable_cover")
+                .ifBlank { o.optString("cover") }
                 .ifBlank { o.optJSONObject("trans_param")?.optString("union_cover").orEmpty() }
+            val albumName = albumInfo?.optString("name").orEmpty()
+                .ifBlank { o.optString("album_name") }
+                .ifBlank { o.optString("remark") }
+            val durationMs = if (o.optLong("timelen", 0L) > 0L) {
+                o.optLong("timelen")
+            } else {
+                o.optLong("duration", 0L).coerceAtLeast(0L) * 1000L
+            }
             val status = parseKgTrackStatus(o)
             list += RemoteTrack(
                 remoteId = LxRemoteId.encodeKg(hash, albumId),
                 title = title,
                 artist = artist,
-                album = cleanKgField(o.optString("remark").ifBlank { o.optString("album_name") }),
-                durationMs = o.optLong("duration", 0L).coerceAtLeast(0L) * 1000L,
+                album = cleanKgField(albumName),
+                durationMs = durationMs,
                 coverUrl = normalizeKugouCoverUrl(coverRaw),
                 playable = status.playable,
                 vip = status.vip,
@@ -1016,7 +1086,7 @@ object LxCatalogProvider {
         return if ('&' in decoded) decoded.replace("&", " / ") else decoded
     }
 
-    private fun cleanKgField(raw: String): String =
+    internal fun cleanKgField(raw: String): String =
         decodeHtmlEntities(HTML_TAG_REGEX.replace(raw, "")).trim()
 
     private fun joinTxSingers(arr: JSONArray?): String {

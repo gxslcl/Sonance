@@ -57,6 +57,8 @@ private val navEntries = listOf(
     // 上面那组全是本机上的东西，混一个要联网的进来会让人误会
     NavEntry(LibraryTab.ONLINE, SonanceIcons.Search, 1),
     NavEntry(LibraryTab.FAVORITES, SonanceIcons.Heart, 1),
+    // 与手机端一致：歌单紧跟在 全部/最近/收藏 之后，不再藏进二级弹层
+    NavEntry(LibraryTab.PLAYLISTS, SonanceIcons.Queue, 1),
     NavEntry(LibraryTab.SETTINGS, SonanceIcons.Palette, 2)
 )
 

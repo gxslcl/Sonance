@@ -16,6 +16,9 @@ enum class WidgetAppearance(val prefValue: String, val label: String) {
     /** 浅色磨砂白（适配浅色壁纸或偏好通透白卡） */
     LIGHT("LIGHT", "浅色磨砂白"),
 
+    /** 苹果风高雾度液态玻璃（半透明透出壁纸，叠加柔和折射高光与高模糊磨砂雾感） */
+    LIQUID_GLASS("LIQUID_GLASS", "液态玻璃"),
+
     /** 跟随应用当前皮肤的明暗属性 */
     FOLLOW_SKIN("FOLLOW_SKIN", "跟随应用皮肤");
 
@@ -61,7 +64,8 @@ data class WidgetAuraPalette(
     val placeholderBgBottom: Int,
     val placeholderStroke: Int,
     val placeholderIconTint: Int,
-    val coverStroke: Int
+    val coverStroke: Int,
+    val isLiquidGlass: Boolean = false
 ) {
     companion object {
         internal const val GRAY_LOCK_THRESHOLD = 0.08f
@@ -129,8 +133,12 @@ data class WidgetAuraPalette(
             return hslToArgb(hue, avgSat, avgLum, 0xFF)
         }
 
-        /** 根据提取到的专辑代表色（为空时采用克制中性冷灰）生成完整 STYLE A 配色板 */
-        fun fromRgb(rawRgb: Int?, isLight: Boolean): WidgetAuraPalette {
+        /** 根据提取到的专辑代表色（为空时采用克制中性冷灰）生成完整 STYLE A / 液态玻璃配色板 */
+        fun fromRgb(
+            rawRgb: Int?,
+            isLight: Boolean,
+            isLiquidGlass: Boolean = false
+        ): WidgetAuraPalette {
             val h: Float
             val rawSat: Float
             if (rawRgb == null) {
@@ -145,6 +153,40 @@ data class WidgetAuraPalette(
 
             val isGray = rawSat < GRAY_LOCK_THRESHOLD
             val hShift = (h + 14f) % 360f
+
+            if (isLiquidGlass) {
+                val glassSat = if (isGray) 0f else (rawSat * 0.16f).coerceAtMost(0.16f)
+                val glowSat = if (isGray) 0f else (rawSat * 0.34f).coerceAtMost(0.30f)
+                return WidgetAuraPalette(
+                    isLight = false,
+                    isGrayscale = isGray,
+                    hueDeg = if (isGray) 0f else h,
+                    appliedSat = glassSat,
+                    bgTopLeft = hslToArgb(h, glassSat, 0.25f, 190),
+                    bgMid = hslToArgb(h, (glassSat * 0.85f).coerceAtLeast(0f), 0.21f, 196),
+                    bgBottomRight = hslToArgb(hShift, glassSat, 0.17f, 205),
+                    glowTopLeft = if (isGray) 0x3AFFFFFF else hslToArgb(h, glowSat, 0.58f, 92),
+                    glowBottomRight = if (isGray) 0x20FFFFFF else hslToArgb(hShift, glowSat * 0.78f, 0.50f, 60),
+                    topSheen = 0x72FFFFFF,
+                    borderColor = 0x00000000,
+                    textPrimary = 0xFAFFFFFF.toInt(),
+                    textSecondary = 0xC6FFFFFF.toInt(),
+                    textDim = 0x8AFFFFFF.toInt(),
+                    pillBg = 0x2EFFFFFF,
+                    pillBorder = 0x00000000,
+                    playBtnBg = 0xEEFFFFFF.toInt(),
+                    playBtnFg = if (isGray) 0xFF141822.toInt() else hslToArgb(h, min(0.28f, glassSat + 0.08f), 0.18f, 255),
+                    accentBar = if (isGray) 0xCCFFFFFF.toInt() else hslToArgb(h, min(0.45f, glassSat + 0.24f), 0.74f, 255),
+                    trackBg = 0x42FFFFFF,
+                    trackFill = 0xF5FFFFFF.toInt(),
+                    placeholderBgTop = hslToArgb(h, if (isGray) 0f else glassSat * 0.7f, 0.28f, 196),
+                    placeholderBgBottom = hslToArgb(hShift, if (isGray) 0f else glassSat * 0.7f, 0.19f, 210),
+                    placeholderStroke = 0x33FFFFFF,
+                    placeholderIconTint = 0xCCFFFFFF.toInt(),
+                    coverStroke = 0x33FFFFFF,
+                    isLiquidGlass = true
+                )
+            }
 
             if (!isLight) {
                 val darkSat = if (isGray) 0f else (rawSat * 0.22f).coerceAtMost(MAX_DARK_SAT)

@@ -1322,7 +1322,7 @@ fun NativeCoverWallScreen(
                 saveTune(context, tune)
             },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xF2121218)
+            containerColor = Color(0xFF121218)
         ) {
             TuneSheet(
                 tune,

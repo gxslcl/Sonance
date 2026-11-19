@@ -40,6 +40,26 @@ object PlaybackCommands {
         }
     }
 
+    /**
+     * 冷启动从磁盘恢复队列并直接响应小组件按键时，决定起始曲目下标与起播位置（ms）。
+     * - [PLAY_PAUSE]：从存档曲目与上次进度继续播放；
+     * - [NEXT] / [PREVIOUS]：直接切到下一首/上一首并从 0ms 起播。
+     */
+    internal fun resolveColdStartTarget(
+        queueSize: Int,
+        savedIndex: Int,
+        savedPosMs: Long,
+        command: String?
+    ): Pair<Int, Long> {
+        if (queueSize <= 0) return 0 to 0L
+        val base = savedIndex.coerceIn(0, queueSize - 1)
+        return when (command) {
+            NEXT -> ((base + 1) % queueSize) to 0L
+            PREVIOUS -> (if (base <= 0) queueSize - 1 else base - 1) to 0L
+            else -> base to savedPosMs.coerceAtLeast(0L)
+        }
+    }
+
     private fun togglePlay(player: Player) {
         if (player.mediaItemCount == 0) return
         val wantsToPlay = activePlaybackIntent(

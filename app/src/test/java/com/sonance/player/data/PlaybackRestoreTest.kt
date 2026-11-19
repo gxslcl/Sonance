@@ -97,4 +97,35 @@ class PlaybackRestoreTest {
         val (queue, _) = PlaybackRestore.resolveIds(listOf(7L, 7L, 8L), 0, setOf(7L, 8L))!!
         assertEquals(listOf(7L, 7L, 8L), queue)
     }
+
+    @Test
+    fun `cold start widget command resolves play next and prev targets correctly`() {
+        assertEquals(
+            1 to 45_000L,
+            com.sonance.player.playback.PlaybackCommands.resolveColdStartTarget(
+                queueSize = 4,
+                savedIndex = 1,
+                savedPosMs = 45_000L,
+                command = com.sonance.player.playback.PlaybackCommands.PLAY_PAUSE
+            )
+        )
+        assertEquals(
+            0 to 0L,
+            com.sonance.player.playback.PlaybackCommands.resolveColdStartTarget(
+                queueSize = 4,
+                savedIndex = 3,
+                savedPosMs = 45_000L,
+                command = com.sonance.player.playback.PlaybackCommands.NEXT
+            )
+        )
+        assertEquals(
+            3 to 0L,
+            com.sonance.player.playback.PlaybackCommands.resolveColdStartTarget(
+                queueSize = 4,
+                savedIndex = 0,
+                savedPosMs = 45_000L,
+                command = com.sonance.player.playback.PlaybackCommands.PREVIOUS
+            )
+        )
+    }
 }

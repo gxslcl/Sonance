@@ -11,19 +11,22 @@ import com.sonance.player.desktoplyrics.DesktopLyricsBgMode
 import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,6 +48,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -58,11 +62,10 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,16 +75,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -122,28 +131,94 @@ import com.sonance.player.ui.theme.MiniProgressStyle
 import com.sonance.player.ui.theme.MiniSwipeStyle
 import com.sonance.player.ui.theme.Skin
 import com.sonance.player.ui.theme.Skins
+import com.sonance.player.ui.theme.glassCardBg
+import com.sonance.player.ui.theme.glassCardBorder
+import com.sonance.player.ui.theme.softPillBg
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * 设置页顶部分类。
+ * 设置页左侧导航分组（瘦身浮栏 + 柔和玻璃卡）。
  *
- * 将原本平铺混排的 20 余项设置收敛为五大分类：
- * - [ALL]：按分类分组标题顺序展示全部模块；
- * - 其余分类：仅筛选展示对应分组，减少长页面翻找成本。
+ * 左栏竖排「图标底座 + 简洁短名」，点哪组右栏就显示哪组；
+ * 右栏每个模块卡片可折叠、默认收起，顶部搜索跨分组命中。
  */
 private enum class SettingsCategory(
     val label: String,
+    val shortLabel: String,
     val subtitle: String,
     val icon: ImageVector
 ) {
-    ALL("全部", "全部设置分组", SonanceIcons.GridView),
-    APPEARANCE("外观界面", "主题皮肤、背景玻璃、列表播放条与桌面组件", SonanceIcons.Palette),
-    PLAYBACK("播放音效", "均衡器、音频输出、通知播控与播放外观", SonanceIcons.Equalizer),
-    LYRICS_COVER("歌词封面", "歌词样式、锁屏歌词、在线歌词与封面补全", SonanceIcons.Lyrics),
-    LIBRARY_ONLINE("曲库在线", "本地扫描、在线音源、曲库清理与格式检查", SonanceIcons.Folder),
-    ABOUT("关于支持", "版本信息、基线导出与支持作者", SonanceIcons.Info)
+    APPEARANCE("外观界面", "外观", "主题皮肤、背景玻璃、列表播放条与桌面组件", SonanceIcons.Palette),
+    PLAYBACK("播放音效", "音效", "均衡器、音频输出、通知播控与播放外观", SonanceIcons.Equalizer),
+    LYRICS_COVER("歌词封面", "歌词", "歌词样式、锁屏歌词、在线歌词与封面补全", SonanceIcons.Lyrics),
+    LIBRARY_ONLINE("曲库在线", "曲库", "本地扫描、在线音源、曲库清理与格式检查", SonanceIcons.Folder),
+    ABOUT("关于支持", "关于", "版本信息、基线导出与支持作者", SonanceIcons.Info)
 }
+
+/**
+ * 设置模块搜索索引：标题 + 行级关键词。
+ *
+ * 搜索按模块粒度命中，结果直接展示整个模块 —— 控件留在上下文里，
+ * 不会出现「滑杆找到了、它属于哪个开关却看不见」的孤儿行。
+ * 关键词收录各模块内的行标题与常见同义词，改行标题时顺手同步这里。
+ */
+private data class SettingsModule(
+    val id: String,
+    val category: SettingsCategory,
+    val title: String,
+    val keywords: String
+) {
+    fun matches(q: String): Boolean =
+        title.lowercase().contains(q) || keywords.lowercase().contains(q)
+}
+
+private val SETTINGS_MODULES = listOf(
+    SettingsModule("skin", SettingsCategory.APPEARANCE, "外观皮肤",
+        "皮肤 主题 换肤 色板 绛唇 象牙 墨黑 青瓷 琥珀 雾蓝 废墟 樱"),
+    SettingsModule("shellBg", SettingsCategory.APPEARANCE, "主界面背景与过渡",
+        "沉浸式背景 封面 晕染 玻璃 切歌过渡 滑动切换 渐变 渐变时长 不透明度 模糊"),
+    SettingsModule("list", SettingsCategory.APPEARANCE, "列表外观与索引",
+        "行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 字母索引 滚动条震动 紧凑 卡片"),
+    SettingsModule("mini", SettingsCategory.APPEARANCE, "底部播放条",
+        "播放条 液态玻璃 纯色 极简 进度 环形 数字时间进度 高度 离底部 圆角 左滑 右滑 切歌 音量"),
+    SettingsModule("iconSet", SettingsCategory.APPEARANCE, "应用内图标风格",
+        "图标 圆润 线性 填充 双色 图标家族"),
+    SettingsModule("appIcon", SettingsCategory.APPEARANCE, "桌面应用图标",
+        "桌面图标 启动器 图标款式"),
+    SettingsModule("widget", SettingsCategory.APPEARANCE, "桌面小组件",
+        "小组件 尺寸 固定配色"),
+    SettingsModule("play", SettingsCategory.PLAYBACK, "均衡器与睡眠定时",
+        "均衡器 EQ 音效 杜比 系统音效 睡眠定时 定时器 播完当前"),
+    SettingsModule("output", SettingsCategory.PLAYBACK, "USB 独占 · 无缝 · 淡入淡出",
+        "USB 独占 bit-perfect DAC 无缝播放 淡入淡出 淡化时长 播放提示 DLNA 投屏 蓝牙 采样率"),
+    SettingsModule("system", SettingsCategory.PLAYBACK, "通知、播控与灵动岛",
+        "通知 锁屏 灵动岛 胶囊 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知"),
+    SettingsModule("control", SettingsCategory.PLAYBACK, "播放按钮与触感",
+        "播放按钮 形状 颜色 光晕 震动反馈 触感 随机 续播 队列"),
+    SettingsModule("visual", SettingsCategory.PLAYBACK, "播放页视觉与黑胶",
+        "晕染 浓度 方向 黑碟 黑胶 机械音效 炒豆 Hi-Res 金标 小金标 视觉"),
+    SettingsModule("lyric", SettingsCategory.LYRICS_COVER, "歌词显示与外观",
+        "歌词 字号 字体 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 桌面歌词 歌词页播放器 状态栏 文字可读性"),
+    SettingsModule("lyOnline", SettingsCategory.LYRICS_COVER, "在线歌词与缓存",
+        "在线歌词 LrcAPI 自动获取 清除歌词缓存 源 优先级"),
+    SettingsModule("cover", SettingsCategory.LYRICS_COVER, "封面补全与缓存",
+        "封面 自动补全 iTunes 一键补齐 手动搜索封面 清除封面缓存"),
+    SettingsModule("scan", SettingsCategory.LIBRARY_ONLINE, "本地扫描与过滤规则",
+        "扫描 重新扫描 扫描范围 忽略短音频 排除加密文件 排除录音 提示音 自动扫描 过滤"),
+    SettingsModule("online", SettingsCategory.LIBRARY_ONLINE, "在线音乐与音源",
+        "在线音乐 内置在线 洛雪 音源 脚本 边听边存 播放并下载 网易云补全 Wi-Fi 下载 音质 登录 黑胶VIP 缓存 无感 多音源 兜底 自动切换 备用音源"),
+    SettingsModule("cleanup", SettingsCategory.LIBRARY_ONLINE, "曲库清理与去重",
+        "隐藏 恢复 重复 同名 检测 清理 排除文件夹 去重"),
+    SettingsModule("formatCompat", SettingsCategory.LIBRARY_ONLINE, "格式与兼容性检查",
+        "格式 兼容 解码 ape wma dsf 私有 加密容器 qmc ncm kgm"),
+    SettingsModule("overview", SettingsCategory.LIBRARY_ONLINE, "曲库统计概览",
+        "统计 歌曲数 专辑 艺术家 收藏 总时长 占用空间"),
+    SettingsModule("about", SettingsCategory.ABOUT, "关于应用",
+        "版本 更新 检查更新 基线 导出 备份 署名 作者"),
+    SettingsModule("donate", SettingsCategory.ABOUT, "支持作者",
+        "赞赏 捐赠 微信 二维码 支持")
+)
 
 @Composable
 fun SettingsScreen(
@@ -153,14 +228,14 @@ fun SettingsScreen(
     onOpenDlna: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val skin = LocalSkin.current
     // 「扫描」不再占列表的 ⁝ 菜单：它是设置类操作，入口收进媒体库分组。
     // 这里点开的是同一个 ScanScopeSheet（沿用 Prefs 里记住的目录勾选）
     var showScanScope by remember { mutableStateOf(false) }
-    var selectedCategory by rememberSaveable { mutableStateOf(SettingsCategory.ALL) }
+    var selectedCategory by rememberSaveable { mutableStateOf(SettingsCategory.APPEARANCE) }
+    var query by rememberSaveable { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
-    // 进设置页时刷一下歌词与封面缓存统计，让折叠摘要直接显示最新数字
+    // 进设置页时刷一下歌词与封面缓存统计，让模块摘要直接显示最新数字
     LaunchedEffect(Unit) {
         vm.refreshLyricsCacheStats()
         vm.refreshCoverCacheStats()
@@ -175,40 +250,82 @@ fun SettingsScreen(
         }
     }
 
-    val pageCategories = SettingsCategory.entries
-    val pageScrolls = remember { pageCategories.map { ScrollState(0) } }
-    val pagerState = rememberPagerState(initialPage = selectedCategory.ordinal) { pageCategories.size }
-
-    // 横滑与点页签共用一份选中态：滑到哪一页，顶部就亮到哪一页
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.currentPage }.collect { page ->
-            val cat = pageCategories[page.coerceIn(0, pageCategories.lastIndex)]
-            if (cat != selectedCategory) selectedCategory = cat
+    // 每个分组各持一份滚动位置：切走再切回还在原处
+    val pageScrolls = remember { SettingsCategory.entries.associateWith { ScrollState(0) } }
+    val searchScroll = remember { ScrollState(0) }
+    val trimmedQuery = query.trim()
+    val hits = remember(trimmedQuery) {
+        val q = trimmedQuery.lowercase()
+        SettingsCategory.entries.associateWith { cat ->
+            if (q.isEmpty()) 0 else SETTINGS_MODULES.count { it.category == cat && it.matches(q) }
         }
     }
 
     Column(modifier.fillMaxSize()) {
-        Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp)) {
-            SettingsCategoryBar(
+        SettingsSearchBar(
+            query = query,
+            onQueryChange = { query = it },
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp)
+        )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            SettingsRail(
                 selected = selectedCategory,
-                onSelect = { cat -> scope.launch { pagerState.animateScrollToPage(cat.ordinal) } },
-                hasAnyExpanded = FoldState.expanded.values.any { it },
-                onCollapseAll = { FoldState.collapseAll() }
+                searching = trimmedQuery.isNotEmpty(),
+                hits = hits,
+                onSelect = { cat ->
+                    if (trimmedQuery.isNotEmpty()) {
+                        if ((hits[cat] ?: 0) == 0) {
+                            Toast.makeText(context, "「${cat.label}」没有匹配项", Toast.LENGTH_SHORT).show()
+                        } else {
+                            query = ""
+                            selectedCategory = cat
+                        }
+                    } else if (cat == selectedCategory) {
+                        scope.launch { pageScrolls.getValue(cat).animateScrollTo(0) }
+                    } else {
+                        selectedCategory = cat
+                    }
+                }
             )
-        }
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.weight(1f)
-        ) { page ->
-            val safe = page.coerceIn(0, pageCategories.lastIndex)
-            SettingsCategoryPage(
-                category = pageCategories[safe],
-                vm = vm,
-                onOpenEqualizer = onOpenEqualizer,
-                onOpenDlna = onOpenDlna,
-                openScanScope = { showScanScope = true },
-                scrollState = pageScrolls[safe]
-            )
+            AnimatedContent(
+                targetState = if (trimmedQuery.isEmpty()) selectedCategory else null,
+                transitionSpec = {
+                    (fadeIn(tween(160)) + slideInVertically(tween(160)) { it / 16 })
+                        .togetherWith(fadeOut(tween(120)))
+                },
+                modifier = Modifier.weight(1f),
+                label = "settingsPane"
+            ) { cat ->
+                if (cat == null) {
+                    SettingsSearchResults(
+                        query = trimmedQuery,
+                        vm = vm,
+                        onOpenEqualizer = onOpenEqualizer,
+                        onOpenDlna = onOpenDlna,
+                        openScanScope = { showScanScope = true },
+                        scrollState = searchScroll,
+                        onJump = { jumpCat ->
+                            query = ""
+                            selectedCategory = jumpCat
+                        },
+                        onSuggestion = { query = it }
+                    )
+                } else {
+                    SettingsCategoryPage(
+                        category = cat,
+                        vm = vm,
+                        onOpenEqualizer = onOpenEqualizer,
+                        onOpenDlna = onOpenDlna,
+                        openScanScope = { showScanScope = true },
+                        scrollState = pageScrolls.getValue(cat)
+                    )
+                }
+            }
         }
     }
 
@@ -219,10 +336,10 @@ fun SettingsScreen(
 }
 
 /**
- * 单个设置分类页。
+ * 单个设置分组页（右栏内容）。
  *
- * 内容与原来的垂直长页一致，只是按分类拆开、每页各自持有滚动位置 ——
- * 左右滑页时不会把上一页的滚动偏移带过来。
+ * 按 [SETTINGS_MODULES] 顺序渲染该分组的全部模块卡片，默认收起、点标题展开；
+ * 每个分组各持一份滚动位置，切走再切回还在原处。
  */
 @Composable
 private fun SettingsCategoryPage(
@@ -233,118 +350,107 @@ private fun SettingsCategoryPage(
     openScanScope: () -> Unit,
     scrollState: ScrollState
 ) {
-    val skin = LocalSkin.current
+    val modules = remember(category) { SETTINGS_MODULES.filter { it.category == category } }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(scrollState)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(top = 2.dp, bottom = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // ============================================================
-        // 一、外观与界面
-        // ============================================================
-        if (category == SettingsCategory.ALL || category == SettingsCategory.APPEARANCE) {
-            SettingsCategoryHeader(
-                category = SettingsCategory.APPEARANCE,
-                topSpacing = if (category == SettingsCategory.ALL) 4.dp else 0.dp
-            )
-
-            CollapsibleSection(
-                id = "skin",
-                title = "外观皮肤",
-                summary = "当前：${vm.skin.name} · 共 ${Skins.all.size} 套主题",
-                icon = SonanceIcons.Palette
-            ) {
-                SkinGrid(current = vm.skin, onSelect = { vm.changeSkin(it) })
-            }
-
-            ShellBackgroundSection(vm = vm)
-
-            ListAppearanceSection(vm = vm)
-
-            MiniPlayerSettingsSection(vm = vm)
-
-            IconSetSettingsSection(vm = vm)
-
-            CollapsibleSection(
-                id = "appIcon",
-                title = "桌面应用图标",
-                summary = "${AppIcons.all.size} 款图标 · 点击更换系统桌面图标",
-                icon = SonanceIcons.GridView
-            ) {
-                Text(
-                    "切换后桌面图标会在几秒内刷新；部分第三方桌面可能需要重启桌面。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textDim
+        SettingsPaneHeader(category = category, moduleCount = modules.size)
+        modules.forEach { module ->
+            CompositionLocalProvider(LocalSettingsModuleId provides module.id) {
+                SettingsModuleContent(
+                    module = module,
+                    vm = vm,
+                    onOpenEqualizer = onOpenEqualizer,
+                    onOpenDlna = onOpenDlna,
+                    openScanScope = openScanScope
                 )
-                Spacer(Modifier.height(12.dp))
-                AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
-            }
-
-            CollapsibleSection(
-                id = "widget",
-                title = "桌面小组件",
-                summary = "${WIDGET_STYLES.size} 种尺寸样式 · 长按桌面 → 小组件 添加",
-                icon = SonanceIcons.Maximize
-            ) {
-                WidgetSettingsContent(vm = vm)
             }
         }
 
-        // ============================================================
-        // 二、播放与音效
-        // ============================================================
-        if (category == SettingsCategory.ALL || category == SettingsCategory.PLAYBACK) {
+        // ===== 私有格式还原 & 音乐缓存嗅探转换 =====
+        // 默认隐藏。在「关于」里连点署名 10 次才会出现，且只保持一小时
+        // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
+        if (vm.conversionUnlocked &&
+            (category == SettingsCategory.LIBRARY_ONLINE || category == SettingsCategory.ABOUT)) {
             SettingsCategoryHeader(
-                category = SettingsCategory.PLAYBACK,
-                topSpacing = if (category == SettingsCategory.ALL) 10.dp else 0.dp
+                title = "格式还原与缓存嗅探",
+                subtitle = "已临时解锁隐藏工具 · 1 小时后自动收起",
+                icon = SonanceIcons.Refresh,
+                topSpacing = 10.dp
             )
-
-            PlaybackSettingsSection(
-                vm = vm,
-                onOpenEqualizer = onOpenEqualizer
-            )
-
-            AudioOutputSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
-
-            SystemControlsSection()
-
-            PlayControlSettingsSection(vm = vm)
-
-            PlayerVisualsSettingsSection(vm = vm)
+            RestoreSection(vm = vm)
+            NeteaseCacheSection(vm = vm)
+            LocalCacheSection(vm = vm)
         }
 
-        // ============================================================
-        // 三、歌词与封面
-        // ============================================================
-        if (category == SettingsCategory.ALL || category == SettingsCategory.LYRICS_COVER) {
-            SettingsCategoryHeader(
-                category = SettingsCategory.LYRICS_COVER,
-                topSpacing = if (category == SettingsCategory.ALL) 10.dp else 0.dp
-            )
+        Spacer(Modifier.height(16.dp))
+    }
+}
 
-            LyricsDisplaySettingsSection(vm = vm)
-
-            LyricsOnlineSettingsSection(vm = vm)
-
-            CoverSettingsSection(vm = vm)
+/** 模块 id → 实际内容。分组页与搜索结果共用这一个入口，避免两处各拼一份。 */
+@Composable
+private fun SettingsModuleContent(
+    module: SettingsModule,
+    vm: SonanceViewModel,
+    onOpenEqualizer: () -> Unit,
+    onOpenDlna: () -> Unit,
+    openScanScope: () -> Unit
+) {
+    val skin = LocalSkin.current
+    when (module.id) {
+        "skin" -> SettingsSectionCard(
+            title = "外观皮肤",
+            summary = "当前：${vm.skin.name} · 共 ${Skins.all.size} 套主题",
+            icon = SonanceIcons.Palette,
+            swatchColors = vm.skin.bg to vm.skin.accent
+        ) {
+            SkinGrid(current = vm.skin, onSelect = { vm.changeSkin(it) })
         }
 
-        // ============================================================
-        // 四、曲库与在线
-        // ============================================================
-        if (category == SettingsCategory.ALL || category == SettingsCategory.LIBRARY_ONLINE) {
-            SettingsCategoryHeader(
-                category = SettingsCategory.LIBRARY_ONLINE,
-                topSpacing = if (category == SettingsCategory.ALL) 10.dp else 0.dp
-            )
+        "shellBg" -> ShellBackgroundSection(vm = vm)
+        "list" -> ListAppearanceSection(vm = vm)
+        "mini" -> MiniPlayerSettingsSection(vm = vm)
+        "iconSet" -> IconSetSettingsSection(vm = vm)
 
-            MediaLibraryScanSection(
-                vm = vm,
-                onOpenScanScope = openScanScope
+        "appIcon" -> SettingsSectionCard(
+            title = "桌面应用图标",
+            summary = "${AppIcons.all.size} 款图标 · 点击更换系统桌面图标",
+            icon = SonanceIcons.GridView
+        ) {
+            Text(
+                "切换后桌面图标会在几秒内刷新；部分第三方桌面可能需要重启桌面。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
             )
+            Spacer(Modifier.height(12.dp))
+            AppIconGrid(currentId = vm.appIconId, onSelect = { vm.changeAppIcon(it) })
+        }
 
+        "widget" -> SettingsSectionCard(
+            title = "桌面小组件",
+            summary = "${WIDGET_STYLES.size} 种尺寸样式 · 长按桌面 → 小组件 添加",
+            icon = SonanceIcons.Maximize
+        ) {
+            WidgetSettingsContent(vm = vm)
+        }
+
+        "play" -> PlaybackSettingsSection(vm = vm, onOpenEqualizer = onOpenEqualizer)
+        "output" -> AudioOutputSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
+        "system" -> SystemControlsSection()
+        "control" -> PlayControlSettingsSection(vm = vm)
+        "visual" -> PlayerVisualsSettingsSection(vm = vm)
+
+        "lyric" -> LyricsDisplaySettingsSection(vm = vm)
+        "lyOnline" -> LyricsOnlineSettingsSection(vm = vm)
+        "cover" -> CoverSettingsSection(vm = vm)
+
+        "scan" -> MediaLibraryScanSection(vm = vm, onOpenScanScope = openScanScope)
+
+        "online" -> {
             val onlineSummary = buildString {
                 if (vm.onlineMode == OnlineMode.LX) {
                     append("洛雪音源")
@@ -357,111 +463,77 @@ private fun SettingsCategoryPage(
                     if (vm.onlineDownloadEnabled) append(" · 边听边存")
                 }
             }
-            CollapsibleSection(
-                id = "online",
+            SettingsSectionCard(
                 title = "在线音乐与音源",
                 summary = onlineSummary,
-                icon = SonanceIcons.Cloud
+                icon = SonanceIcons.Cloud,
+                badge = if (!vm.onlineMusicEnabled) null
+                else if (vm.onlineMode == OnlineMode.LX) "洛雪源"
+                else "已开启"
             ) {
                 OnlineMusicContent(vm = vm)
             }
+        }
 
-            CollapsibleSection(
-                id = "cleanup",
-                title = "曲库清理与去重",
-                summary = "扫描排除 ${vm.lastScanOutcome?.excludedTotal ?: 0} 项 · 已隐藏 ${vm.hiddenCount} 首 · 排除目录 ${vm.excludedDirs.size} 个",
-                icon = SonanceIcons.Refresh,
-                defaultExpanded = false
+        "cleanup" -> SettingsSectionCard(
+            title = "曲库清理与去重",
+            summary = "扫描排除 ${vm.lastScanOutcome?.excludedTotal ?: 0} 项 · 已隐藏 ${vm.hiddenCount} 首 · 排除目录 ${vm.excludedDirs.size} 个",
+            icon = SonanceIcons.Refresh
+        ) {
+            SettingsGroupLabel("曲库清理")
+            LibraryCleanupContent(vm = vm)
+            Spacer(Modifier.height(18.dp))
+            SettingsGroupLabel("重复与同名歌曲")
+            DuplicateCleanupContent(vm = vm)
+        }
+
+        "formatCompat" -> SettingsSectionCard(
+            title = "格式与兼容性检查",
+            summary = "系统解码支持范围 · 私有加密容器扫描",
+            icon = SonanceIcons.Waveform
+        ) {
+            FormatCompatContent(vm = vm)
+        }
+
+        "overview" -> SettingsSectionCard(
+            title = "曲库统计概览",
+            summary = "${vm.songs.size} 首 · ${vm.albums.size} 张专辑 · ${vm.artists.size} 位艺术家 · ${formatSize(vm.totalSizeBytes)}",
+            icon = SonanceIcons.Layers
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                SettingsGroupLabel("曲库清理")
-                LibraryCleanupContent(vm = vm)
-                Spacer(Modifier.height(18.dp))
-                SettingsGroupLabel("重复与同名歌曲")
-                DuplicateCleanupContent(vm = vm)
+                StatBox("歌曲", "${vm.songs.size}", Modifier.weight(1f))
+                StatBox("专辑", "${vm.albums.size}", Modifier.weight(1f))
             }
-
-            CollapsibleSection(
-                id = "formatCompat",
-                title = "格式与兼容性检查",
-                summary = "系统解码支持范围 · 私有加密容器扫描",
-                icon = SonanceIcons.Waveform,
-                defaultExpanded = false
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                FormatCompatContent(vm = vm)
+                StatBox("艺术家", "${vm.artists.size}", Modifier.weight(1f))
+                StatBox("收藏", "${vm.favorites.size}", Modifier.weight(1f))
             }
-
-            CollapsibleSection(
-                id = "overview",
-                title = "曲库统计概览",
-                summary = "${vm.songs.size} 首 · ${vm.albums.size} 张专辑 · ${vm.artists.size} 位艺术家 · ${formatSize(vm.totalSizeBytes)}",
-                icon = SonanceIcons.Layers
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    StatBox("歌曲", "${vm.songs.size}", Modifier.weight(1f))
-                    StatBox("专辑", "${vm.albums.size}", Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    StatBox("艺术家", "${vm.artists.size}", Modifier.weight(1f))
-                    StatBox("收藏", "${vm.favorites.size}", Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    StatBox("总时长", formatDuration(vm.totalDurationMs), Modifier.weight(1f))
-                    StatBox("占用空间", formatSize(vm.totalSizeBytes), Modifier.weight(1f))
-                }
+                StatBox("总时长", formatDuration(vm.totalDurationMs), Modifier.weight(1f))
+                StatBox("占用空间", formatSize(vm.totalSizeBytes), Modifier.weight(1f))
             }
         }
 
-        // ===== 私有格式还原 & 音乐缓存嗅探转换 =====
-        // 默认隐藏。在「关于」里连点署名 10 次才会出现，且只保持一小时
-        // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
-        if (vm.conversionUnlocked && (category == SettingsCategory.ALL ||
-                category == SettingsCategory.LIBRARY_ONLINE || category == SettingsCategory.ABOUT)) {
-            SettingsCategoryHeader(
-                title = "格式还原与缓存嗅探",
-                subtitle = "已临时解锁隐藏工具 · 1 小时后自动收起",
-                icon = SonanceIcons.Refresh,
-                topSpacing = 10.dp
-            )
-            RestoreSection(vm = vm)
-            NeteaseCacheSection(vm = vm)
-            LocalCacheSection(vm = vm)
+        "about" -> AboutSettingsSection(vm = vm)
+
+        "donate" -> SettingsSectionCard(
+            title = "支持作者",
+            summary = "微信扫一扫 · 请作者喝杯饮料",
+            icon = SonanceIcons.Heart
+        ) {
+            DonateCard()
         }
-
-        // ============================================================
-        // 五、关于与支持
-        // ============================================================
-        if (category == SettingsCategory.ALL || category == SettingsCategory.ABOUT) {
-            SettingsCategoryHeader(
-                category = SettingsCategory.ABOUT,
-                topSpacing = if (category == SettingsCategory.ALL) 10.dp else 0.dp
-            )
-
-            AboutSettingsSection(vm = vm)
-
-            CollapsibleSection(
-                id = "donate",
-                title = "支持作者",
-                summary = "微信扫一扫 · 请作者喝杯饮料",
-                icon = SonanceIcons.Heart,
-                defaultExpanded = true
-            ) {
-                DonateCard()
-            }
-        }
-
-
-        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -556,13 +628,11 @@ private fun SystemControlsSection() {
     }
     val guide = remember { systemControlGuide() }
 
-    CollapsibleSection(
-        id = "system_controls",
+    SettingsSectionCard(
         title = "通知、播控与灵动岛",
         summary = if (notificationsOn) "${guide.brand} · 查看开启路径"
         else "通知已关闭，系统胶囊读不到播放状态",
         icon = SonanceIcons.Waveform,
-        defaultExpanded = false
     ) {
         Column(Modifier.padding(vertical = 4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -631,92 +701,348 @@ private fun openNotificationSettings(context: android.content.Context) {
 }
 
 /* ============================================================
- * 分类导航栏与分类标题
+ * 左侧导航、全局搜索与分组标题
  * ============================================================ */
 
+/** 右栏顶部的分组标题：简洁单行标题 + 一键展开/收起胶囊 */
 @Composable
-private fun SettingsCategoryBar(
+private fun SettingsPaneHeader(category: SettingsCategory, moduleCount: Int) {
+    val skin = LocalSkin.current
+    val foldKeys = remember(category) {
+        SETTINGS_MODULES.filter { it.category == category }.map { it.id }
+    }
+    val anyExpanded = foldKeys.any { FoldState.expanded[it] == true }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            category.label,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.text,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (anyExpanded) "全部收起" else "展开 $moduleCount 项",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (anyExpanded) skin.accent else skin.textDim,
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(if (anyExpanded) skin.accentGlow else skin.settingsSoftPill())
+                .clickable { foldKeys.forEach { FoldState.expanded[it] = !anyExpanded } }
+                .padding(horizontal = 11.dp, vertical = 5.dp)
+        )
+    }
+}
+
+/**
+ * 左侧瘦身导航浮栏：66dp 独立圆角底座 + 图标 + 2 字短名。
+ *
+ * 选中 = 主题色实底图标 + 柔光胶囊底；搜索时仅在图标右上角叠轻量命中角标，
+ * 零命中分组置灰，点击已选中分组回到顶部。
+ */
+@Composable
+private fun SettingsRail(
     selected: SettingsCategory,
-    onSelect: (SettingsCategory) -> Unit,
-    hasAnyExpanded: Boolean,
-    onCollapseAll: () -> Unit
+    searching: Boolean,
+    hits: Map<SettingsCategory, Int>,
+    onSelect: (SettingsCategory) -> Unit
 ) {
     val skin = LocalSkin.current
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    val railBorder = if (skin.immersive) Color.White.copy(alpha = 0.07f) else skin.border.copy(alpha = 0.22f)
+    Box(
+        modifier = Modifier
+            .width(66.dp)
+            .padding(top = 2.dp, bottom = 12.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(skin.settingsRailBg())
+                .border(0.7.dp, railBorder, RoundedCornerShape(18.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 5.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             SettingsCategory.entries.forEach { cat ->
-                val isSelected = cat == selected
-                Row(
+                val isSelected = !searching && cat == selected
+                val count = hits[cat] ?: 0
+                val dim = searching && count == 0
+                val hot = isSelected || (searching && count > 0)
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(if (isSelected) skin.accent else skin.surface)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) skin.accent else skin.border,
-                            shape = RoundedCornerShape(20.dp)
-                        )
+                        .fillMaxWidth()
+                        .alpha(if (dim) 0.35f else 1f)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(if (isSelected) skin.accentGlow else Color.Transparent)
                         .clickable { onSelect(cat) }
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(vertical = 8.dp, horizontal = 2.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = cat.icon,
-                        contentDescription = null,
-                        tint = if (isSelected) skin.onAccent else skin.textMuted,
-                        modifier = Modifier.size(14.dp)
-                    )
+                    Box(Modifier.size(width = 40.dp, height = 34.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(if (isSelected) skin.accent else skin.settingsSoftPill()),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = cat.icon,
+                                contentDescription = cat.label,
+                                tint = if (isSelected) skin.onAccent else skin.textDim,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        if (searching && count > 0) {
+                            Box(
+                                Modifier
+                                    .align(Alignment.TopEnd)
+                                    .clip(CircleShape)
+                                    .background(skin.accent)
+                                    .padding(horizontal = 4.dp, vertical = 0.5.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "$count",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = skin.onAccent
+                                )
+                            }
+                        }
+                    }
                     Text(
-                        text = cat.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isSelected) skin.onAccent else skin.textDim
+                        cat.shortLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (hot) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (hot) skin.accent else skin.textDim,
+                        maxLines = 1
                     )
                 }
             }
         }
+    }
+}
 
-        if (hasAnyExpanded) {
+/** 顶部全局搜索框：全圆角柔光胶囊，右侧一键清空 */
+@Composable
+private fun SettingsSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    val searchBg = if (skin.immersive) Color.White.copy(alpha = 0.095f) else skin.surface2.copy(alpha = 0.86f)
+    val searchBorder = if (skin.immersive) Color.White.copy(alpha = 0.08f) else skin.border.copy(alpha = 0.25f)
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clip(CircleShape)
+            .background(searchBg)
+            .border(0.7.dp, searchBorder, CircleShape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = SonanceIcons.Search,
+            contentDescription = null,
+            tint = skin.textMuted,
+            modifier = Modifier.size(15.dp)
+        )
+        Spacer(Modifier.width(8.dp))
+        Box(Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text(
+                    "搜索全部设置…（如：歌词 / 无缝 / 缓存）",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = skin.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = skin.text),
+                cursorBrush = SolidColor(skin.accent),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        if (query.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
             Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(skin.surface2)
-                    .border(1.dp, skin.border, RoundedCornerShape(20.dp))
-                    .clickable(onClick = onCollapseAll)
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                Modifier
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(skin.surface3)
+                    .clickable { onQueryChange("") },
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "收起",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
+                Icon(
+                    imageVector = SonanceIcons.Close,
+                    contentDescription = "清空搜索",
+                    tint = skin.textDim,
+                    modifier = Modifier.size(11.dp)
                 )
             }
         }
     }
 }
 
+/**
+ * 搜索结果页：跨分组命中，按分组归块。
+ *
+ * 分组徽章可点 —— 跳到该分组并清空关键词；命中的字在模块标题 / 摘要里高亮。
+ * 无结果给空态 + 推荐词。
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SettingsCategoryHeader(
-    category: SettingsCategory,
-    topSpacing: androidx.compose.ui.unit.Dp = 8.dp
+private fun SettingsSearchResults(
+    query: String,
+    vm: SonanceViewModel,
+    onOpenEqualizer: () -> Unit,
+    onOpenDlna: () -> Unit,
+    openScanScope: () -> Unit,
+    scrollState: ScrollState,
+    onJump: (SettingsCategory) -> Unit,
+    onSuggestion: (String) -> Unit
 ) {
-    SettingsCategoryHeader(
-        title = category.label,
-        subtitle = category.subtitle,
-        icon = category.icon,
-        topSpacing = topSpacing
-    )
+    val skin = LocalSkin.current
+    val q = query.lowercase()
+    val matched = remember(q) { SETTINGS_MODULES.filter { it.matches(q) } }
+    // 每次新搜索把命中模块展开：搜索是「给我看这个」的明确意图，
+    // 不该被上次的收起状态挡住；结果里仍然可以手动收起
+    LaunchedEffect(matched) { matched.forEach { FoldState.expanded[it.id] = true } }
+    CompositionLocalProvider(
+        LocalSettingsHighlight provides query,
+        // 搜索命中的模块默认展开：用户是来找具体控件的，不该再点一层标题
+        LocalSettingsCardDefaultExpanded provides true
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+                .padding(top = 2.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (matched.isEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        Modifier.size(52.dp).clip(CircleShape).background(skin.surface2),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = SonanceIcons.Search,
+                            contentDescription = null,
+                            tint = skin.textMuted,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "没有找到与「$query」相关的设置",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = skin.textMuted
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("歌词", "无缝", "缓存", "封面").forEach { s ->
+                            TagChip(label = s, selected = false, onClick = { onSuggestion(s) })
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    "找到 ${matched.size} 个模块 · 点分组标题可跳转",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                matched.groupBy { it.category }.forEach { (cat, mods) ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(skin.settingsCardContainer(expanded = false))
+                            .border(0.8.dp, skin.settingsCardBorder(expanded = false), RoundedCornerShape(14.dp))
+                            .clickable {
+                                // 跳过去就把命中的模块展开，不然落地还是一排收起的标题
+                                mods.forEach { FoldState.expanded[it.id] = true }
+                                onJump(cat)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(skin.accentGlow),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = cat.icon,
+                                contentDescription = null,
+                                tint = skin.accent,
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            cat.label,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = skin.text,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${mods.size} 个模块",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = skin.accent,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(skin.accentGlow)
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            imageVector = SonanceIcons.ChevronDown,
+                            contentDescription = "跳转到${cat.label}",
+                            tint = skin.textMuted,
+                            modifier = Modifier.size(14.dp).rotate(-90f)
+                        )
+                    }
+                    mods.forEach { module ->
+                        CompositionLocalProvider(LocalSettingsModuleId provides module.id) {
+                            SettingsModuleContent(
+                                module = module,
+                                vm = vm,
+                                onOpenEqualizer = onOpenEqualizer,
+                                onOpenDlna = onOpenDlna,
+                                openScanScope = openScanScope
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -784,11 +1110,11 @@ private fun ShellBackgroundSection(vm: SonanceViewModel) {
         "纯色背景（非沉浸皮肤） · 切歌$transLabel"
     }
 
-    CollapsibleSection(
-        id = "shellBg",
+    SettingsSectionCard(
         title = "主界面背景与过渡",
         summary = summary,
-        icon = SonanceIcons.Sun
+        icon = SonanceIcons.Sun,
+        badge = if (skin.immersive) vm.shellGlassStyle.label else null
     ) {
         // ---- 换歌时的背景过渡 ----
         SettingsGroupLabel("切歌背景过渡")
@@ -916,8 +1242,7 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
             append(" · ").append(swipe)
         }
     }
-    CollapsibleSection(
-        id = "miniPlayer",
+    SettingsSectionCard(
         title = "底部播放条",
         summary = summary,
         icon = SonanceIcons.Music
@@ -1041,6 +1366,16 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 valueText = String.format("%.2f×", vm.miniCoverScale / 100f),
                 value = (vm.miniCoverScale - 100) / 100f
             ) { f -> vm.changeMiniCoverScale((100 + f * 100).roundToInt()) }
+            SliderLine(
+                label = "离底部",
+                valueText = "${vm.miniFloatBottomDp} dp",
+                value = vm.miniFloatBottomDp / 48f
+            ) { f -> vm.changeMiniFloatBottomDp((f * 48).roundToInt()) }
+            SliderLine(
+                label = "圆角",
+                valueText = "${vm.miniFloatCornerDp} dp",
+                value = vm.miniFloatCornerDp / 36f
+            ) { f -> vm.changeMiniFloatCornerDp((f * 36).roundToInt()) }
 
             // ---- 滑动切歌动效（整卡 / 槽内）----
             Spacer(Modifier.height(14.dp))
@@ -1116,8 +1451,7 @@ private fun IconSetSettingsSection(vm: SonanceViewModel) {
         2 -> "实心圆润"
         else -> "原型原版"
     }
-    CollapsibleSection(
-        id = "iconSet",
+    SettingsSectionCard(
         title = "应用内图标风格",
         summary = "当前：$styleName · 播放页、列表、队列、导航共用",
         icon = SonanceIcons.Layers
@@ -1186,8 +1520,7 @@ private fun ListAppearanceSection(vm: SonanceViewModel) {
     val summary = "${vm.listRowStyle.label} · 封面${vm.listCoverScale.label} · $infoSummary · " +
         if (vm.rightRailLetters) "A–Z 字母索引" else "右侧滑块"
 
-    CollapsibleSection(
-        id = "listAppearance",
+    SettingsSectionCard(
         title = "列表外观与索引",
         summary = summary,
         icon = SonanceIcons.ListView
@@ -1283,6 +1616,13 @@ private fun ListAppearanceSection(vm: SonanceViewModel) {
             checked = !vm.hideListDuration,
             onCheckedChange = { vm.changeHideListDuration(!it) }
         )
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "最近页听歌概览卡",
+            subtitle = "在「最近播放」顶部显示本周收听时长、次数与最爱歌手；点卡片进完整统计",
+            checked = vm.statsOverviewCardEnabled,
+            onCheckedChange = vm::changeStatsOverviewCard
+        )
 
         // ---- 右侧轨道：字母索引 / 比例滑块 ----
         Spacer(Modifier.height(16.dp))
@@ -1324,11 +1664,11 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
     }
     val sleepSummary = timerLabel?.let { "睡眠定时：剩余 $it" } ?: "睡眠定时未开启"
 
-    CollapsibleSection(
-        id = "playback",
+    SettingsSectionCard(
         title = "均衡器与睡眠定时",
         summary = "$eqSummary · $sleepSummary",
-        icon = SonanceIcons.Equalizer
+        icon = SonanceIcons.Equalizer,
+        badge = timerLabel ?: if (vm.eqEnabled) "EQ" else null
     ) {
         // ---- 均衡器 ----
         SettingsActionRow(
@@ -1379,8 +1719,8 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
                 Text("睡眠定时器", style = MaterialTheme.typography.titleSmall, color = skin.text)
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    timerLabel?.let { "计时中 · 剩余 $it，到点自动暂停" }
-                        ?: "到点自动暂停播放，适合睡前听",
+                    timerLabel?.let { "计时中 · 剩余 $it，到点暂停并关闭应用" }
+                        ?: "到点暂停播放、释放音频焦点并关闭应用",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (timerLabel != null) skin.accent else skin.textMuted
                 )
@@ -1433,11 +1773,15 @@ private fun AudioOutputSettingsSection(
         if (vm.crossfadeEnabled) append(" · 淡化 ${vm.crossfadeSec} 秒")
         if (vm.playToastEnabled) append(" · 播放提示开")
     }
-    CollapsibleSection(
-        id = "audioOutput",
+    SettingsSectionCard(
         title = "USB 独占 · 无缝 · 淡入淡出",
         summary = summary,
-        icon = SonanceIcons.Volume
+        icon = SonanceIcons.Volume,
+        badge = when {
+            vm.usbExclusiveEnabled -> "USB直通"
+            vm.gaplessEnabled -> "无缝"
+            else -> null
+        }
     ) {
         SettingsSwitchRow(
             title = "USB 独占输出",
@@ -1472,6 +1816,62 @@ private fun AudioOutputSettingsSection(
             onCheckedChange = { vm.changePlayToast(it) }
         )
 
+        SettingsSwitchRow(
+            title = "摇一摇切歌",
+            subtitle = "播放时晃动手机切到下一曲（双峰回弹算法防日常晃动误触）",
+            checked = vm.shakeNextEnabled,
+            onCheckedChange = { vm.changeShakeNextEnabled(it) }
+        )
+        if (vm.shakeNextEnabled) {
+            val skin = LocalSkin.current
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "摇一摇灵敏度",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.textMuted,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            val levels = listOf(0 to "低（防误触）", 1 to "中（推荐）", 2 to "高（轻甩）")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                levels.forEach { (level, label) ->
+                    val selected = vm.shakeSensitivity == level
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(
+                                1.dp,
+                                if (selected) skin.accent else Color.Transparent,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeShakeSensitivity(level) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            SettingsSwitchRow(
+                title = "息屏时允许摇一摇切歌",
+                subtitle = "锁屏熄屏状态下仍可通过摇一摇切歌（仅播放中监听，暂停自动关闭）",
+                checked = vm.shakeScreenOffEnabled,
+                onCheckedChange = { vm.changeShakeScreenOffEnabled(it) }
+            )
+            SettingsSwitchRow(
+                title = "防口袋误触",
+                subtitle = "距离传感器被遮挡（放入口袋或包中）时自动屏蔽摇一摇",
+                checked = vm.shakePocketGuardEnabled,
+                onCheckedChange = { vm.changeShakePocketGuardEnabled(it) }
+            )
+        }
+
         Spacer(Modifier.height(14.dp))
 
         SettingsActionRow(
@@ -1498,8 +1898,7 @@ private fun PlayControlSettingsSection(vm: SonanceViewModel) {
     val summary = "${vm.playBtnColorMode.label}配色 · ${vm.playBtnShape.label} · ${styleName}图标 (${vm.playBtnIconScale}%)" +
         if (vm.playBtnHaptics) " · 震动开启" else ""
 
-    CollapsibleSection(
-        id = "playControl",
+    SettingsSectionCard(
         title = "播放按钮与触感",
         summary = summary,
         icon = SonanceIcons.Play
@@ -1691,8 +2090,7 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
         )
     }
 
-    CollapsibleSection(
-        id = "playerVisuals",
+    SettingsSectionCard(
         title = "播放页视觉与黑胶",
         summary = summary,
         icon = SonanceIcons.Album
@@ -1969,11 +2367,15 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
         if (vm.desktopLyricsEnabled) append(" · 桌面歌词开")
     }
 
-    CollapsibleSection(
-        id = "lyricsDisplay",
+    SettingsSectionCard(
         title = "歌词显示与外观",
         summary = summary,
-        icon = SonanceIcons.Lyrics
+        icon = SonanceIcons.Lyrics,
+        badge = when {
+            vm.desktopLyricsEnabled -> "桌面词"
+            vm.lockScreenLyrics -> "锁屏词"
+            else -> null
+        }
     ) {
         // ---- 字号 ----
         Row(
@@ -2037,6 +2439,14 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
 
         Spacer(Modifier.height(8.dp))
         SettingsSwitchRow(
+            title = "状态栏歌词扩展（HyperLyric / LyricGetter）",
+            subtitle = "向 HyperLyric / 歌词获取器推送标准状态栏实时歌词广播",
+            checked = vm.externalLyricsEnabled,
+            onCheckedChange = vm::changeExternalLyricsEnabled
+        )
+
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
             title = "桌面歌词",
             subtitle = "在桌面及所有应用上方悬浮显示逐行歌词，支持自由拖动、快捷播控与手势穿透锁定",
             checked = vm.desktopLyricsEnabled,
@@ -2095,6 +2505,54 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
                     }
                 }
             }
+
+            // ---- 歌词颜色 ----
+            Spacer(Modifier.height(12.dp))
+            Text("歌词颜色", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+            Spacer(Modifier.height(8.dp))
+            val colorChoices = DesktopLyricsManager.TEXT_COLOR_OPTIONS
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                colorChoices.forEach { (argb, label) ->
+                    val selected = vm.desktopLyricsTextColor == argb
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { vm.changeDesktopLyricsTextColor(argb) }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Box(
+                            Modifier
+                                .size(26.dp)
+                                .clip(CircleShape)
+                                .background(if (argb == 0) skin.surface3 else Color(argb))
+                                .border(
+                                    if (selected) 2.dp else 1.dp,
+                                    if (selected) skin.accent else skin.border,
+                                    CircleShape
+                                )
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) skin.accent else skin.textDim,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+            Text(
+                "「自动」跟随上面选的背景样式；选固定色后正在唱的那句用这个色，下一句自动降一档透明度。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim,
+                modifier = Modifier.padding(top = 6.dp)
+            )
         }
 
         Spacer(Modifier.height(8.dp))
@@ -2207,8 +2665,7 @@ private fun LyricsOnlineSettingsSection(vm: SonanceViewModel) {
     val summary = (if (vm.onlineLyricsEnabled) "已开启 LrcAPI" else "在线歌词已关闭") +
         " · 已缓存 ${vm.lyricsCacheCount} 首"
 
-    CollapsibleSection(
-        id = "lyricsOnline",
+    SettingsSectionCard(
         title = "在线歌词与缓存",
         summary = summary,
         icon = SonanceIcons.Cloud
@@ -2292,8 +2749,7 @@ private fun CoverSettingsSection(vm: SonanceViewModel) {
     val summary = (if (vm.onlineCoverEnabled) "自动补全已开启" else "自动补全已关闭") +
         " · 已缓存 ${vm.coverCacheCount} 张"
 
-    CollapsibleSection(
-        id = "cover",
+    SettingsSectionCard(
         title = "封面补全与缓存",
         summary = summary,
         icon = SonanceIcons.Image
@@ -2411,8 +2867,7 @@ private fun MediaLibraryScanSection(
     } else {
         "全部文件夹"
     }
-    CollapsibleSection(
-        id = "mediaLibrary",
+    SettingsSectionCard(
         title = "本地扫描与过滤规则",
         summary = "共 ${vm.songs.size} 首 · $scopeText",
         icon = SonanceIcons.Folder
@@ -2426,6 +2881,12 @@ private fun MediaLibraryScanSection(
             ),
             onClick = onOpenScanScope,
             actionLabel = if (vm.scanState == com.sonance.player.ScanState.SCANNING) "扫描中…" else "扫描"
+        )
+        SettingsSwitchRow(
+            title = "启动时自动刷新曲库",
+            subtitle = "默认关闭，重开应用直接秒开上次扫描缓存；开启后每次启动在后台静默检查新音乐",
+            checked = vm.autoScanOnLaunch,
+            onCheckedChange = { vm.changeAutoScanOnLaunch(it) }
         )
         Spacer(Modifier.height(10.dp))
         SettingsGroupLabel("扫描自动过滤")
@@ -2554,7 +3015,7 @@ private fun WidgetSettingsContent(vm: SonanceViewModel) {
             Spacer(Modifier.height(2.dp))
             Text(
                 "添加方式：长按桌面空白处 → 小组件 → 找到「山水有清音」（共 10 套：含 5 列保留与 4 列新增）。\n" +
-                    "采用「克制莫兰迪取色」：高艳专辑自动压低饱和度、黑白封面锁死零色相，确保封面纯净突出不喧宾夺主。",
+                    "提供深色琉璃、浅色磨砂与苹果风高雾「液态玻璃」（半透明透壁纸），配合克制莫兰迪取色让封面纯净突出。",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textDim
             )
@@ -2791,6 +3252,18 @@ private fun LxSettingsContent(
     ) { uri ->
         if (uri != null) vm.importLxScriptFromUri(uri)
     }
+    var showUrlImportDialog by remember { mutableStateOf(false) }
+
+    if (showUrlImportDialog) {
+        LxImportUrlDialog(
+            importing = vm.lxImporting,
+            onConfirm = { url ->
+                showUrlImportDialog = false
+                vm.importLxScriptFromUrl(url)
+            },
+            onDismiss = { showUrlImportDialog = false }
+        )
+    }
 
     Column(Modifier.fillMaxWidth()) {
         // 1. 洛雪脚本管理卡片
@@ -2801,34 +3274,44 @@ private fun LxSettingsContent(
                 .background(skin.surface2)
                 .padding(14.dp)
         ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "洛雪音源脚本",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = skin.text
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "洛雪音源脚本",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = skin.text
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "支持标准洛雪 v2（globalThis.lx）.js 脚本，支持选择本地文件或直链 URL 导入并自动校验启用",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PillButton(
+                        label = if (vm.lxImporting) "导入中…" else "本地导入 .js",
+                        enabled = !vm.lxImporting,
+                        compact = true,
+                        onClick = {
+                            importLauncher.launch(
+                                arrayOf("application/javascript", "text/javascript", "text/plain", "*/*")
+                            )
+                        }
                     )
-                    Text(
-                        "支持标准洛雪 v2（globalThis.lx）.js 脚本，导入即自动校验并启用",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = skin.textMuted
+                    PillButton(
+                        label = "通过 URL 导入",
+                        enabled = !vm.lxImporting,
+                        filled = false,
+                        compact = true,
+                        onClick = { showUrlImportDialog = true },
+                        modifier = Modifier.border(1.dp, skin.accent.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
                     )
                 }
-                Spacer(Modifier.width(8.dp))
-                PillButton(
-                    label = if (vm.lxImporting) "导入中…" else "导入 .js",
-                    enabled = !vm.lxImporting,
-                    compact = true,
-                    onClick = {
-                        importLauncher.launch(
-                            arrayOf("application/javascript", "text/javascript", "text/plain", "*/*")
-                        )
-                    }
-                )
             }
 
             if (vm.lxImporting) {
@@ -2969,6 +3452,17 @@ private fun LxSettingsContent(
                 color = skin.textDim
             )
         }
+
+        Spacer(Modifier.height(10.dp))
+
+        // 2.5 无感多音源兜底（默认开启）
+        SettingsSwitchRow(
+            title = "无感多音源兜底",
+            subtitle = "当前平台拿不到播放地址时，自动按脚本支持的其它平台（酷我 / QQ / 酷狗 / 网易云）逐个临时借用，" +
+                "全程不切换你选中的音源、不弹提示；只有所有平台都没有这首歌时才通知你。默认开启。",
+            checked = vm.lxAutoFallback,
+            onCheckedChange = { vm.changeLxAutoFallback(it) }
+        )
 
         Spacer(Modifier.height(10.dp))
 
@@ -3233,12 +3727,11 @@ private fun AboutSettingsSection(vm: SonanceViewModel) {
         }.getOrNull().orEmpty()
     }
 
-    CollapsibleSection(
-        id = "about",
+    SettingsSectionCard(
         title = "关于应用",
         summary = "山水有清音 · 版本 ${versionLabel.ifBlank { "—" }}",
         icon = SonanceIcons.Info,
-        defaultExpanded = true
+        badge = versionLabel.takeIf { it.isNotBlank() }?.let { "v$it" }
     ) {
         Column(Modifier.padding(vertical = 4.dp)) {
             Text(
@@ -3330,6 +3823,7 @@ internal fun AppIconCard(
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
+    val unselectedBorder = if (skin.immersive) Color.White.copy(alpha = 0.10f) else skin.border.copy(alpha = 0.35f)
     Box(
         modifier = modifier
             .aspectRatio(1f)
@@ -3337,7 +3831,7 @@ internal fun AppIconCard(
             .background(variant.bgColor)
             .then(
                 if (selected) Modifier.border(2.dp, skin.accent, RoundedCornerShape(16.dp))
-                else Modifier.border(1.dp, skin.border, RoundedCornerShape(16.dp))
+                else Modifier.border(0.8.dp, unselectedBorder, RoundedCornerShape(16.dp))
             )
             .clickable(onClick = onClick)
             .padding(9.dp),
@@ -3367,8 +3861,8 @@ internal fun AppIconCard(
 @Composable
 private fun SkinGrid(current: Skin, onSelect: (Skin) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val columns = (maxWidth / 170.dp).toInt().coerceIn(2, 4)
-        val gap = 12.dp
+        val columns = (maxWidth / 150.dp).toInt().coerceIn(2, 4)
+        val gap = 10.dp
         Column(verticalArrangement = Arrangement.spacedBy(gap)) {
             Skins.all.chunked(columns).forEach { rowSkins ->
                 Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
@@ -3397,24 +3891,34 @@ private fun SkinCard(
     modifier: Modifier = Modifier
 ) {
     val active = LocalSkin.current
+    val cardBg = when {
+        selected -> active.accentGlow
+        active.immersive -> Color.White.copy(alpha = 0.065f)
+        else -> active.surface2.copy(alpha = 0.68f)
+    }
+    val cardBorder = when {
+        selected -> active.accent
+        active.immersive -> Color.White.copy(alpha = 0.07f)
+        else -> Color.Transparent
+    }
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(active.surface)
+            .clip(RoundedCornerShape(16.dp))
+            .background(cardBg)
             .border(
-                width = if (selected) 2.dp else 1.dp,
-                color = if (selected) active.accent else active.border,
-                shape = RoundedCornerShape(12.dp)
+                width = if (selected) 1.5.dp else 0.7.dp,
+                color = cardBorder,
+                shape = RoundedCornerShape(16.dp)
             )
             .clickable(onClick = onClick)
-            .padding(10.dp)
+            .padding(9.dp)
     ) {
         // 迷你界面预览
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(74.dp)
-                .clip(RoundedCornerShape(8.dp))
+                .height(66.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .background(skin.bg)
         ) {
             Box(
@@ -3521,53 +4025,107 @@ private fun SkinCard(
  * 设置项通用容器与行组件
  * ============================================================ */
 
-/** 折叠状态：进程内共享的展开记忆，页面重建 / 来回切页后不会回到默认值 */
+/** 搜索命中高亮：搜索结果子树里提供关键词，空串 = 不高亮 */
+private val LocalSettingsHighlight = compositionLocalOf { "" }
+
+/**
+ * 模块卡片的折叠状态：进程级共享。
+ *
+ * 切分组、退出设置再进来都记得住每组的展开情况（和旧版折叠设置同一口径）；
+ * 键是模块 id，隐藏工具卡没有 id 时回退用标题。
+ */
 private object FoldState {
     val expanded = mutableStateMapOf<String, Boolean>()
+}
 
-    fun collapseAll() {
-        val keys = expanded.keys.toList()
-        keys.forEach { expanded[it] = false }
-        // 默认展开的「关于应用」「支持作者」也显式收起
-        expanded["about"] = false
-        expanded["donate"] = false
+/** 当前卡片所属模块 id：在两个 SettingsModuleContent 调用点提供 */
+private val LocalSettingsModuleId = compositionLocalOf { "" }
+
+/** 卡片默认展开与否：分组页 false（默认收起），搜索结果 true（命中即所见） */
+private val LocalSettingsCardDefaultExpanded = compositionLocalOf { false }
+
+/** 把文本里命中关键词的片段染成主题色（大小写不敏感，可多处命中） */
+private fun highlighted(text: String, query: String, accent: Color): AnnotatedString {
+    if (query.isEmpty()) return AnnotatedString(text)
+    val lower = text.lowercase()
+    val q = query.lowercase()
+    return buildAnnotatedString {
+        var start = 0
+        while (true) {
+            val i = lower.indexOf(q, start)
+            if (i < 0) {
+                append(text.substring(start))
+                break
+            }
+            append(text.substring(start, i))
+            withStyle(SpanStyle(color = accent, fontWeight = FontWeight.SemiBold)) {
+                append(text.substring(i, i + q.length))
+            }
+            start = i + q.length
+        }
     }
 }
 
+private fun Skin.settingsCardContainer(expanded: Boolean): Color = glassCardBg(highlighted = expanded)
+
+private fun Skin.settingsCardBorder(expanded: Boolean): Color = glassCardBorder(highlighted = expanded)
+
+private fun Skin.settingsSoftPill(): Color = softPillBg()
+
+private fun Skin.settingsRailBg(): Color = when {
+    immersive -> Color.Black.copy(alpha = 0.16f)
+    isLight -> surface.copy(alpha = 0.72f)
+    else -> surface.copy(alpha = 0.65f)
+}
+
+/**
+ * 设置模块卡片：标题头可点折叠，**默认收起**。
+ *
+ * 展开状态按模块 id 记在进程级 [FoldState]，切分组/退出再进都保持；
+ * 搜索结果里默认展开（命中的控件直接可见），点分组徽章跳转时自动展开命中模块。
+ * 收起时只留标题 + 摘要一行，并支持右侧主题双色点或运行状态小徽章预览。
+ */
 @Composable
-private fun CollapsibleSection(
-    id: String,
+private fun SettingsSectionCard(
     title: String,
     summary: String,
     icon: ImageVector,
-    defaultExpanded: Boolean = false,
+    badge: String? = null,
+    swatchColors: Pair<Color, Color>? = null,
     content: @Composable () -> Unit
 ) {
     val skin = LocalSkin.current
-    val expanded = FoldState.expanded[id] ?: defaultExpanded
+    val highlight = LocalSettingsHighlight.current
+    val foldKey = LocalSettingsModuleId.current.ifEmpty { title }
+    val expanded = FoldState.expanded[foldKey] ?: LocalSettingsCardDefaultExpanded.current
+    val chevronAngle by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(220, easing = FastOutSlowInEasing),
+        label = "settingsFoldChevron"
+    )
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(skin.surface)
+            .clip(RoundedCornerShape(18.dp))
+            .background(skin.settingsCardContainer(expanded))
             .border(
-                width = if (expanded) 1.dp else 0.dp,
-                color = if (expanded) skin.border else Color.Transparent,
-                shape = RoundedCornerShape(12.dp)
+                width = if (expanded) 1.dp else 0.8.dp,
+                color = skin.settingsCardBorder(expanded),
+                shape = RoundedCornerShape(18.dp)
             )
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable { FoldState.expanded[id] = !expanded }
-                .padding(horizontal = 14.dp, vertical = 13.dp),
+                .clickable { FoldState.expanded[foldKey] = !expanded }
+                .padding(horizontal = 13.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 Modifier
                     .size(32.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(if (expanded) skin.accentGlow else skin.surface2),
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (expanded) skin.accentGlow else skin.settingsSoftPill()),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -3577,62 +4135,101 @@ private fun CollapsibleSection(
                     modifier = Modifier.size(16.dp)
                 )
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = skin.text
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        highlighted(title, highlight, skin.accent),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (swatchColors != null) {
+                        Row(
+                            Modifier
+                                .clip(CircleShape)
+                                .background(skin.settingsSoftPill())
+                                .padding(horizontal = 5.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(swatchColors.first)
+                            )
+                            Box(
+                                Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(swatchColors.second)
+                            )
+                        }
+                    } else if (!badge.isNullOrBlank()) {
+                        Text(
+                            text = badge,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.5.sp,
+                            color = skin.accent,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(skin.accentGlow)
+                                .padding(horizontal = 6.dp, vertical = 1.5.dp)
+                        )
+                    }
+                }
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    summary,
+                    highlighted(summary, highlight, skin.accent),
                     style = MaterialTheme.typography.labelSmall,
                     color = skin.textMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(6.dp))
             Icon(
                 imageVector = SonanceIcons.ChevronDown,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = if (expanded) skin.accent else skin.textDim,
-                modifier = Modifier
-                    .size(18.dp)
-                    .rotate(if (expanded) 180f else 0f)
+                contentDescription = if (expanded) "收起$title" else "展开$title",
+                tint = skin.textMuted,
+                modifier = Modifier.size(15.dp).rotate(chevronAngle)
             )
         }
-        // 高度过渡用动画；收起后内容会被移除，重内容（图标网格 / 预览卡）不付组合成本
         AnimatedVisibility(
             visible = expanded,
-            enter = expandVertically(
-                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
-            ) + fadeIn(tween(180)),
-            exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
-            ) + fadeOut(tween(120))
+            enter = expandVertically(tween(220, easing = FastOutSlowInEasing)) + fadeIn(tween(180)),
+            exit = shrinkVertically(tween(180, easing = FastOutSlowInEasing)) + fadeOut(tween(120))
         ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
-            ) {
+            Column(Modifier.fillMaxWidth()) {
+                val dividerColor = if (skin.immersive) Color.White.copy(alpha = 0.08f) else skin.border.copy(alpha = 0.45f)
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp)
-                        .height(1.dp)
-                        .background(skin.border)
+                        .padding(horizontal = 13.dp)
+                        .height(0.8.dp)
+                        .background(dividerColor)
                 )
-                content()
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 13.dp, end = 13.dp, top = 12.dp, bottom = 14.dp)
+                ) {
+                    content()
+                }
             }
         }
     }
 }
 
-/** 折叠模块内部的分组小标题（例如「曲库清理」/「重复与同名歌曲」） */
+/** 模块内部的分组小标题（例如「曲库清理」/「重复与同名歌曲」） */
 @Composable
 internal fun SettingsGroupLabel(text: String) {
     val skin = LocalSkin.current

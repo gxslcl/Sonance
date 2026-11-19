@@ -21,18 +21,24 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -41,10 +47,12 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -59,6 +67,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -119,11 +128,13 @@ import com.sonance.player.ui.components.SongAudioSpecCard
 import com.sonance.player.ui.components.ToastHost
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.screens.AlbumsScreen
+import com.sonance.player.ui.screens.AddToPlaylistSheet
 import com.sonance.player.ui.screens.ArtistsScreen
 import com.sonance.player.ui.screens.BiliCacheScreen
 import com.sonance.player.ui.screens.FavoritesScreen
 import com.sonance.player.ui.screens.FoldersScreen
 import com.sonance.player.ui.screens.LibraryPagerScreen
+import com.sonance.player.ui.screens.ListenStatsScreen
 import com.sonance.player.ui.screens.LxOnlineScreen
 import com.sonance.player.ui.screens.LxSheetDetailScreen
 import com.sonance.player.ui.screens.OnlinePlaylistScreen
@@ -132,6 +143,7 @@ import com.sonance.player.ui.screens.RecentScreen
 import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
 import com.sonance.player.ui.screens.SongsScreen
+import com.sonance.player.ui.screens.UserPlaylistsScreen
 import com.sonance.player.ui.screens.inPager
 import com.sonance.player.ui.sheets.EqualizerStudioScreen
 import com.sonance.player.ui.sheets.QueueSheet
@@ -140,6 +152,9 @@ import com.sonance.player.ui.theme.GlassStyle
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.SonanceTheme
+import com.sonance.player.ui.theme.glassCardBorder
+import com.sonance.player.ui.theme.softPillBg
+import com.sonance.player.ui.theme.solidSurface
 import com.sonance.player.ui.vinyl.VinylWebScreen
 import com.sonance.player.ui.wall.NativeCoverWallScreen
 import com.sonance.player.ui.components.CoverPickerDialog
@@ -239,8 +254,14 @@ fun SonanceRoot(vm: SonanceViewModel) {
         val owner = androidx.lifecycle.ProcessLifecycleOwner.get()
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             when (event) {
-                androidx.lifecycle.Lifecycle.Event.ON_STOP -> session.onAppBackground()
-                androidx.lifecycle.Lifecycle.Event.ON_START -> session.onAppForeground()
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    session.onAppBackground()
+                    vm.onAppBackground()
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    session.onAppForeground()
+                    vm.onAppForeground()
+                }
                 else -> Unit
             }
         }
@@ -293,22 +314,29 @@ private fun PermissionGate(vm: SonanceViewModel, content: @Composable () -> Unit
         ActivityResultContracts.RequestPermission()
     ) { ok ->
         granted = ok
-        if (ok) {
-            vm.scan()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                runCatching { notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
-            }
+        if (ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching { notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
         }
     }
 
     LaunchedEffect(granted) {
         if (!granted) return@LaunchedEffect
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val prefs = com.sonance.player.data.Prefs(context)
+            val notifyGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!notifyGranted && !prefs.hasRequestedNotificationPermission) {
+                prefs.hasRequestedNotificationPermission = true
+                runCatching { notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            }
+        }
         if (vm.scanState == ScanState.IDLE) {
-            // 首次启动：没有缓存，扫一遍（走加载态）
+            // 首次启动尚无缓存：扫一遍建立缓存（走加载态）
             vm.scan()
-        } else {
-            // 有缓存：后台静默刷新一次。这就是"每次打开应用自动刷新"，
-            // 取代了已经被去掉的下拉刷新
+        } else if (vm.autoScanOnLaunch) {
+            // 已有缓存默认直接秒开；仅当用户在设置中开启「启动时自动刷新曲库」时才后台静默刷新
             vm.refreshOnStart()
         }
     }
@@ -649,6 +677,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
     BackHandler(enabled = !fullPlayerOpen && detail != null) { detail = null }
     // 设置页 / 在线音乐页 / 文件夹页按返回 → 回主页面（「全部歌曲」），而不是直接退出应用。
+    // 歌单页不在此列：它已是曲库 Pager 的第四页，返回行为与全部/最近/收藏一致；
+    // 歌单详情的返回由 UserPlaylistDetailScreen 自己的 BackHandler 处理。
     //
     // 必须注册在上面两个之后：BackHandler 是「后注册且 enabled 的优先」，
     // 放在前面会被全屏播放页 / 详情页抢走。另外这里刻意要求 detail == null ——
@@ -656,7 +686,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     BackHandler(
         enabled = !fullPlayerOpen && detail == null &&
             (vm.tab == LibraryTab.SETTINGS || vm.tab == LibraryTab.ONLINE ||
-                vm.tab == LibraryTab.FOLDERS)
+                vm.tab == LibraryTab.FOLDERS ||
+                vm.tab == LibraryTab.STATS)
     ) {
         vm.selectTab(LibraryTab.SONGS)
     }
@@ -944,6 +975,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         }
 
         // ===== 全屏播放页 =====
+        // 播放页「更多 → 添加到歌单」的目标歌（弹层挂在根布局，盖住播放页）
+        var playerAddToPlaylistTarget by remember { mutableStateOf<Song?>(null) }
         AnimatedVisibility(
             visible = fullPlayerOpen,
             enter = slideInVertically { it },
@@ -988,6 +1021,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 dlnaActive = vm.dlnaActiveRenderer != null,
                 onOpenDlna = { dlnaCastSheetOpen = true },
                 onOpenSleepTimer = { sleepOpen = true },
+                onAddToPlaylist = { playerAddToPlaylistTarget = it },
                 onOpenVinyl = { vinylOpen = true },
                 coveredByVinyl = suppressVinylUnderlay,
                 sleepTimerActive = vm.sleepTimerLabel != null,
@@ -1003,14 +1037,24 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 glowStrength = vm.glowStrength,
                 glowTransition = vm.glowTransition,
                 glowFadeMs = vm.glowFadeMs,
+                switchMotion = vm.playerSwitchMotion,
                 onGlowModeChange = { vm.changeGlowMode(it) },
                 onGlowStrengthChange = { vm.changeGlowStrength(it) },
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
                 onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
+                onSwitchMotionChange = { vm.changePlayerSwitchMotion(it) },
                 vinylMode = vm.vinylMode,
                 onVinylModeChange = { vm.changeVinylMode(it) },
                 hiResBadgeEnabled = vm.hiResBadgeEnabled,
                 hiResBadgeSize = vm.hiResBadgeSize
+            )
+        }
+
+        playerAddToPlaylistTarget?.let { target ->
+            AddToPlaylistSheet(
+                vm = vm,
+                songs = listOf(target),
+                onDismiss = { playerAddToPlaylistTarget = null }
             )
         }
 
@@ -1247,8 +1291,14 @@ private fun CompactLayout(
                 onBack = when {
                     detail != null -> { { onCloseDetail() } }
                     vm.tab == LibraryTab.ALBUMS || vm.tab == LibraryTab.ARTISTS ||
-                        vm.tab == LibraryTab.FOLDERS || vm.tab == LibraryTab.ONLINE ->
+                        vm.tab == LibraryTab.FOLDERS || vm.tab == LibraryTab.ONLINE ||
+                        vm.tab == LibraryTab.STATS ->
                         { { vm.selectTab(LibraryTab.SONGS) } }
+                    // 歌单已是曲库 Pager 的第四页：列表态和其它三页一样不给返回键，
+                    // 只有钻进某个歌单详情时才出现「返回」（收回详情，回到歌单列表）
+                    vm.tab == LibraryTab.PLAYLISTS && vm.activeUserPlaylistId != null -> {
+                        { vm.closeUserPlaylist() }
+                    }
                     else -> null
                 },
                 actions = {
@@ -1261,7 +1311,9 @@ private fun CompactLayout(
                             iconSize = 19.dp,
                             tint = if (vm.tab == LibraryTab.ALBUMS ||
                                 vm.tab == LibraryTab.ARTISTS ||
-                                vm.tab == LibraryTab.FOLDERS
+                                vm.tab == LibraryTab.FOLDERS ||
+                                vm.tab == LibraryTab.PLAYLISTS ||
+                                vm.tab == LibraryTab.STATS
                             ) {
                                 skin.accent
                             } else {
@@ -1350,7 +1402,9 @@ private fun CompactLayout(
                     }
 
                     // 「定位到正在播放」：只在曲库三页的列表视图显示，当前播放歌不在可视区时出现。
-                    if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
+                    if (detail == null && vm.tab.inPager && vm.tab != LibraryTab.PLAYLISTS &&
+                        playerState.hasItem && !vm.currentSongVisible
+                    ) {
                         LocateCurrentSongButton(
                             onClick = { vm.requestScrollToCurrent() },
                             modifier = Modifier
@@ -1383,6 +1437,8 @@ private fun CompactLayout(
                     swipeRightPct = vm.miniSwipeRightPct,
                     heightScale = vm.miniHeightScale / 100f,
                     coverScale = vm.miniCoverScale / 100f,
+                    bottomDp = vm.miniFloatBottomDp,
+                    cornerDp = vm.miniFloatCornerDp,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         // 量出真实高度：内容让位、回到顶部按钮的避让都靠它
@@ -1394,7 +1450,19 @@ private fun CompactLayout(
     }
 
     if (showViewSheet) {
-        ModalBottomSheet(onDismissRequest = { showViewSheet = false }) {
+        val viewSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showViewSheet = false },
+            sheetState = viewSheetState,
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+            containerColor = skin.surface.solidSurface(),
+            scrimColor = Color.Black.copy(alpha = 0.56f),
+            dragHandle = {
+                BottomSheetDefaults.DragHandle(
+                    color = skin.textMuted.copy(alpha = 0.45f)
+                )
+            }
+        ) {
             ViewPickerSheet(
                 current = vm.tab,
                 onPick = { tab ->
@@ -1420,10 +1488,9 @@ private fun CompactLayout(
 }
 
 /**
- * 「视图」弹层：把专辑 / 艺术家 / 文件夹 放在一步可达的位置。
+ * 「视图」弹层：把歌单 / 专辑 / 艺术家 / 文件夹 + 统计 / 封面墙 / 投屏收进统一软玻璃面板。
  *
- * 为什么不塞进设置页：这三项是中频操作（按专辑听歌是常见路径），
- * 埋进设置会变成"每次都要找"。放在标题栏一个图标后面，既不占常驻位，也只需一步。
+ * 使用 skipPartiallyExpanded = true 确保点击打开时一次完整展开，不截断下方扩展功能。
  */
 @Composable
 private fun ViewPickerSheet(
@@ -1435,109 +1502,192 @@ private fun ViewPickerSheet(
     val skin = LocalSkin.current
     val options = listOf(
         Triple(LibraryTab.SONGS, SonanceIcons.Music, "歌曲"),
+        Triple(LibraryTab.PLAYLISTS, SonanceIcons.Queue, "歌单"),
         Triple(LibraryTab.ALBUMS, SonanceIcons.Album, "专辑"),
         Triple(LibraryTab.ARTISTS, SonanceIcons.Users, "艺术家"),
         Triple(LibraryTab.FOLDERS, SonanceIcons.Folder, "文件夹")
     )
-    Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+    val tileSurface = if (skin.immersive) Color.White.copy(alpha = 0.06f) else skin.surface2
+    val idleBorder = skin.glassCardBorder(highlighted = false)
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp)
+            .padding(top = 2.dp, bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         Text(
-            text = "按什么方式浏览曲库",
+            text = "曲库浏览方式",
             style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
             color = skin.textMuted,
-            modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 10.dp)
+            modifier = Modifier.padding(horizontal = 4.dp)
         )
-        options.forEach { (tab, icon, label) ->
-            val on = current == tab
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick(tab) }
-                    .padding(horizontal = 24.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                androidx.compose.material3.Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (on) skin.accent else skin.textDim,
-                    modifier = Modifier.size(20.dp)
-                )
-                Text(
-                    text = label,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (on) skin.accent else skin.text
-                )
-                if (on) {
-                    Text(
-                        text = "当前",
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        color = skin.textMuted,
-                        modifier = Modifier.padding(start = 8.dp)
-                    )
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.chunked(2).forEach { rowItems ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    rowItems.forEach { (tab, icon, label) ->
+                        val on = current == tab
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (on) skin.accentGlow else tileSurface)
+                                .border(
+                                    width = if (on) 1.dp else 0.7.dp,
+                                    color = if (on) skin.accent.copy(alpha = 0.45f) else idleBorder,
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+                                .clickable { onPick(tab) }
+                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (on) skin.accent else skin.softPillBg()),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    tint = if (on) skin.onAccent else skin.textDim,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Text(
+                                text = label,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (on) skin.accent else skin.text,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (on) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(skin.accent)
+                                )
+                            }
+                        }
+                    }
+                    if (rowItems.size == 1) {
+                        Spacer(Modifier.weight(1f))
+                    }
                 }
             }
         }
-        // 封面墙：不是曲库视图而是一种沉浸浏览方式，用分隔线与四个 tab 隔开，
-        // 副标题说明它做什么（点进去是全屏 3D 墙，不是又一个列表页）
-        androidx.compose.material3.HorizontalDivider(
-            color = skin.border,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
+
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = "更多探索",
+            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.textMuted,
+            modifier = Modifier.padding(horizontal = 4.dp)
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onOpenWall() }
-                .padding(horizontal = 24.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ViewSheetFeatureCard(
+                icon = SonanceIcons.EqualizerBars,
+                title = "听歌统计",
+                subtitle = "收听时长 · 歌手偏好 · 连续天数",
+                selected = current == LibraryTab.STATS,
+                tileSurface = tileSurface,
+                idleBorder = idleBorder,
+                onClick = { onPick(LibraryTab.STATS) }
+            )
+            ViewSheetFeatureCard(
+                icon = SonanceIcons.CoverWall,
+                title = "封面墙 · 随便听听",
+                subtitle = "沉浸式 3D 浏览全部专辑",
+                selected = false,
+                tileSurface = tileSurface,
+                idleBorder = idleBorder,
+                onClick = onOpenWall
+            )
+            ViewSheetFeatureCard(
+                icon = SonanceIcons.Cast,
+                title = "D-LAN 共享与投屏",
+                subtitle = "浏览局域网曲库并投屏到音箱或电视",
+                selected = false,
+                tileSurface = tileSurface,
+                idleBorder = idleBorder,
+                onClick = onOpenDlna
+            )
+        }
+    }
+}
+
+@Composable
+private fun ViewSheetFeatureCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    tileSurface: Color,
+    idleBorder: Color,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (selected) skin.accentGlow else tileSurface)
+            .border(
+                width = if (selected) 1.dp else 0.7.dp,
+                color = if (selected) skin.accent.copy(alpha = 0.45f) else idleBorder,
+                shape = RoundedCornerShape(16.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(if (selected) skin.accent else skin.softPillBg()),
+            contentAlignment = Alignment.Center
         ) {
             androidx.compose.material3.Icon(
-                imageVector = SonanceIcons.CoverWall,
+                imageVector = icon,
                 contentDescription = null,
-                tint = skin.textDim,
-                modifier = Modifier.size(20.dp)
+                tint = if (selected) skin.onAccent else skin.textDim,
+                modifier = Modifier.size(18.dp)
             )
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = "封面墙",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                    color = skin.text
-                )
-                Text(
-                    text = "沉浸式 3D 浏览全部专辑",
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
-                )
-            }
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onOpenDlna() }
-                .padding(horizontal = 24.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            androidx.compose.material3.Icon(
-                imageVector = SonanceIcons.Cast,
-                contentDescription = null,
-                tint = skin.textDim,
-                modifier = Modifier.size(20.dp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = if (selected) skin.accent else skin.text
             )
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = "D-LAN 共享与投屏",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                    color = skin.text
-                )
-                Text(
-                    text = "浏览局域网曲库并投屏到音箱或电视",
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted
-                )
-            }
+            Text(
+                text = subtitle,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                color = skin.textMuted
+            )
         }
+        androidx.compose.material3.Icon(
+            imageVector = SonanceIcons.ArrowLeft,
+            contentDescription = null,
+            tint = skin.textMuted,
+            modifier = Modifier.size(15.dp).rotate(180f)
+        )
     }
 }
 
@@ -1636,6 +1786,8 @@ private fun MediumLayout(
                     swipeRightPct = vm.miniSwipeRightPct,
                     heightScale = vm.miniHeightScale / 100f,
                     coverScale = vm.miniCoverScale / 100f,
+                    bottomDp = vm.miniFloatBottomDp,
+                    cornerDp = vm.miniFloatCornerDp,
                     modifier = Modifier.navigationBarsPadding()
                 )
             } else {
@@ -1762,7 +1914,9 @@ private fun ExpandedLayout(
                         }
 
                         // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
-                        if (detail == null && vm.tab.inPager && playerState.hasItem && !vm.currentSongVisible) {
+                        if (detail == null && vm.tab.inPager && vm.tab != LibraryTab.PLAYLISTS &&
+                        playerState.hasItem && !vm.currentSongVisible
+                    ) {
                             LocateCurrentSongButton(
                                 onClick = { vm.requestScrollToCurrent() },
                                 modifier = Modifier
@@ -1796,6 +1950,8 @@ private fun ExpandedLayout(
                                 swipeRightPct = vm.miniSwipeRightPct,
                                 heightScale = vm.miniHeightScale / 100f,
                                 coverScale = vm.miniCoverScale / 100f,
+                    bottomDp = vm.miniFloatBottomDp,
+                    cornerDp = vm.miniFloatCornerDp,
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
                                     // 量出真实高度：内容让位靠它（设置里能把卡片调到 2 倍高）
@@ -2039,6 +2195,13 @@ private fun ScreenBody(
             reportCurrentVisibility = reportCurrentVisibility
         )
 
+        LibraryTab.PLAYLISTS -> UserPlaylistsScreen(
+            vm = vm,
+            playerState = playerState
+        )
+
+        LibraryTab.STATS -> ListenStatsScreen(vm = vm)
+
         LibraryTab.SETTINGS -> SettingsScreen(
             vm = vm,
             onOpenEqualizer = onOpenEqualizer,
@@ -2073,6 +2236,12 @@ private fun tabSubtitle(vm: SonanceViewModel): String {
         else -> "未开启 · 点击开启"
     }
     LibraryTab.FAVORITES -> "已收藏 ${vm.favorites.size} 首"
+    LibraryTab.PLAYLISTS -> if (vm.activeUserPlaylistId != null) {
+        vm.userPlaylistById(vm.activeUserPlaylistId!!)?.let { "${it.entries.size} 首" } ?: "我的歌单"
+    } else {
+        "共 ${vm.userPlaylists.size} 个歌单"
+    }
+    LibraryTab.STATS -> "收听时长与偏好"
     LibraryTab.SETTINGS -> vm.skin.name
     }
 }

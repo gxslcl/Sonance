@@ -7,6 +7,7 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import java.nio.ByteBuffer
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.max
@@ -76,6 +77,27 @@ internal fun eqAutoPreampDb(maxBoostDb: Float): Float {
     return -(maxBoostDb * (0.18f + 0.82f * smooth))
 }
 
+/** Poweramp 式双二阶宽搁架滤波点（Hz / Q / ±dB 范围） */
+internal const val TONE_BASS_FREQ = 90.0
+internal const val TONE_TREBLE_FREQ = 9500.0
+internal const val TONE_SHELF_Q = 0.68
+const val TONE_MAX_DB = 9f
+
+/** 解析持久化的 10 段自定义曲线；长度不对或含脏数据都返回 null。 */
+internal fun parseEqBandsCsv(raw: String): FloatArray? {
+    if (raw.isBlank()) return null
+    val parts = raw.split(',')
+    if (parts.size != EQ_BAND_COUNT) return null
+    val out = FloatArray(EQ_BAND_COUNT)
+    var i = 0
+    while (i < EQ_BAND_COUNT) {
+        val v = parts[i].trim().toFloatOrNull()?.takeIf { it.isFinite() } ?: return null
+        out[i] = v.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+        i++
+    }
+    return out
+}
+
 /** 增益上下限（dB），滑杆范围和预设曲线都受它约束 */
 const val EQ_MIN_DB = -12f
 const val EQ_MAX_DB = 12f
@@ -142,13 +164,32 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
     private val b2 = DoubleArray(bandCount)
     private val a1 = DoubleArray(bandCount)
     private val a2 = DoubleArray(bandCount)
+    private val activeBands = IntArray(bandCount)
+    private var activeBandCount = 0
 
     /** 每声道、每段的 DF2T 状态（64 位双精度消除 96/192 kHz 低频极点精度漂移） */
     private val z1 = Array(channels) { DoubleArray(bandCount) }
     private val z2 = Array(channels) { DoubleArray(bandCount) }
 
-    /** 按当前采样率把 [gainsDb] 设计成系数（[freqs] 与 [gainsDb] 一一对应） */
-    fun design(freqs: IntArray, gainsDb: FloatArray, sampleRate: Int) {
+    /** Poweramp 式宽搁架级（index 0 = Low-Shelf 90Hz，index 1 = High-Shelf 9.5kHz） */
+    private val shelfActive = BooleanArray(2)
+    private val shelfB0 = DoubleArray(2)
+    private val shelfB1 = DoubleArray(2)
+    private val shelfB2 = DoubleArray(2)
+    private val shelfA1 = DoubleArray(2)
+    private val shelfA2 = DoubleArray(2)
+    private val shelfZ1 = Array(channels) { DoubleArray(2) }
+    private val shelfZ2 = Array(channels) { DoubleArray(2) }
+
+    /** 按当前采样率把 [gainsDb] 与可选高低音宽搁架设计成系数 */
+    fun design(
+        freqs: IntArray,
+        gainsDb: FloatArray,
+        sampleRate: Int,
+        bassShelfDb: Float = 0f,
+        trebleShelfDb: Float = 0f
+    ) {
+        var activeCount = 0
         var b = 0
         while (b < bandCount) {
             val c = BiquadDesign.peaking(
@@ -158,8 +199,49 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
                 q = eqBandQ(b).toDouble()
             )
             b0[b] = c[0]; b1[b] = c[1]; b2[b] = c[2]; a1[b] = c[3]; a2[b] = c[4]
+            if (c[0] == 1.0 && c[1] == 0.0 && c[2] == 0.0 && c[3] == 0.0 && c[4] == 0.0) {
+                // 单位冲激旁路段清零历史状态，防止切回该段时残留瞬态
+                var ch = 0
+                while (ch < channels) {
+                    z1[ch][b] = 0.0
+                    z2[ch][b] = 0.0
+                    ch++
+                }
+            } else {
+                activeBands[activeCount++] = b
+            }
             b++
         }
+        activeBandCount = activeCount
+        designShelfStage(0, TONE_BASS_FREQ, bassShelfDb, sampleRate, high = false)
+        designShelfStage(1, TONE_TREBLE_FREQ, trebleShelfDb, sampleRate, high = true)
+    }
+
+    private fun designShelfStage(
+        slot: Int,
+        freq: Double,
+        gainDb: Float,
+        sampleRate: Int,
+        high: Boolean
+    ) {
+        if (!gainDb.isFinite() || abs(gainDb) < 1e-3f || sampleRate <= 0) {
+            shelfActive[slot] = false
+            shelfB0[slot] = 1.0
+            shelfB1[slot] = 0.0
+            shelfB2[slot] = 0.0
+            shelfA1[slot] = 0.0
+            shelfA2[slot] = 0.0
+            return
+        }
+        val clamped = gainDb.coerceIn(-TONE_MAX_DB, TONE_MAX_DB).toDouble()
+        val c = if (high) {
+            BiquadDesign.highShelf(freq, clamped, sampleRate, TONE_SHELF_Q)
+        } else {
+            BiquadDesign.lowShelf(freq, clamped, sampleRate, TONE_SHELF_Q)
+        }
+        shelfActive[slot] = true
+        shelfB0[slot] = c[0]; shelfB1[slot] = c[1]; shelfB2[slot] = c[2]
+        shelfA1[slot] = c[3]; shelfA2[slot] = c[4]
     }
 
     /** 清滤波器状态（seek / 暂停后必须做，否则会带出一声残留的"爆音"） */
@@ -168,24 +250,42 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
         while (ch < channels) {
             z1[ch].fill(0.0)
             z2[ch].fill(0.0)
+            shelfZ1[ch].fill(0.0)
+            shelfZ2[ch].fill(0.0)
             ch++
         }
     }
 
     /** 单帧处理供平滑切换曲线使用；每个声道仍保有独立状态。 */
     fun processSample(input: Float, channel: Int): Float {
+        val count = activeBandCount
+        val bassOn = shelfActive[0]
+        val trebleOn = shelfActive[1]
+        if (count == 0 && !bassOn && !trebleOn) return input
         val s1 = z1[channel]
         val s2 = z2[channel]
         var x = input.toDouble()
-        var b = 0
-        while (b < bandCount) {
+        var k = 0
+        while (k < count) {
+            val b = activeBands[k]
             val y = b0[b] * x + s1[b]
             s1[b] = b1[b] * x - a1[b] * y + s2[b]
             s2[b] = b2[b] * x - a2[b] * y
             x = y
-            b++
+            k++
         }
+        if (bassOn) x = processShelf(0, x, channel)
+        if (trebleOn) x = processShelf(1, x, channel)
         return x.toFloat()
+    }
+
+    private fun processShelf(slot: Int, input: Double, channel: Int): Double {
+        val sz1 = shelfZ1[channel]
+        val sz2 = shelfZ2[channel]
+        val y = shelfB0[slot] * input + sz1[slot]
+        sz1[slot] = shelfB1[slot] * input - shelfA1[slot] * y + sz2[slot]
+        sz2[slot] = shelfB2[slot] * input - shelfA2[slot] * y
+        return y
     }
 
     /**
@@ -195,6 +295,10 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
      * @param frames 帧数
      */
     fun process(buf: FloatArray, frames: Int) {
+        val count = activeBandCount
+        val bassOn = shelfActive[0]
+        val trebleOn = shelfActive[1]
+        if (count == 0 && !bassOn && !trebleOn) return
         var ch = 0
         while (ch < channels) {
             val s1 = z1[ch]
@@ -203,15 +307,18 @@ internal class EqCascade(val bandCount: Int, val channels: Int) {
             while (i < frames) {
                 val idx = i * channels + ch
                 var x = buf[idx].toDouble()
-                var b = 0
-                while (b < bandCount) {
+                var k = 0
+                while (k < count) {
+                    val b = activeBands[k]
                     // DF2T：状态更新必须用**输入** x，先算 y 再更新，不能把 x 覆盖掉
                     val y = b0[b] * x + s1[b]
                     s1[b] = b1[b] * x - a1[b] * y + s2[b]
                     s2[b] = b2[b] * x - a2[b] * y
                     x = y
-                    b++
+                    k++
                 }
+                if (bassOn) x = processShelf(0, x, ch)
+                if (trebleOn) x = processShelf(1, x, ch)
                 buf[idx] = x.toFloat()
                 i++
             }
@@ -377,16 +484,33 @@ internal fun designPeakingCoeffs(
     return FloatArray(5) { c[it].toFloat() }
 }
 
-/** 与实际 64 位 biquad 使用同一组系数，用于自动留余量和均衡器的频响示意图。 */
-internal class EqResponse(gainsDb: FloatArray, private val sampleRate: Int) {
-    private val coefficients = Array(EQ_BAND_COUNT) { i ->
-        val gain = gainsDb.getOrElse(i) { 0f }.let { if (it.isFinite()) it else 0f }
-        BiquadDesign.peaking(
-            f0 = EQ_CENTER_FREQS[i].toDouble(),
-            gainDb = gain.toDouble(),
-            sampleRate = sampleRate,
-            q = eqBandQ(i).toDouble()
-        )
+/** 与实际 64 位 biquad + 高低音宽搁架使用同一组系数，用于自动留余量和均衡器的频响示意图。 */
+internal class EqResponse(
+    gainsDb: FloatArray,
+    private val sampleRate: Int,
+    bassBoostDb: Float = 0f,
+    trebleBoostDb: Float = 0f
+) {
+    private val coefficients = Array(EQ_BAND_COUNT + 2) { i ->
+        when {
+            i < EQ_BAND_COUNT -> {
+                val gain = gainsDb.getOrElse(i) { 0f }.let { if (it.isFinite()) it else 0f }
+                BiquadDesign.peaking(
+                    f0 = EQ_CENTER_FREQS[i].toDouble(),
+                    gainDb = gain.toDouble(),
+                    sampleRate = sampleRate,
+                    q = eqBandQ(i).toDouble()
+                )
+            }
+            i == EQ_BAND_COUNT -> {
+                val g = if (bassBoostDb.isFinite()) bassBoostDb.coerceIn(-TONE_MAX_DB, TONE_MAX_DB) else 0f
+                BiquadDesign.lowShelf(TONE_BASS_FREQ, g.toDouble(), sampleRate, TONE_SHELF_Q)
+            }
+            else -> {
+                val g = if (trebleBoostDb.isFinite()) trebleBoostDb.coerceIn(-TONE_MAX_DB, TONE_MAX_DB) else 0f
+                BiquadDesign.highShelf(TONE_TREBLE_FREQ, g.toDouble(), sampleRate, TONE_SHELF_Q)
+            }
+        }
     }
 
     fun dbAt(frequencyHz: Double): Float {
@@ -429,11 +553,17 @@ internal class EqResponse(gainsDb: FloatArray, private val sampleRate: Int) {
 /**
  * 一次算好整条曲线给 UI 画图用：31 Hz–16 kHz 对数扫 [points] 个点。
  *
- * 与运行时 [SoundChainDsp] 共用 [effectPreampBudgetDb]，保证画面与实际听到的电平一致。
+ * 与运行时 [SoundChainDsp] 共用 [effectPreampBudgetDb] 与 Tone 搁架，保证画面与实际听到的电平一致。
  */
-fun presetNetCurve(preset: SoundPreset, points: Int, sampleRate: Int = 48_000): FloatArray {
-    val response = EqResponse(preset.eqDb, sampleRate)
-    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, channels = 2))
+fun presetNetCurve(
+    preset: SoundPreset,
+    points: Int,
+    sampleRate: Int = 48_000,
+    intensity: PresetIntensity = PresetIntensity.MEDIUM
+): FloatArray {
+    val (eqDb, fx) = preset.scaled(intensity)
+    val response = EqResponse(eqDb, sampleRate, fx.bassBoostDb, fx.trebleBoostDb)
+    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(fx, channels = 2))
     val safePoints = points.coerceAtLeast(2)
     return FloatArray(safePoints) { i ->
         val hz = 31.0 * (16_000.0 / 31.0).pow(i.toDouble() / (safePoints - 1))
@@ -442,12 +572,17 @@ fun presetNetCurve(preset: SoundPreset, points: Int, sampleRate: Int = 48_000): 
 }
 
 /**
- * 低频 / 中频 / 高频的整体倾向（dB，已计入自动余量与效果预算），给用户看的"这套预设改了什么"。
+ * 低频 / 中频 / 高频的整体倾向（dB，已计入自动余量、Tone 搁架与效果预算），给用户看的"这套预设改了什么"。
  * 三段的取值区间按听感划分，不是技术上的倍频程。
  */
-fun presetToneBands(preset: SoundPreset, sampleRate: Int = 48_000): FloatArray {
-    val response = EqResponse(preset.eqDb, sampleRate)
-    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, channels = 2))
+fun presetToneBands(
+    preset: SoundPreset,
+    sampleRate: Int = 48_000,
+    intensity: PresetIntensity = PresetIntensity.MEDIUM
+): FloatArray {
+    val (eqDb, fx) = preset.scaled(intensity)
+    val response = EqResponse(eqDb, sampleRate, fx.bassBoostDb, fx.trebleBoostDb)
+    val trim = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(fx, channels = 2))
     fun avg(vararg hz: Double): Float {
         var sum = 0.0
         for (frequency in hz) sum += response.dbAt(frequency)
@@ -461,44 +596,43 @@ fun presetToneBands(preset: SoundPreset, sampleRate: Int = 48_000): FloatArray {
 }
 
 /**
- * 均衡器预设。
+ * 均衡器预设（借鉴 Poweramp 经典分频调音：推下潜/空气感的同时精确清理 250 Hz 低中频浊度）。
  *
  * 每个预设直接给 **10 段增益（dB）**，与 [EQ_CENTER_FREQS] 一一对应 ——
  * 不再做"归一化 → 按设备段数映射"，因为软件均衡器的段数由我们自己决定，
  * 所有设备完全一致。
- *
- * 增益普遍压在 ±8dB 以内：峰值再高，16bit 输出一削顶就是失真，得不偿失。
- */enum class EqPreset(val label: String, val curve: FloatArray) {
+ */
+enum class EqPreset(val label: String, val curve: FloatArray) {
 
     /** 关闭：整条滤波链旁路 */
     OFF("关闭", floatArrayOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)),
 
-    /** 流行：中频抬一点、两端略降，人声和旋律更靠前 */
-    POP("流行", floatArrayOf(-1f, -0.5f, 1f, 3f, 4f, 3.5f, 2f, 1f, 1.5f, 2f)),
+    /** 流行：丰润底鼓 + 250Hz 去糊 + 人声明朗上扬，活力鲜明 */
+    POP("流行", floatArrayOf(2.8f, 3.6f, 1.4f, -1.6f, -0.6f, 1.4f, 2.8f, 3.2f, 2.8f, 2.4f)),
 
-    /** 人声：中高频突出，低频让路，听歌听清咬字 */
-    VOCAL("人声", floatArrayOf(-4f, -2.5f, -1f, 0.5f, 2.5f, 4f, 4.5f, 3f, 1f, -1f)),
+    /** 人声：留住喉音厚度、清理伴奏掩蔽并贴耳托起唇齿呼吸感 */
+    VOCAL("人声", floatArrayOf(-2.0f, -0.8f, 1.2f, -2.2f, 1.4f, 3.6f, 4.6f, 3.4f, 1.8f, 0.8f)),
 
-    /** 摇滚：典型 V 型，低频和镲片两头翘 */
-    ROCK("摇滚", floatArrayOf(5f, 3.5f, 2f, -1f, -1.5f, 0f, 1.5f, 3f, 4f, 4.5f)),
+    /** 摇滚：紧凑双低频脉冲 + 清爽中音留白 + 镲片失真吉他清脆张力 */
+    ROCK("摇滚", floatArrayOf(4.2f, 4.8f, 2.2f, -2.0f, -1.2f, 0.8f, 2.8f, 4.0f, 4.4f, 4.0f)),
 
-    /** 爵士：低频温暖、中频略退、高频通透 */
-    JAZZ("爵士", floatArrayOf(3.5f, 2.5f, 1f, 1.5f, -1f, -1f, 0f, 1.5f, 2.5f, 3f)),
+    /** 爵士：低频弹跳温暖、管乐丝滑通透、空气细节丰富 */
+    JAZZ("爵士", floatArrayOf(2.8f, 3.4f, 2.0f, -0.8f, -0.6f, 0.8f, 1.8f, 2.4f, 3.0f, 3.2f)),
 
-    /** 古典：整体平直，两端轻微抬起补厅堂感 */
-    CLASSICAL("古典", floatArrayOf(3.5f, 2.5f, 1.5f, 0f, -1f, -1f, 0f, 1.5f, 3f, 3.5f)),
+    /** 古典：大厅宽松极低频与琴弦泛音两端顺滑延伸，中频顺平 */
+    CLASSICAL("古典", floatArrayOf(3.2f, 2.8f, 1.0f, -1.0f, -0.6f, 0.4f, 1.6f, 2.6f, 3.4f, 3.8f)),
 
-    /** 舞曲：低频有力 + 中高频明亮，节奏感强 */
-    DANCE("舞曲", floatArrayOf(6f, 5f, 2.5f, 0f, 1f, 2.5f, 3.5f, 4f, 3f, 1f)),
+    /** 舞曲：拳拳到肉 62Hz 重拍 + 250Hz 干脆去泥 + 合成器闪耀高频 */
+    DANCE("舞曲", floatArrayOf(5.4f, 6.0f, 2.6f, -2.4f, -0.6f, 1.2f, 2.6f, 3.8f, 4.2f, 3.6f)),
 
-    /** 低音增强：低频拉满，其余递减以免轰头 */
-    BASS("低音增强", floatArrayOf(8f, 7f, 5.5f, 3f, 1f, -0.5f, -1.5f, -2f, -2f, -2f)),
+    /** 低音增强：重低音双峰轰鸣而不糊中频人声 */
+    BASS("低音增强", floatArrayOf(6.5f, 7.2f, 3.8f, -1.6f, -0.4f, 0.4f, 0.8f, 0.6f, 0.2f, 0.0f)),
 
-    /** 高音增强：齿音与细节变清楚，低频收掉 */
-    TREBLE("高音增强", floatArrayOf(-4f, -3f, -2f, -1f, 0f, 1f, 2.5f, 4.5f, 6f, 6.5f)),
+    /** 高音增强：提亮人声空气感、吉他擦弦与细节，收稳底盘不噪 */
+    TREBLE("高音增强", floatArrayOf(-0.8f, -0.4f, -0.8f, -1.8f, 0.0f, 1.6f, 3.4f, 5.0f, 6.2f, 6.8f)),
 
-    /** 柔和：整体压两端，睡前/长时间听不累 */
-    SOFT("柔和", floatArrayOf(1.5f, 1.5f, 1f, 0.5f, 0f, -0.5f, -1f, -2f, -3f, -3.5f));
+    /** 柔和：小音量等响度轮廓，低频温厚、削去 2~8kHz 刺耳倦怠感 */
+    SOFT("柔和", floatArrayOf(2.2f, 2.6f, 1.6f, 0.4f, 0.0f, -0.6f, -1.6f, -2.4f, -2.0f, -1.2f));
 
     companion object {
         /** 按名字取预设（持久化用），找不到就回落到 [OFF] */

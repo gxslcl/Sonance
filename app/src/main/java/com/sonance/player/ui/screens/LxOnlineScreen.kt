@@ -36,6 +36,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +52,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +78,7 @@ import com.sonance.player.ui.components.hapticTick
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /**
  * 洛雪自定义音源独立在线页面（与内置网易云 / 插件页完全分离）。
@@ -103,6 +107,7 @@ fun LxOnlineScreen(
     }
 
     var showScriptPicker by remember { mutableStateOf(false) }
+    var showUrlImportDialog by remember { mutableStateOf(false) }
     var actionTrack by remember { mutableStateOf<RemoteTrack?>(null) }
 
     val activeScript = vm.lxActiveScript
@@ -129,9 +134,7 @@ fun LxOnlineScreen(
             platforms = availablePlatforms,
             selectedPlatformId = currentPlatform.id,
             onPickScript = { showScriptPicker = true },
-            onImportClick = {
-                importLauncher.launch(arrayOf("application/javascript", "text/javascript", "text/plain", "*/*"))
-            },
+            onImportClick = { showScriptPicker = true },
             onSelectPlatform = { vm.changeLxPlatform(it) }
         )
 
@@ -145,6 +148,29 @@ fun LxOnlineScreen(
                 modifier = Modifier.weight(1f)
             )
             return@Column
+        }
+
+        vm.lxImportError?.let { err ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(skin.surface2)
+                    .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = err,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { vm.dismissLxImportError() }) {
+                    Text("关闭", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+                }
+            }
         }
 
         if (activeScript == null) {
@@ -166,10 +192,20 @@ fun LxOnlineScreen(
                     color = skin.text,
                     modifier = Modifier.weight(1f)
                 )
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 PillButton(
-                    label = "导入 .js",
+                    label = "URL",
                     compact = true,
+                    filled = false,
+                    enabled = !vm.lxImporting,
+                    onClick = { showUrlImportDialog = true },
+                    modifier = Modifier.border(1.dp, skin.accent.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                )
+                Spacer(Modifier.width(6.dp))
+                PillButton(
+                    label = "本地 .js",
+                    compact = true,
+                    enabled = !vm.lxImporting,
                     onClick = {
                         importLauncher.launch(arrayOf("application/javascript", "text/javascript", "text/plain", "*/*"))
                     }
@@ -268,11 +304,26 @@ fun LxOnlineScreen(
     if (showScriptPicker) {
         LxScriptPickerDialog(
             vm = vm,
-            onImportClick = {
+            onImportLocalClick = {
                 showScriptPicker = false
                 importLauncher.launch(arrayOf("application/javascript", "text/javascript", "text/plain", "*/*"))
             },
+            onImportUrlClick = {
+                showScriptPicker = false
+                showUrlImportDialog = true
+            },
             onDismiss = { showScriptPicker = false }
+        )
+    }
+
+    if (showUrlImportDialog) {
+        LxImportUrlDialog(
+            importing = vm.lxImporting,
+            onConfirm = { url ->
+                showUrlImportDialog = false
+                vm.importLxScriptFromUrl(url)
+            },
+            onDismiss = { showUrlImportDialog = false }
         )
     }
 
@@ -910,20 +961,24 @@ private fun LxBoardCard(
 @Composable
 private fun LxScriptPickerDialog(
     vm: SonanceViewModel,
-    onImportClick: () -> Unit,
+    onImportLocalClick: () -> Unit,
+    onImportUrlClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val skin = LocalSkin.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = skin.surface2,
+        containerColor = skin.surface2.solidSurface(),
         titleContentColor = skin.text,
         textContentColor = skin.textMuted,
-        title = { Text("切换洛雪音源脚本") },
+        title = { Text(if (vm.lxScripts.isEmpty()) "导入洛雪音源脚本" else "切换洛雪音源脚本") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (vm.lxScripts.isEmpty()) {
-                    Text("尚未导入任何洛雪 .js 音源脚本。", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "尚未导入任何洛雪 .js 音源脚本，可从本地文件选择或直接输入直链 URL 导入。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 } else {
                     vm.lxScripts.forEach { rec ->
                         val active = rec.id == vm.lxActiveScriptId
@@ -972,10 +1027,114 @@ private fun LxScriptPickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onImportClick) { Text("导入新脚本", color = skin.accent) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onImportUrlClick) { Text("URL 导入", color = skin.accent) }
+                TextButton(onClick = onImportLocalClick) { Text("本地 .js", color = skin.accent) }
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("关闭", color = skin.textMuted) }
+        }
+    )
+}
+
+@Composable
+internal fun LxImportUrlDialog(
+    importing: Boolean,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val skin = LocalSkin.current
+    val clipboard = LocalClipboardManager.current
+    var urlInput by remember { mutableStateOf("") }
+
+    val trimmed = urlInput.trim().trim('"', '\'', '“', '”', '<', '>')
+    val hasSchemeError = trimmed.isNotEmpty() &&
+        !trimmed.startsWith("http://", ignoreCase = true) &&
+        !trimmed.startsWith("https://", ignoreCase = true)
+    val canSubmit = !importing && trimmed.isNotEmpty() && !hasSchemeError
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = skin.surface2.solidSurface(),
+        titleContentColor = skin.text,
+        textContentColor = skin.textMuted,
+        title = { Text("通过 URL 导入洛雪音源") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "请输入标准洛雪 v2（globalThis.lx）.js 脚本的 http / https 直链，导入后将自动校验并启用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.textMuted
+                )
+                OutlinedTextField(
+                    value = urlInput,
+                    onValueChange = { urlInput = it },
+                    placeholder = {
+                        Text(
+                            "https://example.com/lx-source.js",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textDim
+                        )
+                    },
+                    maxLines = 4,
+                    isError = hasSchemeError,
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = { if (canSubmit) onConfirm(trimmed) }
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = skin.accent,
+                        unfocusedBorderColor = skin.border2,
+                        errorBorderColor = MaterialTheme.colorScheme.error,
+                        focusedTextColor = skin.text,
+                        unfocusedTextColor = skin.text,
+                        cursorColor = skin.accent
+                    )
+                )
+                if (hasSchemeError) {
+                    Text(
+                        "仅支持 http:// 或 https:// 开头的脚本直链",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (urlInput.isNotEmpty()) {
+                        TextButton(onClick = { urlInput = "" }) {
+                            Text("清空", style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            val clip = clipboard.getText()?.text?.trim().orEmpty()
+                            if (clip.isNotEmpty()) urlInput = clip
+                        }
+                    ) {
+                        Text("从剪贴板粘贴", style = MaterialTheme.typography.labelSmall, color = skin.accent)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = canSubmit,
+                onClick = { onConfirm(trimmed) }
+            ) {
+                Text(
+                    if (importing) "导入中…" else "导入",
+                    color = if (canSubmit) skin.accent else skin.textDim
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = skin.textMuted) }
         }
     )
 }
@@ -992,7 +1151,7 @@ internal fun LxTrackActionDialog(
     val skin = LocalSkin.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = skin.surface2,
+        containerColor = skin.surface2.solidSurface(),
         titleContentColor = skin.text,
         textContentColor = skin.textMuted,
         title = {

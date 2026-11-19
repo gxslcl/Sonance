@@ -15,8 +15,8 @@ android {
         applicationId = "com.sonance.player"
         minSdk = 24
         targetSdk = 35
-        versionCode = 15
-        versionName = "2.5"
+        versionCode = 16
+        versionName = "2.5.3"
         resourceConfigurations += listOf("zh", "en")
     }
 

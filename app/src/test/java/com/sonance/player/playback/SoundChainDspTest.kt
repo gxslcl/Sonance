@@ -24,7 +24,7 @@ class SoundChainDspTest {
         assertTrue(SoundPresets.OFF.fx.isNeutral)
         assertTrue(SoundPresets.OFF.eqDb.all { it == 0f })
         SoundPresets.ALL.filter { it.id != SoundPresets.OFF.id }.forEach { preset ->
-            val response = EqResponse(preset.eqDb, sr)
+            val response = EqResponse(preset.eqDb, sr, preset.fx.bassBoostDb, preset.fx.trebleBoostDb)
             val auto = eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, 2))
             // 旧版每个预设都被前置增益整体压低 2~3 dB，用户点下去只听到"变小"。
             fun net(hz: Double) = response.dbAt(hz) + auto
@@ -48,9 +48,16 @@ class SoundChainDspTest {
     @Test
     fun `each preset is voiced in the direction its name promises`() {
         fun net(preset: SoundPreset, hz: Double): Float {
-            val response = EqResponse(preset.eqDb, sr)
+            val response = EqResponse(preset.eqDb, sr, preset.fx.bassBoostDb, preset.fx.trebleBoostDb)
             return response.dbAt(hz) + eqAutoPreampDb(response.maxBoostDb() + effectPreampBudgetDb(preset.fx, 2))
         }
+        // 极致 Hi-Fi 完全保持原始参考调音不动
+        assertArrayEquals(
+            floatArrayOf(1.6f, 1.2f, 0.2f, -1.6f, -0.4f, 0.5f, 1.3f, 2.0f, 2.2f, 2.6f),
+            SoundPresets.EXTREME_HIFI.eqDb,
+            0f
+        )
+        assertEquals(SoundFxParams(stereoWidth = 1.10f), SoundPresets.EXTREME_HIFI.fx)
         // 通透：高频抬起来、低中频让路
         assertTrue(net(SoundPresets.CLEAR, 4000.0) - net(SoundPresets.CLEAR, 250.0) > 3f)
         // 人声：2 kHz 的咬字明显高于 250 Hz 的闷
@@ -60,11 +67,11 @@ class SoundChainDspTest {
         assertTrue(net(SoundPresets.BASS, 62.0) > 1.5f)
         // 深夜：高频收钝
         assertTrue(net(SoundPresets.NIGHT, 4000.0) < -1f)
-        // 手机外放沿用旧版温和饱满调音：切 31 Hz 防破音、补 500 Hz 厚度、柔化 2 kHz；平板保留 48 Hz 高通与宽声场
+        // 手机外放：58 Hz 护喇叭高通拦截破音超低频、补 500 Hz 胸腔厚度、柔化 2 kHz；平板保留 46 Hz 高通与宽声场
         assertTrue("手机外放 31 Hz 应被切低: ${net(SoundPresets.PHONE_SPEAKER, 31.0)}", net(SoundPresets.PHONE_SPEAKER, 31.0) < -3f)
         assertTrue("手机外放 500 Hz 保持厚度: ${net(SoundPresets.PHONE_SPEAKER, 500.0)}", net(SoundPresets.PHONE_SPEAKER, 500.0) > 2f)
         assertTrue("手机外放柔化 2 kHz 毛刺: ${net(SoundPresets.PHONE_SPEAKER, 2000.0)}", net(SoundPresets.PHONE_SPEAKER, 2000.0) < -1f)
-        assertEquals(0f, SoundPresets.PHONE_SPEAKER.fx.speakerHpfHz, 0f)
+        assertTrue(SoundPresets.PHONE_SPEAKER.fx.speakerHpfHz in 45f..70f)
         assertTrue(SoundPresets.TABLET_SPEAKER.fx.speakerHpfHz > 40f)
         // 空间档的混响与宽度递增，日常档保持纯净无混响
         assertTrue(SoundPresets.CINEMA.fx.reverbWet > SoundPresets.LIVE.fx.reverbWet)
@@ -73,6 +80,9 @@ class SoundChainDspTest {
         // 低频档与外放档都应启用虚拟低音谐波合成
         assertTrue(SoundPresets.BASS.fx.virtualBass > 0.3f)
         assertTrue(SoundPresets.PHONE_SPEAKER.fx.virtualBass >= SoundPresets.BASS.fx.virtualBass)
+        // 耳机、自然、空间预设不开启激进前置 Limiter（仅外放防破音保留），动态完整释放
+        listOf(SoundPresets.CLEAR, SoundPresets.VOCAL, SoundPresets.BASS, SoundPresets.IN_EAR, SoundPresets.LIVE, SoundPresets.PANORAMA, SoundPresets.CINEMA)
+            .forEach { assertFalse("${it.id} 不应再开启多余前置 Limiter", it.fx.limiter) }
     }
 
     @Test
@@ -423,6 +433,47 @@ class SoundChainDspTest {
             rms(boosted.copyOfRange(frames / 2, frames)) / rms(ref.copyOfRange(frames / 2, frames))
         )
         assertEquals("192 kHz 下 31 Hz 极点不应出现双精度前的截断误差", 6.0, boostDb, 0.7)
+    }
+
+    @Test
+    fun `preset intensity scales monotonically while locking physical protection and safety`() {
+        val (lowEq, lowFx) = SoundPresets.PHONE_SPEAKER.scaled(PresetIntensity.LOW)
+        val (midEq, midFx) = SoundPresets.PHONE_SPEAKER.scaled(PresetIntensity.MEDIUM)
+        val (highEq, highFx) = SoundPresets.PHONE_SPEAKER.scaled(PresetIntensity.HIGH)
+
+        assertTrue(lowEq[4] < midEq[4] && midEq[4] < highEq[4])
+        assertTrue(lowFx.virtualBass < midFx.virtualBass && midFx.virtualBass < highFx.virtualBass)
+        assertTrue(lowFx.trebleBoostDb < midFx.trebleBoostDb && midFx.trebleBoostDb < highFx.trebleBoostDb)
+        assertEquals(midFx.speakerHpfHz, lowFx.speakerHpfHz, 0f)
+        assertEquals(midFx.speakerHpfHz, highFx.speakerHpfHz, 0f)
+        assertEquals(midFx.limiterThresholdDb, highFx.limiterThresholdDb, 0f)
+
+        // 验证高强度预设在复杂多音信号下仍保持零削顶
+        SoundPresets.ALL.forEach { preset ->
+            val (eq, fx) = preset.scaled(PresetIntensity.HIGH)
+            val buf = stereoSignal(sr / 2)
+            SoundChainDsp(sr, 2).also {
+                it.setTarget(preset.id != SoundPresets.OFF.id, eq, fx)
+                it.process(buf, sr / 2)
+            }
+            assertTrue("${preset.id} HIGH 强度不应越界或产生 NaN", buf.all { it.isFinite() && abs(it) <= 1.0f })
+        }
+    }
+
+    @Test
+    fun `steady eq bypass and neutral stereo width preserve exact numerical behavior`() {
+        val frames = sr / 2
+        val buf = stereoSignal(frames)
+        val dsp = SoundChainDsp(sr, 2).apply {
+            setTarget(true, SoundPresets.CLEAR.eqDb, SoundPresets.CLEAR.fx.copy(stereoWidth = 1f))
+            // 先预热使线性斜坡全部落入稳态（验证稳态直通路径不丢声学结果与限幅护栏）
+            process(stereoSignal(frames), frames)
+        }
+        dsp.process(buf, frames)
+        assertTrue(buf.all { it.isFinite() && abs(it) <= 1.0f })
+        val orig = stereoSignal(frames)
+        val ratio4k = rms(FloatArray(frames) { buf[it * 2] }) / rms(FloatArray(frames) { orig[it * 2] })
+        assertTrue("稳态滤波路径不能退化成静音: ratio=$ratio4k", ratio4k > 0.5)
     }
 
     private fun stereoSignal(frames: Int): FloatArray = FloatArray(frames * 2) { i ->

@@ -229,4 +229,22 @@ class EqProcessorTest {
         assertEquals(1f, EqBus.gainsDb[0], 1e-6f)
         EqBus.reset()
     }
+
+    @Test
+    fun `零增益曲线旁路输出与输入比特级一致且保留非零频段精度`() {
+        val zeroCas = EqCascade(EQ_BAND_COUNT, 2).also {
+            it.design(EQ_CENTER_FREQS, FloatArray(EQ_BAND_COUNT), fs)
+        }
+        val frames = 512
+        val raw = FloatArray(frames * 2) { (sin(2.0 * PI * 880.0 * it / fs) * 0.35).toFloat() }
+        val processed = raw.copyOf()
+        zeroCas.process(processed, frames)
+        for (i in raw.indices) {
+            assertEquals("第 $i 个样本应严格直通", raw[i], processed[i], 0f)
+        }
+        val parsed = parseEqBandsCsv("0,1.5,-2,0,0,0,0,0,0,3.2")!!
+        assertEquals(EQ_BAND_COUNT, parsed.size)
+        assertEquals(1.5f, parsed[1], 1e-6f)
+        assertEquals(3.2f, parsed[9], 1e-6f)
+    }
 }

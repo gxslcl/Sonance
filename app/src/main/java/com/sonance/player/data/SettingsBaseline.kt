@@ -73,6 +73,7 @@ object SettingsBaseline {
         Spec("list_cover_scale", Type.INT),
         Spec("hide_list_index", Type.BOOLEAN),
         Spec("hide_list_duration", Type.BOOLEAN),
+        Spec("stats_overview_card", Type.BOOLEAN),
         Spec("scroll_haptic_enabled", Type.BOOLEAN),
         Spec("right_rail_letters", Type.BOOLEAN),
 
@@ -95,6 +96,7 @@ object SettingsBaseline {
         Spec("sound_fx_enabled", Type.BOOLEAN),
         Spec("sound_preset_id", Type.STRING),
         Spec("sound_fx_params", Type.STRING),
+        Spec("sound_preset_intensity", Type.STRING),
         Spec("sound_auto_route", Type.BOOLEAN),
         Spec("system_audio_effect_enabled", Type.BOOLEAN),
 
@@ -133,6 +135,8 @@ object SettingsBaseline {
         Spec("mini_swipe_right_pct", Type.INT),
         Spec("mini_height_scale", Type.INT),
         Spec("mini_cover_scale", Type.INT),
+        Spec("mini_float_bottom_dp", Type.INT),
+        Spec("mini_float_corner_dp", Type.INT),
 
         // ---- 可视化 ----
         Spec("viz_style", Type.INT),
@@ -163,6 +167,7 @@ object SettingsBaseline {
         Spec("scan_exclude_unsupported", Type.BOOLEAN),
         Spec("scan_exclude_nonsong", Type.BOOLEAN),
         Spec("filter_short", Type.BOOLEAN),
+        Spec("auto_scan_on_launch", Type.BOOLEAN),
 
         // ---- B 站播放行为（不含坐标与播放位置）----
         Spec("bili_play_mode", Type.INT),

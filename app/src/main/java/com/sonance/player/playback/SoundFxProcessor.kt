@@ -153,6 +153,8 @@ internal class SoundChainDsp(private val sampleRate: Int, private val channels: 
     private val safety = SoftLimiter(sampleRate)
     private var dryScratch = FloatArray(0)
     private var lastGains: FloatArray? = null
+    private var lastBassShelf = 0f
+    private var lastTrebleShelf = 0f
     private var eqBoostDb = 0f
 
     val needsProcessing: Boolean
@@ -165,12 +167,17 @@ internal class SoundChainDsp(private val sampleRate: Int, private val channels: 
         }
         val params = fx.clamp()
         activeMix.setTarget(if (gains.any { it != 0f } || !params.isNeutral) 1f else 0f, rampFrames)
-        eq.setTarget(gains)
-        // 前置增益在 EQ 之前，而非 EQ 后的 16 位缓冲中。
-        this.fx.setTarget(params.copy(preampDb = 0f))
-        if (lastGains?.contentEquals(gains) != true) {
-            eqBoostDb = EqResponse(gains, sampleRate).maxBoostDb()
+        eq.setTarget(gains, params.bassBoostDb, params.trebleBoostDb)
+        // 前置增益与 Tone 宽搁架在进入后级效果前已融入前端滤波与电平，避免重复计数。
+        this.fx.setTarget(params.copy(preampDb = 0f, bassBoostDb = 0f, trebleBoostDb = 0f))
+        if (lastGains?.contentEquals(gains) != true ||
+            lastBassShelf != params.bassBoostDb ||
+            lastTrebleShelf != params.trebleBoostDb
+        ) {
+            eqBoostDb = EqResponse(gains, sampleRate, params.bassBoostDb, params.trebleBoostDb).maxBoostDb()
             lastGains = gains.copyOf()
+            lastBassShelf = params.bassBoostDb
+            lastTrebleShelf = params.trebleBoostDb
         }
         val effectBudget = effectPreampBudgetDb(params, channels)
         val boost = eqBoostDb + effectBudget
@@ -182,30 +189,48 @@ internal class SoundChainDsp(private val sampleRate: Int, private val channels: 
 
     fun process(buf: FloatArray, frames: Int) {
         val samples = frames * channels
-        if (dryScratch.size < samples) dryScratch = FloatArray(samples)
-        buf.copyInto(dryScratch, endIndex = samples)
-        var index = 0
-        repeat(frames) {
+        val steadyWet = activeMix.isSettledAt(1f)
+        if (!steadyWet) {
+            if (dryScratch.size < samples) dryScratch = FloatArray(samples)
+            buf.copyInto(dryScratch, endIndex = samples)
+        }
+        val steadyPreamp = preamp.isSettled
+        if (steadyPreamp && eq.isSteady) {
             val gain = preamp.next()
-            for (ch in 0 until channels) {
-                val sample = buf[index + ch]
-                buf[index + ch] = (if (sample.isFinite()) sample.coerceIn(-8f, 8f) else 0f) * gain
+            var i = 0
+            while (i < samples) {
+                val sample = buf[i]
+                val sanitized = if (sample.isFinite()) sample.coerceIn(-8f, 8f) else 0f
+                buf[i] = if (gain == 1f) sanitized else sanitized * gain
+                i++
             }
-            eq.processFrame(buf, index)
-            index += channels
+            eq.processSteady(buf, frames)
+        } else {
+            var index = 0
+            repeat(frames) {
+                val gain = preamp.next()
+                for (ch in 0 until channels) {
+                    val sample = buf[index + ch]
+                    buf[index + ch] = (if (sample.isFinite()) sample.coerceIn(-8f, 8f) else 0f) * gain
+                }
+                eq.processFrame(buf, index)
+                index += channels
+            }
         }
         fx.process(buf, frames)
         // 无论用户是否启用更早介入的峰值保护，最终 PCM 都不应发生硬削顶。
         safety.process(buf, frames, channels, -0.1f)
-        // 旁通时交叉淡回原始 PCM，即使限幅器正在释放也不会在切换点突然跳响。
-        index = 0
-        repeat(frames) {
-            val mix = activeMix.next()
-            for (ch in 0 until channels) {
-                val dry = dryScratch[index + ch].let { if (it.isFinite()) it else 0f }
-                buf[index + ch] = dry + (buf[index + ch] - dry) * mix
+        // 旁通或渐入淡出过渡期间混合原始 PCM；稳态湿声跳过无意义的干湿缓冲复制与 lerp
+        if (!steadyWet) {
+            var index = 0
+            repeat(frames) {
+                val mix = activeMix.next()
+                for (ch in 0 until channels) {
+                    val dry = dryScratch[index + ch].let { if (it.isFinite()) it else 0f }
+                    buf[index + ch] = dry + (buf[index + ch] - dry) * mix
+                }
+                index += channels
             }
-            index += channels
         }
         // 完全旁通后不会继续驱动释放包络；清掉旧状态，避免隔很久再开启时突然变小声。
         if (!needsProcessing) safety.reset()
@@ -218,11 +243,13 @@ internal class SoundChainDsp(private val sampleRate: Int, private val channels: 
         activeMix.reset(0f)
         safety.reset()
         lastGains = null
+        lastBassShelf = 0f
+        lastTrebleShelf = 0f
         eqBoostDb = 0f
     }
 }
 
-/** 两组滤波器交叉渐变，切预设或拖动滑杆时不在一个采样上突变系数。 */
+/** 两组滤波器交叉渐变，切预设或拖动滑杆/Tone 搁架时不在一个采样上突变系数。 */
 private class SmoothedEqualizer(
     private val sampleRate: Int,
     private val channels: Int,
@@ -233,23 +260,47 @@ private class SmoothedEqualizer(
     private var currentGains = FloatArray(EQ_BAND_COUNT)
     private var incomingGains = currentGains.copyOf()
     private var desiredGains = currentGains.copyOf()
+    private var currentBassShelf = 0f
+    private var currentTrebleShelf = 0f
+    private var incomingBassShelf = 0f
+    private var incomingTrebleShelf = 0f
+    private var desiredBassShelf = 0f
+    private var desiredTrebleShelf = 0f
     private var currentFlat = true
     private var incomingFlat = true
     private var remaining = 0
 
     init {
-        current.design(EQ_CENTER_FREQS, currentGains, sampleRate)
-        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate)
+        current.design(EQ_CENTER_FREQS, currentGains, sampleRate, 0f, 0f)
+        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate, 0f, 0f)
     }
 
     val isNeutral: Boolean
-        get() = remaining == 0 && currentFlat && desiredGains.all { it == 0f }
+        get() = remaining == 0 && currentFlat &&
+            desiredGains.all { it == 0f } &&
+            desiredBassShelf == 0f && desiredTrebleShelf == 0f
 
-    fun setTarget(gains: FloatArray) {
-        if (desiredGains.contentEquals(gains)) return
+    val isSteady: Boolean
+        get() = remaining == 0
+
+    fun processSteady(buf: FloatArray, frames: Int) {
+        if (!currentFlat) current.process(buf, frames)
+    }
+
+    fun setTarget(gains: FloatArray, bassShelfDb: Float = 0f, trebleShelfDb: Float = 0f) {
+        if (desiredGains.contentEquals(gains) &&
+            desiredBassShelf == bassShelfDb &&
+            desiredTrebleShelf == trebleShelfDb
+        ) return
         desiredGains = gains.copyOf()
+        desiredBassShelf = bassShelfDb
+        desiredTrebleShelf = trebleShelfDb
         // 按住/松开 A-B 时允许正在进行的渐变原路返回，而不是先走到终点再折返。
-        if (remaining > 0 && desiredGains.contentEquals(currentGains)) {
+        if (remaining > 0 &&
+            desiredGains.contentEquals(currentGains) &&
+            desiredBassShelf == currentBassShelf &&
+            desiredTrebleShelf == currentTrebleShelf
+        ) {
             if (remaining == rampFrames) {
                 remaining = 0
             } else {
@@ -259,6 +310,12 @@ private class SmoothedEqualizer(
                 val oldGains = currentGains
                 currentGains = incomingGains
                 incomingGains = oldGains
+                val oldBass = currentBassShelf
+                currentBassShelf = incomingBassShelf
+                incomingBassShelf = oldBass
+                val oldTreble = currentTrebleShelf
+                currentTrebleShelf = incomingTrebleShelf
+                incomingTrebleShelf = oldTreble
                 val oldFlat = currentFlat
                 currentFlat = incomingFlat
                 incomingFlat = oldFlat
@@ -269,11 +326,17 @@ private class SmoothedEqualizer(
     }
 
     private fun startIfNeeded() {
-        if (currentGains.contentEquals(desiredGains)) return
+        if (currentGains.contentEquals(desiredGains) &&
+            currentBassShelf == desiredBassShelf &&
+            currentTrebleShelf == desiredTrebleShelf
+        ) return
         incomingGains = desiredGains.copyOf()
-        incomingFlat = incomingGains.all { it == 0f }
+        incomingBassShelf = desiredBassShelf
+        incomingTrebleShelf = desiredTrebleShelf
+        incomingFlat = incomingGains.all { it == 0f } &&
+            incomingBassShelf == 0f && incomingTrebleShelf == 0f
         incoming.reset()
-        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate)
+        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate, incomingBassShelf, incomingTrebleShelf)
         remaining = rampFrames
     }
 
@@ -297,6 +360,8 @@ private class SmoothedEqualizer(
             current = incoming
             incoming = old
             currentGains = incomingGains
+            currentBassShelf = incomingBassShelf
+            currentTrebleShelf = incomingTrebleShelf
             currentFlat = incomingFlat
             startIfNeeded() // 拖动期间只追最新目标，不堆积过期曲线
         }
@@ -308,10 +373,16 @@ private class SmoothedEqualizer(
         currentGains = FloatArray(EQ_BAND_COUNT)
         incomingGains = currentGains.copyOf()
         desiredGains = currentGains.copyOf()
+        currentBassShelf = 0f
+        currentTrebleShelf = 0f
+        incomingBassShelf = 0f
+        incomingTrebleShelf = 0f
+        desiredBassShelf = 0f
+        desiredTrebleShelf = 0f
         currentFlat = true
         incomingFlat = true
-        current.design(EQ_CENTER_FREQS, currentGains, sampleRate)
-        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate)
+        current.design(EQ_CENTER_FREQS, currentGains, sampleRate, 0f, 0f)
+        incoming.design(EQ_CENTER_FREQS, incomingGains, sampleRate, 0f, 0f)
         remaining = 0
     }
 }
@@ -338,6 +409,8 @@ private class LinearRamp(initial: Float) {
         }
         return value
     }
+
+    val isSettled: Boolean get() = remaining == 0
 
     fun isSettledAt(expected: Float): Boolean = remaining == 0 && value == expected
 
@@ -373,6 +446,7 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     private var bassRunning = false
     private var hpfRunning = false
     private var crossfeedRunning = false
+    private var imagerRunning = false
     private var reverbRunning = false
     private var limiterRunning = false
 
@@ -453,7 +527,13 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
                         crossfeed.reset()
                         crossfeedRunning = false
                     }
-                    imager.processFrame(buf, index, widthValue)
+                    if (abs(widthValue - 1f) > 1e-4f) {
+                        imager.processFrame(buf, index, widthValue)
+                        imagerRunning = true
+                    } else if (imagerRunning) {
+                        imager.reset()
+                        imagerRunning = false
+                    }
                 }
                 if (wetValue > 0f) {
                     reverb.processFrame(buf, index, channels, wetValue, decayValue)
@@ -495,6 +575,7 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
         bassRunning = false
         hpfRunning = false
         crossfeedRunning = false
+        imagerRunning = false
         reverbRunning = false
         limiterRunning = false
     }
@@ -547,8 +628,8 @@ internal class VirtualBass(sampleRate: Int) {
         val gate = (envelope / (envelope + 0.005f)).let { it * it }
         val norm = envelope.coerceAtLeast(1e-4f)
         val xn = (x / norm).coerceIn(-1.5f, 1.5f)
-        val even = (abs(xn) - TWO_OVER_PI) * 0.32f
-        val odd = ((4f * xn * xn - 3f) * xn) * 0.075f
+        val even = (abs(xn) - TWO_OVER_PI) * 0.50f
+        val odd = ((4f * xn * xn - 3f) * xn) * 0.125f
         val envScale = (envelope / (1f + envelope * 0.22f)) * gate
         val harmonic = (even + odd) * envScale
         val cleaned = outputLpf.processSample(outputHpf.processSample(harmonic.toDouble(), 0), 0)
@@ -729,7 +810,7 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
             val send = preDelay[ch][idxMain]
             var y = 0f
             for (k in combs[ch].indices) y += combs[ch][k].process(send, feedback, damp)
-            y *= 0.095f
+            y *= 0.145f
             for (k in allpass[ch].indices) y = allpass[ch][k].process(y)
             tailScratch[ch] = y
         }
@@ -737,7 +818,7 @@ internal class Freeverb(private val sampleRate: Int, channels: Int) {
         for (ch in 0 until channels) {
             val direct = if (ch == 0) left else right
             val opp = if (channels == 2) 1 - ch else 0
-            val early = preDelay[ch][idxE1] * 0.24f - preDelay[opp][idxE2] * 0.16f
+            val early = preDelay[ch][idxE1] * 0.34f - preDelay[opp][idxE2] * 0.24f
             val tail = if (channels == 2) {
                 tailScratch[ch] * 0.86f + tailScratch[opp] * 0.14f
             } else {

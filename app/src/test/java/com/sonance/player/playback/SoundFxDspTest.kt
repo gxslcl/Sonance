@@ -31,19 +31,23 @@ class SoundFxDspTest {
             assertTrue(p.id.isNotBlank())
             assertTrue(p.description.isNotBlank())
         }
-        // 手机外放恢复为原始温和饱满曲线与效果参数，其它档位保持不变
+        // 手机外放：58 Hz 护喇叭高通 + 强力谐波与高频空气感；极致 Hi-Fi 保持原参数不动
         val speaker = SoundPresets.PHONE_SPEAKER
         assertEquals(
-            SoundFxParams(virtualBass = 0.65f, stereoWidth = 1.18f, limiter = true),
+            SoundFxParams(
+                virtualBass = 0.78f, stereoWidth = 1.28f, limiter = true,
+                limiterThresholdDb = -0.4f, speakerHpfHz = 58f, trebleBoostDb = 2.2f
+            ),
             speaker.fx
         )
-        assertTrue(speaker.eqDb.contentEquals(floatArrayOf(-4.5f, -1.5f, 1.2f, 3.2f, 3.6f, 1.2f, -1.8f, -1.2f, 1.5f, 2.2f)))
-        // 新增耳机、平板、车载与全景预设检查（适度 BS2B 避免挤压声场）
-        assertTrue(SoundPresets.IN_EAR.fx.crossfeed in 0.12f..0.25f)
+        assertTrue(speaker.eqDb.contentEquals(floatArrayOf(-5.0f, -1.2f, 1.8f, 3.4f, 4.0f, 1.6f, -2.0f, -1.0f, 1.8f, 2.2f)))
+        assertEquals(SoundFxParams(stereoWidth = 1.10f), SoundPresets.EXTREME_HIFI.fx)
+        // 耳机、平板、车载与全景预设检查（适度 BS2B 避免挤压声场）
+        assertTrue(SoundPresets.IN_EAR.fx.crossfeed in 0.08f..0.25f)
         assertTrue(SoundPresets.OVER_EAR.fx.crossfeed > SoundPresets.IN_EAR.fx.crossfeed)
-        assertTrue(SoundPresets.TABLET_SPEAKER.fx.speakerHpfHz in 42f..60f)
+        assertTrue(SoundPresets.TABLET_SPEAKER.fx.speakerHpfHz in 40f..60f)
         assertTrue(SoundPresets.CAR_AUDIO.fx.speakerHpfHz in 30f..60f)
-        assertTrue(SoundPresets.PANORAMA.fx.stereoWidth > 1.4f)
+        assertTrue(SoundPresets.PANORAMA.fx.stereoWidth > 1.5f)
         assertEquals(0f, SoundPresets.EXTREME_HIFI.fx.reverbWet, 0f)
     }
 
@@ -52,7 +56,8 @@ class SoundFxDspTest {
         val p = SoundFxParams(
             virtualBass = 0.7f, reverbWet = 0.2f, reverbDecay = 0.4f,
             stereoWidth = 1.2f, preampDb = -4f, limiter = true,
-            crossfeed = 0.42f, speakerHpfHz = 115f
+            crossfeed = 0.42f, speakerHpfHz = 115f,
+            bassBoostDb = 3.5f, trebleBoostDb = -2.2f
         )
         val back = SoundFxParams.fromStore(SoundFxParams.toStore(p))
         assertEquals(p.virtualBass, back.virtualBass, 0.001f)
@@ -62,16 +67,53 @@ class SoundFxDspTest {
         assertEquals(p.limiter, back.limiter)
         assertEquals(p.crossfeed, back.crossfeed, 0.001f)
         assertEquals(p.speakerHpfHz, back.speakerHpfHz, 0.001f)
+        assertEquals(p.bassBoostDb, back.bassBoostDb, 0.001f)
+        assertEquals(p.trebleBoostDb, back.trebleBoostDb, 0.001f)
+
+        // 兼容旧版 9 段字符串
+        val legacy9 = SoundFxParams.fromStore("0.5,0.1,0.4,1.2,-2,1,-1,0.2,48")
+        assertEquals(0f, legacy9.bassBoostDb, 0.001f)
+        assertEquals(0f, legacy9.trebleBoostDb, 0.001f)
 
         assertEquals(SoundFxParams.NEUTRAL, SoundFxParams.fromStore(null))
         assertEquals(SoundFxParams.NEUTRAL, SoundFxParams.fromStore("1,2"))
-        val dirty = SoundFxParams.fromStore("99,99,99,99,99,1,99,5,999")
+        val dirty = SoundFxParams.fromStore("99,99,99,99,99,1,99,5,999,99,-99")
         assertEquals(1f, dirty.virtualBass, 0.001f)
         assertEquals(0.6f, dirty.reverbWet, 0.001f)
         assertEquals(0f, dirty.preampDb, 0.001f)
         assertEquals(1f, dirty.crossfeed, 0.001f)
         assertEquals(160f, dirty.speakerHpfHz, 0.001f)
+        assertEquals(TONE_MAX_DB, dirty.bassBoostDb, 0.001f)
+        assertEquals(-TONE_MAX_DB, dirty.trebleBoostDb, 0.001f)
         assertEquals(0f, SoundFxParams(speakerHpfHz = 10f).clamp().speakerHpfHz, 0f)
+    }
+
+    @Test
+    fun `poweramp style low and high shelves boost target ends cleanly`() {
+        val sr = 48_000
+        val unityLow = BiquadDesign.lowShelf(TONE_BASS_FREQ, 0.0, sr, TONE_SHELF_Q)
+        val unityHigh = BiquadDesign.highShelf(TONE_TREBLE_FREQ, 0.0, sr, TONE_SHELF_Q)
+        assertEquals(1.0, unityLow[0], 1e-9)
+        assertEquals(1.0, unityHigh[0], 1e-9)
+
+        val cas = EqCascade(EQ_BAND_COUNT, 1)
+        cas.design(EQ_CENTER_FREQS, FloatArray(EQ_BAND_COUNT), sr, bassShelfDb = 6f, trebleShelfDb = 6f)
+        val frames = sr / 2
+        val sub = FloatArray(frames) { (0.3 * sin(2.0 * PI * 35.0 * it / sr)).toFloat() }
+        val mid = FloatArray(frames) { (0.3 * sin(2.0 * PI * 1000.0 * it / sr)).toFloat() }
+        val air = FloatArray(frames) { (0.3 * sin(2.0 * PI * 16_000.0 * it / sr)).toFloat() }
+        cas.process(sub, frames)
+        cas.reset()
+        cas.process(mid, frames)
+        cas.reset()
+        cas.process(air, frames)
+
+        val subAmp = toneAmplitude(sub, sr, 35.0, frames / 2)
+        val midAmp = toneAmplitude(mid, sr, 1000.0, frames / 2)
+        val airAmp = toneAmplitude(air, sr, 16_000.0, frames / 2)
+        assertTrue("低音宽搁架应在 35 Hz 明显提升: $subAmp", subAmp > 0.50)
+        assertTrue("1 kHz 中频基本保持不变: $midAmp", midAmp in 0.27..0.34)
+        assertTrue("高音宽搁架应在 16 kHz 明显提升: $airAmp", airAmp > 0.48)
     }
 
     @Test

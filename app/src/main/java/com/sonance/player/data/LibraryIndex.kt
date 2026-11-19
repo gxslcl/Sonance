@@ -1,5 +1,8 @@
 package com.sonance.player.data
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 /**
  * 「全部歌曲」右侧字母索引的数据层。
  *
@@ -104,3 +107,53 @@ data class LetterSections(
         }
     }
 }
+
+/**
+ * 索引缓存格式版本。键结构变了就 +1，旧缓存解码失败自然退回重建。
+ */
+private const val INDEX_CACHE_VERSION = 1
+
+/**
+ * 把拼音搜索索引 + 归一化排序键序列化，与歌曲缓存（[encodeSongsToJson]）配套落盘。
+ *
+ * 为什么必须存：ICU 转写只能在后台算（千首歌要几百毫秒），冷启动读缓存那一刻
+ * 排序键还是空的，列表先按码点序排；后台算完整表重排成拼音序 —— 用户看到的就是
+ * "停在原地的十首歌突然换成另外十首"。索引随缓存一起同步加载，第一帧即最终顺序。
+ */
+fun encodeLibraryIndexJson(pinyin: Map<Long, String>, keys: Map<Long, IndexKeys>): String {
+    val p = JSONObject()
+    pinyin.forEach { (id, v) -> p.put(id.toString(), v) }
+    val k = JSONObject()
+    keys.forEach { (id, v) ->
+        k.put(id.toString(), JSONArray().put(v.title).put(v.artist).put(v.album).put(v.fileName))
+    }
+    return JSONObject().put("v", INDEX_CACHE_VERSION).put("p", p).put("k", k).toString()
+}
+
+/** 解码失败（损坏 / 截断 / 版本不符 / 字段缺失）一律返回 null，调用方退回后台重建。 */
+fun decodeLibraryIndexJson(json: String): Pair<Map<Long, String>, Map<Long, IndexKeys>>? = try {
+    val root = JSONObject(json)
+    if (root.optInt("v") != INDEX_CACHE_VERSION) {
+        null
+    } else {
+        val p = root.getJSONObject("p")
+        val k = root.getJSONObject("k")
+        val pm = HashMap<Long, String>(p.length())
+        for (id in p.keys()) pm[id.toLong()] = p.getString(id)
+        val km = HashMap<Long, IndexKeys>(k.length())
+        for (id in k.keys()) {
+            val a = k.getJSONArray(id)
+            km[id.toLong()] = IndexKeys(a.getString(0), a.getString(1), a.getString(2), a.getString(3))
+        }
+        pm to km
+    }
+} catch (e: Exception) {
+    null
+}
+
+/**
+ * 缓存的索引是否覆盖这批歌（两个索引都要全）。隐藏 / 排除只减歌，索引是超集也算覆盖；
+ * 新增 / 改名的歌缺键时返回 false，触发一次重建并把新索引落盘，下次启动即恢复。
+ */
+fun libraryIndexCovers(ids: List<Long>, pinyin: Map<Long, String>, keys: Map<Long, IndexKeys>): Boolean =
+    ids.all { it in pinyin && it in keys }

@@ -13,12 +13,16 @@ import com.sonance.player.ui.theme.MiniProgressStyle
 import com.sonance.player.ui.theme.MiniSwipeStyle
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /** 轻量持久化：收藏、最近播放、皮肤、排序、视图模式 */
 class Prefs(context: Context) {
 
+    private val appContext: Context = context.applicationContext
+    private val appFilesDir: File = appContext.filesDir
+
     private val rawPrefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences("sonance_prefs", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("sonance_prefs", Context.MODE_PRIVATE)
 
     /**
      * 出厂基线（见 [SettingsBaseline]）：首次启动/清数据后，本地未写过的 key
@@ -157,6 +161,11 @@ class Prefs(context: Context) {
     var glowTransition: String
         get() = sp.getString(KEY_GLOW_TRANSITION, null) ?: GlowTransition.SWIPE.id
         set(v) = sp.edit().putString(KEY_GLOW_TRANSITION, v).apply()
+
+    /** 普通播放页点击上一曲 / 下一曲的切换动效方案（见 [PlayerSwitchMotion]）。 */
+    var playerSwitchMotion: String
+        get() = sp.getString(KEY_PLAYER_SWITCH_MOTION, null) ?: PlayerSwitchMotion.POWERAMP_SLIDE.id
+        set(v) = sp.edit().putString(KEY_PLAYER_SWITCH_MOTION, v).apply()
 
     /**
      * 「渐变」模式下的补间时长（毫秒）。只在 [glowTransition] 为 FADE 时有意义。
@@ -615,6 +624,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_LOCK_LYRICS, true)
         set(v) = sp.edit().putBoolean(KEY_LOCK_LYRICS, v).apply()
 
+    /** 是否已主动发起过一次系统通知权限申请（避免覆盖安装或只授了存储权限时漏掉控制中心权限弹窗）。 */
+    var hasRequestedNotificationPermission: Boolean
+        get() = sp.getBoolean(KEY_ASKED_NOTIFY_PERM, false)
+        set(v) = sp.edit().putBoolean(KEY_ASKED_NOTIFY_PERM, v).apply()
+
     /** 桌面歌词（悬浮窗逐行歌词）总开关 */
     var desktopLyricsEnabled: Boolean
         get() = sp.getBoolean(KEY_DESKTOP_LYRICS_ENABLED, false)
@@ -644,6 +658,46 @@ class Prefs(context: Context) {
     var desktopLyricsBgMode: String
         get() = sp.getString(KEY_DESKTOP_LYRICS_BG_MODE, "none") ?: "none"
         set(v) = sp.edit().putString(KEY_DESKTOP_LYRICS_BG_MODE, v).apply()
+
+    /** 桌面歌词文字颜色（ARGB）；0 = 跟随背景模式自带的配色 */
+    var desktopLyricsTextColor: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_TEXT_COLOR, 0)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_TEXT_COLOR, v).apply()
+
+    /** 状态栏歌词扩展（HyperLyric / LyricGetter 标准广播） */
+    var externalLyricsEnabled: Boolean
+        get() = sp.getBoolean(KEY_EXTERNAL_LYRICS_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_EXTERNAL_LYRICS_ENABLED, v).apply()
+
+    /** 摇一摇切歌总开关 */
+    var shakeNextEnabled: Boolean
+        get() = sp.getBoolean(KEY_SHAKE_NEXT_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_SHAKE_NEXT_ENABLED, v).apply()
+
+    /** 息屏状态下允许摇一摇切歌 */
+    var shakeScreenOffEnabled: Boolean
+        get() = sp.getBoolean(KEY_SHAKE_SCREEN_OFF_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_SHAKE_SCREEN_OFF_ENABLED, v).apply()
+
+    /** 摇一摇防口袋误触（距离传感器遮挡时屏蔽触发） */
+    var shakePocketGuardEnabled: Boolean
+        get() = sp.getBoolean(KEY_SHAKE_POCKET_GUARD_ENABLED, true)
+        set(v) = sp.edit().putBoolean(KEY_SHAKE_POCKET_GUARD_ENABLED, v).apply()
+
+    /** 摇一摇切歌灵敏度：0 = 低（防误触），1 = 中（推荐），2 = 高 */
+    var shakeSensitivity: Int
+        get() = sp.getInt(KEY_SHAKE_SENSITIVITY, 1).coerceIn(0, 2)
+        set(v) = sp.edit().putInt(KEY_SHAKE_SENSITIVITY, v.coerceIn(0, 2)).apply()
+
+    /** 悬浮卡片距屏幕底部的留白 (dp)，默认 10 */
+    var miniFloatBottomDp: Int
+        get() = sp.getInt(KEY_MINI_FLOAT_BOTTOM_DP, 10).coerceIn(0, 48)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_BOTTOM_DP, v.coerceIn(0, 48)).apply()
+
+    /** 悬浮卡片圆角 (dp)，默认 20 */
+    var miniFloatCornerDp: Int
+        get() = sp.getInt(KEY_MINI_FLOAT_CORNER_DP, 20).coerceIn(0, 36)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_CORNER_DP, v.coerceIn(0, 36)).apply()
 
     /**
      * 悬浮卡片上的进度怎么显示：[MiniProgressStyle] 的 ordinal。
@@ -989,6 +1043,14 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_LX_DOWNLOAD_ENABLED, false)
         set(v) = sp.edit().putBoolean(KEY_LX_DOWNLOAD_ENABLED, v).apply()
 
+    /**
+     * 洛雪播放无感多音源兜底：当前平台拿不到播放地址时，按脚本支持的其它平台
+     * 逐个临时借一次地址，不改用户选中的音源；全部失败才提示。默认开启。
+     */
+    var lxAutoFallback: Boolean
+        get() = sp.getBoolean(KEY_LX_AUTO_FALLBACK, true)
+        set(v) = sp.edit().putBoolean(KEY_LX_AUTO_FALLBACK, v).apply()
+
     /** 洛雪页面最近搜索历史，最新的在前 */
     fun lxHistory(): List<String> = readHistory(KEY_LX_HISTORY)
 
@@ -1122,6 +1184,11 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_SOUND_FX_PARAMS, null) ?: ""
         set(v) = sp.edit().putString(KEY_SOUND_FX_PARAMS, v).apply()
 
+    /** 预置音效三档整体强度（low / medium / high），默认 medium */
+    var soundPresetIntensity: String
+        get() = sp.getString(KEY_SOUND_PRESET_INTENSITY, null) ?: "medium"
+        set(v) = sp.edit().putString(KEY_SOUND_PRESET_INTENSITY, v).apply()
+
     /** 是否随输出设备（外放/耳机/蓝牙/USB）自动记忆与切换音效预设；默认关闭以免打扰习惯固定音效的用户 */
     var autoPresetByOutputEnabled: Boolean
         get() = sp.getBoolean(KEY_SOUND_AUTO_ROUTE, false)
@@ -1207,15 +1274,57 @@ class Prefs(context: Context) {
         }
     }
 
-    // ===== 歌曲库缓存：上次扫描结果 JSON + 时间戳 =====
-    // 避免每次启动都重新扫 MediaStore（耗时 + 影响体验）
+    // ===== 歌曲库缓存：独立原子落盘 JSON + 时间戳 =====
+    // 避免把几百KB~几MB曲库JSON塞进 SharedPreferences.apply() 异步队列丢缓存，确保冷启动秒开。
+    private val songsCacheFile: File get() = File(appFilesDir, FILE_SONGS_CACHE)
+    private val libraryIndexFile: File get() = File(appFilesDir, FILE_LIBRARY_INDEX)
+
     var songsCacheJson: String?
-        get() = sp.getString(KEY_SONGS_CACHE, null)
-        set(v) = sp.edit().putString(KEY_SONGS_CACHE, v).apply()
+        get() = readDurableTextCache(
+            file = songsCacheFile,
+            legacyFallback = { rawPrefs.getString(KEY_SONGS_CACHE, null) },
+            clearLegacy = { rawPrefs.edit().remove(KEY_SONGS_CACHE).apply() }
+        )
+        set(v) = writeDurableTextCache(
+            file = songsCacheFile,
+            value = v,
+            clearLegacy = {
+                if (rawPrefs.contains(KEY_SONGS_CACHE)) {
+                    rawPrefs.edit().remove(KEY_SONGS_CACHE).apply()
+                }
+            }
+        )
+
+    /**
+     * 拼音搜索索引 + 归一化排序键，与 [songsCacheJson] 配套。
+     * 冷启动同步加载它，列表第一帧就是最终排序，不再"先码点序、后台算完再整表重排"。
+     */
+    var libraryIndexJson: String?
+        get() = readDurableTextCache(
+            file = libraryIndexFile,
+            legacyFallback = { rawPrefs.getString(KEY_LIBRARY_INDEX, null) },
+            clearLegacy = { rawPrefs.edit().remove(KEY_LIBRARY_INDEX).apply() }
+        )
+        set(v) = writeDurableTextCache(
+            file = libraryIndexFile,
+            value = v,
+            clearLegacy = {
+                if (rawPrefs.contains(KEY_LIBRARY_INDEX)) {
+                    rawPrefs.edit().remove(KEY_LIBRARY_INDEX).apply()
+                }
+            }
+        )
 
     var lastScanAt: Long
         get() = sp.getLong(KEY_SCAN_AT, 0L)
         set(v) = sp.edit().putLong(KEY_SCAN_AT, v).apply()
+
+    /**
+     * 启动时是否后台自动刷新本地曲库（默认关闭：有缓存即秒开，需要增量查新可在设置开启或手动扫描）。
+     */
+    var autoScanOnLaunch: Boolean
+        get() = sp.getBoolean(KEY_AUTO_SCAN_ON_LAUNCH, false)
+        set(v) = sp.edit().putBoolean(KEY_AUTO_SCAN_ON_LAUNCH, v).apply()
 
     /**
      * 列表长按提示是否已经看过。
@@ -1432,6 +1541,25 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_LAST_PLAYED_ONLINE, false)
         set(v) = sp.edit().putBoolean(KEY_LAST_PLAYED_ONLINE, v).apply()
 
+    /** 单次批量持久化播放快照，避免快速切歌期间连续提交多次 SharedPreferences 事务。 */
+    fun saveServicePlaybackSnapshot(
+        mediaId: Long,
+        queueIndex: Int,
+        positionMs: Long,
+        isRemote: Boolean
+    ) {
+        sp.edit().apply {
+            putLong(KEY_PLAY_POS, positionMs)
+            putBoolean(KEY_LAST_PLAYED_ONLINE, isRemote)
+            if (isRemote) {
+                putInt(KEY_ONLINE_QUEUE_INDEX, queueIndex)
+            } else {
+                putLong(KEY_LAST_SONG, mediaId)
+                putInt(KEY_PLAY_INDEX, queueIndex)
+            }
+        }.apply()
+    }
+
     // ===== 播放统计 =====
     fun playCount(id: Long): Int = sp.getInt("$KEY_COUNT$id", 0)
 
@@ -1462,6 +1590,16 @@ class Prefs(context: Context) {
             (v as? Int)?.let { put(id, it) }
         }
     }
+
+    // ===== 自建歌单 / 听歌统计 =====
+
+    val userPlaylistStore: UserPlaylistStore by lazy { UserPlaylistStore(sp) }
+    val listenStatsStore: ListenStatsStore by lazy { ListenStatsStore(sp) }
+
+    /** 「最近」页顶部的本周听歌足迹概览卡。默认开，设置里可关。 */
+    var statsOverviewCardEnabled: Boolean
+        get() = sp.getBoolean(KEY_STATS_OVERVIEW_CARD, true)
+        set(v) = sp.edit().putBoolean(KEY_STATS_OVERVIEW_CARD, v).apply()
 
     // ===== D-LAN (DLNA / UPnP) 手动设备记录 =====
 
@@ -1510,6 +1648,7 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_MODE = "player_vinyl_mode"
         private const val KEY_VINYL_SFX_ENABLED = "player_vinyl_sfx_enabled"
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
+        private const val KEY_PLAYER_SWITCH_MOTION = "player_switch_motion"
         private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
         private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
         private const val KEY_USB_EXCLUSIVE = "usb_exclusive_enabled"
@@ -1543,6 +1682,7 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_POS = "play_position_ms"
         private const val KEY_PLAY_MODE = "play_mode"
         private const val KEY_COUNT = "play_count_"
+        private const val KEY_STATS_OVERVIEW_CARD = "stats_overview_card"
         private const val KEY_FILTER_SHORT = "filter_short"
         private const val KEY_EXCLUDE_LOCKED = "scan_exclude_locked"
         private const val KEY_EXCLUDE_UNSUPPORTED = "scan_exclude_unsupported"
@@ -1579,6 +1719,7 @@ class Prefs(context: Context) {
         private const val KEY_LX_PLATFORM = "lx_platform"
         private const val KEY_LX_QUALITY = "lx_quality"
         private const val KEY_LX_DOWNLOAD_ENABLED = "lx_download_enabled"
+        private const val KEY_LX_AUTO_FALLBACK = "lx_auto_fallback"
         private const val KEY_LX_HISTORY = "lx_search_history"
 
         /** 搜索历史最多存几条。再多这一行胶囊就翻不动了，而且没人会翻回去用 */
@@ -1630,6 +1771,9 @@ class Prefs(context: Context) {
         private const val KEY_DESKTOP_LYRICS_X = "desktop_lyrics_x"
         private const val KEY_DESKTOP_LYRICS_Y = "desktop_lyrics_y"
         private const val KEY_DESKTOP_LYRICS_BG_MODE = "desktop_lyrics_bg_mode"
+        private const val KEY_DESKTOP_LYRICS_TEXT_COLOR = "desktop_lyrics_text_color"
+        private const val KEY_MINI_FLOAT_BOTTOM_DP = "mini_float_bottom_dp"
+        private const val KEY_MINI_FLOAT_CORNER_DP = "mini_float_corner_dp"
         private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
         private const val KEY_MINI_SWIPE_RIGHT = "mini_swipe_right_pct"
         private const val KEY_MINI_HEIGHT = "mini_height_scale"
@@ -1667,6 +1811,7 @@ class Prefs(context: Context) {
         private const val KEY_SOUND_FX_ENABLED = "sound_fx_enabled"
         private const val KEY_SOUND_PRESET = "sound_preset_id"
         private const val KEY_SOUND_FX_PARAMS = "sound_fx_params"
+        private const val KEY_SOUND_PRESET_INTENSITY = "sound_preset_intensity"
         private const val KEY_SOUND_AUTO_ROUTE = "sound_auto_route"
         private const val KEY_SOUND_ROUTE_PREFIX = "sound_route_preset_"
         private const val KEY_SYSTEM_AUDIO_EFFECT = "system_audio_effect_enabled"
@@ -1683,7 +1828,11 @@ class Prefs(context: Context) {
         private const val KEY_VISUALIZER_HIDE_STATUS_BAR = "visualizer_hide_status_bar"
         private const val KEY_EXCLUDED_DIRS = "excluded_dirs"
         private const val KEY_SONGS_CACHE = "songs_cache_json"
+        private const val KEY_LIBRARY_INDEX = "library_index_json"
         private const val KEY_SCAN_AT = "last_scan_at"
+        private const val KEY_AUTO_SCAN_ON_LAUNCH = "auto_scan_on_launch"
+        private const val FILE_SONGS_CACHE = "library_songs_cache.json"
+        private const val FILE_LIBRARY_INDEX = "library_index_cache.json"
         private const val KEY_COMPAT_TREE = "compat_tree_uri"
         private const val KEY_COMPAT_TREE_LABEL = "compat_tree_label"
         private const val KEY_SAF_SCAN_TREES = "saf_scan_trees"
@@ -1692,6 +1841,12 @@ class Prefs(context: Context) {
         private const val KEY_LOCAL_CACHE_TREE_URI = "local_cache_tree_uri"
         private const val KEY_LOCAL_CACHE_TREE_LABEL = "local_cache_tree_label"
         private const val KEY_CONVERSION_UNLOCK_UNTIL = "conversion_unlock_until"
+        private const val KEY_ASKED_NOTIFY_PERM = "asked_notify_perm"
+        private const val KEY_EXTERNAL_LYRICS_ENABLED = "external_lyrics_enabled"
+        private const val KEY_SHAKE_NEXT_ENABLED = "shake_next_enabled"
+        private const val KEY_SHAKE_SCREEN_OFF_ENABLED = "shake_screen_off_enabled"
+        private const val KEY_SHAKE_POCKET_GUARD_ENABLED = "shake_pocket_guard_enabled"
+        private const val KEY_SHAKE_SENSITIVITY = "shake_sensitivity"
 
         fun isPlayButtonPrefKey(key: String?): Boolean = key == KEY_PLAY_BTN_GLOW ||
             key == KEY_PLAY_BTN_SHAPE ||
@@ -1722,4 +1877,46 @@ internal fun nextOnlineHistory(existing: List<String>, term: String, max: Int): 
     val t = term.replace('\n', ' ').trim()
     if (t.isEmpty()) return existing
     return (listOf(t) + existing.filter { it != t }).take(max.coerceAtLeast(1))
+}
+
+/**
+ * 从原子持久文件读取文本缓存；若文件尚未创建，则平滑迁移旧 SharedPreferences 字段并清理旧 key。
+ */
+internal fun readDurableTextCache(
+    file: File,
+    legacyFallback: () -> String?,
+    clearLegacy: () -> Unit
+): String? {
+    val existing = DurableCacheFile.read(file)?.toString(Charsets.UTF_8)
+    if (!existing.isNullOrBlank()) return existing
+    val legacy = legacyFallback()?.takeIf { it.isNotBlank() } ?: return null
+    val migrated = DurableCacheFile.write(
+        file = file,
+        bytes = legacy.toByteArray(Charsets.UTF_8),
+        sync = true,
+        preserveNonEmpty = true
+    )
+    if (migrated) clearLegacy()
+    return legacy
+}
+
+/**
+ * 将曲库/索引等大块 JSON 同步原子落盘，避免 SharedPreferences.apply() 在强杀或切桌面图标时丢缓存。
+ */
+internal fun writeDurableTextCache(
+    file: File,
+    value: String?,
+    clearLegacy: () -> Unit
+) {
+    if (value.isNullOrBlank()) {
+        DurableCacheFile.delete(file)
+    } else {
+        DurableCacheFile.write(
+            file = file,
+            bytes = value.toByteArray(Charsets.UTF_8),
+            sync = true,
+            preserveNonEmpty = false
+        )
+    }
+    clearLegacy()
 }

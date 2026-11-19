@@ -223,6 +223,21 @@ enum class GlowTransition(val id: String, val label: String, val hint: String) {
     }
 }
 
+/**
+ * 普通播放页点击「上一曲 / 下一曲」时的专属切换动效（仅作用于按钮切歌，不影响上下滑手势）。
+ */
+enum class PlayerSwitchMotion(val id: String, val label: String, val hint: String) {
+    POWERAMP_SLIDE("poweramp_slide", "丝滑横推", "双封面并排横滑切换，标题同步随动"),
+    DEPTH_SLIDE("depth_slide", "景深叠切", "旧封面退后滑离，新封面弹性推入，文字错峰轻跟"),
+    TILT_3D("tilt_3d", "3D 轻掀", "空间透视旋换 + 丝绸高光掠过，歌名纵向微滚切换"),
+    OPTICAL_DISSOLVE("optical_dissolve", "焦点溶切", "光学呼吸缩放 + 主色光雾溶切，东方留白静谧手感");
+
+    companion object {
+        fun fromId(id: String?): PlayerSwitchMotion =
+            entries.firstOrNull { it.id == id } ?: POWERAMP_SLIDE
+    }
+}
+
 enum class LibraryTab(val id: String, val label: String) {
     SONGS("songs", "全部歌曲"),
     ALBUMS("albums", "专辑"),
@@ -231,6 +246,8 @@ enum class LibraryTab(val id: String, val label: String) {
     RECENT("recent", "最近播放"),
     ONLINE("online", "在线音乐"),
     FAVORITES("favorites", "我的收藏"),
+    PLAYLISTS("playlists", "我的歌单"),
+    STATS("stats", "听歌统计"),
     SETTINGS("settings", "皮肤与设置");
 
     companion object {

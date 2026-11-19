@@ -10,7 +10,8 @@
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/transparent">
+    android:background="@drawable/widget_clip_bg_dark"
+    android:clipToOutline="true">
 
     <ImageView
         android:id="@+id/widget_bg_img"
@@ -25,10 +26,10 @@
         android:layout_height="match_parent"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="10dp"
+        android:paddingStart="12dp"
         android:paddingTop="8dp"
-        android:paddingEnd="11dp"
-        android:paddingBottom="10dp">
+        android:paddingEnd="14dp"
+        android:paddingBottom="13dp">
 
         <ImageView
             android:id="@+id/widget_cover"
@@ -122,50 +123,51 @@
 
             <ImageView
                 android:id="@+id/widget_fav"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_fav_desc"
+                android:padding="4dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_heart_outline" />
 
             <ImageView
                 android:id="@+id/widget_prev"
-                android:layout_width="25dp"
-                android:layout_height="25dp"
-                android:layout_marginStart="2dp"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_prev_desc"
+                android:padding="4dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_prev" />
 
             <ImageView
                 android:id="@+id/widget_play"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
-                android:layout_marginStart="2dp"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_play_desc"
+                android:padding="3dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_play" />
 
             <ImageView
                 android:id="@+id/widget_next"
-                android:layout_width="25dp"
-                android:layout_height="25dp"
-                android:layout_marginStart="2dp"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_next_desc"
+                android:padding="4dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_next" />
 
             <ImageView
                 android:id="@+id/widget_lyric_toggle"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:layout_marginStart="2dp"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
                 android:background="@drawable/widget_btn_ripple"
                 android:contentDescription="@string/widget_lyric_desc"
+                android:padding="4dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_ic_lyric" />
         </LinearLayout>
@@ -177,9 +179,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:layout_marginStart="16dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="2dp"
+        android:layout_marginStart="18dp"
+        android:layout_marginEnd="18dp"
+        android:layout_marginBottom="4dp"
         android:orientation="horizontal">
 
         <TextView

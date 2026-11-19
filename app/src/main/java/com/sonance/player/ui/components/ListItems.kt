@@ -48,6 +48,9 @@ import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.glassCardBg
+import com.sonance.player.ui.theme.glassCardBorder
+import com.sonance.player.ui.theme.softPillBg
 import com.sonance.player.ui.theme.solidSurface
 
 /* ============================================================
@@ -100,6 +103,10 @@ fun SongRow(
      * 听歌识曲（网易云指纹识别，自动补全信息）。**传 null 就不显示这一项**。
      */
     onRecognize: (() -> Unit)? = null,
+    /**
+     * 加入自建歌单。**传 null 就不显示这一项**。弹层由调用方（列表层）负责。
+     */
+    onAddToPlaylist: (() -> Unit)? = null,
     /** 第一次长按打开动作面板时回调，用于把「长按可更多操作」提示永久收起 */
     onLongPressHintUsed: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
@@ -264,6 +271,7 @@ fun SongRow(
                 .ifBlank { null },
             actions = buildList {
                 add(RowSheetAction("下一首播放") { onPlayNext() })
+                onAddToPlaylist?.let { add(RowSheetAction("加入歌单…", onClick = it)) }
                 onShowInfo?.let { add(RowSheetAction("查看歌曲信息", onClick = it)) }
                 onEditInfo?.let { add(RowSheetAction("编辑信息…", onClick = it)) }
                 onRecognize?.let { add(RowSheetAction("识别歌曲", onClick = it)) }
@@ -419,15 +427,27 @@ fun AlbumCard(
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
     isCurrent: Boolean = false,
-    coverCorner: Dp = 10.dp
+    coverCorner: Dp = 14.dp
 ) {
     val skin = LocalSkin.current
-    Column(modifier = modifier.clickable(onClick = onClick)) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(coverCorner + 4.dp))
+            .background(skin.glassCardBg(highlighted = isCurrent))
+            .border(
+                width = if (isCurrent) 1.dp else 0.7.dp,
+                color = skin.glassCardBorder(highlighted = isCurrent),
+                shape = RoundedCornerShape(coverCorner + 4.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(8.dp)
+    ) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(coverCorner))
+                .border(0.6.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(coverCorner))
         ) {
             CoverArt(
                 albumId = album.albumId,
@@ -444,17 +464,18 @@ fun AlbumCard(
                 Modifier
                     .align(Alignment.BottomEnd)
                     .padding(8.dp)
-                    .size(34.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
-                    .background(skin.accent.copy(alpha = 0.94f))
+                    .background(if (isCurrent) skin.accent.copy(alpha = 0.92f) else Color.Black.copy(alpha = 0.48f))
+                    .border(0.8.dp, Color.White.copy(alpha = 0.28f), CircleShape)
                     .clickable(onClick = onPlay),
                 contentAlignment = Alignment.Center
             ) {
                 androidx.compose.material3.Icon(
                     imageVector = SonanceIcons.Play,
                     contentDescription = "播放专辑",
-                    tint = skin.onAccent,
-                    modifier = Modifier.size(15.dp)
+                    tint = if (isCurrent) skin.onAccent else Color.White,
+                    modifier = Modifier.size(14.dp)
                 )
             }
             if (isCurrent) {
@@ -462,22 +483,23 @@ fun AlbumCard(
                     Modifier
                         .align(Alignment.TopStart)
                         .padding(8.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(CircleShape)
                         .background(skin.accent)
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
                 ) {
                     Text("播放中", style = MaterialTheme.typography.labelSmall, color = skin.onAccent)
                 }
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         Text(
             text = album.name,
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold,
             color = if (isCurrent) skin.accent else skin.text,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 2.dp)
         )
         Spacer(Modifier.height(2.dp))
         Text(
@@ -485,7 +507,8 @@ fun AlbumCard(
             style = MaterialTheme.typography.bodySmall,
             color = skin.textMuted,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 2.dp)
         )
     }
 }
@@ -586,10 +609,13 @@ private fun EntityRow(
     trailing: (@Composable () -> Unit)? = null
 ) {
     val skin = LocalSkin.current
+    val shape = RoundedCornerShape(16.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(9.dp))
+            .clip(shape)
+            .background(skin.glassCardBg())
+            .border(0.7.dp, skin.glassCardBorder(), shape)
             .then(
                 if (onLongClick != null) {
                     Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
@@ -597,14 +623,14 @@ private fun EntityRow(
                     Modifier.clickable(onClick = onClick)
                 }
             )
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             Modifier
-                .size(52.dp)
-                .clip(if (circular) CircleShape else RoundedCornerShape(8.dp))
-                .background(skin.surface2),
+                .size(46.dp)
+                .clip(if (circular) CircleShape else RoundedCornerShape(12.dp))
+                .background(if (leadingIcon != null) skin.accentGlow else skin.softPillBg()),
             contentAlignment = Alignment.Center
         ) {
             if (leadingIcon != null) {
@@ -612,14 +638,14 @@ private fun EntityRow(
                     imageVector = leadingIcon,
                     contentDescription = null,
                     tint = leadingTint,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(20.dp)
                 )
             } else {
                 CoverArt(
                     albumId = albumId,
                     seed = seed,
                     modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-                    cornerRadius = if (circular) 26.dp else 8.dp,
+                    cornerRadius = if (circular) 23.dp else 12.dp,
                     sizePx = 220,
                     showPlaceholderMark = false,
                     sourceUri = sourceUri,

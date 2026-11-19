@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 液态玻璃专用裁剪轮廓：非零近乎透明填充以激活 clipToOutline 圆角裁剪，同时完整透出桌面壁纸 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#08FFFFFF" />
+    <corners android:radius="22dp" />
+</shape>

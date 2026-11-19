@@ -30,13 +30,18 @@ data class SoundFxParams(
     /** 双耳交叉馈送 0..1（BS2B 式低通串扰：缓解耳机头中效应，呈现音箱自然定位） */
     val crossfeed: Float = 0f,
     /** 外放高通保护截止频率 Hz：0 表示关闭，启用时 30..160 Hz 切除外放难还原且易破音的超低频 */
-    val speakerHpfHz: Float = 0f
+    val speakerHpfHz: Float = 0f,
+    /** Poweramp 式宽低音搁架增益（90 Hz Low-Shelf，-9..+9 dB） */
+    val bassBoostDb: Float = 0f,
+    /** Poweramp 式空气高音搁架增益（9.5 kHz High-Shelf，-9..+9 dB） */
+    val trebleBoostDb: Float = 0f
 ) {
     /** 没有实际效果时可以整链旁路，省 CPU */
     val isNeutral: Boolean
         get() = virtualBass <= 0f && reverbWet <= 0f &&
             stereoWidth == 1f && preampDb == 0f && !limiter &&
-            crossfeed <= 0f && speakerHpfHz <= 0f
+            crossfeed <= 0f && speakerHpfHz <= 0f &&
+            bassBoostDb == 0f && trebleBoostDb == 0f
 
     /** 所有来自 UI / 持久化的数值都过这一关，脏参数不允许进音频线程 */
     fun clamp(): SoundFxParams = copy(
@@ -47,13 +52,15 @@ data class SoundFxParams(
         preampDb = preampDb.finiteOr(0f).coerceIn(-12f, 0f),
         limiterThresholdDb = limiterThresholdDb.finiteOr(-1f).coerceIn(-12f, 0f),
         crossfeed = crossfeed.finiteOr(0f).coerceIn(0f, 1f),
-        speakerHpfHz = speakerHpfHz.finiteOr(0f).let { if (it < 20f) 0f else it.coerceIn(30f, 160f) }
+        speakerHpfHz = speakerHpfHz.finiteOr(0f).let { if (it < 20f) 0f else it.coerceIn(30f, 160f) },
+        bassBoostDb = bassBoostDb.finiteOr(0f).coerceIn(-TONE_MAX_DB, TONE_MAX_DB),
+        trebleBoostDb = trebleBoostDb.finiteOr(0f).coerceIn(-TONE_MAX_DB, TONE_MAX_DB)
     )
 
     companion object {
         val NEUTRAL = SoundFxParams()
 
-        /** 持久化用「逗号分隔」，兼容旧版 6~7 段格式与新版 9 段格式 */
+        /** 持久化用「逗号分隔」，兼容旧版 6~9 段与新版 11 段格式 */
         fun fromStore(raw: String?): SoundFxParams {
             if (raw.isNullOrBlank()) return NEUTRAL
             val p = raw.split(",")
@@ -67,14 +74,17 @@ data class SoundFxParams(
                 limiter = p[5] == "1",
                 limiterThresholdDb = p.getOrNull(6)?.toFloatOrNull() ?: -1f,
                 crossfeed = p.getOrNull(7)?.toFloatOrNull() ?: 0f,
-                speakerHpfHz = p.getOrNull(8)?.toFloatOrNull() ?: 0f
+                speakerHpfHz = p.getOrNull(8)?.toFloatOrNull() ?: 0f,
+                bassBoostDb = p.getOrNull(9)?.toFloatOrNull() ?: 0f,
+                trebleBoostDb = p.getOrNull(10)?.toFloatOrNull() ?: 0f
             ).clamp()
         }
 
         fun toStore(p: SoundFxParams): String = with(p.clamp()) {
             listOf(
                 virtualBass, reverbWet, reverbDecay, stereoWidth, preampDb,
-                if (limiter) "1" else "0", limiterThresholdDb, crossfeed, speakerHpfHz
+                if (limiter) "1" else "0", limiterThresholdDb, crossfeed, speakerHpfHz,
+                bassBoostDb, trebleBoostDb
             ).joinToString(",")
         }
     }
@@ -108,6 +118,27 @@ enum class SoundPresetCategory(val label: String) {
 }
 
 /**
+ * 预置音效三档整体强度：按声学中性点分项缩放 EQ、高低音搁架与效果强度，
+ * 锁定物理高通与安全保护阈值不缩放，确保低档不干瘪、高档爽感拉满且绝不破音。
+ */
+enum class PresetIntensity(
+    val id: String,
+    val label: String,
+    val shortDesc: String,
+    val eqScale: Float,
+    val fxScale: Float
+) {
+    LOW("low", "低", "柔和耐听", 0.65f, 0.65f),
+    MEDIUM("medium", "中", "标准推荐", 1.00f, 1.00f),
+    HIGH("high", "高", "强力澎湃", 1.35f, 1.32f);
+
+    companion object {
+        fun fromId(id: String?): PresetIntensity =
+            entries.firstOrNull { it.id == id } ?: MEDIUM
+    }
+}
+
+/**
  * 一套音效 = 10 段 EQ 曲线 + 一组效果参数。
  * [eqDb] 长度恒为 [EQ_BAND_COUNT]（31/62/125/250/500/1k/2k/4k/8k/16k Hz）。
  */
@@ -121,6 +152,24 @@ data class SoundPreset(
     val eqDb: FloatArray,
     val fx: SoundFxParams
 ) {
+    fun scaled(intensity: PresetIntensity): Pair<FloatArray, SoundFxParams> {
+        if (id == SoundPresets.OFF.id || intensity == PresetIntensity.MEDIUM) {
+            return eqDb.copyOf() to fx.clamp()
+        }
+        val scaledEq = FloatArray(eqDb.size) { i ->
+            (eqDb[i] * intensity.eqScale).coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+        }
+        val scaledFx = fx.copy(
+            virtualBass = fx.virtualBass * intensity.fxScale,
+            reverbWet = fx.reverbWet * intensity.fxScale,
+            crossfeed = fx.crossfeed * intensity.fxScale,
+            stereoWidth = 1f + (fx.stereoWidth - 1f) * intensity.fxScale,
+            bassBoostDb = fx.bassBoostDb * intensity.eqScale,
+            trebleBoostDb = fx.trebleBoostDb * intensity.eqScale
+        ).clamp()
+        return scaledEq to scaledFx
+    }
+
     companion object {
         const val ORIGIN_SELF = "自研调音 · 参数来自公开 DSP 原理与听感微调"
     }
@@ -160,163 +209,172 @@ object SoundPresets {
         fx = SoundFxParams(stereoWidth = 1.10f)
     )
 
-    /** 去糊 + 提细节 + 高频泛音展宽：低中频让路，4~16 kHz 空气感打开，乐器分离度与通透度一耳朵拉开差距。 */
+    /** 去糊 + 提细节 + 双搁架空气延展：Low-Shelf 轻托下盘，250 Hz 退让去浊，9.5 kHz 空气搁架点亮光泽，瞬间像揭掉一层纱。 */
     val CLEAR = SoundPreset(
         id = "clear",
         name = "清晨 · 通透",
         category = SoundPresetCategory.SONANCE,
-        description = "收掉 250 Hz 的混浊，把乐器泛音与人声细节自然打开；声场更开阔透亮，开关前后清澈度对比鲜明",
-        character = "透亮 · 高解析",
-        eqDb = floatArrayOf(1.6f, 1.2f, -0.4f, -2.4f, -0.3f, 0.8f, 2.4f, 3.8f, 4.2f, 3.8f),
-        fx = SoundFxParams(virtualBass = 0.16f, stereoWidth = 1.22f)
+        description = "精准收净 250 Hz 浑浊并开启 9.5 kHz 空气搁架与宽展声场，乐器泛音与细节如揭开薄纱般清晰透亮",
+        character = "水晶透亮 · 高解析",
+        eqDb = floatArrayOf(0.6f, 0.8f, -0.6f, -3.2f, -0.8f, 0.8f, 2.2f, 2.8f, 2.0f, 1.6f),
+        fx = SoundFxParams(virtualBass = 0.22f, stereoWidth = 1.30f, bassBoostDb = 1.4f, trebleBoostDb = 3.0f)
     )
 
-    /** Pultec 式人声呼吸感：125 Hz 保住嗓音磁性，250 Hz 挖除伴奏掩蔽，1~4 kHz 顺滑托起咬字与气息，不靠互馈抹糊声像。 */
+    /** Pultec 式贴面毒人声：保住 125 Hz 嗓音磁性、退开 250 Hz 伴奏掩蔽，托起 2 kHz 咬字气息与自然宽阔氛围，不再发挤发虚。 */
     val VOCAL = SoundPreset(
         id = "vocal",
         name = "人声 · 贴耳",
         category = SoundPresetCategory.SONANCE,
-        description = "退开伴奏低中频掩蔽，保留嗓音磁性厚度并顺滑托起唇齿呼吸与细节；收束声场焦距让歌手稳稳贴近面前",
-        character = "亲近 · 饱满毒人声",
-        eqDb = floatArrayOf(-0.8f, 0.4f, 1.2f, -2.4f, 1.2f, 2.8f, 3.8f, 2.8f, 1.2f, 0.4f),
-        fx = SoundFxParams(stereoWidth = 0.88f, limiter = true, limiterThresholdDb = -0.5f)
+        description = "退开伴奏低中频掩蔽，保留嗓音磁性厚度并饱满托起唇齿呼吸与细节；搭配丝滑空气延伸与自然声场更富情感",
+        character = "磁性毒嗓 · 贴面清晰",
+        eqDb = floatArrayOf(-1.6f, 0.2f, 1.6f, -3.2f, 1.2f, 3.2f, 4.4f, 2.8f, 1.0f, 0.6f),
+        fx = SoundFxParams(stereoWidth = 1.10f, bassBoostDb = 0.5f, trebleBoostDb = 1.8f)
     )
 
-    /** 62 Hz 核心锤感 + 250 Hz 去糊切口 + 74 Hz+ 饱和谐波下潜：鼓点拳拳到肉、收放干脆有弹性，绝不干瘪或发虚。 */
+    /** Poweramp 式招牌弹跳低音：Low-Shelf 低频气垫 + 62 Hz 核心锤感 + 强化版谐波下潜，切净 250 Hz 防轰头并补足高频清脆。 */
     val BASS = SoundPreset(
         id = "bass",
         name = "低频 · 有弹性",
         category = SoundPresetCategory.SONANCE,
-        description = "强化 62 Hz 底鼓冲击力与澎湃谐波下潜，挖除 250 Hz 闷浊共振并补齐明亮度，下盘稳重有弹性、人声依旧通透",
-        character = "澎湃 · 拳拳到肉",
-        eqDb = floatArrayOf(3.8f, 4.6f, 2.4f, -2.2f, -0.2f, 0.8f, 1.8f, 2.4f, 2.2f, 1.6f),
-        fx = SoundFxParams(
-            virtualBass = 0.62f, stereoWidth = 1.14f, limiter = true, limiterThresholdDb = -0.5f
-        )
+        description = "强力 90 Hz 低音宽搁架叠加强化版谐波合成，打造气垫般澎湃鼓点弹性；切净 250 Hz 轰鸣并点亮高频清脆度",
+        character = "气垫澎湃 · 拳拳到肉",
+        eqDb = floatArrayOf(0.8f, 2.4f, 0.8f, -3.6f, -0.6f, 1.0f, 1.8f, 2.2f, 1.2f, 0.8f),
+        fx = SoundFxParams(virtualBass = 0.74f, stereoWidth = 1.18f, bassBoostDb = 3.2f, trebleBoostDb = 1.8f)
     )
 
-    /** 母带级暖倾斜（Warm Tilt）+ 轻柔双耳过渡：低频温厚包裹，高频柔和顺滑不刺耳，柔和却不显闷窄。 */
+    /** 生理等响度（Loudness）夜间暖调：温润 Low-Shelf 包围低频、柔和抚平 2~8 kHz 刺耳倦怠区并保留微弱泛音，小音量久听也丰满。 */
     val NIGHT = SoundPreset(
         id = "night",
         name = "深夜 · 轻柔",
         category = SoundPresetCategory.SONANCE,
-        description = "模拟黑胶与胆机的暖调倾斜曲线，温润低频包围搭配极轻度双耳融合，夜晚聆听惬意饱满不刺耳",
-        character = "温暖 · 胆机包围",
-        eqDb = floatArrayOf(2.4f, 3.0f, 2.2f, 0.8f, 0.2f, -0.2f, -1.4f, -2.4f, -3.0f, -3.2f),
-        fx = SoundFxParams(virtualBass = 0.28f, stereoWidth = 1.06f, crossfeed = 0.12f)
+        description = "小音量生理等响度曲线：温暖厚实的低频包裹配合人耳敏感刺耳区柔化，夜间聆听饱满宽松且久听不累",
+        character = "暖厚耐听 · 胆机包围",
+        eqDb = floatArrayOf(1.0f, 1.8f, 1.4f, 0.4f, 0.2f, -0.2f, -1.8f, -2.8f, -1.8f, -0.6f),
+        fx = SoundFxParams(
+            virtualBass = 0.36f, stereoWidth = 1.12f, crossfeed = 0.14f,
+            bassBoostDb = 2.4f, trebleBoostDb = -1.2f
+        )
     )
 
-    /** 入耳式耳机优化：饱满下潜 + 轻量抚平 8 kHz 耳道刺耳峰而不压暗高频，搭配柔和 BS2B 缓解头中效应。 */
+    /** 哈曼 IE 取向入耳耳塞调音：低频气垫扎实有弹性、打磨 8 kHz 耳道共振刺峰并推开 12k+ 空气泛音，轻度 BS2B 保住开阔声场。 */
     val IN_EAR = SoundPreset(
         id = "in_ear",
         name = "入耳 · 柔顺",
         category = SoundPresetCategory.HEADPHONE,
-        description = "针对入耳耳塞声学调校：强化低频厚实下潜与极高频空气泛音，轻柔打磨 8 kHz 齿音毛刺并开启适度交叉馈送减轻头中压迫",
-        character = "饱满顺滑 · 去刺不闷",
-        eqDb = floatArrayOf(2.2f, 1.8f, 0.0f, -1.6f, 0.2f, 1.2f, 1.0f, -0.4f, -1.0f, 2.4f),
-        fx = SoundFxParams(virtualBass = 0.24f, stereoWidth = 1.16f, crossfeed = 0.18f)
+        description = "参考主流 Hi-Fi 入耳目标曲线调校：饱满低音气垫搭配 8 kHz 齿音去刺与极高频延伸，一耳朵顺滑大气",
+        character = "顺滑去刺 · 澎湃耐听",
+        eqDb = floatArrayOf(1.2f, 1.4f, 0.0f, -2.6f, 0.2f, 1.6f, 2.2f, 0.4f, -2.2f, 1.6f),
+        fx = SoundFxParams(
+            virtualBass = 0.36f, stereoWidth = 1.22f, crossfeed = 0.12f,
+            bassBoostDb = 2.4f, trebleBoostDb = 2.2f
+        )
     )
 
-    /** 头戴式耳机优化：发挥大尺寸单元宽松低潜 + 适度 BS2B 与早期空间反射，拉开脱塞感而不收窄宽声场。 */
+    /** 头戴旗舰大耳调音：宽松低频下潜 + 250 Hz 罩腔去浊 + 宽舒 132% 声场与轻近场反射，营造音箱般的脱塞听感。 */
     val OVER_EAR = SoundPreset(
         id = "over_ear",
         name = "头戴 · 厅堂",
         category = SoundPresetCategory.HEADPHONE,
-        description = "针对头戴大耳调校：疏通 250 Hz 罩腔共振并深挖低频弹性，适度近场双耳融合配合轻早期反射与宽展声场，呈现开放音箱听感",
-        character = "脱塞音箱感 · 宽舒饱满",
-        eqDb = floatArrayOf(2.6f, 2.2f, 0.6f, -1.6f, 0.2f, 1.6f, 2.4f, 1.8f, 1.4f, 2.0f),
+        description = "针对头戴大耳调校：疏通罩腔微浊共振、深挖低频弹性并融合早期空间反射与宽舒声场，消除头中效应",
+        character = "宽舒脱塞 · 大耳氛围",
+        eqDb = floatArrayOf(1.2f, 1.6f, 0.4f, -2.6f, 0.4f, 1.6f, 2.6f, 2.0f, 1.2f, 1.4f),
         fx = SoundFxParams(
-            virtualBass = 0.28f, reverbWet = 0.10f, reverbDecay = 0.34f,
-            stereoWidth = 1.24f, crossfeed = 0.25f
+            virtualBass = 0.36f, reverbWet = 0.14f, reverbDecay = 0.38f,
+            stereoWidth = 1.32f, crossfeed = 0.20f, bassBoostDb = 2.2f, trebleBoostDb = 2.0f
         )
     )
 
     /**
-     * 手机外放档（原「外放 · 饱满」，沿用 id="dual_speaker" 保持兼容，沿用原版听感配方）：
-     * 切除 31 Hz 振膜打底破音区，强力推起 250~500 Hz 胸腔共鸣厚度，压住 2~4 kHz 喇叭刺耳谐振峰，
-     * 再用动态低频谐波把缺失的基频低音饱满地"脑补"回来。
+     * 手机外放档（沿用 id="dual_speaker" 保持兼容）：
+     * 58 Hz 物理高通切除小喇叭破音振膜打底区间，高通前提取强力 2f/3f 谐波把低音“脑补”得饱满有弹性，
+     * 推起胸腔厚度与高音清晰度，外放脱胎换骨且开大声不破响。
      */
     val PHONE_SPEAKER = SoundPreset(
         id = "dual_speaker",
         name = "手机 · 外放",
         category = SoundPresetCategory.SPEAKER,
-        description = "专为手机与平板扬声器调校：切除破音超低频、补足中低频胸腔厚度、柔化高频毛刺，并用谐波重建饱满低音",
-        character = "外放 · 小音箱感",
-        eqDb = floatArrayOf(-4.5f, -1.5f, 1.2f, 3.2f, 3.6f, 1.2f, -1.8f, -1.2f, 1.5f, 2.2f),
-        fx = SoundFxParams(virtualBass = 0.65f, stereoWidth = 1.18f, limiter = true)
+        description = "58 Hz 高通精准防破音并在高通前强化谐波低音合成，补足胸腔厚度与高频明亮度，外放饱满有力",
+        character = "澎湃抗破音 · 小音箱感",
+        eqDb = floatArrayOf(-5.0f, -1.2f, 1.8f, 3.4f, 4.0f, 1.6f, -2.0f, -1.0f, 1.8f, 2.2f),
+        fx = SoundFxParams(
+            virtualBass = 0.78f, stereoWidth = 1.28f, limiter = true,
+            limiterThresholdDb = -0.4f, speakerHpfHz = 58f, trebleBoostDb = 2.2f
+        )
     )
 
     @Deprecated("使用 PHONE_SPEAKER", ReplaceWith("PHONE_SPEAKER"))
     val DUAL_SPEAKER: SoundPreset
         get() = PHONE_SPEAKER
 
-    /** 平板外放模式：利用平板更大音腔与宽距扬声器，48 Hz 轻保护下释放深沉中低音，大幅展开横向立体声与人声鲜明度。 */
+    /** 平板外放模式：利用多扬声器大音腔，46 Hz 护喇叭下释放充沛低音气垫，142% 宽立体声让桌面声场与清晰人声一同立起。 */
     val TABLET_SPEAKER = SoundPreset(
         id = "tablet_speaker",
         name = "平板 · 立体",
         category = SoundPresetCategory.SPEAKER,
-        description = "专为平板多扬声器大音腔调校：48 Hz 温和保护下保留充沛低频冲击，拉开 134% 宽距立体声并托起人声与弦乐明亮度",
-        character = "大音腔饱满 · 宽距立体环绕",
-        eqDb = floatArrayOf(-2.0f, 2.0f, 2.8f, -1.0f, 0.8f, 1.2f, 2.0f, 2.2f, 2.8f, 3.0f),
+        description = "专为平板多扬声器大音腔调校：低音气垫叠加 142% 宽距环绕声场与明亮人声，桌面外放立体感翻倍",
+        character = "大音腔饱满 · 宽距立体声",
+        eqDb = floatArrayOf(-2.0f, 1.4f, 1.8f, -1.8f, 0.6f, 1.6f, 2.6f, 2.2f, 2.0f, 1.6f),
         fx = SoundFxParams(
-            virtualBass = 0.62f, reverbWet = 0.06f, reverbDecay = 0.26f,
-            stereoWidth = 1.34f, limiter = true, limiterThresholdDb = -0.5f, speakerHpfHz = 48f
+            virtualBass = 0.68f, reverbWet = 0.08f, reverbDecay = 0.28f,
+            stereoWidth = 1.42f, speakerHpfHz = 46f,
+            bassBoostDb = 1.0f, trebleBoostDb = 1.8f
         )
     )
 
-    /** 汽车音响优化：穿透行车 60~250 Hz 路噪胎噪掩蔽，切掉 40 Hz 以下门板驻波，聚焦前排质感并强化鼓点力度。 */
+    /** 车载动感 V 型调音：强力低音气垫与 62 Hz 底鼓穿透行车胎噪路噪，挖净车门 250 Hz 浑浊共振，前排人声鲜明有劲。 */
     val CAR_AUDIO = SoundPreset(
         id = "car_audio",
         name = "车载 · 动感",
         category = SoundPresetCategory.SPEAKER,
-        description = "针对汽车驾驶舱声学优化：有力 62 Hz 底鼓穿透路噪掩蔽，清理 250 Hz 门板浑浊驻波并聚焦前排清晰人声",
-        character = "动感抗路噪 · 前排声场",
-        eqDb = floatArrayOf(1.8f, 4.2f, 2.0f, -2.5f, -0.3f, 1.4f, 2.6f, 1.8f, 1.4f, 1.8f),
+        description = "穿透行车胎噪与路噪掩蔽：强力底鼓锤感搭配门板 250 Hz 共振清理与清晰高音，驾驶舱动态冲击力十足",
+        character = "抗路噪冲击 · 劲爽前排",
+        eqDb = floatArrayOf(1.2f, 3.0f, 1.4f, -3.2f, -0.4f, 1.6f, 2.8f, 2.0f, 1.4f, 1.4f),
         fx = SoundFxParams(
-            virtualBass = 0.48f, stereoWidth = 1.18f, limiter = true,
-            limiterThresholdDb = -0.5f, crossfeed = 0.10f, speakerHpfHz = 40f
+            virtualBass = 0.58f, stereoWidth = 1.24f, limiter = true,
+            limiterThresholdDb = -0.4f, crossfeed = 0.08f, speakerHpfHz = 38f,
+            bassBoostDb = 2.4f, trebleBoostDb = 2.0f
         )
     )
 
-    /** 早期横向反射 + 舞台微V均衡 + 明显展宽：像站在 Livehouse 前排，临场氛围与打击感跃然而出。 */
+    /** 现场 Livehouse 调音：释去多余前置压限保留完整打击乐瞬态，搭配 138% 舞台宽度与鲜明早期声学反射。 */
     val LIVE = SoundPreset(
         id = "live",
         name = "现场 · 微醺",
         category = SoundPresetCategory.SPACE,
-        description = "还原 Livehouse 前排的横向声学反射与舞台宽度，底鼓弹性、吉他泛音与临场空气感鲜明拉开",
-        character = "临场氛围 · 舞台活生感",
-        eqDb = floatArrayOf(2.2f, 2.8f, 1.0f, -1.8f, 0.0f, 1.0f, 2.2f, 3.2f, 2.6f, 1.8f),
+        description = "释放鼓点瞬态动态并还原 Livehouse 舞台宽度与早期横向反射，底鼓、吉他泛音与现场临场感鲜明跃出",
+        character = "临场冲击 · 舞台活生感",
+        eqDb = floatArrayOf(1.2f, 2.2f, 0.8f, -2.6f, 0.2f, 1.2f, 2.4f, 3.0f, 2.0f, 1.4f),
         fx = SoundFxParams(
-            virtualBass = 0.28f, reverbWet = 0.20f, reverbDecay = 0.44f, stereoWidth = 1.28f,
-            limiter = true, limiterThresholdDb = -0.5f
+            virtualBass = 0.38f, reverbWet = 0.24f, reverbDecay = 0.46f,
+            stereoWidth = 1.38f, bassBoostDb = 1.8f, trebleBoostDb = 1.8f
         )
     )
 
-    /** 全景环绕：强力低音锁相展宽 + 立体交叉声学反射（不加跨声道抵消），打造一耳朵 360° 包围环绕的球形空间感。 */
+    /** 全景 360° 环绕：低频稳固锚定中心，高频侧翼大跨度舒展（168%）叠加立体空间反射，开关反差极为强烈。 */
     val PANORAMA = SoundPreset(
         id = "panorama",
         name = "全景 · 环绕",
         category = SoundPresetCategory.SPACE,
-        description = "多维度全景声场拓展：低频稳固锚定中心，侧向高频极大舒展并结合立体早期反射环绕耳畔，呈现一耳朵震撼的 360° 包围感",
-        character = "360° 立体 · 震撼环绕",
-        eqDb = floatArrayOf(2.6f, 3.0f, 1.0f, -1.8f, -0.2f, 0.8f, 1.8f, 2.6f, 3.2f, 2.8f),
+        description = "多维度全景声场拓展：低频稳固锚定中心，侧翼大跨度延展叠加立体环绕反射，呈现一耳朵 360° 沉浸包围感",
+        character = "360° 宽阔 · 震撼环绕",
+        eqDb = floatArrayOf(1.4f, 2.2f, 0.6f, -2.6f, -0.2f, 1.0f, 2.0f, 2.6f, 2.4f, 1.8f),
         fx = SoundFxParams(
-            virtualBass = 0.34f, reverbWet = 0.22f, reverbDecay = 0.54f,
-            stereoWidth = 1.56f, limiter = true, limiterThresholdDb = -0.5f
+            virtualBass = 0.44f, reverbWet = 0.28f, reverbDecay = 0.56f,
+            stereoWidth = 1.68f, bassBoostDb = 2.0f, trebleBoostDb = 2.2f
         )
     )
 
-    /** 影院级极低频氛围 + 宏阔声场与厅堂余韵：动态澎湃、巨幕包围感十足。 */
+    /** 巨幕影院：深沉 Low-Shelf + 强力谐波营造 IMAX 低音炮氛围，饱满厅堂尾韵与宏阔动态声场气势恢弘。 */
     val CINEMA = SoundPreset(
         id = "cinema",
         name = "影院 · 宽广",
         category = SoundPresetCategory.SPACE,
-        description = "声场向两侧深度延展，强化 31~62 Hz 巨幕下潜与饱满厅堂余韵，原声 OST 与大场面气势震撼十足",
-        character = "恢弘澎湃 · 巨幕氛围",
-        eqDb = floatArrayOf(3.8f, 4.4f, 2.2f, -1.8f, -0.4f, 0.8f, 1.8f, 2.8f, 2.8f, 2.0f),
+        description = "IMAX 巨幕低频氛围与宽阔厅堂余韵：无前置压限保留宏大动态起伏，影视原声与大编制交响震撼感拉满",
+        character = "巨幕震撼 · 宏阔厅堂",
+        eqDb = floatArrayOf(2.0f, 2.6f, 1.2f, -2.6f, -0.4f, 1.0f, 2.0f, 2.6f, 2.0f, 1.4f),
         fx = SoundFxParams(
-            virtualBass = 0.44f, reverbWet = 0.26f, reverbDecay = 0.60f, stereoWidth = 1.38f,
-            limiter = true, limiterThresholdDb = -0.5f
+            virtualBass = 0.54f, reverbWet = 0.34f, reverbDecay = 0.64f,
+            stereoWidth = 1.48f, bassBoostDb = 2.8f, trebleBoostDb = 1.8f
         )
     )
 
@@ -345,36 +403,45 @@ object SoundPresets {
             SoundFxParams(stereoWidth = 1.04f, preampDb = -1.5f, limiter = true),
             SoundFxParams(stereoWidth = 1.05f),
             SoundFxParams(virtualBass = 0.14f, stereoWidth = 1.20f),
-            SoundFxParams(virtualBass = 0.12f, stereoWidth = 1.16f)
+            SoundFxParams(virtualBass = 0.12f, stereoWidth = 1.16f),
+            SoundFxParams(virtualBass = 0.16f, stereoWidth = 1.22f)
         ),
         "night" to listOf(
             SoundFxParams(stereoWidth = 0.95f, reverbWet = 0.04f, preampDb = -5f, limiter = true),
             SoundFxParams(preampDb = -1.5f, limiter = true),
             SoundFxParams.NEUTRAL,
             SoundFxParams(virtualBass = 0.24f, stereoWidth = 1.06f),
-            SoundFxParams(virtualBass = 0.22f, stereoWidth = 1.04f, crossfeed = 0.22f)
+            SoundFxParams(virtualBass = 0.22f, stereoWidth = 1.04f, crossfeed = 0.22f),
+            SoundFxParams(virtualBass = 0.28f, stereoWidth = 1.06f, crossfeed = 0.12f)
         ),
         "vocal" to listOf(
             SoundFxParams(reverbWet = 0.07f, preampDb = -3f, limiter = true),
             SoundFxParams(preampDb = -1.8f, limiter = true),
             SoundFxParams(limiter = true),
             SoundFxParams(stereoWidth = 0.90f, limiter = true),
-            SoundFxParams(stereoWidth = 0.92f, limiter = true, crossfeed = 0.18f)
+            SoundFxParams(stereoWidth = 0.92f, limiter = true, crossfeed = 0.18f),
+            SoundFxParams(stereoWidth = 0.88f, limiter = true, limiterThresholdDb = -0.5f)
         ),
         "bass" to listOf(
             SoundFxParams(virtualBass = 0.55f, preampDb = -4f, limiter = true),
             SoundFxParams(preampDb = -2.5f, limiter = true),
             SoundFxParams(limiter = true),
             SoundFxParams(virtualBass = 0.48f, stereoWidth = 1.12f, limiter = true),
-            SoundFxParams(virtualBass = 0.52f, stereoWidth = 1.10f, limiter = true)
+            SoundFxParams(virtualBass = 0.52f, stereoWidth = 1.10f, limiter = true),
+            SoundFxParams(virtualBass = 0.62f, stereoWidth = 1.14f, limiter = true, limiterThresholdDb = -0.5f)
         ),
         "in_ear" to listOf(
-            SoundFxParams(virtualBass = 0.16f, stereoWidth = 1.08f, crossfeed = 0.35f)
+            SoundFxParams(virtualBass = 0.16f, stereoWidth = 1.08f, crossfeed = 0.35f),
+            SoundFxParams(virtualBass = 0.24f, stereoWidth = 1.16f, crossfeed = 0.18f)
         ),
         "over_ear" to listOf(
             SoundFxParams(
                 virtualBass = 0.18f, reverbWet = 0.08f, reverbDecay = 0.28f,
                 stereoWidth = 1.14f, crossfeed = 0.48f
+            ),
+            SoundFxParams(
+                virtualBass = 0.28f, reverbWet = 0.10f, reverbDecay = 0.34f,
+                stereoWidth = 1.24f, crossfeed = 0.25f
             )
         ),
         "live" to listOf(
@@ -382,12 +449,20 @@ object SoundPresets {
             SoundFxParams(reverbWet = 0.10f, reverbDecay = 0.35f, stereoWidth = 1.10f, preampDb = -1.5f, limiter = true),
             SoundFxParams(reverbWet = 0.10f, reverbDecay = 0.38f, stereoWidth = 1.10f, limiter = true),
             SoundFxParams(virtualBass = 0.22f, reverbWet = 0.18f, reverbDecay = 0.42f, stereoWidth = 1.24f, limiter = true),
-            SoundFxParams(virtualBass = 0.20f, reverbWet = 0.16f, reverbDecay = 0.40f, stereoWidth = 1.22f, limiter = true)
+            SoundFxParams(virtualBass = 0.20f, reverbWet = 0.16f, reverbDecay = 0.40f, stereoWidth = 1.22f, limiter = true),
+            SoundFxParams(
+                virtualBass = 0.28f, reverbWet = 0.20f, reverbDecay = 0.44f, stereoWidth = 1.28f,
+                limiter = true, limiterThresholdDb = -0.5f
+            )
         ),
         "panorama" to listOf(
             SoundFxParams(
                 virtualBass = 0.26f, reverbWet = 0.20f, reverbDecay = 0.52f,
                 stereoWidth = 1.48f, limiter = true, crossfeed = 0.15f
+            ),
+            SoundFxParams(
+                virtualBass = 0.34f, reverbWet = 0.22f, reverbDecay = 0.54f,
+                stereoWidth = 1.56f, limiter = true, limiterThresholdDb = -0.5f
             )
         ),
         "cinema" to listOf(
@@ -395,7 +470,11 @@ object SoundPresets {
             SoundFxParams(reverbWet = 0.16f, reverbDecay = 0.55f, stereoWidth = 1.16f, preampDb = -1.8f, limiter = true),
             SoundFxParams(reverbWet = 0.15f, reverbDecay = 0.60f, stereoWidth = 1.16f, limiter = true),
             SoundFxParams(virtualBass = 0.36f, reverbWet = 0.26f, reverbDecay = 0.60f, stereoWidth = 1.32f, limiter = true),
-            SoundFxParams(virtualBass = 0.32f, reverbWet = 0.22f, reverbDecay = 0.56f, stereoWidth = 1.30f, limiter = true)
+            SoundFxParams(virtualBass = 0.32f, reverbWet = 0.22f, reverbDecay = 0.56f, stereoWidth = 1.30f, limiter = true),
+            SoundFxParams(
+                virtualBass = 0.44f, reverbWet = 0.26f, reverbDecay = 0.60f, stereoWidth = 1.38f,
+                limiter = true, limiterThresholdDb = -0.5f
+            )
         ),
         "dual_speaker" to listOf(
             SoundFxParams(virtualBass = 0.7f, reverbWet = 0.06f, reverbDecay = 0.2f, stereoWidth = 1.18f, preampDb = -4f, limiter = true),
@@ -408,30 +487,44 @@ object SoundPresets {
             SoundFxParams(
                 virtualBass = 0.70f, stereoWidth = 1.24f, limiter = true,
                 limiterThresholdDb = -0.5f, speakerHpfHz = 65f
-            )
+            ),
+            SoundFxParams(virtualBass = 0.65f, stereoWidth = 1.18f, limiter = true)
         ),
         "tablet_speaker" to listOf(
             SoundFxParams(
                 virtualBass = 0.56f, reverbWet = 0.06f, reverbDecay = 0.25f,
                 stereoWidth = 1.28f, limiter = true, limiterThresholdDb = -1.0f, speakerHpfHz = 75f
+            ),
+            SoundFxParams(
+                virtualBass = 0.62f, reverbWet = 0.06f, reverbDecay = 0.26f,
+                stereoWidth = 1.34f, limiter = true, limiterThresholdDb = -0.5f, speakerHpfHz = 48f
             )
         ),
         "car_audio" to listOf(
             SoundFxParams(
                 virtualBass = 0.38f, stereoWidth = 1.12f, limiter = true,
                 limiterThresholdDb = -1.0f, crossfeed = 0.20f, speakerHpfHz = 42f
+            ),
+            SoundFxParams(
+                virtualBass = 0.48f, stereoWidth = 1.18f, limiter = true,
+                limiterThresholdDb = -0.5f, crossfeed = 0.10f, speakerHpfHz = 40f
             )
         )
     )
 
     data class RestoredFx(val params: SoundFxParams, val custom: Boolean)
 
-    fun restoreFx(preset: SoundPreset, raw: String?): RestoredFx {
+    fun restoreFx(
+        preset: SoundPreset,
+        raw: String?,
+        intensity: PresetIntensity = PresetIntensity.MEDIUM
+    ): RestoredFx {
         val stored = SoundFxParams.fromStore(raw)
+        val expected = preset.scaled(intensity).second
         val unchanged = raw.isNullOrBlank() ||
-            stored == preset.fx ||
+            PresetIntensity.entries.any { preset.scaled(it).second == stored } ||
             legacyFx[preset.id]?.any { it == stored } == true
-        return if (unchanged) RestoredFx(preset.fx, false) else RestoredFx(stored, true)
+        return if (unchanged) RestoredFx(expected, false) else RestoredFx(stored, true)
     }
 
     private const val EQ_STORE_PREFIX = "sound:"

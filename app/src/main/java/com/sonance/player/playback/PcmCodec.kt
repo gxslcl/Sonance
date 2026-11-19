@@ -4,11 +4,13 @@ import androidx.media3.common.C
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Shared PCM sample conversion (16-bit / 24-bit packed / 32-bit int / 32-bit float)
@@ -308,6 +310,48 @@ internal object BiquadDesign {
             (opc * 0.5) / a0,
             (-2.0 * cosW) / a0,
             (1.0 - alpha) / a0
+        )
+    }
+
+    fun lowShelf(f0: Double, gainDb: Double, sampleRate: Int, q: Double = 0.68): DoubleArray {
+        val fs = sampleRate.toDouble()
+        if (!gainDb.isFinite() || abs(gainDb) < 1e-4 || f0 <= 0.0 || fs <= 0.0 || f0 >= fs * 0.495 || q <= 0.0) {
+            return UNITY.copyOf()
+        }
+        val a = 10.0.pow(gainDb / 40.0)
+        val w0 = 2.0 * PI * f0 / fs
+        val cosW = cos(w0)
+        val sinW = sin(w0)
+        val alpha = sinW / (2.0 * q)
+        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+        val a0 = (a + 1.0) + (a - 1.0) * cosW + twoSqrtAAlpha
+        return doubleArrayOf(
+            (a * ((a + 1.0) - (a - 1.0) * cosW + twoSqrtAAlpha)) / a0,
+            (2.0 * a * ((a - 1.0) - (a + 1.0) * cosW)) / a0,
+            (a * ((a + 1.0) - (a - 1.0) * cosW - twoSqrtAAlpha)) / a0,
+            (-2.0 * ((a - 1.0) + (a + 1.0) * cosW)) / a0,
+            ((a + 1.0) + (a - 1.0) * cosW - twoSqrtAAlpha) / a0
+        )
+    }
+
+    fun highShelf(f0: Double, gainDb: Double, sampleRate: Int, q: Double = 0.68): DoubleArray {
+        val fs = sampleRate.toDouble()
+        if (!gainDb.isFinite() || abs(gainDb) < 1e-4 || f0 <= 0.0 || fs <= 0.0 || f0 >= fs * 0.495 || q <= 0.0) {
+            return UNITY.copyOf()
+        }
+        val a = 10.0.pow(gainDb / 40.0)
+        val w0 = 2.0 * PI * f0 / fs
+        val cosW = cos(w0)
+        val sinW = sin(w0)
+        val alpha = sinW / (2.0 * q)
+        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+        val a0 = (a + 1.0) - (a - 1.0) * cosW + twoSqrtAAlpha
+        return doubleArrayOf(
+            (a * ((a + 1.0) + (a - 1.0) * cosW + twoSqrtAAlpha)) / a0,
+            (-2.0 * a * ((a - 1.0) + (a + 1.0) * cosW)) / a0,
+            (a * ((a + 1.0) + (a - 1.0) * cosW - twoSqrtAAlpha)) / a0,
+            (2.0 * ((a - 1.0) - (a + 1.0) * cosW)) / a0,
+            ((a + 1.0) - (a - 1.0) * cosW - twoSqrtAAlpha) / a0
         )
     }
 }

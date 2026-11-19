@@ -1,20 +1,36 @@
 package com.sonance.player.playback
 
+import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.view.KeyEvent
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.util.UnstableApi
+import com.sonance.player.desktoplyrics.ExternalLyricBridge
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -25,18 +41,34 @@ import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.DefaultMediaNotificationProvider
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.SettableFuture
 import com.sonance.player.MainActivity
+import com.sonance.player.R
 import com.sonance.player.data.AudioTags
+import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.LyricLine
 import com.sonance.player.data.Lyrics
 import com.sonance.player.data.LyricsCache
 import com.sonance.player.data.LyricsRepository
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.OnlineSources
+import com.sonance.player.data.PlaybackRestore
 import com.sonance.player.data.Prefs
+import com.sonance.player.data.Song
+import com.sonance.player.data.decodeSongsFromJson
 import com.sonance.player.data.indexAt
+import com.sonance.player.data.isExternalSongId
+import com.sonance.player.data.isRemoteSongId
 import com.sonance.player.data.isRemoteUrl
+import com.sonance.player.data.storedOnlineSongFromJson
+import com.sonance.player.data.storedOnlineSongsFromJson
 import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import com.sonance.player.widget.SonanceWidgets
 import com.sonance.player.widget.WidgetCommandReceiver
@@ -48,6 +80,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -58,15 +91,47 @@ import java.util.concurrent.atomic.AtomicReference
 private var liveService: PlaybackService? = null
 
 /**
- * 常驻媒体服务：负责后台播放、通知栏控制、耳机线控与蓝牙按键。
+ * 常驻媒体服务：继承 [MediaLibraryService]（兼容 Media3 MediaSessionService 与传统
+ * `android.media.browse.MediaBrowserService`），统一服务控制中心、锁屏控制、
+ * vivo 原子随身听 / 原子岛、小米超级岛与车载媒体协议。
  */
-class PlaybackService : MediaSessionService() {
+class PlaybackService : MediaLibraryService() {
 
-    private var mediaSession: MediaSession? = null
+    private var mediaSession: MediaLibrarySession? = null
     private var transitions: TransitionEffects? = null
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var pendingBtRecovery: Runnable? = null
+    private val persistSnapshotRunnable = Runnable {
+        mediaSession?.player?.let { persistServicePlaybackSnapshot(it) }
+    }
+
+    @Volatile
+    private var shuttingDownForSleep = false
+
+    @Volatile
+    private var isScreenInteractive = true
+
+    private var screenStateReceiver: BroadcastReceiver? = null
+    private val coldRestoreInFlight = AtomicBoolean(false)
+    private val pendingColdCommand = AtomicReference<String?>(null)
+
+    private var sessionLyricsGeneration = 0
+    private var lastPublishedLyricsSig: String? = null
+
+    private var shakeController: ShakeTrackController? = null
+    private val headsetButtonCounter = HeadsetButtonClickCounter(380L)
+    private val headsetButtonFlushRunnable = Runnable {
+        when (headsetButtonCounter.consumePending()) {
+            HeadsetButtonClickCounter.Action.PLAY_PAUSE ->
+                executeWithTransitionReset(PlaybackCommands.PLAY_PAUSE)
+            HeadsetButtonClickCounter.Action.NEXT ->
+                executeWithTransitionReset(PlaybackCommands.NEXT)
+            HeadsetButtonClickCounter.Action.PREVIOUS ->
+                executeWithTransitionReset(PlaybackCommands.PREVIOUS)
+            null -> Unit
+        }
+    }
 
     override fun onCreate() {
         // 必须先于 super.onCreate()：MediaSessionService 在 super 里就会建通知管理器，
@@ -119,6 +184,8 @@ class PlaybackService : MediaSessionService() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource()))
             .build()
 
+        syncDspAndPlayerModesIfCold(player)
+
         val sessionActivity = PendingIntent.getActivity(
             this,
             0,
@@ -162,22 +229,158 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaLibrarySession.Builder(this, player, buildLibraryCallback())
             .setSessionActivity(sessionActivity)
             .build()
 
         player.addListener(widgetSync)
         liveService = this
-        watchBluetoothRoute(player)
-
-        if (player.isPlaying) {
-            mainHandler.post(playbackTicker)
+        shakeController = ShakeTrackController(this) {
+            mainHandler.post { executeWithTransitionReset(PlaybackCommands.NEXT) }
         }
+        watchBluetoothRoute(player)
+        registerScreenStateObserver()
+        syncShakeListener()
+
+        scheduleNextPlaybackTick(player)
 
         if (Prefs(this).desktopLyricsEnabled && DesktopLyricsManager.hasOverlayPermission(this)) {
             DesktopLyricsManager.show(this)
         }
     }
+
+    private fun buildLibraryCallback(): MediaLibrarySession.Callback =
+        object : MediaLibrarySession.Callback {
+            @androidx.annotation.OptIn(UnstableApi::class)
+            override fun onMediaButtonEvent(
+                session: MediaSession,
+                controllerInfo: MediaSession.ControllerInfo,
+                mediaButtonIntent: Intent
+            ): Boolean {
+                val keyEvent = IntentCompat.getParcelableExtra(
+                    mediaButtonIntent,
+                    Intent.EXTRA_KEY_EVENT,
+                    KeyEvent::class.java
+                ) ?: return super.onMediaButtonEvent(session, controllerInfo, mediaButtonIntent)
+
+                val isSingleHook = keyEvent.keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
+                    keyEvent.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                if (!isSingleHook) {
+                    return super.onMediaButtonEvent(session, controllerInfo, mediaButtonIntent)
+                }
+
+                if (keyEvent.action == KeyEvent.ACTION_UP) {
+                    return true
+                }
+                if (keyEvent.action != KeyEvent.ACTION_DOWN || keyEvent.repeatCount != 0) {
+                    return true
+                }
+
+                val immediate = headsetButtonCounter.onClick(SystemClock.elapsedRealtime())
+                mainHandler.removeCallbacks(headsetButtonFlushRunnable)
+                if (immediate == HeadsetButtonClickCounter.Action.PREVIOUS) {
+                    executeWithTransitionReset(PlaybackCommands.PREVIOUS)
+                } else {
+                    mainHandler.postDelayed(headsetButtonFlushRunnable, 380L)
+                }
+                return true
+            }
+
+            override fun onConnect(
+                session: MediaSession,
+                controller: MediaSession.ControllerInfo
+            ): MediaSession.ConnectionResult =
+                MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                    .setAvailableSessionCommands(
+                        MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+                    )
+                    .setAvailablePlayerCommands(
+                        MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+                    )
+                    .build()
+
+            override fun onGetLibraryRoot(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<MediaItem>> {
+                val root = MediaItem.Builder()
+                    .setMediaId(LIBRARY_ROOT_ID)
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle("山水有清音")
+                            .setIsBrowsable(true)
+                            .setIsPlayable(false)
+                            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+                            .build()
+                    )
+                    .build()
+                return Futures.immediateFuture(LibraryResult.ofItem(root, params))
+            }
+
+            override fun onGetChildren(
+                session: MediaLibrarySession,
+                browser: MediaSession.ControllerInfo,
+                parentId: String,
+                page: Int,
+                pageSize: Int,
+                params: LibraryParams?
+            ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+                if (parentId != LIBRARY_ROOT_ID) {
+                    return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.of(), params))
+                }
+                val player = session.player
+                val count = player.mediaItemCount
+                if (count <= 0) {
+                    return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.of(), params))
+                }
+                val safePage = page.coerceAtLeast(0)
+                val safeSize = pageSize.coerceIn(1, 200)
+                val from = (safePage * safeSize).coerceAtMost(count)
+                val to = ((safePage + 1) * safeSize).coerceAtMost(count)
+                val builder = ImmutableList.builder<MediaItem>()
+                for (i in from until to) {
+                    builder.add(player.getMediaItemAt(i))
+                }
+                return Futures.immediateFuture(LibraryResult.ofItemList(builder.build(), params))
+            }
+
+            override fun onPlaybackResumption(
+                mediaSession: MediaSession,
+                controller: MediaSession.ControllerInfo
+            ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                val player = mediaSession.player
+                val count = player.mediaItemCount
+                if (count > 0) {
+                    val items = (0 until count).map { player.getMediaItemAt(it) }
+                    val idx = player.currentMediaItemIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(items, idx, pos)
+                    )
+                }
+                val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+                lyricScope.launch {
+                    val restored = runCatching { loadSavedQueueFromDisk() }.getOrNull()
+                    if (restored == null || restored.songs.isEmpty()) {
+                        future.set(MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L))
+                        return@launch
+                    }
+                    val preparedSongs = resolveTargetTrackIfNeeded(restored.songs, restored.index)
+                    val items = with(PlayerController) {
+                        preparedSongs.map { it.toMediaItem(applicationContext) }
+                    }
+                    future.set(
+                        MediaSession.MediaItemsWithStartPosition(
+                            items,
+                            restored.index.coerceIn(0, items.lastIndex),
+                            restored.positionMs.coerceAtLeast(0L)
+                        )
+                    )
+                }
+                return future
+            }
+        }
 
     /**
      * 监听蓝牙 / 有线 / 外放输出切换：
@@ -312,9 +515,42 @@ class PlaybackService : MediaSessionService() {
         /** 服务收到显式播控命令时的 action（本应用私有，组件不导出）。 */
         const val ACTION_WIDGET_COMMAND = "sonance.widget.service_command"
 
-        /** @return 命令是否真的送到了播放器 */
+        /** @return 命令是否真的送到了非空队列的播放器；服务未启动或队列为空返回 false 以便拉起恢复 */
         fun executeWidgetCommand(command: String): Boolean =
             liveService?.executeWithTransitionReset(command) ?: false
+
+        fun hasRestorableSession(context: Context): Boolean {
+            val app = context.applicationContext
+            if (WidgetState.read(app).hasSong) return true
+            val p = Prefs(app)
+            if (p.lastPlayedOnline && (!p.lastOnlineSongJson.isNullOrBlank() || !p.onlineQueueJson.isNullOrBlank())) {
+                return true
+            }
+            return p.lastSongId > 0L || p.playQueueIds.isNotBlank() || !p.songsCacheJson.isNullOrBlank()
+        }
+
+        internal fun wakePlaybackTicker() {
+            val svc = liveService ?: return
+            svc.runOnMain {
+                val p = svc.mediaSession?.player ?: return@runOnMain
+                svc.tickLive()
+                svc.scheduleNextPlaybackTick(p)
+            }
+        }
+
+        internal fun syncTransitionConfig() {
+            val svc = liveService ?: return
+            svc.runOnMain { svc.transitions?.onConfigChanged() }
+        }
+
+        internal fun refreshExternalAndShakeState() {
+            val svc = liveService ?: return
+            svc.runOnMain {
+                svc.syncShakeListener()
+                svc.tickLive()
+                svc.mediaSession?.player?.let { svc.scheduleNextPlaybackTick(it) }
+            }
+        }
 
         internal fun switchTrackWithFade(index: Int, fadeMs: Long): Boolean =
             liveService?.switchTrackWithFade(index, fadeMs) ?: false
@@ -322,9 +558,8 @@ class PlaybackService : MediaSessionService() {
         internal fun cancelSwitchFade(): Boolean =
             liveService?.cancelSwitchFade() ?: false
 
-        internal fun syncUserVolume(volume: Float) {
-            liveService?.syncUserVolume(volume)
-        }
+        internal fun syncUserVolume(volume: Float): Boolean =
+            liveService?.syncUserVolume(volume) ?: false
 
         internal fun playerOrNull(): Player? = liveService?.playerOrNull()
 
@@ -396,9 +631,17 @@ class PlaybackService : MediaSessionService() {
                     svc.widgetLyricKey = key
                     svc.widgetLyricLines = cleaned
                 }
+                svc.publishSessionLyricsOnMain(resolvedId, resolvedTitle, resolvedArtist, cleaned)
                 svc.tickLive()
                 svc.enqueueWidgetLivePush()
             }
+        }
+
+        private const val LIBRARY_ROOT_ID = "sonance_root"
+
+        /** 定时关闭触发：暂停并停播以释放音频焦点、关闭桌面悬浮词、移除前台通知并退出服务。 */
+        internal fun stopAndReleaseForSleep() {
+            liveService?.sleepShutdownAndStop()
         }
 
         internal fun refreshLyricsIfEmpty() {
@@ -490,13 +733,86 @@ class PlaybackService : MediaSessionService() {
     @Volatile
     private var lastPushedWidgetTickSig: String? = null
 
+    @Volatile
+    private var lastQueuedWidgetMediaId: Long = Long.MIN_VALUE
+
+    private val flushWidgetSyncRunnable = Runnable {
+        widgetExecutor.execute { drainWidgetSync() }
+    }
+
     private val playbackTicker = object : Runnable {
         override fun run() {
-            val player = mediaSession?.player
-            if (player != null && player.isPlaying) {
+            val player = mediaSession?.player ?: return
+            if (player.isPlaying && isScreenInteractive) {
                 tickLive()
-                mainHandler.postDelayed(this, 250L)
+                scheduleNextPlaybackTick(player)
             }
+        }
+    }
+
+    /** 仅在亮屏且存在桌面小组件、悬浮歌词或外部状态栏歌词时调度下一次刷新；息屏或无消费者时 0 唤醒。 */
+    private fun scheduleNextPlaybackTick(player: Player) {
+        mainHandler.removeCallbacks(playbackTicker)
+        if (!player.isPlaying || !isScreenInteractive) return
+        val hasDesktopLyrics = DesktopLyricsManager.isShowing()
+        val hasExternalLyrics = Prefs(applicationContext).externalLyricsEnabled
+        val hasWidgets = SonanceWidgets.hasAnyWidgets(applicationContext)
+        if (!hasDesktopLyrics && !hasExternalLyrics && !hasWidgets) return
+        val delayMs = if (hasDesktopLyrics || hasExternalLyrics) {
+            250L
+        } else {
+            val posMs = player.currentPosition.coerceAtLeast(0L)
+            (1_000L - (posMs % 1_000L)).coerceIn(250L, 1_000L)
+        }
+        mainHandler.postDelayed(playbackTicker, delayMs)
+    }
+
+    private fun syncShakeListener() {
+        val controller = shakeController ?: return
+        val prefs = Prefs(applicationContext)
+        val playing = mediaSession?.player?.isPlaying == true
+        controller.updateState(
+            enabled = prefs.shakeNextEnabled,
+            isPlaying = playing,
+            screenInteractive = isScreenInteractive,
+            screenOffAllowed = prefs.shakeScreenOffEnabled,
+            pocketGuard = prefs.shakePocketGuardEnabled,
+            sensitivity = prefs.shakeSensitivity
+        )
+    }
+
+    private fun registerScreenStateObserver() {
+        isScreenInteractive = getSystemService(PowerManager::class.java)?.isInteractive != false
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        isScreenInteractive = false
+                        mainHandler.removeCallbacks(playbackTicker)
+                        syncShakeListener()
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        isScreenInteractive = true
+                        syncShakeListener()
+                        val p = mediaSession?.player ?: return
+                        if (SonanceWidgets.hasAnyWidgets(applicationContext)) {
+                            widgetExecutor.execute {
+                                runCatching { SonanceWidgets.refreshAll(applicationContext) }
+                            }
+                        }
+                        tickLive()
+                        scheduleNextPlaybackTick(p)
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        runCatching {
+            ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+            screenStateReceiver = receiver
         }
     }
 
@@ -549,6 +865,8 @@ class PlaybackService : MediaSessionService() {
 
         val triplet = lyricTripletAt(effectivePosMs)
 
+        if (!isScreenInteractive) return
+
         DesktopLyricsManager.onTick(
             context = applicationContext,
             isPlaying = player.isPlaying,
@@ -556,6 +874,14 @@ class PlaybackService : MediaSessionService() {
             artist = query.artist,
             lyricTriplet = triplet
         )
+        ExternalLyricBridge.onTick(
+            context = applicationContext,
+            enabled = Prefs(applicationContext).externalLyricsEnabled,
+            isPlaying = player.isPlaying,
+            lyricText = triplet.cur
+        )
+
+        if (!SonanceWidgets.hasAnyWidgets(applicationContext)) return
 
         val posSec = (posMs / 1000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val durSec = (query.durationMs / 1000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -627,17 +953,45 @@ class PlaybackService : MediaSessionService() {
                 positionMs = player.currentPosition.coerceAtLeast(0L),
                 durationMs = durationMs
             )
-            if (pendingWidgetSync.getAndSet(snapshot) == null) {
-                widgetExecutor.execute { drainWidgetSync() }
+            val mediaChanged = mediaId != lastQueuedWidgetMediaId
+            lastQueuedWidgetMediaId = mediaId
+            pendingWidgetSync.set(snapshot)
+            mainHandler.removeCallbacks(flushWidgetSyncRunnable)
+            mainHandler.postDelayed(flushWidgetSyncRunnable, if (mediaChanged) 750L else 120L)
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (playWhenReady) {
+                shuttingDownForSleep = false
             }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             mainHandler.removeCallbacks(playbackTicker)
+            syncShakeListener()
+            val p = mediaSession?.player ?: return
             if (isPlaying) {
-                mainHandler.post(playbackTicker)
+                tickLive()
+                scheduleNextPlaybackTick(p)
             } else {
                 tickLive()
+                persistServicePlaybackSnapshot(p)
+            }
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val p = mediaSession?.player ?: return
+            mainHandler.removeCallbacks(persistSnapshotRunnable)
+            mainHandler.postDelayed(persistSnapshotRunnable, 350L)
+            resolveCurrentOnlineStreamInServiceIfNeeded(p, mediaItem)
+            if (p.isPlaying) {
+                scheduleNextPlaybackTick(p)
+            }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_ENDED) {
+                mediaSession?.player?.let { persistServicePlaybackSnapshot(it) }
             }
         }
 
@@ -647,6 +1001,10 @@ class PlaybackService : MediaSessionService() {
             reason: Int
         ) {
             tickLive()
+            val p = mediaSession?.player
+            if (p != null && p.isPlaying) {
+                scheduleNextPlaybackTick(p)
+            }
         }
     }
 
@@ -654,6 +1012,7 @@ class PlaybackService : MediaSessionService() {
         while (true) {
             val s = pendingWidgetSync.getAndSet(null) ?: break
             runCatching {
+                val interactive = isScreenInteractive
                 SonanceWidgets.onPlaybackChanged(
                     context = applicationContext,
                     mediaId = s.mediaId,
@@ -662,7 +1021,8 @@ class PlaybackService : MediaSessionService() {
                     isPlaying = s.isPlaying,
                     albumId = s.albumId,
                     sourceUri = s.sourceUri,
-                    coverKey = s.coverKey
+                    coverKey = s.coverKey,
+                    refreshUi = interactive
                 )
 
                 val query = TrackLyricQuery(
@@ -693,16 +1053,20 @@ class PlaybackService : MediaSessionService() {
                     }
                 }
 
+                if (!isScreenInteractive) return@runCatching
+
                 val offsetMs = Prefs(applicationContext).lyricsOffsetMs(s.title, s.artist)
                 val effectivePosMs = (s.positionMs + offsetMs).coerceAtLeast(0L)
                 val triplet = lyricTripletAt(effectivePosMs)
 
-                SonanceWidgets.onTick(
-                    applicationContext,
-                    s.positionMs,
-                    s.durationMs,
-                    triplet
-                )
+                if (SonanceWidgets.hasAnyWidgets(applicationContext)) {
+                    SonanceWidgets.onTick(
+                        applicationContext,
+                        s.positionMs,
+                        s.durationMs,
+                        triplet
+                    )
+                }
                 DesktopLyricsManager.onTick(
                     context = applicationContext,
                     isPlaying = s.isPlaying,
@@ -755,6 +1119,7 @@ class PlaybackService : MediaSessionService() {
                 }
                 if (applied) {
                     runOnMain {
+                        publishSessionLyricsOnMain(query.mediaId, query.title, query.artist, local.lines)
                         tickLive()
                         enqueueWidgetLivePush()
                     }
@@ -766,7 +1131,11 @@ class PlaybackService : MediaSessionService() {
                     prefs.onlineLyricsEnabled &&
                     (DesktopLyricsManager.isShowing() || prefs.desktopLyricsEnabled || SonanceWidgets.hasAnyWidgets(applicationContext))
 
-                applyLoadedLyricsIfStillCurrent(query, emptyList())
+                if (applyLoadedLyricsIfStillCurrent(query, emptyList())) {
+                    runOnMain {
+                        publishSessionLyricsOnMain(query.mediaId, query.title, query.artist, emptyList())
+                    }
+                }
                 if (shouldFetchOnline) {
                     scheduleOnlineLyricsFetch(query)
                 } else {
@@ -823,6 +1192,7 @@ class PlaybackService : MediaSessionService() {
             }
             if (applyLoadedLyricsIfStillCurrent(query, lines)) {
                 runOnMain {
+                    publishSessionLyricsOnMain(query.mediaId, query.title, query.artist, lines)
                     tickLive()
                     enqueueWidgetLivePush()
                 }
@@ -941,14 +1311,358 @@ class PlaybackService : MediaSessionService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_WIDGET_COMMAND) {
-            intent.getStringExtra(WidgetCommandReceiver.EXTRA_COMMAND)?.let { command ->
-                executeWithTransitionReset(command)
+            shuttingDownForSleep = false
+            val command = intent.getStringExtra(WidgetCommandReceiver.EXTRA_COMMAND)
+            if (command != null) {
+                val player = playerOrNull()
+                if (player != null && player.mediaItemCount > 0) {
+                    executeWithTransitionReset(command)
+                } else {
+                    ensureColdStartForeground()
+                    restoreAndExecuteWidgetCommand(command)
+                }
             }
         }
         return super.onStartCommand(intent, flags, startId)
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+    private data class RestoredPlaybackQueue(
+        val songs: List<Song>,
+        val index: Int,
+        val positionMs: Long
+    )
+
+    private fun syncDspAndPlayerModesIfCold(player: ExoPlayer) {
+        val prefs = Prefs(this)
+        if (EqBus.revision == 0L && SoundFxBus.revision == 0L) {
+            val intensity = PresetIntensity.fromId(prefs.soundPresetIntensity)
+            val eqPreset = EqPreset.fromName(prefs.eqPreset)
+            val custom = parseEqBandsCsv(prefs.eqCustomBands)
+            val soundEq = SoundPresets.eqPresetFromStore(prefs.eqPreset)
+            val bands = custom ?: soundEq?.scaled(intensity)?.first ?: EqPreset.curveOf(eqPreset)
+            EqBus.update(prefs.eqEnabled, bands)
+
+            val sp = SoundPresets.fromId(prefs.soundPresetId)
+            val fxRestored = SoundPresets.restoreFx(sp, prefs.soundFxParams, intensity)
+            SoundFxBus.update(prefs.soundFxEnabled, fxRestored.params)
+
+            KaraokeBus.enabled = prefs.karaokeEnabled
+        }
+        player.shuffleModeEnabled = false
+        val mode = PlayMode.entries.firstOrNull { it.name == prefs.playMode } ?: PlayMode.REPEAT_ALL
+        player.repeatMode = when (mode) {
+            PlayMode.REPEAT_ONE -> Player.REPEAT_MODE_ONE
+            PlayMode.SEQUENTIAL -> Player.REPEAT_MODE_OFF
+            PlayMode.SHUFFLE, PlayMode.REPEAT_ALL -> Player.REPEAT_MODE_ALL
+        }
+        val speed = prefs.playSpeed
+        if (speed != 1f) {
+            player.playbackParameters = player.playbackParameters.withSpeed(speed)
+        }
+    }
+
+    private fun ensureColdStartForeground() {
+        val snap = WidgetState.read(this)
+        val notification = NotificationCompat.Builder(this, PlaybackNotification.CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_music)
+            .setContentTitle(snap.title.ifBlank { getString(R.string.app_name) })
+            .setContentText(snap.artist.ifBlank { "正在恢复播放…" })
+            .setOngoing(true)
+            .setSilent(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        } else {
+            0
+        }
+        runCatching {
+            ServiceCompat.startForeground(
+                this,
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                notification,
+                fgsType
+            )
+        }
+    }
+
+    private fun loadSavedQueueFromDisk(): RestoredPlaybackQueue? {
+        val app = applicationContext
+        val prefs = Prefs(app)
+        if (prefs.lastPlayedOnline) {
+            val queue = storedOnlineSongsFromJson(prefs.onlineQueueJson).mapNotNull { it.toSong() }
+            val last = prefs.lastOnlineSongJson
+                ?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+                ?.let { storedOnlineSongFromJson(it) }
+                ?.toSong()
+            val list = queue.ifEmpty { listOfNotNull(last) }
+            if (list.isNotEmpty()) {
+                val lxRepo = com.sonance.player.data.lx.LxRepository.get(app)
+                list.forEach { lxRepo.rememberSongHint(it) }
+                val idx = prefs.onlineQueueIndex.coerceIn(0, list.lastIndex)
+                return RestoredPlaybackQueue(list, idx, prefs.playPositionMs.coerceAtLeast(0L))
+            }
+        }
+        val cachedJson = prefs.songsCacheJson
+        if (cachedJson.isNullOrBlank()) return null
+        val all = runCatching { decodeSongsFromJson(cachedJson) }.getOrNull().orEmpty()
+        if (all.isEmpty()) return null
+        val hidden = prefs.hiddenIdSet()
+        val dirsEmpty = prefs.excludedDirs.isEmpty()
+        val visible = if (hidden.isEmpty() && dirsEmpty) {
+            all
+        } else {
+            all.filter { it.id !in hidden && !prefs.isFolderExcluded(it.folderPath) }
+        }
+        if (visible.isEmpty()) return null
+        val map = visible.associateBy { it.id }
+        val resolved = PlaybackRestore.resolveIds(
+            savedIds = PlaybackRestore.parseIdList(prefs.playQueueIds),
+            savedIndex = prefs.playQueueIndex,
+            libraryIds = map.keys
+        )
+        val queue = resolved?.first?.mapNotNull(map::get)
+            ?: map[prefs.lastSongId]?.let { listOf(it) }
+            ?: listOf(visible.first())
+        val idx = resolved?.second ?: 0
+        val pos = if (resolved != null || prefs.lastSongId in map) {
+            prefs.playPositionMs.coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        return RestoredPlaybackQueue(queue, idx, pos)
+    }
+
+    private suspend fun resolveTargetTrackIfNeeded(
+        songs: List<Song>,
+        targetIndex: Int
+    ): List<Song> {
+        val target = songs.getOrNull(targetIndex) ?: return songs
+        if (target.isLocal || target.isDlna) return songs
+        val rid = target.remoteId ?: return songs
+        if (!PlayerController.isUnresolvedStreamUri(target.uri.toString())) return songs
+        val src = OnlineSources.byId(target.source) ?: return songs
+        val url = if (src.hasFreshStream(rid)) {
+            src.streamUrl(rid).takeIf { it.isNotBlank() }
+        } else {
+            runCatching { src.resolveStream(rid, target.durationMs) }.getOrNull()
+        } ?: return songs
+        val uri = Uri.parse(url)
+        return songs.mapIndexed { idx, s -> if (idx == targetIndex) s.copy(uri = uri) else s }
+    }
+
+    private fun restoreAndExecuteWidgetCommand(command: String) {
+        pendingColdCommand.set(command)
+        if (!coldRestoreInFlight.compareAndSet(false, true)) return
+        lyricScope.launch {
+            var postedToMain = false
+            try {
+                val restored = runCatching { loadSavedQueueFromDisk() }.getOrNull()
+                val effectiveCommand = pendingColdCommand.getAndSet(null) ?: command
+                if (restored == null || restored.songs.isEmpty()) {
+                    postedToMain = true
+                    runOnMain {
+                        coldRestoreInFlight.set(false)
+                        if ((mediaSession?.player?.mediaItemCount ?: 0) == 0) {
+                            ServiceCompat.stopForeground(
+                                this@PlaybackService,
+                                ServiceCompat.STOP_FOREGROUND_REMOVE
+                            )
+                            stopSelf()
+                        }
+                    }
+                    return@launch
+                }
+                val (targetIdx, startPos) = PlaybackCommands.resolveColdStartTarget(
+                    queueSize = restored.songs.size,
+                    savedIndex = restored.index,
+                    savedPosMs = restored.positionMs,
+                    command = effectiveCommand
+                )
+                val preparedSongs = resolveTargetTrackIfNeeded(restored.songs, targetIdx)
+                val items = with(PlayerController) {
+                    preparedSongs.map { it.toMediaItem(applicationContext) }
+                }
+                postedToMain = true
+                runOnMain {
+                    coldRestoreInFlight.set(false)
+                    val player = mediaSession?.player ?: return@runOnMain
+                    if (player.mediaItemCount > 0) {
+                        executeWithTransitionReset(effectiveCommand)
+                    } else {
+                        player.setMediaItems(items, targetIdx, startPos)
+                        player.prepare()
+                        player.play()
+                    }
+                }
+            } finally {
+                if (!postedToMain) coldRestoreInFlight.set(false)
+            }
+        }
+    }
+
+    private fun resolveCurrentOnlineStreamInServiceIfNeeded(player: Player, item: MediaItem?) {
+        val current = item ?: return
+        val curUri = current.localConfiguration?.uri?.toString()
+        if (!PlayerController.isUnresolvedStreamUri(curUri)) return
+        val extras = current.mediaMetadata.extras ?: return
+        val source = extras.getString(PlayerController.EXTRA_SOURCE).orEmpty()
+        val remoteId = extras.getString(PlayerController.EXTRA_REMOTE_ID).orEmpty()
+        if (source.isBlank() || remoteId.isBlank()) return
+        val durationMs = extras.getLong(PlayerController.EXTRA_DURATION_MS, 0L)
+        val expectedMediaId = current.mediaId
+        val src = OnlineSources.byId(source) ?: return
+
+        lyricScope.launch {
+            // 若 ViewModel 在前台活跃，稍等其优先解析并记录缓存，避免重复发起网络取流
+            delay(120L)
+            val resolvedUrl = if (src.hasFreshStream(remoteId)) {
+                src.streamUrl(remoteId).takeIf { it.isNotBlank() }
+            } else {
+                runCatching { src.resolveStream(remoteId, durationMs) }.getOrNull()
+            } ?: return@launch
+            val parsedUri = Uri.parse(resolvedUrl)
+            runOnMain {
+                val p = mediaSession?.player ?: return@runOnMain
+                val idx = p.currentMediaItemIndex
+                if (idx !in 0 until p.mediaItemCount) return@runOnMain
+                val liveItem = p.getMediaItemAt(idx)
+                if (liveItem.mediaId != expectedMediaId) return@runOnMain
+                val latestUri = liveItem.localConfiguration?.uri?.toString()
+                if (!PlayerController.isUnresolvedStreamUri(latestUri)) return@runOnMain
+                val newExtras = Bundle(liveItem.mediaMetadata.extras ?: Bundle()).apply {
+                    putString(PlayerController.EXTRA_URI, parsedUri.toString())
+                }
+                val newMeta = liveItem.mediaMetadata.buildUpon().setExtras(newExtras).build()
+                val updated = liveItem.buildUpon().setUri(parsedUri).setMediaMetadata(newMeta).build()
+                runCatching {
+                    PlayerController.replaceQueueItemSafely(
+                        player = p,
+                        index = idx,
+                        updated = updated,
+                        isMediaController = false
+                    )
+                }
+            }
+        }
+    }
+
+    private fun persistServicePlaybackSnapshot(player: Player) {
+        if (player.mediaItemCount <= 0) return
+        val item = player.currentMediaItem ?: return
+        val mediaId = item.mediaId.toLongOrNull() ?: return
+        if (mediaId == -1L || mediaId == 0L || isExternalSongId(mediaId)) return
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        val idx = player.currentMediaItemIndex.coerceAtLeast(0)
+        mainHandler.removeCallbacks(persistSnapshotRunnable)
+        Prefs(applicationContext).saveServicePlaybackSnapshot(
+            mediaId = mediaId,
+            queueIndex = idx,
+            positionMs = pos,
+            isRemote = isRemoteSongId(mediaId)
+        )
+    }
+
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        if (shuttingDownForSleep) return
+        super.onUpdateNotification(session, startInForegroundRequired)
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = mediaSession
+
+    /**
+     * 将系统锁屏 / 原子随身听 / 车机歌词（ColorOS `lyricInfo`、vivo `ucar.media.metadata.LYRICS_WHOLE`、
+     * 通用 `android.media.metadata.LYRIC`）直接同步到服务端当前 MediaItem。
+     */
+    private fun publishSessionLyricsOnMain(
+        expectedSongId: Long,
+        expectedTitle: String,
+        expectedArtist: String,
+        lines: List<LyricLine>
+    ) {
+        if (!Prefs(applicationContext).lockScreenLyrics) return
+        val player = mediaSession?.player ?: return
+        val idx = player.currentMediaItemIndex
+        if (idx !in 0 until player.mediaItemCount) return
+        val current = runCatching { player.getMediaItemAt(idx) }.getOrNull() ?: return
+        val curId = current.mediaId.toLongOrNull() ?: -1L
+        val curMeta = current.mediaMetadata
+        val curTitle = curMeta.title?.toString().orEmpty()
+        val curArtist = curMeta.artist?.toString().orEmpty()
+        val matches = if (curId != -1L && expectedSongId != 0L && expectedSongId != -1L) {
+            curId == expectedSongId
+        } else {
+            curTitle.trim() == expectedTitle.trim() && curArtist.trim() == expectedArtist.trim()
+        }
+        if (!matches) return
+
+        val cleaned = lines.filter { it.text.isNotBlank() }
+        val lrcText = LockScreenLyrics.toLrcText(cleaned)
+        val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+            ?: curMeta.durationMs
+            ?: curMeta.extras?.getLong(PlayerController.EXTRA_DURATION_MS, 0L)
+            ?: 0L
+        val sig = "$curId|$curTitle|$curArtist|${lrcText.orEmpty()}"
+        if (sig == lastPublishedLyricsSig) return
+        lastPublishedLyricsSig = sig
+        val gen = ++sessionLyricsGeneration
+
+        val json = LockScreenLyrics.buildJsonFromLrc(
+            songId = curId,
+            title = curTitle.ifBlank { expectedTitle },
+            artist = curArtist.ifBlank { expectedArtist },
+            album = curMeta.albumTitle?.toString().orEmpty(),
+            durationMs = durationMs,
+            lrc = lrcText,
+            generation = gen
+        )
+        val extras = Bundle(curMeta.extras ?: Bundle()).apply {
+            putString(LockScreenLyrics.EXTRA_KEY, json)
+            if (!lrcText.isNullOrBlank()) {
+                putString(LockScreenLyrics.EXTRA_KEY_VIVO_WHOLE, lrcText)
+                putString(LockScreenLyrics.EXTRA_KEY_GENERIC_LYRIC, lrcText)
+            } else {
+                remove(LockScreenLyrics.EXTRA_KEY_VIVO_WHOLE)
+                remove(LockScreenLyrics.EXTRA_KEY_GENERIC_LYRIC)
+            }
+        }
+        val flip = if (curMeta.compilation?.toString() == "1") "0" else "1"
+        val updatedMeta = curMeta.buildUpon()
+            .setExtras(extras)
+            .setCompilation(flip)
+            .build()
+        val updatedItem = current.buildUpon().setMediaMetadata(updatedMeta).build()
+        runCatching {
+            PlayerController.replaceQueueItemSafely(
+                player = player,
+                index = idx,
+                updated = updatedItem,
+                isMediaController = false
+            )
+        }
+    }
+
+    /** 定时结束收尾：暂停并停止播放器释放音频焦点、隐藏桌面歌词、移除前台媒体通知并停止服务。 */
+    internal fun sleepShutdownAndStop() {
+        runOnMain {
+            shuttingDownForSleep = true
+            pendingOnlineLyricJob?.cancel()
+            pendingOnlineLyricJob = null
+            transitions?.cancelSwitchFade(restoreVolume = true)
+            DesktopLyricsManager.hide(this)
+            mediaSession?.player?.let { player ->
+                player.playWhenReady = false
+                player.pause()
+                player.stop()
+            }
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            runCatching {
+                getSystemService(NotificationManager::class.java)
+                    ?.cancel(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID)
+            }
+            stopSelf()
+        }
+    }
 
     /** 进程内命令通道取播放器，不把整个 session 暴露出去。 */
     internal fun playerOrNull(): Player? = mediaSession?.player
@@ -963,9 +1677,14 @@ class PlaybackService : MediaSessionService() {
 
     private fun executeWithTransitionReset(command: String): Boolean {
         val player = playerOrNull() ?: return false
+        if (Looper.myLooper() == Looper.getMainLooper() && player.mediaItemCount == 0) {
+            return false
+        }
         runOnMain {
-            transitions?.cancelSwitchFade(restoreVolume = true)
-            PlaybackCommands.execute(player, command)
+            if (player.mediaItemCount > 0) {
+                transitions?.cancelSwitchFade(restoreVolume = true)
+                PlaybackCommands.execute(player, command)
+            }
         }
         return true
     }
@@ -992,13 +1711,17 @@ class PlaybackService : MediaSessionService() {
         return true
     }
 
-    internal fun syncUserVolume(volume: Float) {
-        val fx = transitions ?: return
+    internal fun syncUserVolume(volume: Float): Boolean {
+        val fx = transitions ?: return false
         runOnMain { fx.setUserVolume(volume) }
+        return true
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
+        if (player != null) {
+            persistServicePlaybackSnapshot(player)
+        }
         if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
             stopSelf()
         }
@@ -1008,7 +1731,14 @@ class PlaybackService : MediaSessionService() {
         pendingOnlineLyricJob?.cancel()
         pendingOnlineLyricJob = null
         lyricScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        shakeController?.release()
+        shakeController = null
+        ExternalLyricBridge.clear(this)
         DesktopLyricsManager.hide(this)
+        screenStateReceiver?.let { receiver ->
+            runCatching { unregisterReceiver(receiver) }
+        }
+        screenStateReceiver = null
         pendingBtRecovery?.let { mainHandler.removeCallbacks(it) }
         pendingBtRecovery = null
         audioDeviceCallback?.let { cb ->
@@ -1018,6 +1748,7 @@ class PlaybackService : MediaSessionService() {
         mainHandler.removeCallbacksAndMessages(null)
         SystemAudioEffects.releaseSession(this)
         mediaSession?.run {
+            persistServicePlaybackSnapshot(player)
             transitions?.let {
                 player.removeListener(it)
                 it.release()

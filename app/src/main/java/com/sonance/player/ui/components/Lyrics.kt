@@ -2,10 +2,16 @@ package com.sonance.player.ui.components
 
 import android.os.Build
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.unit.IntOffset
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1394,6 +1400,8 @@ fun InlineLyrics(
     glowImage: ImageBitmap? = null,
     /** 紧凑模式：只渲染「上一句 / 当前句 / 下一句」三行，行距收紧、两侧字号与透明度降级 */
     compact: Boolean = false,
+    /** 同步歌词行点击是否跳进度；封面内歌词只读浏览设为 false */
+    seekEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -1496,6 +1504,7 @@ fun InlineLyrics(
                 onSeek = onSeek,
                 bgProfile = bgProfile,
                 adaptMode = adaptMode,
+                seekEnabled = seekEnabled,
                 timelineOffsetMs = offsetMs,
                 scrollHaptic = scrollHaptic
             )
@@ -2429,11 +2438,20 @@ fun LyricStrip(
     )
 }
 
+private data class CoverLyricUiState(
+    val key: Long,
+    val currentText: String,
+    val isCurrentActive: Boolean,
+    val nextText: String
+)
+
+private val CoverLyricEase = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
+
 /**
  * 封面下方的两行歌词：第一行是当前句，第二行是即将到来的下一句。
  *
- * 与 [InlineLyrics] 的区别：这里不接管封面、不占整块主区域，只是封面下面的一条
- * 轻量字幕 —— 主次靠字号、字重和透明度拉开，切句用淡入淡出，不上下跳动。
+ * 与 [InlineLyrics] 的区别：这里不接管封面、脱离主文档流居中悬浮在封面与歌名之间，
+ * 靠字号、字重与透明度区分当前句与下一句，两行协同平滑推入切换。
  * 数据加载走同一个 [LyricsRepository]，所以手动导入、在线补全、繁转简都与全屏歌词一致。
  */
 @Composable
@@ -2441,17 +2459,18 @@ fun CoverInlineLyrics(
     song: Song,
     positionMs: Long,
     prefs: Prefs,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val skin = LocalSkin.current
-    var lines by remember(song.id) { mutableStateOf(emptyList<LyricLine>()) }
+    var result by remember(song.id) { mutableStateOf<LyricsResult?>(null) }
     var loaded by remember(song.id) { mutableStateOf(false) }
     val lyricsRev by LyricsRepository.revision.collectAsState()
 
     LaunchedEffect(song.id, song.uri, prefs.onlineLyricsEnabled, prefs.lyricsApiBase,
         prefs.lyricsConvertToSimplified, prefs.neteaseFillEnabled, lyricsRev) {
-        val result = LyricsRepository.load(
+        val loadedResult = LyricsRepository.load(
             context = context,
             songId = song.id,
             uri = song.uri,
@@ -2466,53 +2485,150 @@ fun CoverInlineLyrics(
             remoteSource = song.source,
             remoteId = song.remoteId
         )
-        lines = (result.lyrics as? Lyrics.Synced)?.lines.orEmpty()
+        result = loadedResult
         loaded = true
     }
 
-    val currentIndex = if (lines.isEmpty()) -1 else lines.indexAt(positionMs)
-    val current = lines.getOrNull(currentIndex)
-    val next = lines.getOrNull(currentIndex + 1)
+    val offsetMs = prefs.lyricsOffsetMs(song.title, song.artist)
+    val effectivePosMs = positionMs - offsetMs
+    val lyrics = result?.lyrics
+    val syncedLines = (lyrics as? Lyrics.Synced)?.lines?.filter { it.text.isNotBlank() }.orEmpty()
+    val plainLines = (lyrics as? Lyrics.Plain)?.lines?.filter { it.isNotBlank() }.orEmpty()
 
-    Column(
-        modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        if (current == null) {
-            Text(
-                if (loaded) "这首歌还没有歌词" else "歌词加载中…",
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.textDim,
-                maxLines = 1
+    val currentIndex = if (syncedLines.isEmpty()) -1 else syncedLines.indexAt(effectivePosMs)
+    val current = syncedLines.getOrNull(currentIndex)
+    val next = if (currentIndex >= 0) syncedLines.getOrNull(currentIndex + 1) else syncedLines.firstOrNull()
+
+    // 无背景、无边框，通透漂浮在封面与歌名之间；整体垂直居中，切句两行协同平滑滚动
+    Box(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick != null) {
+                    Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onClick
+                    )
+                } else {
+                    Modifier
+                }
             )
-        } else {
-            AnimatedContent(
-                targetState = current.timeMs,
-                transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
-                label = "coverLyricCurrent"
-            ) {
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clipToBounds(),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            syncedLines.isNotEmpty() -> {
+                val targetUi = CoverLyricUiState(
+                    key = current?.timeMs ?: -1L,
+                    currentText = current?.text ?: "♪",
+                    isCurrentActive = current != null,
+                    nextText = next?.text ?: "· · ·"
+                )
+                AnimatedContent(
+                    targetState = targetUi,
+                    contentKey = { it.key },
+                    transitionSpec = {
+                        val forward = targetState.key >= initialState.key
+                        val enter = fadeIn(
+                            tween(durationMillis = 320, delayMillis = 40, easing = LinearOutSlowInEasing)
+                        ) + slideInVertically(
+                            tween(durationMillis = 380, easing = CoverLyricEase)
+                        ) { h ->
+                            val offset = (h * 0.42f).toInt().coerceAtLeast(1)
+                            if (forward) offset else -offset
+                        }
+                        val exit = fadeOut(
+                            tween(durationMillis = 220, easing = LinearOutSlowInEasing)
+                        ) + slideOutVertically(
+                            tween(durationMillis = 300, easing = CoverLyricEase)
+                        ) { h ->
+                            val offset = (h * 0.42f).toInt().coerceAtLeast(1)
+                            if (forward) -offset else offset
+                        }
+                        (enter togetherWith exit).using(SizeTransform(clip = false))
+                    },
+                    contentAlignment = Alignment.Center,
+                    label = "coverLyricPair"
+                ) { state ->
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = state.currentText,
+                            fontSize = 17.sp,
+                            lineHeight = 23.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (state.isCurrentActive) {
+                                skin.text
+                            } else {
+                                skin.textMuted.copy(alpha = 0.72f)
+                            },
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = state.nextText,
+                            fontSize = 14.sp,
+                            lineHeight = 19.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = skin.textMuted.copy(alpha = 0.70f),
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+            plainLines.isNotEmpty() -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = plainLines[0],
+                        fontSize = 17.sp,
+                        lineHeight = 23.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = skin.text,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = plainLines.getOrNull(1) ?: "纯文本歌词",
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = FontWeight.Normal,
+                        color = skin.textMuted.copy(alpha = 0.70f),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+            else -> {
                 Text(
-                    current.text,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    ),
-                    color = skin.accent,
+                    text = if (loaded) "暂无歌词" else "···",
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    color = skin.textMuted.copy(alpha = 0.6f),
                     textAlign = TextAlign.Center,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
-            Spacer(Modifier.height(3.dp))
-            Text(
-                next?.text ?: "· · ·",
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                color = skin.textMuted,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
         }
     }
 }

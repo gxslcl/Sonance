@@ -56,6 +56,7 @@ import com.sonance.player.ui.components.PlaceholderCover
 import com.sonance.player.ui.components.rememberRemoteCover
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.solidSurface
 
 /**
  * 在线歌单详情（独立页面）。
@@ -696,7 +697,7 @@ internal fun OnlineDownloadConfirmDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = skin.surface2,
+        containerColor = skin.surface2.solidSurface(),
         title = {
             Text(
                 text = if (isPartial) "下载所选曲目" else "下载全部曲目",

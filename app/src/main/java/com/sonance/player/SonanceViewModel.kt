@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -27,15 +28,16 @@ import com.sonance.player.data.Album
 import com.sonance.player.data.AppIconSwitcher
 import com.sonance.player.data.Artist
 import com.sonance.player.data.ArtworkLoader
-import com.sonance.player.data.BuiltinCovers
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.CoverCandidate
 import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTagWriter
+import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import java.io.ByteArrayOutputStream
 import com.sonance.player.data.ExternalStoragePaths
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
+import com.sonance.player.data.PlayerSwitchMotion
 import com.sonance.player.data.MediaFileDeleter
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineDownloader
@@ -77,6 +79,21 @@ import com.sonance.player.data.toStoredOrNull
 import com.sonance.player.data.onlineSongIdsToKeep
 import com.sonance.player.data.remoteSongId
 import com.sonance.player.data.PlaybackRestore
+import com.sonance.player.data.PlaylistEntry
+import com.sonance.player.data.UserPlaylist
+import com.sonance.player.data.playlistToM3u
+import com.sonance.player.data.SessionListenClock
+import com.sonance.player.data.StatsRange
+import com.sonance.player.data.StatsSummary
+import com.sonance.player.data.ImportCandidate
+import com.sonance.player.data.ImportMatchResult
+import com.sonance.player.data.OnlinePlaylistImporter
+import com.sonance.player.data.PlaylistImportParser
+import com.sonance.player.data.PlaylistImportMatcher
+import com.sonance.player.data.UrlImportPreview
+import com.sonance.player.data.StoredOnlineSong
+import com.sonance.player.data.toStored
+import java.time.LocalDate
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.DuplicateReport
 import com.sonance.player.data.LyricAdaptMode
@@ -103,8 +120,11 @@ import com.sonance.player.data.dlna.DlnaTransportState
 import com.sonance.player.data.dlna.guessAudioMimeType
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.data.decodeSongsFromJson
+import com.sonance.player.data.decodeLibraryIndexJson
 import com.sonance.player.data.findDuplicates
 import com.sonance.player.data.encodeSongsToJson
+import com.sonance.player.data.encodeLibraryIndexJson
+import com.sonance.player.data.libraryIndexCovers
 import com.sonance.player.data.ScanOutcome
 import com.sonance.player.data.ScanFolderInfo
 import com.sonance.player.data.canonicalArtist
@@ -145,8 +165,10 @@ import com.sonance.player.playback.EQ_MAX_DB
 import com.sonance.player.playback.EQ_MIN_DB
 import com.sonance.player.playback.EqBus
 import com.sonance.player.playback.EqPreset
+import com.sonance.player.playback.parseEqBandsCsv
 import com.sonance.player.playback.AudioOutputRoute
 import com.sonance.player.playback.OutputAudioRouter
+import com.sonance.player.playback.PresetIntensity
 import com.sonance.player.playback.SoundFxBus
 import com.sonance.player.playback.SoundFxParams
 import com.sonance.player.playback.SoundPreset
@@ -175,6 +197,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
@@ -201,6 +229,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var localSongIndexJob: Job? = null
+
+    /**
+     * 拼音索引：songId → "全拼 首字母"。
+     * 声明在所有 `init {}` 之前，确保冷启动同步恢复曲库缓存时委托属性已完成初始化。
+     */
+    private var pinyinIndex by mutableStateOf<Map<Long, String>>(emptyMap())
+
+    /** 四个文本字段的归一化排序键：songId → [IndexKeys]。 */
+    var sortKeys by mutableStateOf<Map<Long, IndexKeys>>(emptyMap())
+        private set
+
+    private var pinyinIndexJob: Job? = null
 
     private fun scheduleLocalSongIndexRebuild(snapshot: List<Song>) {
         localSongIndexJob?.cancel()
@@ -283,6 +323,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var scanExcludeNonSongFolders by mutableStateOf(prefs.scanExcludeNonSongFolders)
         private set
+    var autoScanOnLaunch by mutableStateOf(prefs.autoScanOnLaunch)
+        private set
+
+    fun changeAutoScanOnLaunch(value: Boolean) {
+        autoScanOnLaunch = value
+        prefs.autoScanOnLaunch = value
+    }
 
     /** 最近一次扫描的排除明细，供「曲库清理」区块展示 */
     var lastScanOutcome by mutableStateOf<ScanOutcome?>(null)
@@ -555,12 +602,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
         val visible = filterHidden(merged)
         pinyinIndexJob?.cancel()
-        val (pinyin, keys) = withContext(Dispatchers.Default) {
-            computePinyinAndKeys(visible)
+        val (pinyin, keys, indexJson) = withContext(Dispatchers.Default) {
+            val (p, k) = computePinyinAndKeys(visible)
+            Triple(p, k, encodeLibraryIndexJson(p, k))
         }
         val removed = (existing.size - kept.size - reappearing.size).coerceAtLeast(0)
         pinyinIndex = pinyin
         sortKeys = keys
+        prefs.libraryIndexJson = indexJson
         songs = visible
         warmUpCovers()
         albums = MediaRepository.groupAlbums(visible)
@@ -568,6 +617,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         folders = MediaRepository.groupFolders(visible)
         prefs.songsCacheJson = encodeSongsToJson(merged)
         prefs.lastScanAt = System.currentTimeMillis()
+        scanState = ScanState.READY
+        restorePlaybackState()
         lastScanOutcome = outcome.copy(songs = merged)
         duplicateReport = null
         scopedScanResult = ScopedScanResult(scanned = scopedScanScanned, added = added, removed = removed)
@@ -894,153 +945,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         pendingStartupScroll = prefs.libraryScroll.isBlank()
     }
 
-    init {
-        pushSkinToWidget()
-        seedOnlineFavoriteSongs()
-        com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = { id ->
-            toggleFavorite(id)
-        }
-        com.sonance.player.widget.WidgetCommandReceiver.onCyclePlayMode = {
-            cyclePlayMode(quiet = false)
-        }
-        // 播放模式（随机 / 列表循环 / 单曲循环）持久化恢复。
-        // 必须在恢复播放现场之前设好：队列是按上次的模式排的（随机时就是洗牌序），
-        // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
-        applyPersistedPlayMode()
-        // 网易云音质：把持久化的档位灌进数据层（账号在属性声明处直接读盘，见 neteaseAccount）
-        NeteaseQuality.current = NeteaseLevel.fromId(prefs.onlineQuality)
-        // 已登录用户首次升级到此版本时默认关闭「听 8 秒自动下载」，之后仍允许用户在设置中手动开启
-        if (neteaseAccount != null && !prefs.loggedInAutoDownloadResetDone) {
-            prefs.loggedInAutoDownloadResetDone = true
-            if (onlineDownloadEnabled) {
-                onlineDownloadEnabled = false
-                prefs.onlineDownloadEnabled = false
-            }
-        }
-        // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
-        // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
-        player.onPlaybackEnded = {
-            if (dlnaActiveRenderer == null && player.state.value.queueIds.size <= 1) {
-                randomListenLikeWall()
-            }
-        }
-        player.onShuffleRoundWrapped = { reshuffleQueueKeepingCurrent() }
-        player.onSongStarted = { id ->
-            // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
-            // 通知栏封面替换与锁屏歌词读取；中间划过的曲目 360ms 内即被取消，避免连串 SP/IPC 抢占主线程。
-            songStartedJob?.cancel()
-            songStartedJob = viewModelScope.launch {
-                delay(360)
-                val startedSong = songById(id)
-                val isDlnaTrack = startedSong?.isDlna == true
-                // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
-                // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
-                if (prefs.playToastEnabled) {
-                    val title = player.state.value.title
-                    if (title.isNotBlank()) showToast("正在播放 · $title")
-                }
-                if (!isRemoteSongId(id) && !isExternalSongId(id)) {
-                    prefs.pushRecentLocal(id)
-                    prefs.bumpPlayCount(id)
-                    recentIds = prefs.recentIds()
-                    prefs.lastSongId = id
-                    prefs.lastPlayedOnline = false
-                    // 现在播的是本地歌，在线那套存档就用不上了 ——
-                    // 不清的话恢复时会读到一份过期的在线现场，走错分支
-                    prefs.lastOnlineSongJson = null
-                    prefs.onlineQueueJson = null
-                } else if (isRemoteSongId(id) && !isDlnaTrack) {
-                    // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
-                    startedSong?.toStoredOrNull()?.let { stored ->
-                        prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
-                        prefs.lastPlayedOnline = true
-                        prefs.playPositionMs = 0L
-                    }
-                }
-                recentEntries = prefs.recentEntries()
-                val st = player.state.value
-                val queueHasTransient = isExternalSongId(st.mediaId) ||
-                    isDlnaTrack ||
-                    st.queueIds.any { isExternalSongId(it) || songById(it)?.isDlna == true }
-                if (st.queueIds.isNotEmpty() && !queueHasTransient) {
-                    if (isRemoteSongId(st.mediaId)) {
-                        val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
-                        if (stored.isNotEmpty()) {
-                            val json = withContext(Dispatchers.Default) { storedOnlineSongsToJson(stored) }
-                            prefs.onlineQueueJson = json
-                            prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
-                        }
-                    } else {
-                        val joined = withContext(Dispatchers.Default) { st.queueIds.joinToString(",") }
-                        prefs.playQueueIds = joined
-                        prefs.playQueueIndex = st.queueIndex
-                    }
-                }
-                if (!isExternalSongId(id) && !isDlnaTrack) prefs.playPositionMs = 0L
-                // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
-                // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
-                startedSong?.let { song ->
-                    player.refreshCurrentArtwork(song)
-                    ensureCover(song)
-                    // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
-                    maybeDownload(song)
-                    // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
-                    resolveStreamIfMissing(song)
-                    // 顺带预取队列后续曲目的真实流地址，避免切歌时 ExoPlayer 预加载兜底 30s 外链
-                    prefetchNextOnlineStreams(song)
-                    // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
-                    publishLockScreenLyrics(song)
-                    // 若正处于 D-LAN 远端投屏会话，自动把当前曲目推到远端设备并保持本机静音
-                    dlnaActiveRenderer?.let { renderer ->
-                        if (player.state.value.isPlaying) player.pause()
-                        castSongToDlnaInternal(song, renderer, notifyConnected = false)
-                    }
-                }
-            }
-        }
-
-        // 优先读上一次扫描的缓存：冷启动不再强制扫一遍 MediaStore。
-        // PermissionGate 只在 scanState == IDLE 时才自动扫描，所以加载到缓存
-        // 就直接置为 READY，PermissionGate 不会再触发 scan。
-        val cachedJson = prefs.songsCacheJson
-        if (!cachedJson.isNullOrBlank()) {
-            runCatching {
-                val list = decodeSongsFromJson(cachedJson)
-                if (list.isNotEmpty()) {
-                    val visible = filterHidden(list)
-                    songs = visible
-                    rebuildPinyinIndex(visible)
-                    albums = MediaRepository.groupAlbums(visible)
-                    artists = MediaRepository.groupArtists(visible)
-                    folders = MediaRepository.groupFolders(visible)
-                    scanState = ScanState.READY
-                    // 曲库就位 → 提前把开头这些歌的封面解出来，
-                    // 免得重启后第一屏全是占位图（见 warmUpCovers 的说明）
-                    warmUpCovers()
-                }
-            }
-        }
-
-        // 曲库（缓存）就绪之后恢复上次的播放现场。
-        // 放在最后：它要按歌曲 id 去 songs 里查，曲库没加载出来时无从恢复。
-        restorePlaybackState()
-
-        // 恢复完成、播放器真正报出 mediaId 之后再请求列表定位。
-        // 不能恢复完直接 requestScrollToCurrent()：那一刻 mediaId 还是 -1，
-        // SongList 里那个 effect 会因为 `currentId <= 0` 提前 return，白请求一次。
-        //
-        // `> 0` 也顺带排除了在线歌（负数 id）—— 这是对的：它们不在本地曲库列表里，
-        // 没有"滚到那一行"可言。
-        viewModelScope.launch {
-            player.state.collect { st ->
-                if (pendingStartupScroll && st.mediaId > 0L) {
-                    pendingStartupScroll = false
-                    requestScrollToCurrent()
-                }
-            }
-        }
-    }
-
     /**
      * 把播放器摆回上次退出时的样子：同一个队列、同一首、同一个进度。
      *
@@ -1207,6 +1111,261 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.playQueueIds = st.queueIds.joinToString(",")
                 prefs.playQueueIndex = st.queueIndex
             }
+        }
+        // 离开界面时把攒着的收听时长写盘（平时 30 秒一次，见下方 init）
+        flushListenSeconds()
+    }
+
+    // ===== 自建歌单 =====
+
+    var userPlaylists by mutableStateOf(prefs.userPlaylistStore.playlists)
+        private set
+
+    /** 「我的歌单」页当前打开的歌单；null = 歌单列表。 */
+    var activeUserPlaylistId by mutableStateOf<String?>(null)
+
+    fun openUserPlaylist(id: String) {
+        activeUserPlaylistId = id
+    }
+
+    fun closeUserPlaylist() {
+        activeUserPlaylistId = null
+    }
+
+    private fun refreshUserPlaylists() {
+        userPlaylists = prefs.userPlaylistStore.playlists
+    }
+
+    fun userPlaylistById(id: String): UserPlaylist? = userPlaylists.firstOrNull { it.id == id }
+
+    fun createUserPlaylist(
+        name: String,
+        desc: String = "",
+        entries: List<PlaylistEntry> = emptyList()
+    ): UserPlaylist? {
+        if (name.isBlank()) {
+            showToast("歌单名不能为空")
+            return null
+        }
+        val pl = prefs.userPlaylistStore.create(name, desc, entries)
+        refreshUserPlaylists()
+        showToast("已创建歌单「${pl.name}」")
+        return pl
+    }
+
+    fun renameUserPlaylist(id: String, name: String, desc: String) {
+        if (name.isBlank()) {
+            showToast("歌单名不能为空")
+            return
+        }
+        prefs.userPlaylistStore.rename(id, name, desc)
+        refreshUserPlaylists()
+    }
+
+    fun deleteUserPlaylist(id: String) {
+        val name = prefs.userPlaylistStore.byId(id)?.name
+        prefs.userPlaylistStore.delete(id)
+        if (activeUserPlaylistId == id) activeUserPlaylistId = null
+        refreshUserPlaylists()
+        if (name != null) showToast("已删除歌单「$name」")
+    }
+
+    /** 歌 → 歌单条目：本地存 id，在线存完整存档（与最近播放同一规则）。 */
+    private fun songToPlaylistEntry(song: Song): PlaylistEntry? =
+        if (song.isLocal) PlaylistEntry(localId = song.id)
+        else song.toStoredOrNull()?.let { PlaylistEntry(online = it) }
+
+    /** @return true 有新歌加入；false 全部已在歌单里 */
+    fun addUserPlaylistSongs(id: String, songs: List<Song>): Boolean {
+        val entries = songs.mapNotNull { songToPlaylistEntry(it) }
+        if (entries.isEmpty()) return false
+        val added = prefs.userPlaylistStore.addSongs(id, entries)
+        refreshUserPlaylists()
+        showToast(if (added) "已加入歌单" else "这些歌已在歌单中")
+        return added
+    }
+
+    fun removeUserPlaylistSongs(id: String, songIds: Collection<Long>) {
+        prefs.userPlaylistStore.removeSongs(id, songIds)
+        refreshUserPlaylists()
+    }
+
+    /** 歌单条目 → 可播 Song。在线歌用存档重建（与最近播放同一套路）。 */
+    fun userPlaylistSongs(playlist: UserPlaylist): List<Song> = playlist.entries.mapNotNull { entry ->
+        if (entry.isOnline) {
+            val stored = entry.online ?: return@mapNotNull null
+            onlineSongMap[stored.songId()] ?: stored.toSong()?.also { s ->
+                lxRepo.rememberSongHint(s)
+                onlineSongMap.putIfAbsent(s.id, s)
+            }
+        } else {
+            songs.firstOrNull { it.id == entry.localId }
+        }
+    }
+
+    fun exportUserPlaylistText(playlist: UserPlaylist): String =
+        playlistToM3u(playlist.name, userPlaylistSongs(playlist))
+
+    /**
+     * 把歌单里的在线歌登记进 [onlineSongMap] 并推进版本号。
+     * 播放页 / 队列页的 songMap 按 onlineRevision 重建，不登记的话
+     * 队列反查不到这些 id，整页显示成「未知歌曲」占位。
+     */
+    fun registerUserPlaylistOnlineSongs() {
+        var added = false
+        userPlaylists.forEach { pl ->
+            pl.entries.forEach { entry ->
+                val stored = entry.online ?: return@forEach
+                if (onlineSongMap[stored.songId()] == null) {
+                    stored.toSong()?.let { s ->
+                        lxRepo.rememberSongHint(s)
+                        if (onlineSongMap.putIfAbsent(s.id, s) == null) added = true
+                    }
+                }
+            }
+        }
+        if (added) onlineRevision++
+    }
+
+    // ===== 歌单导入 =====
+
+    /** 本地文本（.m3u / .m3u8 / .pls / 纯文本）→ 曲库匹配。纯同步，预览用。 */
+    fun matchLocalPlaylistText(text: String): ImportMatchResult =
+        PlaylistImportMatcher.match(PlaylistImportParser.parse(text), songs)
+
+    /**
+     * 在线歌单链接 → 导入预览（支持网易云音乐、酷狗音乐、QQ 音乐，及带文案的短链）。
+     * [fillOnline] = false 仅匹配本地曲库；true 时未命中的歌以在线形态补进来。
+     */
+    suspend fun previewOnlinePlaylistImport(
+        rawInput: String,
+        fillOnline: Boolean
+    ): Result<UrlImportPreview> {
+        val imported = OnlinePlaylistImporter.fetchFromShareText(rawInput).getOrElse {
+            return Result.failure(it)
+        }
+        if (imported.tracks.isEmpty()) {
+            return Result.failure(IllegalStateException("歌单里暂无可导入的曲目"))
+        }
+        if (imported.lxPlatformId != null) {
+            lxRepo.rememberTrackHints(imported.lxPlatformId, imported.tracks)
+        }
+        val matchedLocalIds = ArrayList<Long>()
+        val seenLocalIds = HashSet<Long>()
+        val online = ArrayList<StoredOnlineSong>()
+        val seenOnlineKeys = HashSet<String>()
+        val unmatchedDisplays = ArrayList<String>()
+
+        for (track in imported.tracks) {
+            val display = if (track.artist.isNotBlank()) "${track.artist} - ${track.title}" else track.title
+            val candidate = ImportCandidate(display = display, title = track.title, artist = track.artist)
+            val localHit = PlaylistImportMatcher.findMatchingSong(candidate, songs)
+            if (localHit != null) {
+                if (seenLocalIds.add(localHit.id)) matchedLocalIds.add(localHit.id)
+            } else if (fillOnline) {
+                val key = "${imported.sourceId}:${track.remoteId}"
+                if (seenOnlineKeys.add(key)) online.add(track.toStored(imported.sourceId))
+            } else {
+                unmatchedDisplays.add(display)
+            }
+        }
+        return Result.success(
+            UrlImportPreview(
+                playlistName = imported.name.ifBlank { "导入的歌单" },
+                matchedLocalIds = matchedLocalIds,
+                onlineEntries = online,
+                unmatchedDisplays = unmatchedDisplays
+            )
+        )
+    }
+
+    /** 预览确认后落库：本地命中 + 在线补齐合成一个新歌单。 */
+    fun commitImportedPlaylist(
+        name: String,
+        matchedLocalIds: List<Long>,
+        online: List<StoredOnlineSong>
+    ): UserPlaylist? {
+        if (name.isBlank()) {
+            showToast("歌单名不能为空")
+            return null
+        }
+        val entries = matchedLocalIds.map { PlaylistEntry(localId = it) } +
+            online.map { PlaylistEntry(online = it) }
+        if (entries.isEmpty()) {
+            showToast("没有可导入的歌曲")
+            return null
+        }
+        val pl = prefs.userPlaylistStore.create(name, "", entries)
+        refreshUserPlaylists()
+        registerUserPlaylistOnlineSongs()
+        showToast("已导入 ${pl.entries.size} 首到「${pl.name}」")
+        return pl
+    }
+
+    // ===== 听歌统计 =====
+
+    private val listenClock = SessionListenClock()
+
+    /** 统计数据版本号：记账写盘后 +1，统计页 / 概览卡据此重组。 */
+    var statsRevision by mutableIntStateOf(0)
+        private set
+
+    var statsOverviewCardEnabled by mutableStateOf(prefs.statsOverviewCardEnabled)
+        private set
+
+    fun changeStatsOverviewCard(enabled: Boolean) {
+        statsOverviewCardEnabled = enabled
+        prefs.statsOverviewCardEnabled = enabled
+    }
+
+    fun listenStatsSummary(range: StatsRange): StatsSummary =
+        prefs.listenStatsStore.summary(range)
+
+    private fun flushListenSeconds() {
+        val seconds = listenClock.drainSeconds(SystemClock.elapsedRealtime())
+        if (seconds <= 0) return
+        prefs.listenStatsStore.addSeconds(LocalDate.now().toEpochDay(), seconds)
+        statsRevision++
+    }
+
+    fun onAppBackground() {
+        player.setUiVisible(false)
+        flushListenSeconds()
+    }
+
+    fun onAppForeground() {
+        player.setUiVisible(true)
+    }
+
+    init {
+        // 收听时长记账：只在曲目或播放态变更时按 elapsedRealtime 结算，
+        // 应用在后台暂停 500ms UI 轮询时照常精确计时，暂停态零定时唤醒。
+        viewModelScope.launch {
+            player.state
+                .map { st ->
+                    val id = if (isExternalSongId(st.mediaId)) -1L else st.mediaId
+                    id to st.isPlaying
+                }
+                .distinctUntilChanged()
+                .collect { (id, playing) ->
+                    listenClock.onState(id, playing, SystemClock.elapsedRealtime())
+                }
+        }
+        // 仅在真正播放期间每 30 秒落盘一次，暂停时完全挂起等待状态变更。
+        viewModelScope.launch {
+            player.state
+                .map { it.isPlaying }
+                .distinctUntilChanged()
+                .collectLatest { playing ->
+                    if (playing) {
+                        while (isActive) {
+                            delay(30_000)
+                            flushListenSeconds()
+                        }
+                    } else {
+                        flushListenSeconds()
+                    }
+                }
         }
     }
 
@@ -1663,11 +1822,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 下载只是新增文件，已有封面依然有效，清了会让正在播放的封面闪一下
      * （用户边听边下载时特别明显）。
      */
-    private suspend fun runScan(clearArtwork: Boolean = true): ScanOutcome {
+    private suspend fun runScan(
+        clearArtwork: Boolean = true,
+        folderPaths: Set<String>? = scanScopeSelection.takeIf { it.isNotEmpty() },
+        preserveExistingOnEmpty: Boolean = false
+    ): ScanOutcome {
         if (clearArtwork) ArtworkLoader.clear(getApplication())
-        val outcome = repo.scan(filterShortAudio, currentScanFilters(), safTrees = safScanTrees)
+        val outcome = repo.scan(
+            filterShortAudio = filterShortAudio,
+            filters = currentScanFilters(),
+            folderPaths = folderPaths,
+            safTrees = safScanTrees
+        )
+        if (preserveExistingOnEmpty && songs.isNotEmpty() && outcome.songs.isEmpty()) {
+            return outcome
+        }
         applyScanOutcome(outcome)
-        // 把结果落到 Prefs，下次冷启动直接用、不再扫 MediaStore
+        // 把结果落到独立持久文件，下次冷启动直接用、不再扫 MediaStore
         prefs.songsCacheJson = encodeSongsToJson(outcome.songs)
         prefs.lastScanAt = System.currentTimeMillis()
         return outcome
@@ -1676,11 +1847,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun applyScanOutcome(outcome: ScanOutcome) {
         val visible = filterHidden(outcome.songs)
         pinyinIndexJob?.cancel()
-        val (pinyin, keys) = withContext(Dispatchers.Default) {
-            computePinyinAndKeys(visible)
+        val (pinyin, keys, indexJson) = withContext(Dispatchers.Default) {
+            val (p, k) = computePinyinAndKeys(visible)
+            Triple(p, k, encodeLibraryIndexJson(p, k))
         }
         pinyinIndex = pinyin
         sortKeys = keys
+        prefs.libraryIndexJson = indexJson
         songs = visible
         reconcileOnlineFavoritesAfterScan(visible)
         // 扫描会清掉封面缓存，这里重新预热一遍（见 warmUpCovers 的说明）
@@ -2013,8 +2186,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scan()
     }
 
+    private var fullScanJob: Job? = null
+
     fun scan() {
-        viewModelScope.launch {
+        if (fullScanJob?.isActive == true) return
+        fullScanJob = viewModelScope.launch {
             val beforeIds = songs.mapTo(HashSet()) { it.id }
             scanState = ScanState.SCANNING
             try {
@@ -2038,24 +2214,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     private var startupRefreshStarted = false
 
     /**
-     * 冷启动自动刷新曲库 —— 取代原来的下拉刷新。
+     * 冷启动自动刷新曲库 —— 仅当用户在设置里显式开启 [autoScanOnLaunch] 时执行。
      *
-     * 几个刻意的取舍：
-     * - **不把 scanState 置成 SCANNING**（已经有缓存时）：那样列表会闪一下加载态；
-     * - **不清封面缓存**（`clearArtwork = false`）：清了每次启动封面都要重新解一遍，
-     *   正是之前"重启后封面要等一会才出来"的老毛病；
-     * - **没权限就不扫**：拿不到 READ_MEDIA_AUDIO 时 scan 会返回空结果，
-     *   把空结果写进缓存等于把用户的曲库抹了。
+     * 默认保持关闭：冷启动直接加载持久化的歌曲与索引缓存，不重扫 MediaStore，也不改写 `lastScanAt`。
      */
     fun refreshOnStart() {
+        if (!autoScanOnLaunch) return
         if (startupRefreshStarted) return
         startupRefreshStarted = true
         if (!hasAudioPermission() && safScanTrees.isEmpty()) return
         viewModelScope.launch {
             val hadSongs = songs.isNotEmpty()
             if (!hadSongs) scanState = ScanState.SCANNING
-            runCatching { runScan(clearArtwork = false) }
-                .onFailure { android.util.Log.w("SonanceScan", "启动刷新失败: ${it.message}") }
+            runCatching {
+                runScan(
+                    clearArtwork = false,
+                    preserveExistingOnEmpty = true
+                )
+            }.onFailure { android.util.Log.w("SonanceScan", "启动刷新失败: ${it.message}") }
             scanState = ScanState.READY
             if (!hadSongs) restorePlaybackState()
         }
@@ -2085,7 +2261,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun rescanAfterDownload() {
         viewModelScope.launch {
             scanState = ScanState.SCANNING
-            runScan(clearArtwork = false)
+            val scopedPaths = scanScopeSelection.takeIf { it.isNotEmpty() }?.plus("Music/Sonance")
+            runScan(clearArtwork = false, folderPaths = scopedPaths, preserveExistingOnEmpty = true)
             scanState = ScanState.READY
         }
     }
@@ -2336,6 +2513,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         com.sonance.player.playback.UsbExclusive.onStateChanged = { enabled ->
             usbExclusiveEnabled = enabled
         }
+        com.sonance.player.desktoplyrics.DesktopLyricsManager.onTextColorChanged = { color ->
+            desktopLyricsTextColor = color
+        }
     }
 
     fun changeUsbExclusive(on: Boolean) {
@@ -2359,6 +2539,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeCrossfade(on: Boolean) {
         crossfadeEnabled = on
         prefs.crossfadeEnabled = on
+        PlaybackService.syncTransitionConfig()
     }
 
     var crossfadeSec by mutableStateOf(prefs.crossfadeSec)
@@ -2367,6 +2548,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeCrossfadeSec(sec: Int) {
         crossfadeSec = sec.coerceIn(1, 10)
         prefs.crossfadeSec = crossfadeSec
+        PlaybackService.syncTransitionConfig()
     }
 
     var playToastEnabled by mutableStateOf(prefs.playToastEnabled)
@@ -2489,6 +2671,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.miniCoverScale = miniCoverScale
     }
 
+    /** 悬浮卡片距底部留白 (dp) */
+    var miniFloatBottomDp by mutableIntStateOf(prefs.miniFloatBottomDp)
+        private set
+
+    fun changeMiniFloatBottomDp(value: Int) {
+        miniFloatBottomDp = value.coerceIn(0, 48)
+        prefs.miniFloatBottomDp = miniFloatBottomDp
+    }
+
+    /** 悬浮卡片圆角 (dp) */
+    var miniFloatCornerDp by mutableIntStateOf(prefs.miniFloatCornerDp)
+        private set
+
+    fun changeMiniFloatCornerDp(value: Int) {
+        miniFloatCornerDp = value.coerceIn(0, 36)
+        prefs.miniFloatCornerDp = miniFloatCornerDp
+    }
+
     /**
      * 锁屏歌词（ColorOS / OPlus 原生锁屏歌词页）。
      *
@@ -2506,6 +2706,70 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeDesktopLyricsEnabled(value: Boolean) {
         desktopLyricsEnabled = value
         prefs.desktopLyricsEnabled = value
+    }
+
+    /** 桌面歌词文字颜色（0 = 跟随背景模式） */
+    var desktopLyricsTextColor by mutableIntStateOf(prefs.desktopLyricsTextColor)
+        private set
+
+    fun changeDesktopLyricsTextColor(value: Int) {
+        desktopLyricsTextColor = value
+        prefs.desktopLyricsTextColor = value
+        DesktopLyricsManager.applyTextColor(getApplication())
+    }
+
+    /** 状态栏歌词扩展（HyperLyric / LyricGetter 标准广播） */
+    var externalLyricsEnabled by mutableStateOf(prefs.externalLyricsEnabled)
+        private set
+
+    fun changeExternalLyricsEnabled(value: Boolean) {
+        externalLyricsEnabled = value
+        prefs.externalLyricsEnabled = value
+        if (!value) {
+            com.sonance.player.desktoplyrics.ExternalLyricBridge.clear(getApplication())
+        }
+        com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
+    }
+
+    /** 摇一摇切歌开关 */
+    var shakeNextEnabled by mutableStateOf(prefs.shakeNextEnabled)
+        private set
+
+    fun changeShakeNextEnabled(value: Boolean) {
+        shakeNextEnabled = value
+        prefs.shakeNextEnabled = value
+        com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
+    }
+
+    /** 息屏摇一摇开关 */
+    var shakeScreenOffEnabled by mutableStateOf(prefs.shakeScreenOffEnabled)
+        private set
+
+    fun changeShakeScreenOffEnabled(value: Boolean) {
+        shakeScreenOffEnabled = value
+        prefs.shakeScreenOffEnabled = value
+        com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
+    }
+
+    /** 摇一摇防口袋误触 */
+    var shakePocketGuardEnabled by mutableStateOf(prefs.shakePocketGuardEnabled)
+        private set
+
+    fun changeShakePocketGuardEnabled(value: Boolean) {
+        shakePocketGuardEnabled = value
+        prefs.shakePocketGuardEnabled = value
+        com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
+    }
+
+    /** 摇一摇灵敏度：0=低，1=中，2=高 */
+    var shakeSensitivity by mutableIntStateOf(prefs.shakeSensitivity)
+        private set
+
+    fun changeShakeSensitivity(value: Int) {
+        val clamped = value.coerceIn(0, 2)
+        shakeSensitivity = clamped
+        prefs.shakeSensitivity = clamped
+        com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
     }
 
     /** 换歌代次：迟到的旧歌词结果靠它丢弃 */
@@ -2533,11 +2797,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun publishLockScreenLyrics(song: Song) {
         if (!prefs.lockScreenLyrics) return
-        if (isRemoteSongId(song.id)) {
-            lockLyricsGeneration++
-            player.publishLyricsInfo(null)
-            return
-        }
         val gen = ++lockLyricsGeneration
         viewModelScope.launch {
             val result = runCatching {
@@ -2548,7 +2807,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     title = song.title,
                     artist = song.artist,
                     album = song.album,
-                    // 锁屏歌词**不联网**：只用内嵌标签和本地缓存
+                    // 锁屏/原子随身听：只读取内嵌标签和本地缓存，不主动为后台额外联网
                     onlineEnabled = false,
                     apiBase = prefs.lyricsApiBase,
                     convertToSimplified = false,
@@ -2572,7 +2831,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     lines = synced.lines
                 )
             }
-            player.publishLyricsInfo(LockScreenLyrics.buildJson(song, result?.lyrics, gen), expectedMediaId = song.id)
+            val lrcText = LockScreenLyrics.toLrcText(result?.lyrics)
+            player.publishLyricsInfo(
+                json = LockScreenLyrics.buildJson(song, result?.lyrics, gen),
+                lrcText = lrcText,
+                expectedMediaId = song.id
+            )
         }
     }
 
@@ -2731,6 +2995,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var glowTransition by mutableStateOf(GlowTransition.fromId(prefs.glowTransition))
         private set
 
+    /** 普通播放页点击上一曲 / 下一曲的切换动效 */
+    var playerSwitchMotion by mutableStateOf(PlayerSwitchMotion.fromId(prefs.playerSwitchMotion))
+        private set
+
     /** 「渐变」模式的补间时长（毫秒） */
     var glowFadeMs by mutableIntStateOf(prefs.glowFadeMs)
         private set
@@ -2768,6 +3036,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeGlowTransition(t: GlowTransition) {
         glowTransition = t
         prefs.glowTransition = t.id
+    }
+
+    fun changePlayerSwitchMotion(motion: PlayerSwitchMotion) {
+        playerSwitchMotion = motion
+        prefs.playerSwitchMotion = motion.id
     }
 
     fun changeGlowFadeMs(ms: Int) {
@@ -3235,34 +3508,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * 选一张内置封面（封面墙那套渐变 + 几何母题）落到当前歌曲。
-     * 和手动搜索共用同一个「手选封面」缓存槽，所以列表、播放页、通知、小组件
-     * 会一起变，不需要给内置图再开一条显示路径。
-     */
-    fun applyBuiltinCover(songId: Long, presetId: String) {
-        val preset = BuiltinCovers.find(presetId) ?: return
-        viewModelScope.launch {
-            val app = getApplication<Application>()
-            val song = songById(songId)
-            if (song == null) {
-                coverNotice = "歌曲已不存在，无法设置封面"
-                return@launch
-            }
-            val (raw, bmp) = withContext(Dispatchers.IO) {
-                val bitmap = BuiltinCovers.render(preset, 900)
-                val bytes = ByteArrayOutputStream().use { out ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
-                    out.toByteArray()
-                }
-                bytes to bitmap
-            }
-            persistCustomCover(app, song, raw, bmp, writeTag = true)
-            coverNotice = null
-            showToast("已换成内置封面「${preset.label}」")
-        }
-    }
-
     /** 从相册 / 文件管理器挑一张图片作为这首歌的封面。 */
     fun applyPickedCover(songId: Long, imageUri: Uri) {
         viewModelScope.launch {
@@ -3458,6 +3703,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (sortKeys.isNotEmpty()) {
             sortKeys = sortKeys + (patched.id to IndexKey.keysOf(patched))
+        }
+        // 改过的键随歌曲缓存一起落盘；编码放后台，主线程只取快照。
+        // 空索引不落盘：冷启动重建还没跑完时改了标签，别拿空快照盖掉盘上那份好的
+        val p = pinyinIndex
+        val k = sortKeys
+        if (p.isNotEmpty() || k.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.Default) {
+                prefs.libraryIndexJson = encodeLibraryIndexJson(p, k)
+            }
         }
         albums = MediaRepository.groupAlbums(songs)
         artists = MediaRepository.groupArtists(songs)
@@ -3899,6 +4153,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     var lxQuality by mutableStateOf(prefs.lxQuality)
+        private set
+
+    var lxAutoFallback by mutableStateOf(prefs.lxAutoFallback)
         private set
 
     var lxImporting by mutableStateOf(false)
@@ -4621,12 +4878,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun importLxScriptFromUri(uri: Uri) {
+    fun importLxScriptFromUri(uri: Uri) = runLxImport { lxRepo.importFromUri(uri) }
+
+    fun importLxScriptFromUrl(url: String) = runLxImport { lxRepo.importFromUrl(url) }
+
+    private fun runLxImport(loader: suspend () -> Result<LxScriptRecord>) {
         if (lxImporting) return
         viewModelScope.launch {
             lxImporting = true
             lxImportError = null
-            val res = lxRepo.importFromUri(uri)
+            val res = loader()
             lxImporting = false
             res.onSuccess { record ->
                 lxScripts = lxRepo.scripts.value
@@ -4688,6 +4949,12 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.lxQuality = q.id
         lxRepo.runtime.clearCaches()
         showToast("洛雪优先音质：${q.title}")
+    }
+
+    fun changeLxAutoFallback(enabled: Boolean) {
+        lxAutoFallback = enabled
+        prefs.lxAutoFallback = enabled
+        showToast(if (enabled) "已开启无感多音源兜底" else "已关闭无感多音源兜底")
     }
 
     fun changeLxDownloadEnabled(enabled: Boolean) {
@@ -6205,6 +6472,72 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    /** 洛雪歌单 / 榜单详情页批量下载。 */
+    fun downloadLxTracks(tracks: List<RemoteTrack>, platform: String, ownerKey: String) {
+        if (!onlineMusicEnabled) {
+            showToast("请先开启在线音乐")
+            return
+        }
+        if (lxActiveScript == null) {
+            showToast("请先导入洛雪音源脚本")
+            return
+        }
+        val src = OnlineSources.byId(LxPlatform.sourceIdFor(platform)) ?: return
+        lxRepo.rememberTrackHints(platform, tracks)
+        startTrackDownloadBatch(
+            tracks = tracks,
+            ownerKey = ownerKey,
+            srcOverride = src
+        )
+    }
+
+    fun isSongDownloaded(song: Song): Boolean {
+        if (song.isLocal) return true
+        if (song.isDlna || song.remoteId.isNullOrBlank()) return false
+        val key = OnlineDownloader.downloadKeyOf(song.source, song.remoteId) ?: return false
+        return key in prefs.downloadedKeys()
+    }
+
+    /** 导入/自建歌单批量下载：仅下载尚未缓存的在线歌曲，跳过本地歌曲与已下载歌曲。 */
+    fun downloadUserPlaylistSongs(songs: List<Song>, ownerKey: String) {
+        if (!onlineMusicEnabled) {
+            showToast("请先开启在线音乐")
+            return
+        }
+        val downloadable = filterDownloadableUserPlaylistSongs(songs, prefs.downloadedKeys())
+        if (downloadable.isEmpty()) {
+            showToast("所选曲目均为本地歌曲或已下载")
+            return
+        }
+        val firstSource = downloadable.first().source
+        val sameSourceSongs = downloadable.filter { it.source == firstSource }
+        val src = OnlineSources.byId(firstSource) ?: run {
+            showToast("未找到音源：$firstSource")
+            return
+        }
+        val tracks = sameSourceSongs.map { s ->
+            RemoteTrack(
+                remoteId = s.remoteId!!,
+                title = s.title,
+                artist = s.artist,
+                album = s.album,
+                durationMs = s.durationMs,
+                coverUrl = s.coverUrl,
+                playable = true,
+                vip = false
+            )
+        }
+        if (firstSource.startsWith("lx:")) {
+            val platform = firstSource.removePrefix("lx:")
+            lxRepo.rememberTrackHints(platform, tracks)
+        }
+        startTrackDownloadBatch(
+            tracks = tracks,
+            ownerKey = ownerKey,
+            srcOverride = src
+        )
+    }
+
     /** 长按在线搜索单曲时立即触发单曲下载到本地。 */
     fun downloadSingleOnlineTrack(track: RemoteTrack) {
         val src = onlineSource ?: run {
@@ -6360,13 +6693,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (addedToMap) onlineRevision++
         val wasEmpty = player.state.value.queueIds.isEmpty()
-        player.appendToQueue(songs)
+        player.insertNextToQueue(songs)
         if (wasEmpty) {
             songs.firstOrNull()?.let { first ->
                 if (isRemoteSongId(first.id)) resolveStreamIfMissing(first)
             }
+            showToast("已将 ${songs.size} 首加入播放列表")
+        } else if (songs.size == 1) {
+            showToast("已添加到下一首播放")
+        } else {
+            showToast("已将 ${songs.size} 首添加到下一首播放")
         }
-        showToast("已将 ${songs.size} 首加入播放列表")
     }
 
     /** 取消正在跑的歌单下载。进度状态由协程的 `finally` 收尾 */
@@ -6376,25 +6713,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ===== 派生数据 =====
-
-    /**
-     * 拼音索引：songId → "全拼 首字母"。
-     *
-     * 扫描/缓存加载完成后在后台线程构建，搜索时只做字符串 contains，不阻塞输入。
-     * 索引没就绪时为空 Map，搜索自然退化为「原名匹配」。
-     */
-    private var pinyinIndex by mutableStateOf<Map<Long, String>>(emptyMap())
-
-    /**
-     * 四个文本字段的归一化排序键：songId → [IndexKeys]。
-     *
-     * 列表排序和右侧字母分组**都读它**，两边必然同源。索引没就绪时为空：
-     * 排序退回原来的码点序，右侧退回滑块，不会出现「字母表说在 Z、列表却不是」。
-     */
-    var sortKeys by mutableStateOf<Map<Long, IndexKeys>>(emptyMap())
-        private set
-
-    private var pinyinIndexJob: Job? = null
 
     private fun computePinyinAndKeys(list: List<Song>): Pair<Map<Long, String>, Map<Long, IndexKeys>> {
         val p = HashMap<Long, String>(list.size)
@@ -6411,11 +6729,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         pinyinIndexJob = viewModelScope.launch {
             // 搜索用的拼音索引和排序 / 分组用的归一化键一次扫描同时产出，
             // 都跑在后台线程：搜索输入时只是查 Map，不再做 ICU 转写。
-            val (pinyin, keys) = withContext(Dispatchers.Default) {
-                computePinyinAndKeys(list)
+            // 序列化也在后台做完，主线程只接结果写 Prefs（apply 异步落盘）。
+            val (pinyin, keys, json) = withContext(Dispatchers.Default) {
+                val (p, k) = computePinyinAndKeys(list)
+                Triple(p, k, encodeLibraryIndexJson(p, k))
             }
             pinyinIndex = pinyin
             sortKeys = keys
+            prefs.libraryIndexJson = json
         }
     }
 
@@ -6503,6 +6824,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var eqFromSoundPreset by mutableStateOf(false)
         private set
 
+    /** 预置音效整体强度（低 / 中 / 高），默认中档。 */
+    var presetIntensity by mutableStateOf(PresetIntensity.MEDIUM)
+        private set
+
     val eqCenterFreqs: IntArray get() = EQ_CENTER_FREQS
     val eqMinDb: Float get() = EQ_MIN_DB
     val eqMaxDb: Float get() = EQ_MAX_DB
@@ -6511,6 +6836,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // Kotlin 的初始化按源码顺序执行，写进前面那个 init 块会被这里的
     // `by mutableStateOf(...)` 初值覆盖掉。
     init {
+        presetIntensity = PresetIntensity.fromId(prefs.soundPresetIntensity)
         val storedEq = prefs.eqPreset
         val preset = EqPreset.fromName(storedEq)
         val custom = parseEqBands(prefs.eqCustomBands)
@@ -6529,7 +6855,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         eqPreset = preset
         eqCustom = custom != null
         eqFromSoundPreset = soundEq != null
-        eqBands = custom ?: soundEq?.eqDb?.copyOf() ?: EqPreset.curveOf(preset)
+        eqBands = custom ?: soundEq?.scaled(presetIntensity)?.first ?: EqPreset.curveOf(preset)
         // 自定义值优先；独立的 EQ 开关也要按用户上次选择恢复。
         eqEnabled = prefs.eqEnabled
         pushEq()
@@ -6658,7 +6984,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     // 又一个独立 init：必须放在上面几个属性之后，否则会被初值覆盖（和 EQ 那段同理）。
     init {
         soundPreset = SoundPresets.fromId(prefs.soundPresetId)
-        val restored = SoundPresets.restoreFx(soundPreset, prefs.soundFxParams)
+        val restored = SoundPresets.restoreFx(soundPreset, prefs.soundFxParams, presetIntensity)
         soundFxParams = restored.params
         soundFxCustom = restored.custom
         soundFxEnabled = prefs.soundFxEnabled
@@ -6688,20 +7014,55 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 选中一套音效：同时写入 EQ 曲线与效果参数 */
+    /** 选中一套音效：同时写入按当前强度缩放后的 EQ 曲线与效果参数 */
     fun chooseSoundPreset(preset: SoundPreset) {
-        applySoundPreset(preset, saveToRoute = true)
-        showToast(if (soundFxEnabled) "音效 · ${preset.name}" else "已切回原声")
+        val autoDisabledSystemFx = applySoundPreset(preset, saveToRoute = true)
+        val msg = when {
+            !soundFxEnabled -> "已切回原声"
+            autoDisabledSystemFx -> "音效 · ${preset.name}（已自动关闭系统音效防叠加）"
+            else -> "音效 · ${preset.name}"
+        }
+        showToast(msg)
     }
 
-    private fun applySoundPreset(preset: SoundPreset, saveToRoute: Boolean) {
+    /** 切换预置音效整体强度（低 / 中 / 高）：实时联动曲线与效果参数，但保持「极致 · Hi-Fi」在中档下原样不动 */
+    fun changePresetIntensity(intensity: PresetIntensity) {
         resumeSoundAfterComparison()
+        presetIntensity = intensity
+        prefs.soundPresetIntensity = intensity.id
+        if (soundPreset.id != SoundPresets.OFF.id) {
+            val (scaledEq, scaledFx) = soundPreset.scaled(intensity)
+            soundFxParams = scaledFx
+            soundFxCustom = false
+            prefs.soundFxParams = SoundFxParams.toStore(scaledFx)
+            if (eqFromSoundPreset) {
+                eqBands = scaledEq
+                eqCustom = false
+                prefs.eqCustomBands = ""
+                pushEq()
+            }
+            pushSoundFx()
+        }
+        showToast("预设强度 · ${intensity.label}（${intensity.shortDesc}）")
+    }
+
+    private fun disableSystemAudioEffectForBuiltIn(): Boolean {
+        if (!systemAudioEffectEnabled) return false
+        systemAudioEffectEnabled = false
+        prefs.systemAudioEffectEnabled = false
+        PlaybackService.syncSystemAudioEffects()
+        return true
+    }
+
+    private fun applySoundPreset(preset: SoundPreset, saveToRoute: Boolean): Boolean {
+        resumeSoundAfterComparison()
+        val (scaledEq, scaledFx) = preset.scaled(presetIntensity)
         soundPreset = preset
-        soundFxParams = preset.fx.clamp()
+        soundFxParams = scaledFx
         soundFxEnabled = preset.id != SoundPresets.OFF.id
         soundFxCustom = false
 
-        eqBands = preset.eqDb.copyOf()
+        eqBands = scaledEq
         eqPreset = EqPreset.OFF
         eqCustom = false
         eqFromSoundPreset = true
@@ -6716,8 +7077,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         if (saveToRoute && autoPresetByOutputEnabled) {
             prefs.setPresetIdForRoute(currentOutputRoute.id, preset.id)
         }
+        val autoDisabledSystemFx = if (soundFxEnabled) disableSystemAudioEffectForBuiltIn() else false
         pushEq()
         pushSoundFx()
+        return autoDisabledSystemFx
     }
 
     fun toggleSoundFx(on: Boolean) {
@@ -6734,6 +7097,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (on) soundPreset.id else SoundPresets.OFF.id
             )
         }
+        if (on && disableSystemAudioEffectForBuiltIn()) {
+            showToast("已开启内置音效，并自动关闭系统音效防叠加")
+        }
         // 只联动预设自己的 EQ；用户另选的曲风或自定义 EQ 不受此开关影响。
         if (eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
             eqEnabled = on
@@ -6749,13 +7115,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val wasEnabled = soundFxEnabled
         soundFxParams = next.clamp()
         soundFxEnabled = true
-        soundFxCustom = soundFxParams != soundPreset.fx
+        soundFxCustom = soundFxParams != soundPreset.scaled(presetIntensity).second
         prefs.soundFxParams = SoundFxParams.toStore(soundFxParams)
         prefs.soundFxEnabled = true
-        if (!wasEnabled && eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
-            eqEnabled = true
-            prefs.eqEnabled = true
-            pushEq()
+        if (!wasEnabled) {
+            disableSystemAudioEffectForBuiltIn()
+            if (eqFromSoundPreset && soundPreset.id != SoundPresets.OFF.id) {
+                eqEnabled = true
+                prefs.eqEnabled = true
+                pushEq()
+            }
         }
         pushSoundFx()
     }
@@ -6877,19 +7246,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 解析持久化的自定义曲线；长度不对或含脏数据都返回 null（回落到预设） */
-    private fun parseEqBands(raw: String): FloatArray? {
-        if (raw.isBlank()) return null
-        val parts = raw.split(',')
-        if (parts.size != EQ_BAND_COUNT) return null
-        val out = FloatArray(EQ_BAND_COUNT)
-        var i = 0
-        while (i < EQ_BAND_COUNT) {
-            val v = parts[i].trim().toFloatOrNull()?.takeIf { it.isFinite() } ?: return null
-            out[i] = v.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
-            i++
-        }
-        return out
-    }
+    private fun parseEqBands(raw: String): FloatArray? = parseEqBandsCsv(raw)
 
     // ===== 睡眠定时器 =====
 
@@ -6907,6 +7264,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var sleepTimerTotalMinutes by mutableIntStateOf(0)
         private set
 
+    private val _closeAppEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val closeAppEvents: SharedFlow<Unit> = _closeAppEvents.asSharedFlow()
+
     /** 「播完当前曲」模式下，记住开启时是哪一首 */
     private var sleepAnchorSongId = -1L
     private var sleepTimerJob: Job? = null
@@ -6922,7 +7282,23 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-    /** 倒计时 N 分钟后暂停 */
+    /**
+     * 定时到期收尾：
+     * 1. 先保存当前曲目与播放进度，确保下次打开仍可续播；
+     * 2. 清空定时状态与视频浮窗会话；
+     * 3. 停播释放音频焦点、隐藏桌面歌词并移除前台媒体通知；
+     * 4. 通知 MainActivity 关闭应用窗口并移出近期任务。
+     */
+    private fun finishPlaybackForSleepTimer() {
+        clearSleepTimer()
+        persistPlayback()
+        runCatching { com.sonance.player.playback.BiliVideoSession.of(getApplication()).onAppExit() }
+        player.stopForSleepTimer()
+        showToast("定时结束，已暂停播放并关闭应用")
+        _closeAppEvents.tryEmit(Unit)
+    }
+
+    /** 倒计时 N 分钟后暂停并退出 */
     fun setSleepTimer(minutes: Int) {
         sleepTimerJob?.cancel()
         sleepTimerMode = SleepTimerMode.COUNTDOWN
@@ -6938,19 +7314,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 sleepTimerRemainingMs = left
                 delay(1_000L)
             }
-            // 到点：暂停播放（已经在暂停状态就什么都不做）
-            if (player.state.value.isPlaying) player.togglePlay()
-            clearSleepTimer()
-            showToast("睡眠定时器到点，已暂停播放")
+            finishPlaybackForSleepTimer()
         }
-        showToast("将在 $minutes 分钟后暂停播放")
+        showToast("将在 $minutes 分钟后暂停播放并关闭应用")
     }
 
     /**
-     * 播完当前这首就暂停。
+     * 播完当前这首就暂停并退出。
      *
      * 不用 `onSongStarted` 来做 —— 那要等下一首**已经开始播**才触发，会多放一小段。
-     * 这里轮询进度，在离结尾还有 700ms 时就暂停。
+     * 这里轮询进度，在离结尾还有 700ms 时就停止。
      */
     fun setSleepAfterCurrent() {
         sleepTimerJob?.cancel()
@@ -6962,18 +7335,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         sleepTimerJob = viewModelScope.launch {
             while (isActive) {
                 val st = player.state.value
+                val livePos = PlaybackService.playerOrNull()?.currentPosition?.coerceAtLeast(0L) ?: st.positionMs
                 val ended = st.mediaId != sleepAnchorSongId ||
-                    (st.durationMs > 0 && st.positionMs >= st.durationMs - 700L)
+                    (st.durationMs > 0 && livePos >= st.durationMs - 700L)
                 if (ended) {
-                    if (player.state.value.isPlaying) player.togglePlay()
-                    clearSleepTimer()
-                    showToast("睡眠定时器：已暂停播放")
+                    finishPlaybackForSleepTimer()
                     return@launch
                 }
                 delay(400L)
             }
         }
-        showToast("播完当前这首就暂停")
+        showToast("播完当前这首后将暂停并关闭应用")
     }
 
     fun clearSleepTimer() {
@@ -8018,6 +8390,187 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     val totalDurationMs: Long get() = songs.sumOf { it.durationMs }
     val totalSizeBytes: Long get() = songs.sumOf { it.sizeBytes }
 
+    /**
+     * 冷启动初始化块：严格放在所有委托属性与状态声明之后执行，
+     * 避免 Kotlin 按源码顺序初始化时在 `init {}` 阶段踩到尚未赋值的 `by mutableStateOf` 委托导致 NPE。
+     */
+    init {
+        pushSkinToWidget()
+        seedOnlineFavoriteSongs()
+        registerUserPlaylistOnlineSongs()
+        com.sonance.player.widget.WidgetCommandReceiver.onToggleFavorite = { id ->
+            toggleFavorite(id)
+        }
+        com.sonance.player.widget.WidgetCommandReceiver.onCyclePlayMode = {
+            cyclePlayMode(quiet = false)
+        }
+        // 播放模式（随机 / 列表循环 / 单曲循环）持久化恢复。
+        // 必须在恢复播放现场之前设好：队列是按上次的模式排的（随机时就是洗牌序），
+        // 播放器的 repeatMode 也要跟着摆回去，UI 图标才不会和实际行为对不上。
+        applyPersistedPlayMode()
+        // 网易云音质：把持久化的档位灌进数据层（账号在属性声明处直接读盘，见 neteaseAccount）
+        NeteaseQuality.current = NeteaseLevel.fromId(prefs.onlineQuality)
+        // 已登录用户首次升级到此版本时默认关闭「听 8 秒自动下载」，之后仍允许用户在设置中手动开启
+        if (neteaseAccount != null && !prefs.loggedInAutoDownloadResetDone) {
+            prefs.loggedInAutoDownloadResetDone = true
+            if (onlineDownloadEnabled) {
+                onlineDownloadEnabled = false
+                prefs.onlineDownloadEnabled = false
+            }
+        }
+        // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
+        // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
+        player.onPlaybackEnded = {
+            if (dlnaActiveRenderer == null && player.state.value.queueIds.size <= 1) {
+                randomListenLikeWall()
+            }
+        }
+        player.onShuffleRoundWrapped = { reshuffleQueueKeepingCurrent() }
+        player.onSongStarted = { id ->
+            // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
+            // 通知栏封面替换与锁屏歌词读取；中间划过的曲目 360ms 内即被取消，避免连串 SP/IPC 抢占主线程。
+            songStartedJob?.cancel()
+            songStartedJob = viewModelScope.launch {
+                delay(750)
+                val startedSong = songById(id)
+                val isDlnaTrack = startedSong?.isDlna == true
+                // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。
+                // 冷启动恢复现场不会走到这里（notifyStart=false 已被控制器拦掉）。
+                if (prefs.playToastEnabled) {
+                    val title = player.state.value.title
+                    if (title.isNotBlank()) showToast("正在播放 · $title")
+                }
+                if (!isRemoteSongId(id) && !isExternalSongId(id)) {
+                    prefs.pushRecentLocal(id)
+                    prefs.bumpPlayCount(id)
+                    recentIds = prefs.recentIds()
+                    prefs.lastSongId = id
+                    prefs.lastPlayedOnline = false
+                    // 现在播的是本地歌，在线那套存档就用不上了 ——
+                    // 不清的话恢复时会读到一份过期的在线现场，走错分支
+                    prefs.lastOnlineSongJson = null
+                    prefs.onlineQueueJson = null
+                } else if (isRemoteSongId(id) && !isDlnaTrack) {
+                    // 在线歌**不进**最近播放（用户要求），但**播放现场存档必须保留**。
+                    startedSong?.toStoredOrNull()?.let { stored ->
+                        prefs.lastOnlineSongJson = storedOnlineSongToJson(stored).toString()
+                        prefs.lastPlayedOnline = true
+                        prefs.playPositionMs = 0L
+                    }
+                }
+                recentEntries = prefs.recentEntries()
+                // 听歌统计记账：本地 / 在线都算一次播放（外部打开、DLNA 不算）
+                if (startedSong != null && !isExternalSongId(id) && !isDlnaTrack) {
+                    prefs.listenStatsStore.recordPlay(
+                        startedSong.id,
+                        startedSong.title,
+                        startedSong.artist,
+                        System.currentTimeMillis(),
+                        LocalDate.now().toEpochDay()
+                    )
+                    statsRevision++
+                }
+                val st = player.state.value
+                val queueHasTransient = isExternalSongId(st.mediaId) ||
+                    isDlnaTrack ||
+                    st.queueIds.any { isExternalSongId(it) || songById(it)?.isDlna == true }
+                if (st.queueIds.isNotEmpty() && !queueHasTransient) {
+                    if (isRemoteSongId(st.mediaId)) {
+                        val stored = st.queueIds.mapNotNull { songById(it)?.toStoredOrNull() }
+                        if (stored.isNotEmpty()) {
+                            val json = withContext(Dispatchers.Default) { storedOnlineSongsToJson(stored) }
+                            prefs.onlineQueueJson = json
+                            prefs.onlineQueueIndex = st.queueIndex.coerceIn(0, stored.lastIndex)
+                        }
+                    } else {
+                        val joined = withContext(Dispatchers.Default) { st.queueIds.joinToString(",") }
+                        prefs.playQueueIds = joined
+                        prefs.playQueueIndex = st.queueIndex
+                    }
+                }
+                if (!isExternalSongId(id) && !isDlnaTrack) prefs.playPositionMs = 0L
+                // 本地没有封面就顺手联网补一张（开关没开时内部直接返回）
+                // 刷新通知栏封面不受开关影响：下载过的封面是本地数据，随时该显示
+                startedSong?.let { song ->
+                    player.refreshCurrentArtwork(song)
+                    ensureCover(song)
+                    // 在线歌：确认真的在听之后存一份到本地（开关没开时内部直接返回）
+                    maybeDownload(song)
+                    // 插件源：入队时可能还没取到流地址（点播只预取当前这首），轮到它时补一次
+                    resolveStreamIfMissing(song)
+                    // 顺带预取队列后续曲目的真实流地址，避免切歌时 ExoPlayer 预加载兜底 30s 外链
+                    prefetchNextOnlineStreams(song)
+                    // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
+                    publishLockScreenLyrics(song)
+                    // 若正处于 D-LAN 远端投屏会话，自动把当前曲目推到远端设备并保持本机静音
+                    dlnaActiveRenderer?.let { renderer ->
+                        if (player.state.value.isPlaying) player.pause()
+                        castSongToDlnaInternal(song, renderer, notifyConnected = false)
+                    }
+                }
+            }
+        }
+
+        // 优先读上一次扫描的缓存：冷启动不再强制扫一遍 MediaStore。
+        // PermissionGate 只在 scanState == IDLE 时才自动扫描，所以加载到缓存
+        // 就直接置为 READY，PermissionGate 不会再触发 scan。
+        val cachedJson = prefs.songsCacheJson
+        if (!cachedJson.isNullOrBlank()) {
+            runCatching {
+                val list = decodeSongsFromJson(cachedJson)
+                if (list.isNotEmpty()) {
+                    val visible = filterHidden(list)
+                    // 排序键与歌曲缓存配套落盘：冷启动第一帧就是拼音序，
+                    // 不再"先码点序显示、后台算完整表重排"地闪一下。
+                    // 旧版本没存过索引 / 索引缺歌 / 索引损坏时退回后台重建，不阻断歌曲缓存恢复。
+                    val cachedIndex = prefs.libraryIndexJson?.let {
+                        runCatching { decodeLibraryIndexJson(it) }.getOrNull()
+                    }
+                    if (cachedIndex != null &&
+                        libraryIndexCovers(visible.map { it.id }, cachedIndex.first, cachedIndex.second)
+                    ) {
+                        pinyinIndex = cachedIndex.first
+                        sortKeys = cachedIndex.second
+                    } else {
+                        rebuildPinyinIndex(visible)
+                    }
+                    songs = visible
+                    albums = MediaRepository.groupAlbums(visible)
+                    artists = MediaRepository.groupArtists(visible)
+                    folders = MediaRepository.groupFolders(visible)
+                    scanState = ScanState.READY
+                    // 曲库就位 → 提前把开头这些歌的封面解出来，
+                    // 免得重启后第一屏全是占位图（见 warmUpCovers 的说明）
+                    warmUpCovers()
+                } else if (prefs.lastScanAt > 0L) {
+                    // 已经明确扫描过且缓存明确为空表 `[]`（例如排除了所有目录），冷启动不再强扫
+                    scanState = ScanState.READY
+                }
+            }.onFailure {
+                android.util.Log.w("SonanceScan", "读取歌曲缓存失败: ${it.message}")
+            }
+        }
+
+        // 曲库（缓存）就绪之后恢复上次的播放现场。
+        // 放在最后：它要按歌曲 id 去 songs 里查，曲库没加载出来时无从恢复。
+        restorePlaybackState()
+
+        // 恢复完成、播放器真正报出 mediaId 之后再请求列表定位。
+        // 不能恢复完直接 requestScrollToCurrent()：那一刻 mediaId 还是 -1，
+        // SongList 里那个 effect 会因为 `currentId <= 0` 提前 return，白请求一次。
+        //
+        // `> 0` 也顺带排除了在线歌（负数 id）—— 这是对的：它们不在本地曲库列表里，
+        // 没有"滚到那一行"可言。
+        viewModelScope.launch {
+            player.state.collect { st ->
+                if (pendingStartupScroll && st.mediaId > 0L) {
+                    pendingStartupScroll = false
+                    requestScrollToCurrent()
+                }
+            }
+        }
+    }
+
     companion object {
         /** 洛雪模式单曲与歌单搜索每页条数。 */
         private const val LX_PAGE_SIZE = 30
@@ -8064,4 +8617,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private const val DOWNLOAD_ARM_DELAY_MS = 8_000L
         internal const val DOWNLOAD_OWNER_SEARCH = "__online_search__"
     }
+}
+
+/**
+ * 过滤导入/自建歌单中可下载的歌曲：仅保留尚未缓存的在线歌曲（跳过本地与 DLNA 与已下载）。
+ */
+internal fun filterDownloadableUserPlaylistSongs(
+    songs: List<Song>,
+    downloadedKeys: Set<String>
+): List<Song> = songs.filter { song ->
+    if (song.isLocal || song.isDlna || song.remoteId.isNullOrBlank()) return@filter false
+    val key = OnlineDownloader.downloadKeyOf(song.source, song.remoteId) ?: return@filter false
+    key !in downloadedKeys
 }

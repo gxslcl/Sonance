@@ -17,6 +17,9 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import com.sonance.player.data.ArtworkLoader
@@ -161,14 +164,23 @@ internal fun rememberPlayButtonPaletteProvider(
 @Composable
 internal fun rememberButtonOrbit(isPlaying: Boolean): FloatState {
     val angle = remember { mutableFloatStateOf(if (isPlaying) 0f else 135f) }
-    LaunchedEffect(isPlaying) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(isPlaying, lifecycleOwner) {
         if (!isPlaying) return@LaunchedEffect
-        var last = withFrameNanos { it }
-        while (true) {
-            val now = withFrameNanos { it }
-            val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.08f)
-            angle.floatValue = (angle.floatValue + dt * 360f / 11f) % 360f
-            last = now
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var last = withFrameNanos { it }
+            var accNs = 0L
+            while (true) {
+                val now = withFrameNanos { it }
+                val dtNs = (now - last).coerceIn(0L, 80_000_000L)
+                last = now
+                accNs += dtNs
+                if (accNs >= 33_000_000L) {
+                    val dt = accNs / 1_000_000_000f
+                    accNs = 0L
+                    angle.floatValue = (angle.floatValue + dt * 360f / 11f) % 360f
+                }
+            }
         }
     }
     return angle

@@ -343,6 +343,29 @@ class LxRuntime(private val context: Context) {
     fun hasFreshStream(platform: String, remoteId: String): Boolean =
         cachedStreamUrl(platform, remoteId).isNotBlank()
 
+    /**
+     * 把「从别的平台借来的」已解析地址镜像到原曲的缓存键下。
+     *
+     * 无感多音源兜底时，真正解析成功的是另一个平台的 remoteId，但播放队列 / 音质徽标 /
+     * 预取 / 恢复播放都按**原曲**的 (platform, remoteId) 查缓存。不镜像的话原曲键下仍是
+     * 失败记录，下一轮又要重新借一次。这里把元信息和流缓存一并复制过去。
+     */
+    fun aliasResolvedStream(
+        fromPlatform: String,
+        fromRemoteId: String,
+        toPlatform: String,
+        toRemoteId: String,
+        scriptId: String,
+        requestedQuality: String
+    ) {
+        val fromKey = trackMetaKey(fromPlatform, fromRemoteId)
+        val toKey = trackMetaKey(toPlatform, toRemoteId)
+        lastTrackMeta[fromKey]?.let { lastTrackMeta[toKey] = it }
+        val fromCache = "$scriptId|$fromKey|$requestedQuality"
+        val toCache = "$scriptId|$toKey|$requestedQuality"
+        streamCache[fromCache]?.let { streamCache[toCache] = it }
+    }
+
     fun lastStreamError(platform: String, remoteId: String): String? =
         lastTrackMeta[trackMetaKey(platform, remoteId)]?.error
 

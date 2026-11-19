@@ -1,5 +1,6 @@
 package com.sonance.player.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,17 +73,75 @@ fun LxSheetDetailScreen(
     }
 
     var actionTrack by remember { mutableStateOf<RemoteTrack?>(null) }
+    val tracks = vm.lxDetailTracks
+    val ownerKey = "lx:${target.platform}:${target.id}"
+    var selectionMode by remember(ownerKey) { mutableStateOf(false) }
+    var selectedIds by remember(ownerKey) { mutableStateOf<Set<String>>(emptySet()) }
+    val exitSelection = {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    BackHandler(enabled = selectionMode) { exitSelection() }
+
+    val selectedTracks = remember(tracks, selectedIds) {
+        if (selectedIds.isEmpty()) emptyList()
+        else tracks.filter { it.remoteId in selectedIds }
+    }
+    val selectedDownloadable = remember(selectedTracks, vm.playlistDownloadDone) {
+        selectedTracks.count { it.playable && !vm.isLxTrackDownloaded(target.platform, it.remoteId) }
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // 顶部封面信息 + 播放全部 / 全部入队操作栏
+        // 顶部封面信息 + 播放全部 / 全部入队 / 全部下载操作栏
         LxSheetDetailHeader(
             target = target,
             platformLabel = platform?.displayName ?: target.platform,
-            trackCount = vm.lxDetailTracks.size,
-            canAct = vm.lxDetailTracks.any { it.playable } && !vm.lxDetailLoading,
-            onPlayAll = { vm.playLxAll(vm.lxDetailTracks, target.platform) },
-            onEnqueueAll = { vm.enqueueLxTracks(vm.lxDetailTracks, target.platform) }
+            trackCount = tracks.size,
+            canAct = tracks.any { it.playable } && !vm.lxDetailLoading,
+            downloading = vm.playlistDownloadActive,
+            onPlayAll = { vm.playLxAll(tracks, target.platform) },
+            onEnqueueAll = { vm.enqueueLxTracks(tracks, target.platform) },
+            onDownloadAll = { vm.downloadLxTracks(tracks, target.platform, ownerKey) }
         )
+
+        if (vm.playlistDownloadActive && vm.playlistDownloadOwner == ownerKey) {
+            OnlineDownloadProgressBanner(
+                done = vm.playlistDownloadDone,
+                total = vm.playlistDownloadTotal,
+                saved = vm.playlistDownloadSaved,
+                skipped = vm.playlistDownloadSkipped,
+                failed = vm.playlistDownloadFailed,
+                onCancel = { vm.cancelPlaylistDownload() }
+            )
+        }
+
+        if (tracks.isNotEmpty() && !vm.lxDetailLoading) {
+            val allSelected = selectedIds.size >= tracks.size
+            OnlineTrackListToolbar(
+                selectionMode = selectionMode,
+                selectedCount = selectedTracks.size,
+                totalCount = tracks.size,
+                downloadableCount = selectedDownloadable,
+                allSelected = allSelected,
+                downloading = vm.playlistDownloadActive,
+                onEnterSelect = {
+                    selectedIds = emptySet()
+                    selectionMode = true
+                },
+                onToggleSelectAll = {
+                    selectedIds = if (allSelected) emptySet() else tracks.mapTo(HashSet()) { it.remoteId }
+                },
+                onDownloadSelected = {
+                    vm.downloadLxTracks(selectedTracks, target.platform, ownerKey)
+                    exitSelection()
+                },
+                onAddToQueue = {
+                    vm.enqueueLxTracks(selectedTracks, target.platform)
+                    exitSelection()
+                },
+                onCancel = exitSelection
+            )
+        }
 
         HorizontalDivider(color = skin.border)
 
@@ -109,10 +168,11 @@ fun LxSheetDetailScreen(
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     itemsIndexed(
-                        items = vm.lxDetailTracks,
+                        items = tracks,
                         key = { index, t -> "${index}_${t.remoteId}" }
                     ) { index, track ->
                         val songId = remoteSongId(sourceId, track.remoteId)
+                        val checked = track.remoteId in selectedIds
                         OnlineTrackRow(
                             track = track,
                             thumbUrl = track.coverUrl,
@@ -120,11 +180,31 @@ fun LxSheetDetailScreen(
                             downloaded = vm.isLxTrackDownloaded(target.platform, track.remoteId),
                             isCurrent = playerState.mediaId == songId,
                             isPlaying = playerState.isPlaying,
+                            selectionMode = selectionMode,
+                            selected = checked,
                             onLongClick = {
                                 hapticTick(context)
-                                actionTrack = track
+                                if (selectionMode) {
+                                    selectedIds = if (checked) {
+                                        selectedIds - track.remoteId
+                                    } else {
+                                        selectedIds + track.remoteId
+                                    }
+                                } else {
+                                    actionTrack = track
+                                }
                             },
-                            onClick = { vm.playLxTrackAt(vm.lxDetailTracks, index, target.platform) }
+                            onClick = {
+                                if (selectionMode) {
+                                    selectedIds = if (checked) {
+                                        selectedIds - track.remoteId
+                                    } else {
+                                        selectedIds + track.remoteId
+                                    }
+                                } else {
+                                    vm.playLxTrackAt(tracks, index, target.platform)
+                                }
+                            }
                         )
                     }
                 }
@@ -163,8 +243,10 @@ private fun LxSheetDetailHeader(
     platformLabel: String,
     trackCount: Int,
     canAct: Boolean,
+    downloading: Boolean,
     onPlayAll: () -> Unit,
-    onEnqueueAll: () -> Unit
+    onEnqueueAll: () -> Unit,
+    onDownloadAll: () -> Unit
 ) {
     val skin = LocalSkin.current
     val cover = rememberRemoteCover(target.coverUrl, 400)
@@ -256,6 +338,13 @@ private fun LxSheetDetailHeader(
                 filled = false,
                 compact = true,
                 onClick = onEnqueueAll
+            )
+            PillButton(
+                label = "全部下载",
+                enabled = canAct && !downloading,
+                filled = false,
+                compact = true,
+                onClick = onDownloadAll
             )
         }
     }
