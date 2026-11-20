@@ -11,10 +11,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 
@@ -93,7 +95,7 @@ private val SonanceTypography = Typography(
 )
 
 @Composable
-fun SonanceTheme(skin: Skin, content: @Composable () -> Unit) {
+fun SonanceTheme(skin: Skin, fontScale: Float = 1f, content: @Composable () -> Unit) {
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
@@ -104,7 +106,15 @@ fun SonanceTheme(skin: Skin, content: @Composable () -> Unit) {
             }
         }
     }
-    CompositionLocalProvider(LocalSkin provides skin) {
+    // 全局字体缩放：只放大 fontScale，不动 density —— 所有 sp 文字（含行高）
+    // 跟着缩放，dp 布局尺寸不受影响。系统字体缩放叠乘在其上。
+    val baseDensity = LocalDensity.current
+    val scaledDensity = if (fontScale != 1f) {
+        Density(baseDensity.density, baseDensity.fontScale * fontScale)
+    } else {
+        baseDensity
+    }
+    CompositionLocalProvider(LocalSkin provides skin, LocalDensity provides scaledDensity) {
         MaterialTheme(
             colorScheme = skin.toColorScheme(),
             typography = SonanceTypography,

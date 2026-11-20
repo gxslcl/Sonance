@@ -90,6 +90,7 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sonance.player.BuildConfig
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.ArtworkLoader
@@ -116,6 +117,7 @@ import com.sonance.player.ui.components.buildBgProfile
 import com.sonance.player.ui.components.ensureReadable
 import com.sonance.player.ui.components.equalizeScrimAlphas
 import com.sonance.player.ui.components.IconAction
+import com.sonance.player.ui.components.InputFocusTracker
 import com.sonance.player.ui.components.LocalDenseLayout
 import com.sonance.player.ui.components.MiniPlayer
 import com.sonance.player.ui.components.MenuRow
@@ -269,7 +271,7 @@ fun SonanceRoot(vm: SonanceViewModel) {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
 
-    SonanceTheme(vm.skin) {
+    SonanceTheme(vm.skin, fontScale = vm.fontScalePercent / 100f) {
         val rawPlayerState by vm.player.state.collectAsStateWithLifecycle()
         val playerState = remember(
             rawPlayerState,
@@ -670,9 +672,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
 
     // 切 tab / 进详情页时也收一下：这两种操作都会把当前页面换掉，
-    // 留着输入焦点就会出现"键盘浮在另一个页面上"
-    LaunchedEffect(vm.tab) { dismissInput() }
-    LaunchedEffect(detail) { dismissInput() }
+    // 留着输入焦点就会出现"键盘浮在另一个页面上"。
+    // 必须先确认「真的有输入框聚焦」再清：Android 5 上对无焦点页面执行
+    // clearFocus(force) 会触发窗口级焦点重搜索，反而把焦点塞进新页面的
+    // 搜索框、自动弹出输入法（用户报的切栏目弹键盘就是这个）。
+    LaunchedEffect(vm.tab) { if (InputFocusTracker.anyFocused) dismissInput() }
+    LaunchedEffect(detail) { if (InputFocusTracker.anyFocused) dismissInput() }
 
     BackHandler(enabled = fullPlayerOpen) { fullPlayerOpen = false }
     BackHandler(enabled = !fullPlayerOpen && detail != null) { detail = null }
@@ -1841,8 +1846,8 @@ private fun ExpandedLayout(
             storageFraction = runCatching {
                 vm.totalSizeBytes.toFloat() / (24f * 1024f * 1024f * 1024f)
             }.getOrDefault(0f),
-            // 平板布局专有入口：读 B 站离线缓存（需要 Shizuku）
-            biliVisible = true,
+            // 平板布局专有入口：读 B 站离线缓存（需要 Shizuku；legacy 发行版整体裁掉）
+            biliVisible = BuildConfig.FLAVOR != "legacy",
             biliSelected = detail is Detail.BiliCache,
             onOpenBili = { onOpenDetail(Detail.BiliCache) },
             dlnaVisible = true,

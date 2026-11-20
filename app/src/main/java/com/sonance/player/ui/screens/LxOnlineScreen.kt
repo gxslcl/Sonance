@@ -624,7 +624,8 @@ private fun LxExploreBody(
                     )
                 }
                 else -> {
-                    val rows = vm.lxHomeSheets.chunked(2)
+                    val cols = vm.playlistGridColumns
+                    val rows = vm.lxHomeSheets.chunked(cols)
                     itemsIndexed(
                         items = rows,
                         key = { idx, pair -> "sheet_row_${idx}_${pair.first().id}" }
@@ -660,7 +661,7 @@ private fun LxExploreBody(
                                     modifier = Modifier.weight(1f)
                                 )
                             }
-                            if (pair.size == 1) Spacer(Modifier.weight(1f))
+                            repeat(cols - pair.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
                 }
@@ -830,7 +831,8 @@ private fun LxSheetSearchBody(
             subtitle = "可尝试更换关键词或切换顶部音乐平台"
         )
         else -> {
-            val rows = vm.lxSheetResults.chunked(2)
+            val cols = vm.playlistGridColumns
+            val rows = vm.lxSheetResults.chunked(cols)
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 28.dp),
@@ -860,7 +862,7 @@ private fun LxSheetSearchBody(
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        if (pair.size == 1) Spacer(Modifier.weight(1f))
+                        repeat(cols - pair.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
                 if (vm.lxSheetHasMore) {

@@ -260,14 +260,15 @@ fun SongList(
         }
             .distinctUntilChanged()
             // 手指还在滚的时候窗口一直在变，debounce 会把中间那些全丢掉
-            .debounce(180L)
+            // legacy 低配档案：停稳更久才补、一次补更少，避免解码 IO 挤占 UI 线程
+            .debounce(if (com.sonance.player.PerfProfile.legacy) 320L else 180L)
             .collect { range ->
                 if (range == null) return@collect
                 val (first, last) = range
                 val targets = ((first - COVER_PREFETCH_AHEAD)..(last + COVER_PREFETCH_AHEAD))
                     .filter { it in songs.indices && (it < first || it > last) }
                     // 一次最多补 12 张：再多也只是堆队列，对首屏没帮助
-                    .take(12)
+                    .take(if (com.sonance.player.PerfProfile.legacy) 4 else 12)
                 if (targets.isEmpty()) return@collect
                 ArtworkLoader.prefetch(
                     context = context,
@@ -1939,7 +1940,7 @@ fun LibraryPagerScreen(
                 modifier = Modifier.fillMaxSize(),
                 // 多选态下不允许横滑换页：勾选状态是按列表页维护的，换页会让数量和目标对不上
                 userScrollEnabled = !vm.selectionMode,
-                beyondViewportPageCount = 1
+                beyondViewportPageCount = com.sonance.player.PerfProfile.pagerBeyondViewport
             ) { page ->
                 // 本虚拟页用的滚动状态（池化，见 SCROLL_SLOTS 的注释）
                 val pageState = slotStatesNow[slotFor(page)]

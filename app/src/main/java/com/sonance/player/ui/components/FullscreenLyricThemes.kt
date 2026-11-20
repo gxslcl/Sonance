@@ -508,7 +508,7 @@ private fun stageTime(ms: Long): String {
 private fun rememberStageMotion(isPlaying: Boolean): FloatState {
     val time = remember { mutableFloatStateOf(0f) }
     LaunchedEffect(isPlaying) {
-        if (!isPlaying) return@LaunchedEffect
+        if (!isPlaying || !com.sonance.player.PerfProfile.decorAnimEnabled) return@LaunchedEffect
         var previous = withFrameNanos { it }
         while (true) {
             val now = withFrameNanos { it }

@@ -32,7 +32,7 @@ internal class OutputAudioRouter(
     private val onRouteChanged: (AudioOutputRoute) -> Unit
 ) {
     private val appContext = context.applicationContext
-    private val audioManager = appContext.getSystemService(AudioManager::class.java)
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private var callback: AudioDeviceCallback? = null
     private var lastRoute: AudioOutputRoute = detectCurrentRoute(appContext)
@@ -42,6 +42,11 @@ internal class OutputAudioRouter(
     fun start() {
         val am = audioManager ?: return
         if (callback != null) return
+        // AudioDeviceCallback 是 API 23 才有：Android 5 上只报一次当前路由，不监听热插拔
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            dispatch()
+            return
+        }
         val cb = object : AudioDeviceCallback() {
             override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) = dispatch()
             override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) = dispatch()
@@ -70,7 +75,17 @@ internal class OutputAudioRouter(
             context.resources.configuration.smallestScreenWidthDp >= 600
 
         fun detectCurrentRoute(context: Context): AudioOutputRoute {
-            val am = context.getSystemService(AudioManager::class.java)
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            // getDevices / AudioDeviceInfo 都是 API 23+；Android 5 用旧版开关量近似判断
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                @Suppress("DEPRECATION")
+                return when {
+                    am?.isBluetoothA2dpOn == true -> AudioOutputRoute.BLUETOOTH
+                    am?.isWiredHeadsetOn == true -> AudioOutputRoute.WIRED_HEADPHONE
+                    isTabletHardware(context) -> AudioOutputRoute.TABLET_SPEAKER
+                    else -> AudioOutputRoute.PHONE_SPEAKER
+                }
+            }
             val outputs = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS).orEmpty()
             val hasUsb = outputs.any {
                 it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||

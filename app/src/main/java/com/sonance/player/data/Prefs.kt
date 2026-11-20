@@ -184,7 +184,10 @@ class Prefs(context: Context) {
      * "fade" = 直接渐变过去（不左右滑）。设置页「背景切换」里选。
      */
     var artTransitionMode: String
-        get() = sp.getString(KEY_ART_TRANSITION, "slide") ?: "slide"
+        get() = sp.getString(
+            KEY_ART_TRANSITION,
+            if (com.sonance.player.PerfProfile.legacy) "fade" else "slide"
+        ) ?: if (com.sonance.player.PerfProfile.legacy) "fade" else "slide"
         set(v) = sp.edit()
             .putString(KEY_ART_TRANSITION, if (v == "fade") "fade" else "slide")
             .apply()
@@ -214,6 +217,16 @@ class Prefs(context: Context) {
     var viewMode: String
         get() = sp.getString(KEY_VIEW, ViewMode.LIST.name) ?: ViewMode.LIST.name
         set(v) = sp.edit().putString(KEY_VIEW, v).apply()
+
+    /** 在线歌单卡片每行个数（2/3/4）。横屏车机 1920×720 上 2 列太空，设置里可调。 */
+    var playlistGridColumns: Int
+        get() = sp.getInt(KEY_PLAYLIST_GRID_COLUMNS, 2).coerceIn(2, 4)
+        set(v) = sp.edit().putInt(KEY_PLAYLIST_GRID_COLUMNS, v.coerceIn(2, 4)).apply()
+
+    /** 全局字体缩放（百分比）：85 小 / 100 标准 / 115 大 / 130 特大。作用于所有 sp 文字。 */
+    var fontScalePercent: Int
+        get() = sp.getInt(KEY_FONT_SCALE_PERCENT, 100).coerceIn(85, 130)
+        set(v) = sp.edit().putInt(KEY_FONT_SCALE_PERCENT, v.coerceIn(85, 130)).apply()
 
     var lastTab: String
         get() = sp.getString(KEY_TAB, LibraryTab.SONGS.id) ?: LibraryTab.SONGS.id
@@ -1664,6 +1677,8 @@ class Prefs(context: Context) {
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"
         private const val KEY_VIEW = "view_mode"
+        private const val KEY_PLAYLIST_GRID_COLUMNS = "playlist_grid_columns"
+        private const val KEY_FONT_SCALE_PERCENT = "font_scale_percent"
         private const val KEY_TAB = "last_tab"
         private const val KEY_FAV = "favorites"
         private const val KEY_ONLINE_FAVORITES = "online_favorites"

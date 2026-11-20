@@ -23,22 +23,30 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.sonance.player.BuildConfig
 import com.sonance.player.data.SortField
 import com.sonance.player.data.ViewMode
 import com.sonance.player.ui.icon.SonanceIcons
@@ -84,6 +92,21 @@ private fun Modifier.headerGlass(skin: Skin, shape: Shape): Modifier {
         .background(Brush.verticalGradient(listOf(top, bottom)))
 }
 
+/**
+ * 全局「有没有输入框正聚焦」的计数。
+ *
+ * Android 5 上 Compose 的焦点走旧 View 体系：对没有任何聚焦输入的页面执行
+ * `clearFocus(force)` 会触发窗口级焦点重搜索，落到新页面第一个可聚焦节点
+ * （搜索框）上，输入法随之自动弹出。切 tab 时的收键盘动作必须先查这里，
+ * 真有人聚焦才清，否则什么都不做。
+ */
+object InputFocusTracker {
+    private var count by mutableIntStateOf(0)
+    val anyFocused: Boolean get() = count > 0
+    fun acquire() { count++ }
+    fun release() { if (count > 0) count-- }
+}
+
 @Composable
 fun SearchField(
     value: String,
@@ -101,6 +124,21 @@ fun SearchField(
 ) {
     val skin = LocalSkin.current
     var focused by remember { mutableStateOf(false) }
+    // Android 5 兜底：搜索框默认不可聚焦，第一次点按才「解锁」并主动请求焦点。
+    // 这样即便系统因节点移除等原因发起焦点重搜索，也落不到搜索框上。
+    val twoStageFocus = BuildConfig.FLAVOR == "legacy"
+    var tapArmed by remember { mutableStateOf(!twoStageFocus) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(tapArmed) {
+        if (twoStageFocus && tapArmed) {
+            runCatching { focusRequester.requestFocus() }
+            keyboardController?.show()
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { if (focused) InputFocusTracker.release() }
+    }
     Row(
         modifier = modifier
             .height(height)
@@ -149,8 +187,27 @@ fun SearchField(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onFocusChanged { focused = it.isFocused }
+                    .focusRequester(focusRequester)
+                    .focusProperties { canFocus = tapArmed }
+                    .onFocusChanged { state ->
+                        val now = state.isFocused
+                        if (now != focused) {
+                            if (now) InputFocusTracker.acquire() else InputFocusTracker.release()
+                        }
+                        focused = now
+                    }
             )
+            // 未解锁时盖一层透明触摸层：吃掉第一次点按用于解锁，
+            // 焦点请求放在 LaunchedEffect 里等重组完成后再发（canFocus 已生效）
+            if (!tapArmed) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures { tapArmed = true }
+                        }
+                )
+            }
         }
         if (value.isNotEmpty()) {
             Icon(

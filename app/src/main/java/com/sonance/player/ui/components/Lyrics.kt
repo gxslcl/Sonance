@@ -1286,20 +1286,29 @@ internal fun rememberSmoothPosition(
     LaunchedEffect(positionMs, isPlaying, enabled, smooth) {
         val prev = smooth.longValue
         val jump = positionMs - prev
-        // 正常 500ms 刷新之间：保持单调（进度采样偶尔晚几十毫秒，不能回跳）；
+        // 正常刷新之间：保持单调（进度采样偶尔晚几十毫秒，不能回跳）；
         // 明显的前跳/后跳（seek、拖进度条）直接采用新值，高亮立刻重算。
-        smooth.longValue = if (isPlaying && jump in -600L..899L) {
+        // 窗口跟着轮询间隔走：legacy 档案轮询放宽到 1s，正常跳变上限也放宽。
+        val pollWindow = com.sonance.player.PerfProfile.positionPollMs + 399L
+        smooth.longValue = if (isPlaying && jump in -600L..pollWindow) {
             maxOf(prev, positionMs)
         } else {
             positionMs
         }
         // 普通 LRC（整份文件都没有逐字片段）不需要逐帧推进，省掉这个循环
         if (!isPlaying || !enabled) return@LaunchedEffect
+        // legacy 低配档案：逐字高亮按 ~10fps 发布，重组/重绘频率降一个量级
+        val stepNs = if (com.sonance.player.PerfProfile.legacy) 100_000_000L else 0L
         var last = withFrameNanos { it }
+        var accNs = 0L
         while (true) {
             val now = withFrameNanos { it }
-            smooth.longValue += ((now - last) / 1_000_000L).coerceIn(0L, 80L)
+            accNs += (now - last).coerceIn(0L, 80_000_000L)
             last = now
+            if (accNs >= stepNs) {
+                smooth.longValue += accNs / 1_000_000L
+                accNs = 0L
+            }
         }
     }
     return smooth

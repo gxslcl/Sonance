@@ -938,10 +938,10 @@ fun NowPlayingPanel(
     val frac = progressFraction(state)
     val duration = if (state.durationMs > 0) state.durationMs else (song?.durationMs ?: 0L)
     val pulsePhase = rememberThrottledPhase(
-        active = state.isPlaying,
+        active = state.isPlaying && com.sonance.player.PerfProfile.decorAnimEnabled,
         periodMs = 1800,
         reverse = true,
-        stepMs = 40L
+        stepMs = com.sonance.player.PerfProfile.decorStepMs
     )
 
     // ---- 面板内手势：上下切歌 / 左右切层 ----

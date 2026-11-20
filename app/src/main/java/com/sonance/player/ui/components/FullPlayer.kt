@@ -624,6 +624,12 @@ fun FullPlayer(
     }
 
     fun triggerButtonSwitch(dir: Int, fallbackSwitch: () -> Unit) {
+        // legacy 低配档案：跳过整套按钮切歌动效（同步 900px 封面窥探 + 乐观位移 +
+        // 延迟音频派发），直接切歌。封面由常规同步渐变接手，老设备不再掉帧。
+        if (com.sonance.player.PerfProfile.legacy) {
+            fallbackSwitch()
+            return
+        }
         val curIdx = displayedQueueIndex
         val from = queue.getOrNull(curIdx)
         val hasMulti = from != null && layer == PlayerLayer.COVER && !coveredByVinyl && queue.size > 1 && curIdx in queue.indices
@@ -906,7 +912,9 @@ fun FullPlayer(
 
     LaunchedEffect(breathActive, layer, state.isPlaybackActive) {
         snapshotFlow {
-            coveredByVinyl || coverTouched || activeSwitch != null || optimisticTargetIdx >= 0 ||
+            // legacy 低配档案：封面呼吸/音频律动整体静止，不进逐帧循环
+            com.sonance.player.PerfProfile.legacy ||
+                coveredByVinyl || coverTouched || activeSwitch != null || optimisticTargetIdx >= 0 ||
                 pagerState.isScrollInProgress || layerPager.isScrollInProgress ||
                 latestState.isBuffering || (latestQueue.isNotEmpty() && pagerState.settledPage != latestActiveIdx)
         }.collectLatest { frozen ->
@@ -1569,7 +1577,7 @@ private fun PlayingStateIndicator(
         active = isPlaying || level.value > 0.005f,
         periodMs = 46_800,
         reverse = false,
-        stepMs = 33L
+        stepMs = com.sonance.player.PerfProfile.decorStepMs
     )
     val primaryCycles = remember { floatArrayOf(26f, 36f, 29f) }
     val harmonicCycles = remember { floatArrayOf(41f, 53f, 47f) }
@@ -2061,6 +2069,8 @@ private fun VinylCover(
     // 避免 120Hz 触发 CoverArt 重组、暂停时立即进入 0fps、退后台自动停帧，旋转节流到 ~60fps。
     val angleState = remember { mutableFloatStateOf(0f) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    // legacy 低配档案：唱片旋转降到 ~10fps（慢速旋转观感仍可接受），大幅减少离屏合成次数
+    val vinylStepNs = if (com.sonance.player.PerfProfile.legacy) 100_000_000L else 16_000_000L
     LaunchedEffect(isPlaying, lifecycleOwner) {
         if (!isPlaying) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -2071,7 +2081,7 @@ private fun VinylCover(
                 val dtNs = (now - last).coerceIn(0L, 100_000_000L)
                 last = now
                 accNs += dtNs
-                if (accNs >= 16_000_000L) {
+                if (accNs >= vinylStepNs) {
                     angleState.floatValue =
                         (angleState.floatValue + accNs / 1_000_000_000f * VINYL_DEG_PER_SEC) % 360f
                     accNs = 0L
@@ -2779,7 +2789,8 @@ private fun PlayerMoreActionsSheet(
             Spacer(Modifier.height(10.dp))
 
             // 切歌动效切换卡片（点击上一曲 / 下一曲时的封面与歌名过渡）
-            Column(
+            // legacy 低配档案：按钮切歌动效整体停用（直接切歌），这张卡不再展示
+            if (!com.sonance.player.PerfProfile.legacy) Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))

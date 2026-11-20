@@ -725,8 +725,15 @@ private fun VisualizerCanvas(
      */
     LaunchedEffect(physics, live, isPlaying) {
         var lastNanos = 0L
+        // legacy 低配档案：渲染发布上限 ~30fps（物理按真实 dt 积分，降频不失真）
+        val publishStepNs = if (com.sonance.player.PerfProfile.legacy) 33_000_000L else 0L
+        var lastPublished = 0L
         while (true) {
             withFrameNanos { nanos ->
+                if (publishStepNs > 0L && lastPublished != 0L && nanos - lastPublished < publishStepNs) {
+                    return@withFrameNanos
+                }
+                lastPublished = nanos
                 val dt = if (lastNanos == 0L) {
                     1f / 60f
                 } else {

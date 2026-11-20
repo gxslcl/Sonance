@@ -49,3 +49,9 @@
 -keep class rikka.shizuku.ShizukuProvider { *; }
 -keep interface rikka.shizuku.Shizuku$OnRequestPermissionResultListener { *; }
 -keep class rikka.shizuku.ShizukuRemoteProcess { *; }
+
+# jflac 的 StreamInfo.getAudioFormat() / sound.spi 包引用 javax.sound.sampled，
+# Android 上没有这套 API。这些方法永远不会被调用（我们只走 PCM 软解路径），
+# Dalvik/ART 对未调用方法里的缺失引用是软失败，R8 这里放行即可。
+-dontwarn javax.sound.**
+-dontwarn org.jflac.sound.**

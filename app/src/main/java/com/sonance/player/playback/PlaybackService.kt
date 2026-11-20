@@ -41,6 +41,9 @@ import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.Extractor
+import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
@@ -181,7 +184,7 @@ class PlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setRenderersFactory(TapRenderersFactory(this, audioSink))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource()))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource(), extractorsFactory()))
             .build()
 
         syncDspAndPlayerModesIfCold(player)
@@ -390,7 +393,9 @@ class PlaybackService : MediaLibraryService() {
      * 迫使 ExoPlayer 重建指向当前蓝牙通道的 AudioTrack。
      */
     private fun watchBluetoothRoute(player: ExoPlayer) {
-        val am = getSystemService(AudioManager::class.java) ?: return
+        // 设备枚举 / 回调全是 API 23+：Android 5 上没有这套监听，直接跳过
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         var lastRoute = OutputAudioRouter.detectCurrentRoute(this)
         var lastBtIds = bluetoothMediaDeviceIds(am)
 
@@ -782,7 +787,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun registerScreenStateObserver() {
-        isScreenInteractive = getSystemService(PowerManager::class.java)?.isInteractive != false
+        isScreenInteractive = (getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive != false
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 when (intent?.action) {
@@ -1657,7 +1662,7 @@ class PlaybackService : MediaLibraryService() {
             }
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             runCatching {
-                getSystemService(NotificationManager::class.java)
+                (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
                     ?.cancel(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID)
             }
             stopSelf()
@@ -1742,7 +1747,7 @@ class PlaybackService : MediaLibraryService() {
         pendingBtRecovery?.let { mainHandler.removeCallbacks(it) }
         pendingBtRecovery = null
         audioDeviceCallback?.let { cb ->
-            runCatching { getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb) }
+            runCatching { (getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.unregisterAudioDeviceCallback(cb) }
         }
         audioDeviceCallback = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -1782,3 +1787,18 @@ private class TapRenderersFactory(
         enableAudioTrackPlaybackParams: Boolean
     ): AudioSink = audioSink
 }
+
+/**
+ * legacy：FLAC 一律走 jflac 软解（老车机可能没有 FLAC 硬解器，厂商实现也参差），
+ * 软解输出 PCM 后 EQ/音效/可视化链路不变。modern：保持默认提取器不动，
+ * [com.sonance.player.PerfProfile.legacy] 是编译期常量，R8 会把软解分支整体裁掉。
+ */
+private fun extractorsFactory(): ExtractorsFactory =
+    if (com.sonance.player.PerfProfile.legacy) {
+        val defaults = DefaultExtractorsFactory()
+        ExtractorsFactory {
+            arrayOf<Extractor>(JflacExtractor()) + defaults.createExtractors()
+        }
+    } else {
+        DefaultExtractorsFactory()
+    }

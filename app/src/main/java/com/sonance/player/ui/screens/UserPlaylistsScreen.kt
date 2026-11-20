@@ -164,7 +164,7 @@ private fun PlaylistListPage(
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
+                columns = GridCells.Fixed(vm.playlistGridColumns),
                 state = gridState ?: rememberLazyGridState(),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),

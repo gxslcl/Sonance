@@ -495,27 +495,28 @@ fun PlayPauseButton(
     val morphRunning = dropletActive || morphBlendState.value > 0.01f
 
     // 装饰性慢速动效统一按 ~30fps 发布且仅在播放 + 前台可见时运行；暂停后即刻进入 0fps 静止态。
+    // legacy 低配档案：呼吸/公转/形变全部静止（0fps），只保留按压与一次性水波纹反馈。
     val breathState = rememberThrottledPhase(
-        active = animRunning,
+        active = animRunning && com.sonance.player.PerfProfile.decorAnimEnabled,
         periodMs = 2200,
         reverse = true,
-        stepMs = 33L
+        stepMs = com.sonance.player.PerfProfile.decorStepMs
     )
-    val orbitState = if (hasCustomPalette) rememberButtonOrbit(isPlaying) else null
+    val orbitState = if (hasCustomPalette) rememberButtonOrbit(isPlaying && com.sonance.player.PerfProfile.decorAnimEnabled) else null
     val orbitPhaseState = if (!hasCustomPalette) {
         rememberThrottledPhase(
-            active = animRunning,
+            active = animRunning && com.sonance.player.PerfProfile.decorAnimEnabled,
             periodMs = 11000,
             reverse = false,
-            stepMs = 33L,
+            stepMs = com.sonance.player.PerfProfile.decorStepMs,
             initial = 135f / 360f
         )
     } else null
     val morphState = rememberThrottledPhase(
-        active = morphRunning,
+        active = morphRunning && com.sonance.player.PerfProfile.decorAnimEnabled,
         periodMs = 5500,
         reverse = true,
-        stepMs = 33L
+        stepMs = com.sonance.player.PerfProfile.decorStepMs
     )
     val lastMorphRef = remember { floatArrayOf(0f) }
 
@@ -1486,7 +1487,7 @@ fun EqualizerBars(
         active = true,
         periodMs = 1100,
         reverse = false,
-        stepMs = 33L
+        stepMs = com.sonance.player.PerfProfile.decorStepMs
     )
 
     Canvas(boxModifier) {

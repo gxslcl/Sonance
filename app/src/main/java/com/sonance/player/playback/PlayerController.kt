@@ -321,7 +321,7 @@ class PlayerController(private val context: Context) {
                             durationMs = if (c.duration > 0) c.duration else it.durationMs
                         )
                     }
-                    delay(500)
+                    delay(com.sonance.player.PerfProfile.positionPollMs)
                 }
             } finally {
                 ticker = null

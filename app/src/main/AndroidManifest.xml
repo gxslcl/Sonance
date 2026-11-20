@@ -41,12 +41,7 @@
     <!-- 桌面歌词悬浮窗权限 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
-    <!--
-      Shizuku：以 shell 身份读 B 站缓存目录（Android/data/tv.danmaku.bilibilihd）。
-      Android 11+ 普通应用无法访问其他应用的 Android/data，shell 是免 root 的唯一通道。
-      没有装 Shizuku 或没授权时这条权限不生效，功能会自动降级为「未就绪」提示。
-    -->
-    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!-- Shizuku 权限声明只属于 modern 发行版，见 src/modern/AndroidManifest.xml -->
 
 
     <uses-feature
@@ -178,13 +173,7 @@
             android:theme="@style/Theme.Sonance"
             android:supportsPictureInPicture="true" />
 
-        <!-- Shizuku 的权限回调 provider。authorities 必须带包名前缀，不能和别的应用冲突 -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:enabled="true"
-            android:exported="true"
-            android:multiprocess="false" />
+        <!-- Shizuku 的权限回调 provider 只属于 modern 发行版，见 src/modern/AndroidManifest.xml -->
 
         <!--
           把下载的封面交给通知栏 / 锁屏用的 FileProvider。

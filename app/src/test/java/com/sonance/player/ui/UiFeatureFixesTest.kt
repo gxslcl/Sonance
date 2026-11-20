@@ -103,7 +103,10 @@ class UiFeatureFixesTest {
         val pinyinIdx = src.indexOf("private var pinyinIndex by mutableStateOf")
         val sortKeysIdx = src.indexOf("var sortKeys by mutableStateOf")
         val firstInitIdx = Regex("(?m)^\\s*init\\s*\\{").find(src)?.range?.first ?: -1
-        val cacheRestoreIdx = src.indexOf("val cachedJson = prefs.songsCacheJson")
+        // 缓存恢复已抽成 restoreSongsCacheBlocking()，这里钉住它的「调用点」
+        // （而非函数体）必须落在所有属性委托之后，保证恢复时属性都已初始化。
+        val cacheRestoreIdx = Regex("(?<!fun )restoreSongsCacheBlocking\\(\\)")
+            .find(src)?.range?.first ?: -1
         val lastDelegateIdx = Regex(
             "(?m)^\\s*(?:private\\s+|internal\\s+)?va[lr]\\s+\\w+\\s+by\\s+mutableStateOf"
         ).findAll(src).lastOrNull()?.range?.first ?: -1

@@ -25,6 +25,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
+        // Android 5 的 Compose 焦点走旧 View 体系：窗口重获焦点时会把焦点搜索落到
+        // 新页面第一个可聚焦节点（搜索框），导致切栏目就弹输入法。从窗口层面压住。
+        window.setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        )
         requestHighRefreshRate()
         enableEdgeToEdge()
         if (savedInstanceState == null) {
@@ -120,6 +126,15 @@ class MainActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 windowManager.defaultDisplay
             } ?: return
+
+            // supportedModes / preferredDisplayModeId 都是 API 23 才有；
+            // Android 5 只声明一个期望刷新率（API 21 可用），不挑显示模式。
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                window.attributes = window.attributes.apply {
+                    preferredRefreshRate = display.refreshRate
+                }
+                return
+            }
 
             val modes = display.supportedModes
             val best = modes

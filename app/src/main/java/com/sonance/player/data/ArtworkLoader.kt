@@ -157,12 +157,16 @@ object ArtworkLoader {
      * 缩到 768（2.3MB/张）之后三页加一起也才 7MB，翻页不再互相顶掉。
      * 屏幕上一个封面最多也就 400 多 dp，768px 完全够看。
      */
-    private const val LARGE_PX = 768
+    private val LARGE_PX = com.sonance.player.PerfProfile.artworkLargePx
 
     /** 按**字节**算上限，不是按条数 —— 80 张 900px 位图能吃掉一百多 MB */
     private val maxBytes: Int = run {
         val heap = Runtime.getRuntime().maxMemory()
-        (heap / 8L).coerceIn(8L * 1024 * 1024, 48L * 1024 * 1024).toInt()
+        if (com.sonance.player.PerfProfile.legacy) {
+            (heap / 16L).coerceIn(4L * 1024 * 1024, 24L * 1024 * 1024).toInt()
+        } else {
+            (heap / 8L).coerceIn(8L * 1024 * 1024, 48L * 1024 * 1024).toInt()
+        }
     }
 
     /**
@@ -348,8 +352,8 @@ object ArtworkLoader {
      * 非滑动档取 6：一屏十来行基本能一波跑完，而 256px 的 RGB_565 缩略图
      * 每张约 128KB，6 张同时在解也就几百 KB，内存无压力。
      */
-    private val idleGate = Semaphore(permits = 6)
-    private val scrollGate = Semaphore(permits = 2)
+    private val idleGate = Semaphore(permits = if (com.sonance.player.PerfProfile.legacy) 3 else 6)
+    private val scrollGate = Semaphore(permits = if (com.sonance.player.PerfProfile.legacy) 1 else 2)
 
     /** 在闸门里跑 [block]。`paused` 在**真正开工时**读，排队期间状态变了也能跟上 */
     private suspend fun <T> withDecodeGate(block: suspend () -> T): T =
@@ -628,12 +632,14 @@ object ArtworkLoader {
         val size = bucketOf(sizePx)
         return withContext(Dispatchers.IO) {
             withDecodeGate {
+                // legacy 低配档案：手动挑选的封面也用 RGB_565，内存减半（无透明通道需求）
+                val selectedConfig = if (com.sonance.player.PerfProfile.legacy) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
                 val selectedBytes = CoverCache.lookupSelected(context, songId, sourceUri)
-                var decoded = selectedBytes?.let { decodeSampled(it, size, Bitmap.Config.ARGB_8888) }
+                var decoded = selectedBytes?.let { decodeSampled(it, size, selectedConfig) }
                 if (decoded == null && legacyPinned && coverKey != null) {
                     val legacy = CoverCache.lookup(context, coverKey)
                     if (legacy is CoverCache.Lookup.Hit) {
-                        decoded = decodeSampled(legacy.bytes, size, Bitmap.Config.ARGB_8888)
+                        decoded = decodeSampled(legacy.bytes, size, selectedConfig)
                         if (decoded != null && selectedBytes == null) {
                             // 只复制可解码的旧图，不删除旧缓存；迁移失败仍可继续使用旧数据。
                             ifSelectedGeneration(songId, version) {

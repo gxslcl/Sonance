@@ -309,6 +309,20 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var viewMode by mutableStateOf(runCatching { ViewMode.valueOf(prefs.viewMode) }.getOrDefault(ViewMode.LIST))
         private set
+    var playlistGridColumns by mutableIntStateOf(prefs.playlistGridColumns)
+        private set
+    var fontScalePercent by mutableIntStateOf(prefs.fontScalePercent)
+        private set
+
+    fun changePlaylistGridColumns(value: Int) {
+        playlistGridColumns = value.coerceIn(2, 4)
+        prefs.playlistGridColumns = playlistGridColumns
+    }
+
+    fun changeFontScalePercent(value: Int) {
+        fontScalePercent = value.coerceIn(85, 130)
+        prefs.fontScalePercent = fontScalePercent
+    }
     var tab by mutableStateOf(LibraryTab.fromId(prefs.lastTab))
         private set
     var searchQuery by mutableStateOf("")
@@ -766,7 +780,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 恢复列表位置附近少量预热，避免开头 80 个后台任务占住可见行的解码队列。
         val start = (readLibraryScroll().firstOrNull()?.first ?: 0).coerceIn(0, songs.size)
-        val list = songs.drop(start).take(24)
+        val list = songs.drop(start).take(if (com.sonance.player.PerfProfile.legacy) 8 else 24)
         if (list.isEmpty()) return
         ArtworkLoader.warmUp(
             context = app,
@@ -1008,6 +1022,48 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             resolveStreamIfMissing(activeSong)
         }
         return true
+    }
+
+    /**
+     * 读上次扫描的歌曲缓存并重建分组/索引。纯数据操作，可在任意线程调用；
+     * modern 在 init 里同步跑（保持原时序），legacy 挪到 Dispatchers.Default。
+     */
+    private fun restoreSongsCacheBlocking() {
+        val cachedJson = prefs.songsCacheJson
+        if (cachedJson.isNullOrBlank()) return
+        runCatching {
+            val list = decodeSongsFromJson(cachedJson)
+            if (list.isNotEmpty()) {
+                val visible = filterHidden(list)
+                // 排序键与歌曲缓存配套落盘：冷启动第一帧就是拼音序，
+                // 不再"先码点序显示、后台算完整表重排"地闪一下。
+                // 旧版本没存过索引 / 索引缺歌 / 索引损坏时退回后台重建，不阻断歌曲缓存恢复。
+                val cachedIndex = prefs.libraryIndexJson?.let {
+                    runCatching { decodeLibraryIndexJson(it) }.getOrNull()
+                }
+                if (cachedIndex != null &&
+                    libraryIndexCovers(visible.map { it.id }, cachedIndex.first, cachedIndex.second)
+                ) {
+                    pinyinIndex = cachedIndex.first
+                    sortKeys = cachedIndex.second
+                } else {
+                    rebuildPinyinIndex(visible)
+                }
+                songs = visible
+                albums = MediaRepository.groupAlbums(visible)
+                artists = MediaRepository.groupArtists(visible)
+                folders = MediaRepository.groupFolders(visible)
+                scanState = ScanState.READY
+                // 曲库就位 → 提前把开头这些歌的封面解出来，
+                // 免得重启后第一屏全是占位图（见 warmUpCovers 的说明）
+                warmUpCovers()
+            } else if (prefs.lastScanAt > 0L) {
+                // 已经明确扫描过且缓存明确为空表 `[]`（例如排除了所有目录），冷启动不再强扫
+                scanState = ScanState.READY
+            }
+        }.onFailure {
+            android.util.Log.w("SonanceScan", "读取歌曲缓存失败: ${it.message}")
+        }
     }
 
     private fun restorePlaybackState() {
@@ -8514,46 +8570,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 优先读上一次扫描的缓存：冷启动不再强制扫一遍 MediaStore。
         // PermissionGate 只在 scanState == IDLE 时才自动扫描，所以加载到缓存
         // 就直接置为 READY，PermissionGate 不会再触发 scan。
-        val cachedJson = prefs.songsCacheJson
-        if (!cachedJson.isNullOrBlank()) {
-            runCatching {
-                val list = decodeSongsFromJson(cachedJson)
-                if (list.isNotEmpty()) {
-                    val visible = filterHidden(list)
-                    // 排序键与歌曲缓存配套落盘：冷启动第一帧就是拼音序，
-                    // 不再"先码点序显示、后台算完整表重排"地闪一下。
-                    // 旧版本没存过索引 / 索引缺歌 / 索引损坏时退回后台重建，不阻断歌曲缓存恢复。
-                    val cachedIndex = prefs.libraryIndexJson?.let {
-                        runCatching { decodeLibraryIndexJson(it) }.getOrNull()
-                    }
-                    if (cachedIndex != null &&
-                        libraryIndexCovers(visible.map { it.id }, cachedIndex.first, cachedIndex.second)
-                    ) {
-                        pinyinIndex = cachedIndex.first
-                        sortKeys = cachedIndex.second
-                    } else {
-                        rebuildPinyinIndex(visible)
-                    }
-                    songs = visible
-                    albums = MediaRepository.groupAlbums(visible)
-                    artists = MediaRepository.groupArtists(visible)
-                    folders = MediaRepository.groupFolders(visible)
-                    scanState = ScanState.READY
-                    // 曲库就位 → 提前把开头这些歌的封面解出来，
-                    // 免得重启后第一屏全是占位图（见 warmUpCovers 的说明）
-                    warmUpCovers()
-                } else if (prefs.lastScanAt > 0L) {
-                    // 已经明确扫描过且缓存明确为空表 `[]`（例如排除了所有目录），冷启动不再强扫
-                    scanState = ScanState.READY
+        if (com.sonance.player.PerfProfile.legacy) {
+            // 低配档案：JSON 解码 + 拼音索引 + 分组全部移出主线程，冷启动首帧不被阻塞。
+            // 先置 SCANNING 挡住 PermissionGate 的自动扫描，解码完再落 READY / 补扫。
+            scanState = ScanState.SCANNING
+            viewModelScope.launch {
+                withContext(Dispatchers.Default) { restoreSongsCacheBlocking() }
+                if (scanState != ScanState.READY) {
+                    scanState = ScanState.IDLE
+                    scan()
                 }
-            }.onFailure {
-                android.util.Log.w("SonanceScan", "读取歌曲缓存失败: ${it.message}")
+                restorePlaybackState()
             }
+        } else {
+            restoreSongsCacheBlocking()
+            // 曲库（缓存）就绪之后恢复上次的播放现场。
+            // 放在最后：它要按歌曲 id 去 songs 里查，曲库没加载出来时无从恢复。
+            restorePlaybackState()
         }
-
-        // 曲库（缓存）就绪之后恢复上次的播放现场。
-        // 放在最后：它要按歌曲 id 去 songs 里查，曲库没加载出来时无从恢复。
-        restorePlaybackState()
 
         // 恢复完成、播放器真正报出 mediaId 之后再请求列表定位。
         // 不能恢复完直接 requestScrollToCurrent()：那一刻 mediaId 还是 -1，

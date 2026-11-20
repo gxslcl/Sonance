@@ -220,9 +220,9 @@ object QmcCrypto {
 
     /** ekey（原始 base64 字节）→ 真实密钥；格式非法返回 null */
     fun deriveKey(rawKey: ByteArray): ByteArray? {
-        val decoded = runCatching {
-            java.util.Base64.getDecoder().decode(rawKey)
-        }.getOrNull() ?: return null
+        // 复用 NcmDecoder 的纯 Kotlin Base64：java.util.Base64 要 API 26，
+        // Android 5/6 专版（minSdk 21）上会直接 NoClassDefFoundError。
+        val decoded = NcmDecoder.base64Decode(String(rawKey, Charsets.US_ASCII)) ?: return null
         if (decoded.size < 16) return null
 
         val v1Input = if (String(decoded.copyOfRange(0, minOf(decoded.size, RAW_KEY_PREFIX_V2.length)), Charsets.UTF_8) == RAW_KEY_PREFIX_V2) {
@@ -230,7 +230,7 @@ object QmcCrypto {
             // EncV2：双层 TEA → 再 base64
             val buf1 = teaDecrypt(v2Raw, DERIVE_V2_KEY1) ?: return null
             val buf2 = teaDecrypt(buf1, DERIVE_V2_KEY2) ?: return null
-            runCatching { java.util.Base64.getDecoder().decode(buf2) }.getOrNull() ?: return null
+            NcmDecoder.base64Decode(String(buf2, Charsets.US_ASCII)) ?: return null
         } else {
             decoded
         }

@@ -145,7 +145,7 @@ fun NativeCoverWallScreen(
     val engine = remember { WallEngine(tune).apply { markInput(wallNow()) } }
     val painter = remember(d) { WallCardPainter(d) }
     val cache = remember {
-        object : LruCache<String, Bitmap>(64 * 1024 * 1024) {
+        object : LruCache<String, Bitmap>(com.sonance.player.PerfProfile.wallLruMb * 1024 * 1024) {
             override fun sizeOf(key: String, value: Bitmap) = value.byteCount
         }
     }
@@ -221,14 +221,19 @@ fun NativeCoverWallScreen(
     val hapticRef = rememberUpdatedState(::haptic)
 
     fun cacheKey(t: WallTile): String =
-        "${t.album.key}|${t.spec.title.length}:${t.spec.title}|${t.spec.artist.length}:${t.spec.artist}|${t.spec.style}|${if (t.size * d > 280f) 512 else 256}"
+        "${t.album.key}|${t.spec.title.length}:${t.spec.title}|${t.spec.artist.length}:${t.spec.artist}|${t.spec.style}|${if (t.size * d > 280f) com.sonance.player.PerfProfile.wallTextureLarge else com.sonance.player.PerfProfile.wallTextureSmall}"
 
     suspend fun texture(t: WallTile): Bitmap {
         val key = cacheKey(t)
         cache.get(key)?.let { return it }
         return withContext(Dispatchers.Default) {
             ensureActive()
-            renderCoverBitmap(t.spec, if (t.size * d > 280f) 512 else 256, 0f)
+            renderCoverBitmap(
+                t.spec,
+                if (t.size * d > 280f) com.sonance.player.PerfProfile.wallTextureLarge
+                else com.sonance.player.PerfProfile.wallTextureSmall,
+                0f
+            )
         }.also { cache.put(key, it) }
     }
 
@@ -485,10 +490,10 @@ fun NativeCoverWallScreen(
     }
 
     DisposableEffect(tune.parallax, resumed, view) {
-        val manager = context.getSystemService(SensorManager::class.java)
+        val manager = context.getSystemService(android.content.Context.SENSOR_SERVICE) as? SensorManager
         val sensor = manager?.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
             ?: manager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val listener = if (tune.parallax && resumed && sensor != null) object : SensorEventListener {
+        val listener = if (tune.parallax && resumed && sensor != null && com.sonance.player.PerfProfile.wallParallaxEnabled) object : SensorEventListener {
             var primed = false
             var baseX = 0f
             var baseY = 0f
@@ -650,10 +655,15 @@ fun NativeCoverWallScreen(
         var last = withFrameNanos { it }
         var requestedY = Float.NaN
         var pressHaptic = false
+        // legacy 低配档案：引擎步进/重绘上限 ~30fps，自动漂移与呼吸唤醒关闭
+        val frameStepNs = if (com.sonance.player.PerfProfile.legacy) 33_000_000L else 0L
+        var lastStep = 0L
         while (isActive) {
             val frame = withFrameNanos { it }
+            if (frameStepNs > 0L && lastStep != 0L && frame - lastStep < frameStepNs) continue
+            lastStep = frame
             val now = wallNow()
-            val driftNow = engine.driftCond(now)
+            val driftNow = com.sonance.player.PerfProfile.wallDriftEnabled && engine.driftCond(now)
             if (driftNow != drifting) drifting = driftNow
             val dt = ((frame - last) / 1e9f).coerceIn(0.001f, 0.05f)
             last = frame
@@ -683,7 +693,7 @@ fun NativeCoverWallScreen(
                 val glowVisible = engine.current?.let {
                     it.y + it.size > engine.scrollY && it.y < engine.scrollY + engine.heightCss
                 } == true && focus == null
-                val wait = if (glowVisible) min(driftWait ?: 40L, 40L) else driftWait
+                val wait = if (glowVisible && com.sonance.player.PerfProfile.wallDriftEnabled) min(driftWait ?: 40L, 40L) else driftWait
                 if (wait == null) wake.receive()
                 else withTimeoutOrNull(wait.coerceAtLeast(1)) { wake.receive() }
                 drawTick = System.nanoTime()
@@ -695,11 +705,18 @@ fun NativeCoverWallScreen(
     LaunchedEffect(resumed, state.isPlaying, focus, tuning, tune.vinyl) {
         if (!resumed || !state.isPlaying || focus == null || tuning || !tune.vinyl)
             return@LaunchedEffect
+        // legacy 低配档案：聚焦唱片旋转降到 ~10fps
+        val stepNs = if (com.sonance.player.PerfProfile.legacy) 100_000_000L else 0L
         var last = withFrameNanos { it }
+        var accNs = 0L
         while (isActive) {
             val n = withFrameNanos { it }
-            discAngle = (discAngle + (n - last) / 1e9f * 100f) % 360f
+            accNs += (n - last).coerceIn(0L, 100_000_000L)
             last = n
+            if (accNs >= stepNs) {
+                discAngle = (discAngle + accNs / 1e9f * 100f) % 360f
+                accNs = 0L
+            }
         }
     }
 

@@ -105,6 +105,8 @@ object DesktopLyricsManager {
 
     /** 检查是否有悬浮窗权限 */
     fun hasOverlayPermission(context: Context): Boolean {
+        // Android 6 以下悬浮窗权限随安装授予，没有运行时授权入口
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
         return Settings.canDrawOverlays(context)
     }
 

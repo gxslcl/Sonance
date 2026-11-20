@@ -94,6 +94,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.sonance.player.BuildConfig
 import com.sonance.player.R
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.GlowMode
@@ -180,6 +181,8 @@ private val SETTINGS_MODULES = listOf(
         "沉浸式背景 封面 晕染 玻璃 切歌过渡 滑动切换 渐变 渐变时长 不透明度 模糊"),
     SettingsModule("list", SettingsCategory.APPEARANCE, "列表外观与索引",
         "行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 字母索引 滚动条震动 紧凑 卡片"),
+    SettingsModule("fontGrid", SettingsCategory.APPEARANCE, "字体大小与歌单布局",
+        "字体 字号 全局字体 放大 缩小 特大 歌单 每行 列数 网格 横屏 车机"),
     SettingsModule("mini", SettingsCategory.APPEARANCE, "底部播放条",
         "播放条 液态玻璃 纯色 极简 进度 环形 数字时间进度 高度 离底部 圆角 左滑 右滑 切歌 音量"),
     SettingsModule("iconSet", SettingsCategory.APPEARANCE, "应用内图标风格",
@@ -190,7 +193,8 @@ private val SETTINGS_MODULES = listOf(
         "小组件 尺寸 固定配色"),
     SettingsModule("play", SettingsCategory.PLAYBACK, "均衡器与睡眠定时",
         "均衡器 EQ 音效 杜比 系统音效 睡眠定时 定时器 播完当前"),
-    SettingsModule("output", SettingsCategory.PLAYBACK, "USB 独占 · 无缝 · 淡入淡出",
+    SettingsModule("output", SettingsCategory.PLAYBACK,
+        if (BuildConfig.FLAVOR == "legacy") "无缝 · 淡入淡出" else "USB 独占 · 无缝 · 淡入淡出",
         "USB 独占 bit-perfect DAC 无缝播放 淡入淡出 淡化时长 播放提示 DLNA 投屏 蓝牙 采样率"),
     SettingsModule("system", SettingsCategory.PLAYBACK, "通知、播控与灵动岛",
         "通知 锁屏 灵动岛 胶囊 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知"),
@@ -383,7 +387,11 @@ private fun SettingsCategoryPage(
                 topSpacing = 10.dp
             )
             RestoreSection(vm = vm)
-            NeteaseCacheSection(vm = vm)
+            // 网易云缓存嗅探依赖 Shizuku，legacy（Android 5/6）发行版不提供；
+            // 免 Shizuku 的本机缓存转换（LocalCacheSection）两边都保留。
+            if (BuildConfig.FLAVOR != "legacy") {
+                NeteaseCacheSection(vm = vm)
+            }
             LocalCacheSection(vm = vm)
         }
 
@@ -413,6 +421,7 @@ private fun SettingsModuleContent(
 
         "shellBg" -> ShellBackgroundSection(vm = vm)
         "list" -> ListAppearanceSection(vm = vm)
+        "fontGrid" -> FontAndGridSection(vm = vm)
         "mini" -> MiniPlayerSettingsSection(vm = vm)
         "iconSet" -> IconSetSettingsSection(vm = vm)
 
@@ -1509,6 +1518,87 @@ private fun IconSetSettingsSection(vm: SonanceViewModel) {
  * 列表外观：行与行之间怎么分开、封面大小与右侧快速索引。
  */
 @Composable
+private fun FontAndGridSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val fontOptions = listOf(85 to "小", 100 to "标准", 115 to "大", 130 to "特大")
+    val fontLabel = fontOptions.firstOrNull { it.first == vm.fontScalePercent }?.second ?: "标准"
+    SettingsSectionCard(
+        title = "字体大小与歌单布局",
+        summary = "字体$fontLabel · 歌单每行 ${vm.playlistGridColumns} 个",
+        icon = SonanceIcons.ListView
+    ) {
+        Text("全局字体大小", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "作用于整个应用的文字（列表、设置、播放页等），立即生效。歌词字号在「歌词显示与外观」里单独调。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            fontOptions.forEach { (percent, label) ->
+                val on = percent == vm.fontScalePercent
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeFontScalePercent(percent) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Text("歌单每行个数", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "在线歌单与自建歌单的卡片网格。横屏宽屏（如车机 1920×720）建议 3 或 4 个，竖屏手机 2 个最合适。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(2, 3, 4).forEach { n ->
+                val on = n == vm.playlistGridColumns
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changePlaylistGridColumns(n) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "每行 $n 个",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ListAppearanceSection(vm: SonanceViewModel) {
     val skin = LocalSkin.current
     val infoSummary = when {
@@ -1768,13 +1858,16 @@ private fun AudioOutputSettingsSection(
     onOpenDlna: () -> Unit = {}
 ) {
     val summary = buildString {
-        append(if (vm.usbExclusiveEnabled) "USB 独占开" else "USB 独占关")
-        append(if (vm.gaplessEnabled) " · 无缝" else " · 曲间停顿")
+        if (BuildConfig.FLAVOR != "legacy") {
+            append(if (vm.usbExclusiveEnabled) "USB 独占开" else "USB 独占关")
+        }
+        if (isNotEmpty()) append(" · ")
+        append(if (vm.gaplessEnabled) "无缝" else "曲间停顿")
         if (vm.crossfadeEnabled) append(" · 淡化 ${vm.crossfadeSec} 秒")
         if (vm.playToastEnabled) append(" · 播放提示开")
     }
     SettingsSectionCard(
-        title = "USB 独占 · 无缝 · 淡入淡出",
+        title = if (BuildConfig.FLAVOR == "legacy") "无缝 · 淡入淡出" else "USB 独占 · 无缝 · 淡入淡出",
         summary = summary,
         icon = SonanceIcons.Volume,
         badge = when {
@@ -1783,12 +1876,14 @@ private fun AudioOutputSettingsSection(
             else -> null
         }
     ) {
-        SettingsSwitchRow(
-            title = "USB 独占输出",
-            subtitle = "bit-perfect 直通 USB DAC / 耳机，绕过系统混音器（需 Android 14+，参考海贝音乐）",
-            checked = vm.usbExclusiveEnabled,
-            onCheckedChange = { vm.changeUsbExclusive(it) }
-        )
+        if (BuildConfig.FLAVOR != "legacy") {
+            SettingsSwitchRow(
+                title = "USB 独占输出",
+                subtitle = "bit-perfect 直通 USB DAC / 耳机，绕过系统混音器（需 Android 14+，参考海贝音乐）",
+                checked = vm.usbExclusiveEnabled,
+                onCheckedChange = { vm.changeUsbExclusive(it) }
+            )
+        }
         SettingsSwitchRow(
             title = "无缝播放",
             subtitle = "曲目之间无间隙衔接；关闭后自动续播时插入短暂停顿",

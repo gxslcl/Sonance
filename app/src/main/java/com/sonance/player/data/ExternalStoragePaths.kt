@@ -62,7 +62,7 @@ object ExternalStoragePaths {
         }
 
         // 1. StorageManager.storageVolumes（标准 Android USB OTG / 可移动卷发现入口）
-        val sm = runCatching { context.getSystemService(StorageManager::class.java) }.getOrNull()
+        val sm = runCatching { context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager }.getOrNull()
         runCatching { sm?.storageVolumes }.getOrNull()?.forEach { vol ->
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

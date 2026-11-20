@@ -35,7 +35,7 @@ internal object NcMetaFetcher {
     private const val TAG = "SonanceNc"
 
     /** 封面用多大：800px 与在线封面库 [OnlineCover.FULL_PX] 同档，写进文件足够 */
-    private const val COVER_PX = OnlineCover.FULL_PX
+    private val COVER_PX = OnlineCover.FULL_PX
 
     /**
      * 按歌曲 ID 补全元数据。

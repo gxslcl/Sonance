@@ -44,7 +44,9 @@ data class CoverCandidate(
 object OnlineCover {
 
     /** 候选与歌单/搜索缩略图内存缓存（加大容量避免长列表回滑频繁淘汰重下） */
-    val thumbCache = android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(240)
+    val thumbCache = android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(
+        com.sonance.player.PerfProfile.onlineCoverCacheCount
+    )
 
     private val TRACK_PREFIX_REGEX = Regex("^\\[?\\d{1,3}\\]?\\s*[-._、)）]?\\s*")
     private val ARTWORK_SIZE_REGEX = Regex("/\\d+x\\d+bb\\.(jpg|png)$")
@@ -57,8 +59,8 @@ object OnlineCover {
 
     /** 列表缩略图尺寸 */
     const val THUMB_PX = 200
-    /** 实际使用尺寸 */
-    const val FULL_PX = 800
+    /** 实际使用尺寸（legacy 低配档案降到 512，省解码与内存） */
+    val FULL_PX = com.sonance.player.PerfProfile.onlineCoverCachePx
 
     @androidx.annotation.VisibleForTesting
     internal fun buildSearchUrl(term: String, limit: Int, country: String?, entity: String = "song"): String? {

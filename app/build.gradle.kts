@@ -20,6 +20,23 @@ android {
         resourceConfigurations += listOf("zh", "en")
     }
 
+    // 双发行版：modern 是主力包（Android 7+，全功能）；legacy 是 Android 5/6 老机专版。
+    // 两者共用同一份 src/main 代码与同一个 applicationId（目标设备不同，不会共存）。
+    // 差异只有三处：minSdk、Shizuku 依赖与源码（src/modern vs src/legacy 的 ShizukuShell）、
+    // 以及 BuildConfig.FLAVOR 门控的少量 UI 入口（B站缓存 / 网易云嗅探 / USB 独占）。
+    flavorDimensions += "api"
+    productFlavors {
+        create("modern") {
+            dimension = "api"
+            isDefault = true
+            minSdk = 24
+        }
+        create("legacy") {
+            dimension = "api"
+            minSdk = 21
+        }
+    }
+
     testOptions {
         unitTests {
             // 让 android.util.Log / org.json 这类 framework 桩方法返回默认值而不是抛
@@ -70,10 +87,14 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // java.time / java.util.stream 这些 API 26+ 的类在老系统上靠脱糖运行。
+        // legacy（API 21）必需；modern 也顺带修掉 Android 7.0/7.1 上的同类隐患。
+        isCoreLibraryDesugaringEnabled = true
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -102,6 +123,8 @@ composeCompiler {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)
 
@@ -123,11 +146,17 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.5.0")
     implementation("androidx.media3:media3-session:1.5.0")
 
+    // FLAC 纯 Java 软解（org.jflac）：老车机/精简 ROM 可能没有 FLAC 的 MediaCodec
+    // 解码器，硬件解不了时由 JflacExtractor 软解成 PCM 兜底。只被 legacy 路径引用，
+    // modern 的 R8 会把整个解码器裁掉。本地 jar 避免构建期再走网络。
+    implementation(files("libs/jflac-codec-1.5.2.jar"))
+
     // Shizuku：以 shell（uid 2000）身份读 Android/data 下的 B 站缓存目录。
     // Android 11+ 起普通应用（含 SAF、所有文件访问权限）都进不去那个目录，
     // shell 是唯一不需要 root 的通道。provider 负责权限请求的回调。
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // 只进 modern：Shizuku 自身要求 Android 6+，legacy 用同包名的空实现顶替。
+    "modernImplementation"("dev.rikka.shizuku:api:13.1.5")
+    "modernImplementation"("dev.rikka.shizuku:provider:13.1.5")
 
     implementation("androidx.documentfile:documentfile:1.0.1")
 
