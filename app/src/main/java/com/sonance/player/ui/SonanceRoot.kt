@@ -23,6 +23,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,11 +52,13 @@ import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -144,7 +147,8 @@ import com.sonance.player.ui.screens.SettingsScreen
 import com.sonance.player.ui.screens.SongCollectionScreen
 import com.sonance.player.ui.screens.SongsScreen
 import com.sonance.player.ui.screens.UserPlaylistsScreen
-import com.sonance.player.ui.screens.inPager
+import com.sonance.player.ui.screens.isSongListTab
+import com.sonance.player.ui.screens.pagerShortLabel
 import com.sonance.player.ui.sheets.EqualizerStudioScreen
 import com.sonance.player.ui.sheets.QueueSheet
 import com.sonance.player.ui.sheets.SleepTimerSheet
@@ -267,6 +271,13 @@ fun SonanceRoot(vm: SonanceViewModel) {
         }
         owner.lifecycle.addObserver(observer)
         onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+
+    // 主题跟随系统：观察系统深浅色，开启跟随时在亮/暗两套皮肤间自动切换。
+    // 键里带上两个槽位 id，用户在设置里改亮/暗皮肤时也会立即重算套用。
+    val systemDark = isSystemInDarkTheme()
+    LaunchedEffect(systemDark, vm.skinFollowSystem, vm.skinLightId, vm.skinDarkId) {
+        vm.onSystemThemeMaybeChanged(systemDark)
     }
 
     SonanceTheme(vm.skin) {
@@ -648,6 +659,57 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         }
     }
 
+    // ===== 冷启动恢复文件夹详情 =====
+    // 先把上次保存的路径快照住：必须在任何 effect 改写它之前读，
+    // 否则初始 detail=null 的持久化会把待恢复的值清掉。
+    val savedFolderPath = remember { vm.savedFolderPath() }
+    var folderRestored by remember { mutableStateOf(false) }
+    // folders 异步加载：等它非空再恢复，避免先闪一下「文件夹不存在」。
+    // 只在「上次停在文件夹页」时恢复；一次性，恢复过就不再管。
+    LaunchedEffect(vm.folders) {
+        if (folderRestored) return@LaunchedEffect
+        if (vm.tab != LibraryTab.FOLDERS || savedFolderPath == null) {
+            folderRestored = true
+            return@LaunchedEffect
+        }
+        if (vm.folders.isEmpty()) return@LaunchedEffect
+        if (vm.folderByPath(savedFolderPath) != null) {
+            detail = Detail.FolderDetail(savedFolderPath)
+        }
+        folderRestored = true
+    }
+    // detail 变化时记录/清除文件夹路径。跳过首次发射（初始 null，不清待恢复值）。
+    var folderPersistInitialized by remember { mutableStateOf(false) }
+    LaunchedEffect(detail) {
+        if (!folderPersistInitialized) {
+            folderPersistInitialized = true
+            return@LaunchedEffect
+        }
+        vm.persistFolderDetail((detail as? Detail.FolderDetail)?.path)
+    }
+
+    // ===== 冷启动默认直接打开播放界面（设置里可关）=====
+    // 一次性 + 有限窗口：只在本次启动后 5 秒内、曲库已就绪且有播放项时自动展开播放页。
+    // 窗口过期后即便用户稍后手动播放也不再自动弹，避免「空曲库启动 → 之后一播就跳脸」。
+    // rememberSaveable 保证旋转 / 重组不会重复触发。
+    var launchAutoOpenDone by rememberSaveable { mutableStateOf(false) }
+    var launchWindowOpen by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        delay(5000)
+        launchWindowOpen = false
+    }
+    LaunchedEffect(playerState.hasItem, launchWindowOpen, launchAutoOpenDone) {
+        if (launchAutoOpenDone || !launchWindowOpen) return@LaunchedEffect
+        if (!vm.openPlayerOnLaunch) {
+            launchAutoOpenDone = true
+            return@LaunchedEffect
+        }
+        if (playerState.hasItem && !fullPlayerOpen) {
+            fullPlayerOpen = true
+            launchAutoOpenDone = true
+        }
+    }
+
     /**
      * 收掉输入法焦点。
      *
@@ -830,25 +892,26 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             scrimAlphas = equalScrims
         )
     }
-    // 方案 C：背景亮度恒定深色 → 组件 / 文字固定一套深色样式，**不再随封面明暗翻转**
-    //（旧的 pickLighten / 白霜分支已删）。ensureReadable 只作兜底：个别停靠点
-    // 没压到位（无封面 / 极暗封面遮罩趋零）或强调色与封面色相撞时，把字色朝亮推
-    // 到刚好达标 —— 背景亮度钉死，推出来的颜色逐歌几乎不变，观感上就是"一套固定的色"。
+    // 方案 C：背景亮度恒定（深色钉在深灰档 / 浅色沉浸钉在浅白档）→ 组件 / 文字
+    // 固定一套样式，**不再随封面明暗翻转**。ensureReadable 只作兜底：个别停靠点
+    // 没压 / 抬到位（无封面 / 极暗封面遮罩趋零）或强调色与封面色相撞时，把字色
+    // 朝达标方向推到刚好够 —— 背景亮度钉死，推出来的颜色逐歌几乎不变。
+    // 方向按皮肤明暗：深色底往亮推、取最亮带做基准；浅色底往暗推、取最暗带。
     val adaptedSkin = if (skin.immersive && bgProfile != null) {
-        // 亮文字最怕最亮的那段：取三个采样点里最亮的做基准
-        val rep = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
-            .maxBy { it.luminance() }
-        val accent = ensureReadable(skin.accent, rep, 3.2f, true)
+        val lighten = !skin.isLight
+        val samples = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
+        val rep = if (lighten) samples.maxBy { it.luminance() } else samples.minBy { it.luminance() }
+        val accent = ensureReadable(skin.accent, rep, 3.2f, lighten)
         skin.copy(
-            text = ensureReadable(skin.text, rep, 4.5f, true),
-            textDim = ensureReadable(skin.textDim, rep, 3.8f, true),
-            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, true),
+            text = ensureReadable(skin.text, rep, 4.5f, lighten),
+            textDim = ensureReadable(skin.textDim, rep, 3.8f, lighten),
+            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, lighten),
             accent = accent,
-            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, true),
+            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, lighten),
             // onAccent 是「accent 实底上的字/图标」——开关圆点、实心按钮、播放键。
             // 与 accent 相反方向适配（accent 亮它就暗），保证实底上永远看得清
-            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false),
-            danger = ensureReadable(skin.danger, rep, 3.0f, true)
+            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, !lighten),
+            danger = ensureReadable(skin.danger, rep, 3.0f, lighten)
         )
     } else skin
 
@@ -1286,7 +1349,11 @@ private fun CompactLayout(
                     { showBrandEditor = true }
                 } else null,
                 logoId = vm.topBarLogoId,
-                // 底栏去掉之后，专辑/艺术家/文件夹/在线 变成"深一层"的页面 ——
+                // 图标选「无」时左上角那块透明区域单击进设置（不至于把入口弄丢）
+                onLogoClick = {
+                    vm.selectTab(LibraryTab.SETTINGS)
+                    onCloseDetail()
+                },
                 // 不给返回键，用户只能再点一次 ▤ 才能回曲库，等于走进死胡同
                 onBack = when {
                     detail != null -> { { onCloseDetail() } }
@@ -1302,78 +1369,114 @@ private fun CompactLayout(
                     else -> null
                 },
                 actions = {
-                    if (detail == null) {
-                        // ① 视图：专辑 / 艺术家 / 文件夹 收进弹层（原来占底栏三格）
-                        IconAction(
-                            icon = SonanceIcons.Layers,
-                            contentDescription = "切换视图",
-                            onClick = { showViewSheet = true },
-                            iconSize = 19.dp,
-                            tint = if (vm.tab == LibraryTab.ALBUMS ||
-                                vm.tab == LibraryTab.ARTISTS ||
-                                vm.tab == LibraryTab.FOLDERS ||
-                                vm.tab == LibraryTab.PLAYLISTS ||
-                                vm.tab == LibraryTab.STATS
-                            ) {
-                                skin.accent
-                            } else {
-                                skin.textDim
-                            }
-                        )
-                        // ② 封面墙入口已移到曲库筛选行的「随便听听」胶囊
-                        //（LibraryPagerScreen 表头），顶栏不再放小图标。
-                        // ③ 在线音乐：云图标进（不跟本地搜索框抢放大镜）；
-                        // 已经停在在线音乐页时变成 ✕ —— 和设置页同一条规则：
-                        // 这类"全屏接管"的页面，原样图标点上去毫无反应，看着就像坏了。
-                        val inOnline = vm.tab == LibraryTab.ONLINE
-                        // 在线音乐关闭时，这一格不再有「进在线页」的意义，改成刷新本地曲库。
-                        // 刷新走 vm.scan()，内部使用 currentScanFilters()，已排除文件夹不会被扫回来。
-                        val refreshOnly = !inOnline && !vm.onlineMusicEnabled
-                        IconAction(
-                            icon = when {
-                                inOnline -> SonanceIcons.Close
-                                refreshOnly -> SonanceIcons.Refresh
-                                else -> SonanceIcons.Cloud
-                            },
-                            contentDescription = when {
-                                inOnline -> "关闭在线音乐"
-                                refreshOnly -> "刷新本地曲库"
-                                else -> "在线音乐"
-                            },
-                            onClick = {
-                                if (inOnline) {
-                                    vm.selectTab(LibraryTab.SONGS)
-                                } else if (refreshOnly) {
-                                    vm.scan()
-                                } else {
-                                    vm.selectTab(LibraryTab.ONLINE)
-                                    onCloseDetail()
-                                }
-                            },
-                            iconSize = 19.dp,
-                            tint = if (inOnline) skin.accent else skin.textDim
-                        )
-                    }
-                    // ③ 设置：固定在最右。
-                    //
-                    // 已经停在设置页时它变成 ✕ —— 设置页是"全屏接管"的一页，
-                    // 右上角那个齿轮点上去没有任何变化，看着就像坏了；
-                    // 变成 ✕ 才说明「再点一下就退出去」。
+                    val inOnline = vm.tab == LibraryTab.ONLINE
+                    // 在线音乐关闭时，这一格不再有「进在线页」的意义，改成刷新本地曲库。
+                    val refreshOnly = !inOnline && !vm.onlineMusicEnabled
                     val inSettings = detail == null && vm.tab == LibraryTab.SETTINGS
-                    IconAction(
-                        icon = if (inSettings) SonanceIcons.Close else SonanceIcons.Settings,
-                        contentDescription = if (inSettings) "关闭设置" else "皮肤与设置",
-                        onClick = {
-                            if (inSettings) {
-                                vm.selectTab(LibraryTab.SONGS)
-                            } else {
-                                vm.selectTab(LibraryTab.SETTINGS)
-                                onCloseDetail()
+                    val viewActive = vm.tab == LibraryTab.ALBUMS ||
+                        vm.tab == LibraryTab.ARTISTS ||
+                        vm.tab == LibraryTab.FOLDERS ||
+                        vm.tab == LibraryTab.PLAYLISTS ||
+                        vm.tab == LibraryTab.STATS
+                    val onlineIcon = when {
+                        inOnline -> SonanceIcons.Close
+                        refreshOnly -> SonanceIcons.Refresh
+                        else -> SonanceIcons.Cloud
+                    }
+                    val onlineLabel = when {
+                        inOnline -> "关闭在线音乐"
+                        refreshOnly -> "刷新本地曲库"
+                        else -> "在线音乐"
+                    }
+                    val onOnlineClick: () -> Unit = {
+                        if (inOnline) {
+                            vm.selectTab(LibraryTab.SONGS)
+                        } else if (refreshOnly) {
+                            vm.scan()
+                        } else {
+                            vm.selectTab(LibraryTab.ONLINE)
+                            onCloseDetail()
+                        }
+                    }
+                    // 已经停在设置页时齿轮变成 ✕ ——「全屏接管」页原样图标点上去没反应，看着像坏了。
+                    val onSettingsClick: () -> Unit = {
+                        if (inSettings) {
+                            vm.selectTab(LibraryTab.SONGS)
+                        } else {
+                            vm.selectTab(LibraryTab.SETTINGS)
+                            onCloseDetail()
+                        }
+                    }
+
+                    if (vm.topBarIconsMode) {
+                        if (detail == null) {
+                            // ① 视图切换（设置里可隐藏）
+                            if (vm.showViewIcon) {
+                                IconAction(
+                                    icon = SonanceIcons.Layers,
+                                    contentDescription = "切换视图",
+                                    onClick = { showViewSheet = true },
+                                    iconSize = 19.dp,
+                                    tint = if (viewActive) skin.accent else skin.textDim
+                                )
                             }
-                        },
-                        iconSize = 19.dp,
-                        tint = if (inSettings) skin.accent else skin.textDim
-                    )
+                            // ② 在线音乐 / 刷新（设置里可隐藏）
+                            if (vm.showOnlineIcon) {
+                                IconAction(
+                                    icon = onlineIcon,
+                                    contentDescription = onlineLabel,
+                                    onClick = onOnlineClick,
+                                    iconSize = 19.dp,
+                                    tint = if (inOnline) skin.accent else skin.textDim
+                                )
+                            }
+                        }
+                        // ③ 设置：三图标模式下固定保留在最右
+                        IconAction(
+                            icon = if (inSettings) SonanceIcons.Close else SonanceIcons.Settings,
+                            contentDescription = if (inSettings) "关闭设置" else "皮肤与设置",
+                            onClick = onSettingsClick,
+                            iconSize = 19.dp,
+                            tint = if (inSettings) skin.accent else skin.textDim
+                        )
+                    } else {
+                        // 三点菜单模式：视图 / 在线 / 设置全部收进一个竖向 ⁝
+                        var menuOpen by remember { mutableStateOf(false) }
+                        Box {
+                            IconAction(
+                                icon = SonanceIcons.MoreVertical,
+                                contentDescription = "更多",
+                                onClick = { menuOpen = true },
+                                iconSize = 19.dp,
+                                tint = if (menuOpen) skin.accent else skin.textDim
+                            )
+                            DropdownMenu(
+                                expanded = menuOpen,
+                                onDismissRequest = { menuOpen = false }
+                            ) {
+                                if (detail == null) {
+                                    MenuRow(
+                                        icon = SonanceIcons.Layers,
+                                        label = "切换视图",
+                                        selected = viewActive,
+                                        onClick = { menuOpen = false; showViewSheet = true }
+                                    )
+                                    MenuRow(
+                                        icon = onlineIcon,
+                                        label = onlineLabel,
+                                        selected = inOnline,
+                                        onClick = { menuOpen = false; onOnlineClick() }
+                                    )
+                                }
+                                MenuRow(
+                                    icon = if (inSettings) SonanceIcons.Close else SonanceIcons.Settings,
+                                    label = if (inSettings) "关闭设置" else "皮肤与设置",
+                                    selected = inSettings,
+                                    onClick = { menuOpen = false; onSettingsClick() }
+                                )
+                            }
+                        }
+                    }
                 }
             )
                 Box(
@@ -1382,12 +1485,14 @@ private fun CompactLayout(
                         .fillMaxWidth()
                         .padding(bottom = if (floating && playerState.hasItem) miniReserve else 0.dp)
                 ) {
-                    if (detail == null && vm.tab.inPager) {
-                        // 三页滑动：全部 / 最近 / 收藏（下拉刷新已移除，改由启动时自动刷新）
+                    if (detail == null && vm.tab in vm.pagerTabs) {
+                        // 左右滑动的曲库页（页签集合可在视图弹层里自定义）
                         LibraryPagerScreen(
                             vm = vm,
                             playerState = playerState,
+                            onOpenFolder = { path -> onOpenDetail(Detail.FolderDetail(path)) },
                             onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) },
+                            onOpenArtist = { name -> onOpenDetail(Detail.ArtistDetail(name)) },
                             onOpenCoverWall = onOpenCoverWall
                         )
                     } else {
@@ -1401,16 +1506,24 @@ private fun CompactLayout(
                         )
                     }
 
-                    // 「定位到正在播放」：只在曲库三页的列表视图显示，当前播放歌不在可视区时出现。
-                    if (detail == null && vm.tab.inPager && vm.tab != LibraryTab.PLAYLISTS &&
-                        playerState.hasItem && !vm.currentSongVisible
-                    ) {
-                        LocateCurrentSongButton(
-                            onClick = { vm.requestScrollToCurrent() },
+                    // 右下角悬浮按钮组：放大镜（聚焦搜索框 + 弹键盘）在上，
+                    // 定位（回到正在播放）在下。放大镜在曲库滑动页常驻；
+                    // 定位按钮只在歌曲列表页（全部 / 最近 / 收藏）且当前歌不在可视区时出现。
+                    if (detail == null && vm.tab in vm.pagerTabs) {
+                        Column(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
-                                .padding(end = 19.dp, bottom = if (floating) 5.dp else 13.dp)
-                        )
+                                .padding(end = 19.dp, bottom = if (floating) 5.dp else 13.dp),
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            SearchCurrentButton(onClick = { vm.requestSearchFocus() })
+                            if (vm.tab.isSongListTab &&
+                                playerState.hasItem && !vm.currentSongVisible
+                            ) {
+                                LocateCurrentSongButton(onClick = { vm.requestScrollToCurrent() })
+                            }
+                        }
                     }
                 }
             }
@@ -1464,6 +1577,7 @@ private fun CompactLayout(
             }
         ) {
             ViewPickerSheet(
+                vm = vm,
                 current = vm.tab,
                 onPick = { tab ->
                     vm.selectTab(tab)
@@ -1494,6 +1608,7 @@ private fun CompactLayout(
  */
 @Composable
 private fun ViewPickerSheet(
+    vm: SonanceViewModel,
     current: LibraryTab,
     onPick: (LibraryTab) -> Unit,
     onOpenWall: () -> Unit,
@@ -1507,7 +1622,11 @@ private fun ViewPickerSheet(
         Triple(LibraryTab.ARTISTS, SonanceIcons.Users, "艺术家"),
         Triple(LibraryTab.FOLDERS, SonanceIcons.Folder, "文件夹")
     )
-    val tileSurface = if (skin.immersive) Color.White.copy(alpha = 0.06f) else skin.surface2
+    val tileSurface = when {
+        skin.immersive && skin.isLight -> Color.White.copy(alpha = 0.62f)
+        skin.immersive -> Color.White.copy(alpha = 0.06f)
+        else -> skin.surface2
+    }
     val idleBorder = skin.glassCardBorder(highlighted = false)
 
     Column(
@@ -1519,6 +1638,8 @@ private fun ViewPickerSheet(
             .padding(top = 2.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        PagerTabBarManager(vm = vm, tileSurface = tileSurface, idleBorder = idleBorder)
+
         Text(
             text = "曲库浏览方式",
             style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
@@ -1626,6 +1747,164 @@ private fun ViewPickerSheet(
                 onClick = onOpenDlna
             )
         }
+    }
+}
+
+@Composable
+private fun PagerTabBarManager(
+    vm: SonanceViewModel,
+    tileSurface: Color,
+    idleBorder: Color
+) {
+    val skin = LocalSkin.current
+    val tabs = vm.pagerTabs
+    val maxTabs = 5
+    val available = vm.pagerTabCandidates.filter { it !in tabs }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "顶部切换栏",
+                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.textMuted,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${tabs.size} / $maxTabs",
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                color = skin.textDim
+            )
+        }
+        Text(
+            text = "「全部」固定保留，其余可增删、调整顺序，最多 5 个。",
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            color = skin.textDim,
+            modifier = Modifier.padding(horizontal = 4.dp)
+        )
+
+        tabs.forEachIndexed { index, tab ->
+            val locked = tab == LibraryTab.SONGS
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(tileSurface)
+                    .border(0.7.dp, idleBorder, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = pagerShortLabel(tab),
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = skin.text,
+                    modifier = Modifier.weight(1f)
+                )
+                if (locked) {
+                    Text(
+                        text = "固定",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        color = skin.textDim,
+                        modifier = Modifier.padding(end = 6.dp)
+                    )
+                } else {
+                    ManagerIconButton(
+                        icon = SonanceIcons.ArrowUp,
+                        enabled = index > 1,
+                        onClick = {
+                            val list = tabs.toMutableList()
+                            val moved = list.removeAt(index)
+                            list.add(index - 1, moved)
+                            vm.changePagerTabs(list)
+                        }
+                    )
+                    ManagerIconButton(
+                        icon = SonanceIcons.ArrowUp,
+                        rotate = 180f,
+                        enabled = index < tabs.lastIndex,
+                        onClick = {
+                            val list = tabs.toMutableList()
+                            val moved = list.removeAt(index)
+                            list.add(index + 1, moved)
+                            vm.changePagerTabs(list)
+                        }
+                    )
+                    ManagerIconButton(
+                        icon = SonanceIcons.Close,
+                        enabled = tabs.size > 1,
+                        onClick = { vm.changePagerTabs(tabs.filter { it != tab }) }
+                    )
+                }
+            }
+        }
+
+        if (available.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                available.forEach { tab ->
+                    val canAdd = tabs.size < maxTabs
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (canAdd) skin.softPillBg() else tileSurface)
+                            .border(0.7.dp, idleBorder, RoundedCornerShape(50))
+                            .clickable(enabled = canAdd) { vm.changePagerTabs(tabs + tab) }
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = SonanceIcons.Plus,
+                            contentDescription = null,
+                            tint = if (canAdd) skin.accent else skin.textDim,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = pagerShortLabel(tab),
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                            color = if (canAdd) skin.text else skin.textDim
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManagerIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    enabled: Boolean,
+    rotate: Float = 0f,
+    onClick: () -> Unit
+) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        androidx.compose.material3.Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (enabled) skin.textMuted else skin.textDim.copy(alpha = 0.4f),
+            modifier = Modifier
+                .size(15.dp)
+                .rotate(rotate)
+        )
     }
 }
 
@@ -1877,6 +2156,10 @@ private fun ExpandedLayout(
                         onTitleDoubleTap = if (detail == null) {
                             { showBrandEditor = true }
                         } else null,
+                        onLogoClick = {
+                            vm.selectTab(LibraryTab.SETTINGS)
+                            onCloseDetail()
+                        },
                         // 刷新图标去掉了：列表页有下拉刷新，其它页面走「设置 → 重新扫描」。
                         // 顶栏只留真正一步到不了的入口，图标多了反而每个都不像入口。
                         actions = {
@@ -1914,7 +2197,8 @@ private fun ExpandedLayout(
                         }
 
                         // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
-                        if (detail == null && vm.tab.inPager && vm.tab != LibraryTab.PLAYLISTS &&
+                        // 只在歌曲列表页（全部 / 最近 / 收藏）出现，浏览类网格没有歌曲定位。
+                        if (detail == null && vm.tab.isSongListTab &&
                         playerState.hasItem && !vm.currentSongVisible
                     ) {
                             LocateCurrentSongButton(
@@ -2079,9 +2363,6 @@ private fun ScreenBody(
                 if (folder == null) {
                     EmptyState(SonanceIcons.Folder, "文件夹不存在", "可能已被移除或重新扫描")
                 } else {
-                    // 「排除此文件夹」：整支从曲库列表剔除（文件不动），
-                    // 恢复入口在 设置 → 乐库清理与合并 → 已排除的文件夹。
-                    var confirmExclude by remember { mutableStateOf(false) }
                     SongCollectionScreen(
                         title = folder.name,
                         subtitle = "${folder.songs.size} 首 · ${folder.path}",
@@ -2089,38 +2370,28 @@ private fun ScreenBody(
                         vm = vm,
                         playerState = playerState,
                         showCover = false,
-                        headerOverflow = {
-                            MenuRow(
-                                icon = SonanceIcons.FolderMinus,
-                                label = "排除此文件夹",
-                                selected = false,
-                                onClick = { confirmExclude = true }
-                            )
+                        onPlayAll = { vm.playAll(folder.songs) },
+                        onLocate = {
+                            val currentId = playerState.mediaId
+                            when {
+                                currentId <= 0L -> vm.showToast("当前没有正在播放的歌曲")
+                                folder.songs.any { it.id == currentId } ->
+                                    vm.requestScrollToCurrent()
+                                else -> {
+                                    // 当前歌不在本文件夹：找到它所在的文件夹，切过去再定位。
+                                    val target = vm.folders.firstOrNull { f ->
+                                        f.songs.any { it.id == currentId }
+                                    }
+                                    if (target == null) {
+                                        vm.showToast("当前歌曲不在任何文件夹中")
+                                    } else {
+                                        onOpenDetail(Detail.FolderDetail(target.path))
+                                        vm.requestScrollToCurrent()
+                                    }
+                                }
+                            }
                         }
                     )
-                    if (confirmExclude) {
-                        AlertDialog(
-                            onDismissRequest = { confirmExclude = false },
-                            title = { Text("排除文件夹") },
-                            text = {
-                                Text(
-                                    "把「${folder.name}」从曲库列表排除？\n\n" +
-                                        "其中 ${folder.songs.size} 首歌曲将不再出现在任何列表中，" +
-                                        "文件不会被删除。\n" +
-                                        "可在 设置 → 乐库清理与合并 → 已排除的文件夹 中恢复。"
-                                )
-                            },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    confirmExclude = false
-                                    vm.excludeFolder(folder.path)
-                                }) { Text("排除") }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { confirmExclude = false }) { Text("取消") }
-                            }
-                        )
-                    }
                 }
             }
 
@@ -2307,6 +2578,39 @@ private fun LocateCurrentSongButton(
             androidx.compose.material3.Icon(
                 imageVector = SonanceIcons.Locate,
                 contentDescription = "定位到正在播放的歌曲",
+                tint = skin.text.copy(alpha = 0.86f),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 列表右下角「搜索」悬浮按钮，位于定位按钮正上方：
+ * 点击让顶部搜索框获取焦点并弹出键盘。外观与定位按钮同一套（42dp 热区 / 34dp 圆底 / 18dp 图标）。
+ */
+@Composable
+private fun SearchCurrentButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val skin = LocalSkin.current
+    Box(
+        modifier = modifier
+            .size(42.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(skin.text.copy(alpha = 0.06f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.material3.Icon(
+                imageVector = SonanceIcons.Search,
+                contentDescription = "搜索",
                 tint = skin.text.copy(alpha = 0.86f),
                 modifier = Modifier.size(18.dp)
             )

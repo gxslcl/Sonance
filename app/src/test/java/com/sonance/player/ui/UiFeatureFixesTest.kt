@@ -4,7 +4,8 @@ import com.sonance.player.data.PlayerSwitchMotion
 import com.sonance.player.data.SettingsBaseline
 import com.sonance.player.data.readDurableTextCache
 import com.sonance.player.data.writeDurableTextCache
-import com.sonance.player.ui.sheets.StudioConsoleSkin
+import com.sonance.player.ui.sheets.StudioDarkPalette
+import com.sonance.player.ui.sheets.StudioLightPalette
 import com.sonance.player.ui.sheets.sleepCountdownChipLabel
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -84,11 +85,17 @@ class UiFeatureFixesTest {
     }
 
     @Test
-    fun `studio console skin uses fixed chinese red theme independent of app theme`() {
-        assertFalse(StudioConsoleSkin.isLight)
-        assertFalse(StudioConsoleSkin.immersive)
-        assertTrue(StudioConsoleSkin.bg.red > StudioConsoleSkin.bg.blue)
-        assertTrue(StudioConsoleSkin.accent.red > 0.80f && StudioConsoleSkin.accent.red > StudioConsoleSkin.accent.blue * 2f)
+    fun `studio console palettes keep chinese red theme with dedicated light variant`() {
+        assertFalse(StudioDarkPalette.isLight)
+        assertTrue(StudioLightPalette.isLight)
+        assertTrue(StudioDarkPalette.bg.red > StudioDarkPalette.bg.blue)
+        assertTrue(StudioLightPalette.bg.red > StudioLightPalette.bg.blue)
+        val darkBg = StudioDarkPalette.bg
+        val lightBg = StudioLightPalette.bg
+        assertTrue(lightBg.red + lightBg.green + lightBg.blue > darkBg.red + darkBg.green + darkBg.blue)
+        listOf(StudioDarkPalette, StudioLightPalette).forEach { p ->
+            assertTrue(p.crimson.red > 0.75f && p.crimson.red > p.crimson.blue * 2f)
+        }
     }
 
     @Test

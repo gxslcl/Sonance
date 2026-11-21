@@ -108,6 +108,7 @@ import com.sonance.player.data.PlayButtonShape
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.formatDuration
 import com.sonance.player.data.formatSize
+import com.sonance.player.ui.BrandEditorDialog
 import com.sonance.player.ui.components.AdaptModeRow
 import com.sonance.player.ui.components.PlayPauseButton
 import com.sonance.player.ui.components.TagChip
@@ -162,6 +163,12 @@ private enum class SettingsCategory(
  * 搜索按模块粒度命中，结果直接展示整个模块 —— 控件留在上下文里，
  * 不会出现「滑杆找到了、它属于哪个开关却看不见」的孤儿行。
  * 关键词收录各模块内的行标题与常见同义词，改行标题时顺手同步这里。
+ *
+ * 匹配分两层（[matches]）：
+ *  - **关键字匹配**：整句子串命中，或把查询按空格拆词后逐词命中（多词取「都在」，
+ *    单词任意命中）—— 覆盖「歌词 字号」这类组合查询。
+ *  - **模糊匹配**：去掉空格后按字符顺序做子序列命中（允许中间插字/漏字），
+ *    兜住「歌词大小」→「歌词…字号」这类不完全一致的输入。
  */
 private data class SettingsModule(
     val id: String,
@@ -169,55 +176,95 @@ private data class SettingsModule(
     val title: String,
     val keywords: String
 ) {
-    fun matches(q: String): Boolean =
-        title.lowercase().contains(q) || keywords.lowercase().contains(q)
+    private val index = (title + " " + keywords).lowercase()
+
+    fun matches(q: String): Boolean {
+        val query = q.trim().lowercase()
+        if (query.isEmpty()) return false
+        // 1) 整句子串
+        if (index.contains(query)) return true
+        val tokens = query.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        // 2) 多词「都在」（组合查询更精准）
+        if (tokens.size > 1 && tokens.all { index.contains(it) }) return true
+        // 3) 模糊：去空格后的字符子序列（≥2 字才启用，避免单字到处命中）
+        val compact = query.replace(Regex("\\s+"), "")
+        if (compact.length >= 2 && isSubsequence(compact, index)) return true
+        // 4) 任意单词命中（宽松兜底）
+        return tokens.any { index.contains(it) }
+    }
+
+    /** needle 的字符是否按顺序（可不连续）出现在 hay 里。 */
+    private fun isSubsequence(needle: String, hay: String): Boolean {
+        var i = 0
+        for (ch in hay) {
+            if (i < needle.length && ch == needle[i]) i++
+            if (i == needle.length) return true
+        }
+        return i == needle.length
+    }
 }
 
 private val SETTINGS_MODULES = listOf(
     SettingsModule("skin", SettingsCategory.APPEARANCE, "外观皮肤",
-        "皮肤 主题 换肤 色板 绛唇 象牙 墨黑 青瓷 琥珀 雾蓝 废墟 樱"),
+        "皮肤 主题 换肤 色板 跟随系统 深浅色 深色模式 浅色模式 亮色 暗色 自动切换 系统浅色 系统深色 " +
+            "沉浸 沉浸式 封面铺底 透出 宣纸玻璃 浅色沉浸 玻璃主题 " +
+            Skins.all.joinToString(" ") { it.name }),
     SettingsModule("shellBg", SettingsCategory.APPEARANCE, "主界面背景与过渡",
-        "沉浸式背景 封面 晕染 玻璃 切歌过渡 滑动切换 渐变 渐变时长 不透明度 模糊"),
+        "主界面背景 切歌背景过渡 背景过渡 滑动切换 渐变切换 渐变过渡时长 过渡时长 主界面封面玻璃 " +
+            "封面玻璃 玻璃样式 液态玻璃 毛玻璃 磨砂 模糊 模糊度 可见度 不透明度 透出浓度 沉浸式背景 封面 晕染 关闭玻璃"),
     SettingsModule("list", SettingsCategory.APPEARANCE, "列表外观与索引",
-        "行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 字母索引 滚动条震动 紧凑 卡片"),
+        "列表外观 行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 听歌概览 概览卡 字母索引 右侧索引 " +
+            "滚动条震动 紧凑 卡片 列表"),
+    SettingsModule("topBar", SettingsCategory.APPEARANCE, "顶栏与启动",
+        "顶栏 左上角 右上角 应用名称 改名 名称 logo 图标 无 隐藏名称 隐藏图标 三个图标 三点菜单 竖向三点 " +
+            "视图图标 在线图标 设置图标 启动 打开应用 直接进入播放 播放界面 冷启动 默认播放页"),
     SettingsModule("mini", SettingsCategory.APPEARANCE, "底部播放条",
-        "播放条 液态玻璃 纯色 极简 进度 环形 数字时间进度 高度 离底部 圆角 左滑 右滑 切歌 音量"),
+        "底部播放条 迷你播放条 播放条 悬浮 贴底 液态玻璃 纯色 极简 进度 圆环进度 长条进度 环形 数字时间进度 " +
+            "显示时间 高度 封面大小 离底部 圆角 左滑 右滑 滑动切歌 整卡滑动 槽内滑动 不透明度 音量"),
     SettingsModule("iconSet", SettingsCategory.APPEARANCE, "应用内图标风格",
-        "图标 圆润 线性 填充 双色 图标家族"),
+        "应用内图标 图标风格 图标 圆润 线性 填充 双色 图标家族"),
     SettingsModule("appIcon", SettingsCategory.APPEARANCE, "桌面应用图标",
-        "桌面图标 启动器 图标款式"),
+        "桌面应用图标 桌面图标 启动器 图标款式 更换图标"),
     SettingsModule("widget", SettingsCategory.APPEARANCE, "桌面小组件",
-        "小组件 尺寸 固定配色"),
+        "桌面小组件 小组件 组件 尺寸 固定配色 封面 歌曲信息 两排"),
     SettingsModule("play", SettingsCategory.PLAYBACK, "均衡器与睡眠定时",
-        "均衡器 EQ 音效 杜比 系统音效 睡眠定时 定时器 播完当前"),
+        "均衡器 EQ 音效工作室 音效 杜比 系统音效接入 系统音效控制面板 本机音效 睡眠定时 定时器 播完当前 定时停止"),
     SettingsModule("output", SettingsCategory.PLAYBACK, "USB 独占 · 无缝 · 淡入淡出",
-        "USB 独占 bit-perfect DAC 无缝播放 淡入淡出 淡化时长 播放提示 DLNA 投屏 蓝牙 采样率"),
+        "USB独占 USB 独占输出 bit-perfect DAC 采样率 输出格式 实时输出 无缝播放 淡入淡出 淡化时长 播放提示 " +
+            "摇一摇切歌 摇一摇 息屏摇一摇 防口袋误触 DLNA D-LAN 无线投屏 投屏 共享 蓝牙"),
     SettingsModule("system", SettingsCategory.PLAYBACK, "通知、播控与灵动岛",
-        "通知 锁屏 灵动岛 胶囊 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知"),
+        "通知 锁屏 灵动岛 胶囊 歌词上岛 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知 播控"),
     SettingsModule("control", SettingsCategory.PLAYBACK, "播放按钮与触感",
-        "播放按钮 形状 颜色 光晕 震动反馈 触感 随机 续播 队列"),
+        "播放按钮 形状 颜色 图标样式 图标大小 光晕 震动反馈 触感 随机 续播 队列 单曲循环 列表循环 播放模式"),
     SettingsModule("visual", SettingsCategory.PLAYBACK, "播放页视觉与黑胶",
-        "晕染 浓度 方向 黑碟 黑胶 机械音效 炒豆 Hi-Res 金标 小金标 视觉"),
+        "播放页视觉 封面颜色晕染 晕染 晕染强度 浓度 方向 换歌晕染过渡 渐变时长 黑碟播放器 黑胶模式 黑胶机械音效 " +
+            "机械音效 炒豆 音效音量 Hi-Res 小金标 金标 金标大小 隐藏音量条 音量条 视觉"),
     SettingsModule("lyric", SettingsCategory.LYRICS_COVER, "歌词显示与外观",
-        "歌词 字号 字体 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 桌面歌词 歌词页播放器 状态栏 文字可读性"),
+        "歌词 歌词字号 字号 字体 字体大小 歌词颜色 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 蓝牙车载歌词 车载 " +
+            "状态栏歌词扩展 HyperLyric LyricGetter 歌词获取器 桌面歌词 悬浮歌词 桌面歌词背景 桌面歌词字号 " +
+            "歌词页播放器 播放器样式 歌词适配背景 背景玻璃 文字可读性 对比度 歌词页背景玻璃"),
     SettingsModule("lyOnline", SettingsCategory.LYRICS_COVER, "在线歌词与缓存",
-        "在线歌词 LrcAPI 自动获取 清除歌词缓存 源 优先级"),
+        "在线歌词 LrcAPI 歌词服务地址 自动获取 清除歌词缓存 源 优先级"),
     SettingsModule("cover", SettingsCategory.LYRICS_COVER, "封面补全与缓存",
-        "封面 自动补全 iTunes 一键补齐 手动搜索封面 清除封面缓存"),
+        "封面 在线补全封面 自动补全 iTunes 一键补齐全部封面 一键补齐 手动搜索封面 清除封面缓存"),
     SettingsModule("scan", SettingsCategory.LIBRARY_ONLINE, "本地扫描与过滤规则",
-        "扫描 重新扫描 扫描范围 忽略短音频 排除加密文件 排除录音 提示音 自动扫描 过滤"),
+        "本地扫描 扫描 重新扫描本地音乐 重新扫描 扫描范围 启动时自动刷新曲库 自动扫描 忽略短音频 排除加密文件 " +
+            "排除系统不支持的格式 排除录音与系统提示音 排除录音 提示音 过滤规则 过滤"),
     SettingsModule("online", SettingsCategory.LIBRARY_ONLINE, "在线音乐与音源",
-        "在线音乐 内置在线 洛雪 音源 脚本 边听边存 播放并下载 网易云补全 Wi-Fi 下载 音质 登录 黑胶VIP 缓存 无感 多音源 兜底 自动切换 备用音源"),
+        "在线音乐 在线搜索与播放 内置在线 洛雪 洛雪音源 音源 音源脚本 脚本 用网易云补全本地歌 网易云补全 " +
+            "播放并下载 边听边存 只在Wi-Fi下下载 Wi-Fi下载 音质 登录 黑胶VIP 缓存 无感多音源兜底 无感 多音源 兜底 " +
+            "自动切换 备用音源"),
     SettingsModule("cleanup", SettingsCategory.LIBRARY_ONLINE, "曲库清理与去重",
-        "隐藏 恢复 重复 同名 检测 清理 排除文件夹 去重"),
+        "曲库清理 隐藏 恢复被隐藏的曲目 恢复 检测重复与同名 重复 同名 清理重复文件 清理同名歌曲 清理 去重 " +
+            "已排除的文件夹 排除文件夹"),
     SettingsModule("formatCompat", SettingsCategory.LIBRARY_ONLINE, "格式与兼容性检查",
-        "格式 兼容 解码 ape wma dsf 私有 加密容器 qmc ncm kgm"),
+        "格式 兼容性检查 兼容 解码 ape wma dsf 私有格式 加密容器 qmc ncm kgm 格式还原 缓存嗅探"),
     SettingsModule("overview", SettingsCategory.LIBRARY_ONLINE, "曲库统计概览",
-        "统计 歌曲数 专辑 艺术家 收藏 总时长 占用空间"),
+        "曲库统计 统计 概览 歌曲数 专辑 艺术家 收藏 总时长 占用空间"),
     SettingsModule("about", SettingsCategory.ABOUT, "关于应用",
-        "版本 更新 检查更新 基线 导出 备份 署名 作者"),
+        "关于 版本 更新 检查更新 设置基线 基线 导出 备份 署名 作者"),
     SettingsModule("donate", SettingsCategory.ABOUT, "支持作者",
-        "赞赏 捐赠 微信 二维码 支持")
+        "支持作者 赞赏 捐赠 微信 二维码 支持")
 )
 
 @Composable
@@ -404,15 +451,42 @@ private fun SettingsModuleContent(
     when (module.id) {
         "skin" -> SettingsSectionCard(
             title = "外观皮肤",
-            summary = "当前：${vm.skin.name} · 共 ${Skins.all.size} 套主题",
+            summary = if (vm.skinFollowSystem) "跟随系统 · 当前：${vm.skin.name}"
+            else "当前：${vm.skin.name} · 共 ${Skins.all.size} 套主题",
             icon = SonanceIcons.Palette,
             swatchColors = vm.skin.bg to vm.skin.accent
         ) {
-            SkinGrid(current = vm.skin, onSelect = { vm.changeSkin(it) })
+            SettingsSwitchRow(
+                title = "跟随系统深浅色",
+                subtitle = "按系统深色模式自动切换，亮色 / 暗色可分别指定一套皮肤",
+                checked = vm.skinFollowSystem,
+                onCheckedChange = { vm.changeSkinFollowSystem(it) }
+            )
+            Spacer(Modifier.height(10.dp))
+            if (vm.skinFollowSystem) {
+                FollowSkinPicker(
+                    label = "系统浅色模式",
+                    hint = "系统处于浅色时用这套",
+                    skins = Skins.all.filter { it.isLight },
+                    currentId = vm.skinLightId,
+                    onSelect = { vm.setFollowLightSkin(it) }
+                )
+                Spacer(Modifier.height(16.dp))
+                FollowSkinPicker(
+                    label = "系统深色模式",
+                    hint = "系统处于深色时用这套",
+                    skins = Skins.all.filter { !it.isLight },
+                    currentId = vm.skinDarkId,
+                    onSelect = { vm.setFollowDarkSkin(it) }
+                )
+            } else {
+                SkinGrid(skins = Skins.all, currentId = vm.skin.id, onSelect = { vm.changeSkin(it) })
+            }
         }
 
         "shellBg" -> ShellBackgroundSection(vm = vm)
         "list" -> ListAppearanceSection(vm = vm)
+        "topBar" -> TopBarAndLaunchSection(vm = vm)
         "mini" -> MiniPlayerSettingsSection(vm = vm)
         "iconSet" -> IconSetSettingsSection(vm = vm)
 
@@ -755,7 +829,11 @@ private fun SettingsRail(
     onSelect: (SettingsCategory) -> Unit
 ) {
     val skin = LocalSkin.current
-    val railBorder = if (skin.immersive) Color.White.copy(alpha = 0.07f) else skin.border.copy(alpha = 0.22f)
+    val railBorder = when {
+        skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.08f)
+        skin.immersive -> Color.White.copy(alpha = 0.07f)
+        else -> skin.border.copy(alpha = 0.22f)
+    }
     Box(
         modifier = Modifier
             .width(66.dp)
@@ -843,8 +921,16 @@ private fun SettingsSearchBar(
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
-    val searchBg = if (skin.immersive) Color.White.copy(alpha = 0.095f) else skin.surface2.copy(alpha = 0.86f)
-    val searchBorder = if (skin.immersive) Color.White.copy(alpha = 0.08f) else skin.border.copy(alpha = 0.25f)
+    val searchBg = when {
+        skin.immersive && skin.isLight -> Color.White.copy(alpha = 0.62f)
+        skin.immersive -> Color.White.copy(alpha = 0.095f)
+        else -> skin.surface2.copy(alpha = 0.86f)
+    }
+    val searchBorder = when {
+        skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.10f)
+        skin.immersive -> Color.White.copy(alpha = 0.08f)
+        else -> skin.border.copy(alpha = 0.25f)
+    }
     Row(
         modifier
             .fillMaxWidth()
@@ -1644,6 +1730,103 @@ private fun ListAppearanceSection(vm: SonanceViewModel) {
     }
 }
 
+@Composable
+private fun TopBarAndLaunchSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    var showBrandEditor by remember { mutableStateOf(false) }
+
+    val modeSummary = if (vm.topBarIconsMode) "三个图标" else "三点菜单"
+    val brandSummary = buildString {
+        append(if (vm.appDisplayName.isBlank()) "名称已隐藏" else vm.appDisplayName)
+        append(" · ")
+        append(if (vm.topBarLogoId == "none") "无图标" else "自定义图标")
+    }
+    SettingsSectionCard(
+        title = "顶栏与启动",
+        summary = "$modeSummary · $brandSummary",
+        icon = SonanceIcons.Layers
+    ) {
+        // ---- 启动行为 ----
+        SettingsSwitchRow(
+            title = "启动时直接打开播放界面",
+            subtitle = "默认开启：重开应用直接进入正在播放页，而不是曲库列表；关闭则回到上次的列表页",
+            checked = vm.openPlayerOnLaunch,
+            onCheckedChange = vm::changeOpenPlayerOnLaunch
+        )
+
+        // ---- 右上角呈现方式 ----
+        Spacer(Modifier.height(16.dp))
+        Text("右上角按钮", style = MaterialTheme.typography.titleSmall, color = skin.text)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "三个独立图标，或全部收进一个竖向三点菜单。三图标模式下设置齿轮始终保留。",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(true to "三个图标", false to "三点菜单").forEach { (icons, label) ->
+                val on = vm.topBarIconsMode == icons
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeTopBarIconsMode(icons) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+        if (vm.topBarIconsMode) {
+            Spacer(Modifier.height(8.dp))
+            SettingsSwitchRow(
+                title = "显示视图切换图标",
+                subtitle = "右上角的叠层图标，点开可切换曲库浏览方式、管理顶部切换栏",
+                checked = vm.showViewIcon,
+                onCheckedChange = vm::changeShowViewIcon
+            )
+            Spacer(Modifier.height(8.dp))
+            SettingsSwitchRow(
+                title = "显示在线音乐图标",
+                subtitle = "右上角的云朵图标，点开进入在线音乐；隐藏后可改用三点菜单进入",
+                checked = vm.showOnlineIcon,
+                onCheckedChange = vm::changeShowOnlineIcon
+            )
+        }
+
+        // ---- 左上角名称与图标 ----
+        Spacer(Modifier.height(16.dp))
+        SettingsActionRow(
+            title = "左上角名称与图标",
+            subtitle = "名称留空即隐藏、不占位；图标选「无」则融入背景，但保留可点区域，点一下进设置",
+            onClick = { showBrandEditor = true },
+            actionLabel = "编辑"
+        )
+        Text(
+            "也可以直接双击顶栏的名称或图标快速打开这个面板。",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+
+    if (showBrandEditor) {
+        BrandEditorDialog(vm = vm, onDismiss = { showBrandEditor = false })
+    }
+}
+
 /* ============================================================
  * 二、播放与音效：均衡器/睡眠定时、播放键控制、播放页晕染与黑胶
  * ============================================================ */
@@ -1789,6 +1972,62 @@ private fun AudioOutputSettingsSection(
             checked = vm.usbExclusiveEnabled,
             onCheckedChange = { vm.changeUsbExclusive(it) }
         )
+        if (vm.usbExclusiveEnabled) {
+            val skin = LocalSkin.current
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "采样率策略",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.textMuted,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            val policies = listOf(
+                "auto" to "自动最优",
+                "source" to "跟随源"
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                policies.forEach { (policy, label) ->
+                    val selected = vm.usbRatePolicy == policy
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(
+                                1.dp,
+                                if (selected) skin.accent else Color.Transparent,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeUsbRatePolicy(policy) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) skin.accent else skin.textDim
+                        )
+                    }
+                }
+            }
+            Text(
+                if (vm.usbRatePolicy == "source") {
+                    "尽量按源文件采样率输出，不升频；设备不支持时回落 44.1/48kHz"
+                } else {
+                    "自动选择设备支持的最优采样率与位深（可能升频以获得最佳兼容性）"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+            Text(
+                vm.usbOutputLabel?.let { "当前输出：$it · bit-perfect 直通中" }
+                    ?: "等待播放以协商输出格式…",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (vm.usbOutputLabel != null) skin.accent else skin.textMuted,
+                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+            )
+        }
         SettingsSwitchRow(
             title = "无缝播放",
             subtitle = "曲目之间无间隙衔接；关闭后自动续播时插入短暂停顿",
@@ -2095,6 +2334,14 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
         summary = summary,
         icon = SonanceIcons.Album
     ) {
+        SettingsSwitchRow(
+            title = "隐藏音量条",
+            subtitle = "隐藏播放页底部音量条与音效按钮；音效工作室入口移入右上角「更多」菜单",
+            checked = vm.playerHideVolumeBar,
+            onCheckedChange = vm::changePlayerHideVolumeBar
+        )
+        Spacer(Modifier.height(16.dp))
+
         // ---- 播放页的颜色晕染 ----
         SettingsGroupLabel("封面颜色晕染")
         Row(
@@ -2432,9 +2679,17 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
         Spacer(Modifier.height(8.dp))
         SettingsSwitchRow(
             title = "锁屏歌词",
-            subtitle = "把逐行歌词交给系统锁屏显示（ColorOS / OPlus 支持；其他机型会自动忽略）",
+            subtitle = "把逐行歌词交给系统锁屏 / 胶囊显示（OPPO 流体云锁屏、vivo 原子随身听、小米超级岛歌词；无内嵌歌词时按在线歌词开关联网补齐）",
             checked = vm.lockScreenLyrics,
             onCheckedChange = vm::changeLockScreenLyrics
+        )
+
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "蓝牙车载歌词",
+            subtitle = "连接车机 / 蓝牙音箱播放时，把当前歌词行逐行显示在车机屏幕上（借道蓝牙歌名通道，QQ音乐同款方案）。注意：开启后车机与手机通知的「歌名」会变为歌词行，暂停或断开蓝牙自动还原",
+            checked = vm.carBtLyricsEnabled,
+            onCheckedChange = vm::changeCarBtLyrics
         )
 
         Spacer(Modifier.height(8.dp))
@@ -2470,6 +2725,7 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
         if (vm.desktopLyricsEnabled) {
             val prefs = remember { com.sonance.player.data.Prefs(context) }
             var currentBgMode by remember { mutableStateOf(DesktopLyricsBgMode.fromId(prefs.desktopLyricsBgMode)) }
+            var desktopFontSize by remember { mutableStateOf(prefs.desktopLyricsFontSizeSp) }
             Text(
                 "桌面歌词背景样式",
                 style = MaterialTheme.typography.labelMedium,
@@ -2552,6 +2808,35 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textDim,
                 modifier = Modifier.padding(top = 6.dp)
+            )
+
+            // ---- 歌词字号（大范围 12–120sp，拖动即时生效） ----
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("歌词字号", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text(
+                    "${desktopFontSize}sp",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = skin.accent
+                )
+            }
+            Slider(
+                value = desktopFontSize.toFloat(),
+                onValueChange = {
+                    desktopFontSize = it.roundToInt()
+                    DesktopLyricsManager.applyFontSize(context, desktopFontSize)
+                },
+                valueRange = 12f..120f,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "范围 12–120sp，拖动即时生效；悬浮窗上的字号按钮按常用档位循环切换。",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textDim
             )
         }
 
@@ -3823,7 +4108,11 @@ internal fun AppIconCard(
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
-    val unselectedBorder = if (skin.immersive) Color.White.copy(alpha = 0.10f) else skin.border.copy(alpha = 0.35f)
+    val unselectedBorder = when {
+        skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.12f)
+        skin.immersive -> Color.White.copy(alpha = 0.10f)
+        else -> skin.border.copy(alpha = 0.35f)
+    }
     Box(
         modifier = modifier
             .aspectRatio(1f)
@@ -3859,17 +4148,17 @@ internal fun AppIconCard(
  * ============================================================ */
 
 @Composable
-private fun SkinGrid(current: Skin, onSelect: (Skin) -> Unit) {
+private fun SkinGrid(skins: List<Skin>, currentId: String, onSelect: (Skin) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val columns = (maxWidth / 150.dp).toInt().coerceIn(2, 4)
         val gap = 10.dp
         Column(verticalArrangement = Arrangement.spacedBy(gap)) {
-            Skins.all.chunked(columns).forEach { rowSkins ->
+            skins.chunked(columns).forEach { rowSkins ->
                 Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                     rowSkins.forEach { s ->
                         SkinCard(
                             skin = s,
-                            selected = s.id == current.id,
+                            selected = s.id == currentId,
                             onClick = { onSelect(s) },
                             modifier = Modifier.weight(1f)
                         )
@@ -3883,6 +4172,38 @@ private fun SkinGrid(current: Skin, onSelect: (Skin) -> Unit) {
     }
 }
 
+/** 跟随系统时的单个槽位选择器：标题 + 说明 + 该明暗分类下的皮肤网格。 */
+@Composable
+private fun FollowSkinPicker(
+    label: String,
+    hint: String,
+    skins: List<Skin>,
+    currentId: String,
+    onSelect: (Skin) -> Unit
+) {
+    val skin = LocalSkin.current
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = skin.text
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        SkinGrid(skins = skins, currentId = currentId, onSelect = onSelect)
+    }
+}
+
 @Composable
 private fun SkinCard(
     skin: Skin,
@@ -3893,11 +4214,13 @@ private fun SkinCard(
     val active = LocalSkin.current
     val cardBg = when {
         selected -> active.accentGlow
+        active.immersive && active.isLight -> Color.White.copy(alpha = 0.62f)
         active.immersive -> Color.White.copy(alpha = 0.065f)
         else -> active.surface2.copy(alpha = 0.68f)
     }
     val cardBorder = when {
         selected -> active.accent
+        active.immersive && active.isLight -> Color.Black.copy(alpha = 0.09f)
         active.immersive -> Color.White.copy(alpha = 0.07f)
         else -> Color.Transparent
     }
@@ -4073,6 +4396,7 @@ private fun Skin.settingsCardBorder(expanded: Boolean): Color = glassCardBorder(
 private fun Skin.settingsSoftPill(): Color = softPillBg()
 
 private fun Skin.settingsRailBg(): Color = when {
+    immersive && isLight -> Color.White.copy(alpha = 0.55f)
     immersive -> Color.Black.copy(alpha = 0.16f)
     isLight -> surface.copy(alpha = 0.72f)
     else -> surface.copy(alpha = 0.65f)
@@ -4209,7 +4533,11 @@ private fun SettingsSectionCard(
             exit = shrinkVertically(tween(180, easing = FastOutSlowInEasing)) + fadeOut(tween(120))
         ) {
             Column(Modifier.fillMaxWidth()) {
-                val dividerColor = if (skin.immersive) Color.White.copy(alpha = 0.08f) else skin.border.copy(alpha = 0.45f)
+                val dividerColor = when {
+                    skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.08f)
+                    skin.immersive -> Color.White.copy(alpha = 0.08f)
+                    else -> skin.border.copy(alpha = 0.45f)
+                }
                 Box(
                     Modifier
                         .fillMaxWidth()

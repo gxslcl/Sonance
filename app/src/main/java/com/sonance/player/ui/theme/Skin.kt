@@ -95,7 +95,7 @@ data class Skin(
 
 private fun c(hex: Long) = Color(hex)
 
-/** 28 套皮肤：17 套深色（含液态玻璃）+ 11 套浅色（含霜华玻璃） */
+/** 31 套皮肤：17 套深色（含液态玻璃）+ 14 套浅色（含霜华玻璃与 3 套浅色沉浸） */
 object Skins {
 
     /** 1 · 午夜琥珀 —— 原型默认 */
@@ -621,6 +621,72 @@ object Skins {
         immersive = true
     )
 
+    /**
+     * 29-31 · 宣纸玻璃系列 —— 浅色沉浸：与五色沉浸族同一条「封面铺底」管线，方向相反。
+     * 均衡遮罩把合成亮度**抬**到浅色档（EQUALIZE_TARGET_LUM_LIGHT），封面越暗遮罩越浓、
+     * 越亮越薄，只透出封面色相；文字深墨色按最暗色带校准（见 SonanceRoot.adaptedSkin）。
+     * surface 家族半透明白：叠在玻璃上是白玻璃卡片；描边淡墨发丝边（白边在浅底上隐形）。
+     */
+    /** 29 · 宣纸白 —— 中性 · 素宣（暖米白 × 深赭）*/
+    val XuanPaper = Skin(
+        id = "xuan_paper",
+        name = "宣纸白",
+        tagline = "封面铺底 · 素宣白玻璃",
+        isLight = true,
+        bg = c(0xFFF4F0E8), surface = c(0xCCFFFFFF), surface2 = c(0xCCF7F3EB), surface3 = c(0xB3EFE9DD),
+        border = c(0x26000000), border2 = c(0x17000000),
+        text = c(0xFF221E18), textDim = c(0xFF6B6459), textMuted = c(0xFF8A8276),
+        accent = c(0xFFA8551E), accentDim = c(0xFF8A4416), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x33A8551E), danger = c(0xFFC0392B),
+        gradients = listOf(
+            listOf(c(0xFFF3DFC0), c(0xFFE8D3B0)),
+            listOf(c(0xFFEDE0CC), c(0xFFDCCDB4)),
+            listOf(c(0xFFF6E8D2), c(0xFFE3D2B8)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 30 · 青花瓷 —— 冷瓷 · 釉青（克莱因蓝的亮色对位）*/
+    val PorcelainBlue = Skin(
+        id = "porcelain_blue",
+        name = "青花瓷",
+        tagline = "封面铺底 · 青花白玻璃",
+        isLight = true,
+        bg = c(0xFFF0F4FA), surface = c(0xCCFFFFFF), surface2 = c(0xCCF2F5FA), surface3 = c(0xB3E6ECF6),
+        border = c(0x26000000), border2 = c(0x17000000),
+        text = c(0xFF17202B), textDim = c(0xFF5A6879), textMuted = c(0xFF7D8896),
+        accent = c(0xFF1D4FB8), accentDim = c(0xFF163C8C), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x331D4FB8), danger = c(0xFFD1453D),
+        gradients = listOf(
+            listOf(c(0xFFDCE8F6), c(0xFFBCCFE8)),
+            listOf(c(0xFFD2E0F0), c(0xFFB3C8E3)),
+            listOf(c(0xFFE4EEF9), c(0xFFC6D8EC)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
+    /** 31 · 釉里红 —— 暖绯 · 釉红（中国红的亮色对位）*/
+    val GlazeRed = Skin(
+        id = "glaze_red",
+        name = "釉里红",
+        tagline = "封面铺底 · 釉里红玻璃",
+        isLight = true,
+        bg = c(0xFFFAF0EE), surface = c(0xCCFFFFFF), surface2 = c(0xCCFAF1EF), surface3 = c(0xB3F3E2DE),
+        border = c(0x26000000), border2 = c(0x17000000),
+        text = c(0xFF2B1A18), textDim = c(0xFF77584A), textMuted = c(0xFF94807A),
+        accent = c(0xFFC0392B), accentDim = c(0xFF9A2D22), onAccent = c(0xFFFFFFFF),
+        accentGlow = c(0x33C0392B), danger = c(0xFFC9403A),
+        gradients = listOf(
+            listOf(c(0xFFF8D5C4), c(0xFFEFB99D)),
+            listOf(c(0xFFFBDCE6), c(0xFFF2C2D3)),
+            listOf(c(0xFFFCE4D6), c(0xFFF5CDB6)),
+        ),
+        glass = GlassStyle.LIQUID,
+        immersive = true
+    )
+
     val all: List<Skin> = listOf(
         // ---- 深色 ----
         MidnightAmber, Graphite, Ocean, NeonViolet, Forest, Crimson,
@@ -628,7 +694,9 @@ object Skins {
         TitianRed, LimeGreen, MarrsGreen, KleinBlue, ChineseRed,
         // ---- 浅色 ----
         Ivory, Sakura, Mint, Mist, Cloud, Lavender, Coral, Clay,
-        Tropical, SkyLemon, FrostedGlass
+        Tropical, SkyLemon, FrostedGlass,
+        // ---- 浅色沉浸（封面铺底）----
+        XuanPaper, PorcelainBlue, GlazeRed
     )
 
     fun byId(id: String?): Skin = all.firstOrNull { it.id == id } ?: MidnightAmber
@@ -643,20 +711,27 @@ val LocalSkin = staticCompositionLocalOf { Skins.MidnightAmber }
  */
 fun Color.solidSurface(): Color = copy(alpha = 1f)
 
-/** 统一轻玻璃卡片底色：沉浸皮肤采用柔和半透明白雾，非沉浸皮肤沿用 surface 保持分层。 */
+/** 统一轻玻璃卡片底色：沉浸皮肤采用柔和半透明雾，非沉浸皮肤沿用 surface 保持分层。
+ *  深色沉浸用低透白雾（提亮）；浅色沉浸底本来就亮，白雾要浓到六成以上才显出卡片层次。 */
 fun Skin.glassCardBg(highlighted: Boolean = false): Color = when {
+    immersive && isLight -> Color.White.copy(alpha = if (highlighted) 0.78f else 0.62f)
     immersive -> Color.White.copy(alpha = if (highlighted) 0.125f else 0.085f)
     else -> surface
 }
 
-/** 统一轻玻璃卡片描边：去掉高对比白框，常规态极淡发丝边，聚焦/选中态叠加主题柔光。 */
+/** 统一轻玻璃卡片描边：去掉高对比白框，常规态极淡发丝边，聚焦/选中态叠加主题柔光。
+ *  浅色沉浸上白边隐形，发丝边改淡墨。 */
 fun Skin.glassCardBorder(highlighted: Boolean = false): Color = when {
     highlighted -> accent.copy(alpha = if (immersive) 0.44f else 0.36f)
+    immersive && isLight -> Color.Black.copy(alpha = 0.10f)
     immersive -> Color.White.copy(alpha = 0.085f)
     isLight -> border.copy(alpha = 0.45f)
     else -> border.copy(alpha = 0.25f)
 }
 
 /** 次级胶囊 / 图标底座底色：与主页、设置页、统计页共用。 */
-fun Skin.softPillBg(): Color =
-    if (immersive) Color.White.copy(alpha = 0.10f) else surface2
+fun Skin.softPillBg(): Color = when {
+    immersive && isLight -> Color.White.copy(alpha = 0.66f)
+    immersive -> Color.White.copy(alpha = 0.10f)
+    else -> surface2
+}

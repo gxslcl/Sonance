@@ -57,6 +57,19 @@ object DesktopLyricsManager {
     @Volatile
     var onTextColorChanged: ((Int) -> Unit)? = null
 
+    /** 悬浮窗字号按钮的循环档位：从小到大覆盖大范围，设置页滑杆可细调 12–120sp */
+    private val FONT_SIZE_LADDER = listOf(16, 20, 24, 28, 32, 40, 48, 64, 96)
+
+    /** 写入字号偏好并立即刷新悬浮窗（设置页滑杆 / 悬浮窗按钮共用） */
+    fun applyFontSize(context: Context, sizeSp: Int) {
+        val size = sizeSp.coerceIn(12, 120)
+        Prefs(context).desktopLyricsFontSizeSp = size
+        mainHandler.post {
+            tvCurrent?.textSize = size.toFloat()
+            tvNext?.textSize = (size - 4).coerceAtLeast(12).toFloat()
+        }
+    }
+
     private const val CHANNEL_ID = "sonance_desktop_lyrics"
     private const val NOTIFICATION_ID = 20048
 
@@ -432,15 +445,8 @@ object DesktopLyricsManager {
             }
             btnFontSize?.setOnClickListener {
                 val curSize = prefs.desktopLyricsFontSizeSp
-                val nextSize = when (curSize) {
-                    16 -> 18
-                    18 -> 20
-                    20 -> 22
-                    else -> 16
-                }
-                prefs.desktopLyricsFontSizeSp = nextSize
-                tvCurrent?.textSize = nextSize.toFloat()
-                tvNext?.textSize = (nextSize - 4).coerceAtLeast(12).toFloat()
+                val nextSize = FONT_SIZE_LADDER.firstOrNull { it > curSize } ?: FONT_SIZE_LADDER.first()
+                applyFontSize(app, nextSize)
                 Toast.makeText(app, "桌面歌词字号: ${nextSize}sp", Toast.LENGTH_SHORT).show()
                 scheduleAutoHide()
             }

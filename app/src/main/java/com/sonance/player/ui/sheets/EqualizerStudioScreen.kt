@@ -134,60 +134,263 @@ private enum class PresetFilter(val label: String, val category: SoundPresetCate
     ORIGINAL("原声", SoundPresetCategory.ORIGINAL)
 }
 
-private val StudioBg = Color(0xFF1A090B)
-private val StudioWellBg = Color(0xFF110507)
-private val StudioWellBorder = Color(0xFF3D191D)
-private val StudioCardTop = Color(0xFF2B1215)
-private val StudioCardBottom = Color(0xFF210D10)
-private val StudioHeroTop = Color(0xFF38151A)
-private val StudioHeroBottom = Color(0xFF240E11)
-private val StudioPillBg = Color(0xFF321519)
-private val StudioTrackBg = Color(0xFF451D22)
-private val StudioBorder = Color(0xFF471E22)
-private val StudioBorderStrong = Color(0xFF5E282E)
-private val StudioText = Color(0xFFFAF0EE)
-private val StudioTextDim = Color(0xFFDCC2BF)
-private val StudioTextMuted = Color(0xFFA07E7B)
-private val StudioCrimson = Color(0xFFE03E44)
-private val StudioCoral = Color(0xFFFF6B6B)
-private val StudioCrimsonDark = Color(0xFFC8161D)
-private val StudioOnRed = Color(0xFFFFF7F6)
-private val StudioCrimsonGlow = Color(0x2EE03E44)
-private val StudioChipSelectedBg = Color(0xFF4C161C)
-private val StudioChipSelectedText = Color(0xFFFFD6D8)
-private val StudioGold = Color(0xFFF0B44C)
-private val StudioGoldSoft = Color(0x2EF0B44C)
-
-private val StudioCardBrush = Brush.verticalGradient(listOf(StudioCardTop, StudioCardBottom))
-private val StudioHeroBrush = Brush.verticalGradient(listOf(StudioHeroTop, StudioHeroBottom))
-
 /**
- * 音效工作室专属中国红丹漆暗金配色：完全独立于应用主题，不跟随浅色/沉浸/高饱和皮肤变化。
+ * 音效工作室专属配色：中国红丹漆暗金 identity 不跟随应用主题色，
+ * 但应用设为亮色主题时整套切到亮色丹漆变体（背景亮、文字深，红金点缀保留）。
+ * 所有颜色经 [LocalStudioPalette] 下发，下面的同名 val 是 composable 读取点。
  */
-internal val StudioConsoleSkin = Skin(
-    id = "studio_console",
-    name = "中国红调音台",
-    tagline = "丹漆暗金 · 独立专业调音台配色",
+internal data class StudioPalette(
+    val isLight: Boolean,
+    val bg: Color,
+    val wellBg: Color,
+    val wellBorder: Color,
+    val cardTop: Color,
+    val cardBottom: Color,
+    val heroTop: Color,
+    val heroBottom: Color,
+    val pillBg: Color,
+    val trackBg: Color,
+    val border: Color,
+    val borderStrong: Color,
+    val text: Color,
+    val textDim: Color,
+    val textMuted: Color,
+    val crimson: Color,
+    val coral: Color,
+    val crimsonDark: Color,
+    val onRed: Color,
+    val crimsonGlow: Color,
+    val chipSelectedBg: Color,
+    val chipSelectedText: Color,
+    val gold: Color,
+    val goldSoft: Color,
+    val surface: Color,
+    val danger: Color,
+    val heroGlowTop: Color,
+    val heroGlowBottom: Color,
+    val statusActiveBg: Color,
+    val statusIdleBg: Color,
+    val statusBypassText: Color,
+    val statusIdleBorder: Color,
+    val statusBypassDotBg: Color,
+    val statusIdleText: Color,
+    val tabsTrayBg: Color,
+    val tabsTrayBorder: Color,
+    val tabSelectedTop: Color,
+    val tabSelectedBottom: Color,
+    val heroStripBg: Color,
+    val presetCardSelTop: Color,
+    val presetCardSelBottom: Color,
+    val eqWellInner: Color,
+    val eqGridLine: Color,
+    val eqBandBg: Color,
+    val eqThumbInactive: Color,
+    val eqLabelInactive: Color,
+    val curveRefZero: Color,
+    val curveRefOther: Color,
+    val curveGrid: Color,
+    val curveInactiveStroke: Color,
+    val chipUnselectedBg: Color
+) {
+    val cardBrush: Brush = Brush.verticalGradient(listOf(cardTop, cardBottom))
+    val heroBrush: Brush = Brush.verticalGradient(listOf(heroTop, heroBottom))
+}
+
+internal val StudioDarkPalette = StudioPalette(
     isLight = false,
-    bg = StudioBg,
+    bg = Color(0xFF1A090B),
+    wellBg = Color(0xFF110507),
+    wellBorder = Color(0xFF3D191D),
+    cardTop = Color(0xFF2B1215),
+    cardBottom = Color(0xFF210D10),
+    heroTop = Color(0xFF38151A),
+    heroBottom = Color(0xFF240E11),
+    pillBg = Color(0xFF321519),
+    trackBg = Color(0xFF451D22),
+    border = Color(0xFF471E22),
+    borderStrong = Color(0xFF5E282E),
+    text = Color(0xFFFAF0EE),
+    textDim = Color(0xFFDCC2BF),
+    textMuted = Color(0xFFA07E7B),
+    crimson = Color(0xFFE03E44),
+    coral = Color(0xFFFF6B6B),
+    crimsonDark = Color(0xFFC8161D),
+    onRed = Color(0xFFFFF7F6),
+    crimsonGlow = Color(0x2EE03E44),
+    chipSelectedBg = Color(0xFF4C161C),
+    chipSelectedText = Color(0xFFFFD6D8),
+    gold = Color(0xFFF0B44C),
+    goldSoft = Color(0x2EF0B44C),
     surface = Color(0xFF250F12),
-    surface2 = StudioPillBg,
-    surface3 = StudioTrackBg,
-    border = StudioBorder,
-    border2 = StudioBorderStrong,
-    text = StudioText,
-    textDim = StudioTextDim,
-    textMuted = StudioTextMuted,
-    accent = StudioCrimson,
-    accentDim = StudioCrimsonDark,
-    onAccent = StudioOnRed,
-    accentGlow = StudioCrimsonGlow,
     danger = Color(0xFFFF7A5A),
-    gradients = listOf(listOf(StudioHeroTop, StudioBg)),
-    glass = null,
-    immersive = false
+    heroGlowTop = Color(0xFF5C1118),
+    heroGlowBottom = Color(0xFF330A0E),
+    statusActiveBg = Color(0xFF3D141A),
+    statusIdleBg = Color(0xFF230E11),
+    statusBypassText = Color(0xFFF7C96E),
+    statusIdleBorder = Color(0xFF3A181C),
+    statusBypassDotBg = Color(0xFF1A090B),
+    statusIdleText = Color(0xFF7D5C5A),
+    tabsTrayBg = Color(0xFF140709),
+    tabsTrayBorder = Color(0xFF3A181C),
+    tabSelectedTop = Color(0xFF42171D),
+    tabSelectedBottom = Color(0xFF311116),
+    heroStripBg = Color(0xFF281014),
+    presetCardSelTop = Color(0xFF45151B),
+    presetCardSelBottom = Color(0xFF2A0E12),
+    eqWellInner = Color(0xFF2B1216),
+    eqGridLine = Color(0xFF4F2328),
+    eqBandBg = Color(0xFF2D1317),
+    eqThumbInactive = Color(0xFF5C383B),
+    eqLabelInactive = Color(0xFF8F6B69),
+    curveRefZero = Color(0xFF4F2328),
+    curveRefOther = Color(0xFF301418),
+    curveGrid = Color(0xFF260F12),
+    curveInactiveStroke = Color(0xFF6E4B4E),
+    chipUnselectedBg = Color(0xFF240E12)
 )
 
+internal val StudioLightPalette = StudioPalette(
+    isLight = true,
+    bg = Color(0xFFF7F1EF),
+    wellBg = Color(0xFFEFE4E1),
+    wellBorder = Color(0xFFE0CCC8),
+    cardTop = Color(0xFFFBF6F4),
+    cardBottom = Color(0xFFF3E9E6),
+    heroTop = Color(0xFFF6E3E0),
+    heroBottom = Color(0xFFFBEFEC),
+    pillBg = Color(0xFFF0E2DF),
+    trackBg = Color(0xFFE7D4D0),
+    border = Color(0xFFE3CFCA),
+    borderStrong = Color(0xFFD3B6B0),
+    text = Color(0xFF3A1F1E),
+    textDim = Color(0xFF6B4A47),
+    textMuted = Color(0xFF9A7B77),
+    crimson = Color(0xFFD22B32),
+    coral = Color(0xFFE05A5A),
+    crimsonDark = Color(0xFFA81218),
+    onRed = Color(0xFFFFF7F6),
+    crimsonGlow = Color(0x1FC8161D),
+    chipSelectedBg = Color(0xFFF3D9D6),
+    chipSelectedText = Color(0xFF8C1F26),
+    gold = Color(0xFFB07A1E),
+    goldSoft = Color(0x2EB07A1E),
+    surface = Color(0xFFF3E9E6),
+    danger = Color(0xFFD94F2E),
+    heroGlowTop = Color(0xFFF2D9D4),
+    heroGlowBottom = Color(0xFFF8E8E4),
+    statusActiveBg = Color(0xFFF3D9D6),
+    statusIdleBg = Color(0xFFEFE2DF),
+    statusBypassText = Color(0xFF9A6A10),
+    statusIdleBorder = Color(0xFFE0CCC8),
+    statusBypassDotBg = Color(0xFFF7F1EF),
+    statusIdleText = Color(0xFF8A6A66),
+    tabsTrayBg = Color(0xFFEDE0DC),
+    tabsTrayBorder = Color(0xFFE0CCC8),
+    tabSelectedTop = Color(0xFFFBEFEC),
+    tabSelectedBottom = Color(0xFFF3E2DE),
+    heroStripBg = Color(0xFFF3E9E6),
+    presetCardSelTop = Color(0xFFF6E0DC),
+    presetCardSelBottom = Color(0xFFEFDCD8),
+    eqWellInner = Color(0xFFE9D8D4),
+    eqGridLine = Color(0xFFD8BFB9),
+    eqBandBg = Color(0xFFEFE2DF),
+    eqThumbInactive = Color(0xFFC9A9A3),
+    eqLabelInactive = Color(0xFF8F6B69),
+    curveRefZero = Color(0xFFD8BFB9),
+    curveRefOther = Color(0xFFE2CEC9),
+    curveGrid = Color(0xFFEBDCD8),
+    curveInactiveStroke = Color(0xFFB3928C),
+    chipUnselectedBg = Color(0xFFEFE2DF)
+)
+
+private val LocalStudioPalette = androidx.compose.runtime.staticCompositionLocalOf { StudioDarkPalette }
+
+private val StudioBg: Color
+    @Composable get() = LocalStudioPalette.current.bg
+private val StudioWellBg: Color
+    @Composable get() = LocalStudioPalette.current.wellBg
+private val StudioWellBorder: Color
+    @Composable get() = LocalStudioPalette.current.wellBorder
+private val StudioCardTop: Color
+    @Composable get() = LocalStudioPalette.current.cardTop
+private val StudioCardBottom: Color
+    @Composable get() = LocalStudioPalette.current.cardBottom
+private val StudioHeroTop: Color
+    @Composable get() = LocalStudioPalette.current.heroTop
+private val StudioHeroBottom: Color
+    @Composable get() = LocalStudioPalette.current.heroBottom
+private val StudioPillBg: Color
+    @Composable get() = LocalStudioPalette.current.pillBg
+private val StudioTrackBg: Color
+    @Composable get() = LocalStudioPalette.current.trackBg
+private val StudioBorder: Color
+    @Composable get() = LocalStudioPalette.current.border
+private val StudioBorderStrong: Color
+    @Composable get() = LocalStudioPalette.current.borderStrong
+private val StudioText: Color
+    @Composable get() = LocalStudioPalette.current.text
+private val StudioTextDim: Color
+    @Composable get() = LocalStudioPalette.current.textDim
+private val StudioTextMuted: Color
+    @Composable get() = LocalStudioPalette.current.textMuted
+private val StudioCrimson: Color
+    @Composable get() = LocalStudioPalette.current.crimson
+private val StudioCoral: Color
+    @Composable get() = LocalStudioPalette.current.coral
+private val StudioCrimsonDark: Color
+    @Composable get() = LocalStudioPalette.current.crimsonDark
+private val StudioOnRed: Color
+    @Composable get() = LocalStudioPalette.current.onRed
+private val StudioCrimsonGlow: Color
+    @Composable get() = LocalStudioPalette.current.crimsonGlow
+private val StudioChipSelectedBg: Color
+    @Composable get() = LocalStudioPalette.current.chipSelectedBg
+private val StudioChipSelectedText: Color
+    @Composable get() = LocalStudioPalette.current.chipSelectedText
+private val StudioGold: Color
+    @Composable get() = LocalStudioPalette.current.gold
+private val StudioGoldSoft: Color
+    @Composable get() = LocalStudioPalette.current.goldSoft
+
+private val StudioCardBrush: Brush
+    @Composable get() = LocalStudioPalette.current.cardBrush
+private val StudioHeroBrush: Brush
+    @Composable get() = LocalStudioPalette.current.heroBrush
+
+/**
+ * 音效工作室专属中国红丹漆配色：identity 独立于应用主题（不跟随皮肤强调色），
+ * 亮色主题下自动切到亮色丹漆变体。
+ */
+internal val StudioConsoleSkin: Skin
+    @Composable get() {
+        val p = LocalStudioPalette.current
+        return Skin(
+            id = "studio_console",
+            name = "中国红调音台",
+            tagline = "丹漆暗金 · 独立专业调音台配色",
+            isLight = p.isLight,
+            bg = p.bg,
+            surface = p.surface,
+            surface2 = p.pillBg,
+            surface3 = p.trackBg,
+            border = p.border,
+            border2 = p.borderStrong,
+            text = p.text,
+            textDim = p.textDim,
+            textMuted = p.textMuted,
+            accent = p.crimson,
+            accentDim = p.crimsonDark,
+            onAccent = p.onRed,
+            accentGlow = p.crimsonGlow,
+            danger = p.danger,
+            gradients = listOf(listOf(p.heroTop, p.bg)),
+            glass = null,
+            immersive = false
+        )
+    }
+
+@Composable
 private fun Modifier.studioCardContainer(
     radius: androidx.compose.ui.unit.Dp = 20.dp,
     highlighted: Boolean = false
@@ -235,7 +438,9 @@ fun EqualizerStudioScreen(
     val hasAnyProcessing = vm.soundFxEnabled || vm.eqEnabled
     val scrollState = rememberScrollState()
 
-    SonanceTheme(StudioConsoleSkin) {
+    val studioPalette = if (outerSkin.isLight) StudioLightPalette else StudioDarkPalette
+    androidx.compose.runtime.CompositionLocalProvider(LocalStudioPalette provides studioPalette) {
+        SonanceTheme(StudioConsoleSkin) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -255,8 +460,8 @@ fun EqualizerStudioScreen(
                     .background(
                         Brush.verticalGradient(
                             listOf(
-                                Color(0xFF5C1118).copy(alpha = 0.72f),
-                                Color(0xFF330A0E).copy(alpha = 0.36f),
+                                LocalStudioPalette.current.heroGlowTop.copy(alpha = 0.72f),
+                                LocalStudioPalette.current.heroGlowBottom.copy(alpha = 0.36f),
                                 Color.Transparent
                             )
                         )
@@ -332,6 +537,7 @@ fun EqualizerStudioScreen(
                     }
                 }
             }
+        }
         }
     }
 }
@@ -419,21 +625,21 @@ private fun StudioTopHeader(
         val abBg by animateColorAsState(
             targetValue = when {
                 bypassing -> StudioGold
-                processingActive -> Color(0xFF3D141A)
-                else -> Color(0xFF230E11)
+                processingActive -> LocalStudioPalette.current.statusActiveBg
+                else -> LocalStudioPalette.current.statusIdleBg
             },
             animationSpec = tween(150),
             label = "abHoldBg"
         )
         val abBorderColor = when {
-            bypassing -> Color(0xFFF7C96E)
+            bypassing -> LocalStudioPalette.current.statusBypassText
             processingActive -> StudioCrimson.copy(alpha = 0.65f)
-            else -> Color(0xFF3A181C)
+            else -> LocalStudioPalette.current.statusIdleBorder
         }
         val abTextColor = when {
-            bypassing -> Color(0xFF1A090B)
+            bypassing -> LocalStudioPalette.current.statusBypassDotBg
             processingActive -> StudioText
-            else -> Color(0xFF7D5C5A)
+            else -> LocalStudioPalette.current.statusIdleText
         }
         Row(
             modifier = Modifier
@@ -501,8 +707,8 @@ private fun StudioSegmentedTabs(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF140709))
-            .border(0.8.dp, Color(0xFF3A181C), RoundedCornerShape(16.dp))
+            .background(LocalStudioPalette.current.tabsTrayBg)
+            .border(0.8.dp, LocalStudioPalette.current.tabsTrayBorder, RoundedCornerShape(16.dp))
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -515,7 +721,9 @@ private fun StudioSegmentedTabs(
                 StudioTab.KARAOKE -> karaokeActive
             }
             val bgBrush = if (isSelected) {
-                Brush.verticalGradient(listOf(Color(0xFF42171D), Color(0xFF311116)))
+                Brush.verticalGradient(
+                    listOf(LocalStudioPalette.current.tabSelectedTop, LocalStudioPalette.current.tabSelectedBottom)
+                )
             } else {
                 Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
             }
@@ -747,7 +955,7 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFF140709))
+                .background(LocalStudioPalette.current.tabsTrayBg)
                 .border(0.8.dp, StudioWellBorder, RoundedCornerShape(14.dp))
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -772,7 +980,9 @@ private fun StudioHeroCard(vm: SonanceViewModel) {
                     val pillBrush = if (on) {
                         Brush.horizontalGradient(listOf(StudioCrimsonDark, StudioCrimson))
                     } else {
-                        Brush.horizontalGradient(listOf(Color(0xFF281014), Color(0xFF281014)))
+                        Brush.horizontalGradient(
+                            listOf(LocalStudioPalette.current.heroStripBg, LocalStudioPalette.current.heroStripBg)
+                        )
                     }
                     Box(
                         modifier = Modifier
@@ -1004,7 +1214,9 @@ private fun PresetStudioCard(
         presetNetCurve(preset, 32, intensity = intensity)
     }
     val cardBg = if (selected) {
-        Brush.verticalGradient(listOf(Color(0xFF45151B), Color(0xFF2A0E12)))
+        Brush.verticalGradient(
+            listOf(LocalStudioPalette.current.presetCardSelTop, LocalStudioPalette.current.presetCardSelBottom)
+        )
     } else {
         StudioCardBrush
     }
@@ -1239,6 +1451,7 @@ private fun VerticalEqMixerBank(
 ) {
     val context = LocalContext.current
     val span = (maxDb - minDb).coerceAtLeast(0.001f)
+    val palette = LocalStudioPalette.current
 
     Box(
         modifier = Modifier
@@ -1362,14 +1575,14 @@ private fun VerticalEqMixerBank(
                             listOf(halfGain, -halfGain).forEach { refDb ->
                                 val ry = yForDb(refDb)
                                 drawLine(
-                                    color = Color(0xFF2B1216),
+                                    color = palette.eqWellInner,
                                     start = Offset(3.dp.toPx(), ry),
                                     end = Offset(size.width - 3.dp.toPx(), ry),
                                     strokeWidth = 0.7.dp.toPx()
                                 )
                             }
                             drawLine(
-                                color = Color(0xFF4F2328),
+                                color = palette.eqGridLine,
                                 start = Offset(2.dp.toPx(), zeroY),
                                 end = Offset(size.width - 2.dp.toPx(), zeroY),
                                 strokeWidth = 1.dp.toPx()
@@ -1377,7 +1590,7 @@ private fun VerticalEqMixerBank(
 
                             // 轨道凹槽
                             drawRoundRect(
-                                color = Color(0xFF2D1317),
+                                color = palette.eqBandBg,
                                 topLeft = Offset(cx - trackW / 2f, trackTop),
                                 size = Size(trackW, trackLen),
                                 cornerRadius = CornerRadius(trackW / 2f)
@@ -1388,9 +1601,9 @@ private fun VerticalEqMixerBank(
                             val fillH = abs(thumbY - zeroY)
                             if (fillH > 0.5f) {
                                 val barBrush = if (eqEnabled) {
-                                    Brush.verticalGradient(listOf(StudioCoral, StudioCrimsonDark))
+                                    Brush.verticalGradient(listOf(palette.coral, palette.crimsonDark))
                                 } else {
-                                    Brush.verticalGradient(listOf(Color(0xFF5C383B), Color(0xFF5C383B)))
+                                    Brush.verticalGradient(listOf(palette.eqThumbInactive, palette.eqThumbInactive))
                                 }
                                 drawRoundRect(
                                     brush = barBrush,
@@ -1404,18 +1617,18 @@ private fun VerticalEqMixerBank(
                             val thumbR = 6.5.dp.toPx()
                             if (eqEnabled) {
                                 drawCircle(
-                                    color = StudioCrimson.copy(alpha = 0.26f),
+                                    color = palette.crimson.copy(alpha = 0.26f),
                                     radius = thumbR + 3.dp.toPx(),
                                     center = Offset(cx, thumbY)
                                 )
                             }
                             drawCircle(
-                                color = if (active || eqEnabled) StudioCrimson else Color(0xFF8F6B69),
+                                color = if (active || eqEnabled) palette.crimson else palette.eqLabelInactive,
                                 radius = thumbR,
                                 center = Offset(cx, thumbY)
                             )
                             drawCircle(
-                                color = StudioWellBg,
+                                color = palette.wellBg,
                                 radius = thumbR * 0.36f,
                                 center = Offset(cx, thumbY)
                             )
@@ -1852,6 +2065,7 @@ private fun StudioCurveGraph(
     heightDp: Float,
     accentActive: Boolean
 ) {
+    val palette = LocalStudioPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1876,7 +2090,7 @@ private fun StudioCurveGraph(
             listOf(6f, 0f, -6f).forEach { refDb ->
                 val y = yFor(refDb)
                 drawLine(
-                    color = if (refDb == 0f) Color(0xFF4F2328) else Color(0xFF301418),
+                    color = if (refDb == 0f) palette.curveRefZero else palette.curveRefOther,
                     start = Offset(0f, y),
                     end = Offset(size.width, y),
                     strokeWidth = if (refDb == 0f) 1.dp.toPx() else 0.7.dp.toPx(),
@@ -1889,7 +2103,7 @@ private fun StudioCurveGraph(
                 val ratio = (kotlin.math.ln(hz / 31.0) / kotlin.math.ln(16_000.0 / 31.0)).toFloat()
                 val x = size.width * ratio
                 drawLine(
-                    color = Color(0xFF260F12),
+                    color = palette.curveGrid,
                     start = Offset(x, 0f),
                     end = Offset(x, size.height),
                     strokeWidth = 0.7.dp.toPx()
@@ -1918,7 +2132,7 @@ private fun StudioCurveGraph(
                 addSmoothSegments(ghostPath, ghostCurve)
                 drawPath(
                     path = ghostPath,
-                    color = StudioGold.copy(alpha = 0.48f),
+                    color = palette.gold.copy(alpha = 0.48f),
                     style = Stroke(
                         width = 1.3.dp.toPx(),
                         pathEffect = dash,
@@ -1928,7 +2142,7 @@ private fun StudioCurveGraph(
             }
 
             if (curve.size >= 2) {
-                val inactiveStroke = Color(0xFF6E4B4E)
+                val inactiveStroke = palette.curveInactiveStroke
                 val line = Path()
                 addSmoothSegments(line, curve)
                 val fill = Path().apply {
@@ -1942,7 +2156,7 @@ private fun StudioCurveGraph(
                         path = fill,
                         brush = Brush.verticalGradient(
                             listOf(
-                                StudioCrimson.copy(alpha = 0.28f),
+                                palette.crimson.copy(alpha = 0.28f),
                                 Color.Transparent
                             )
                         )
@@ -1950,7 +2164,7 @@ private fun StudioCurveGraph(
                     drawPath(
                         path = line,
                         brush = Brush.horizontalGradient(
-                            listOf(StudioCrimsonDark, StudioCrimson, StudioCoral, StudioGold)
+                            listOf(palette.crimsonDark, palette.crimson, palette.coral, palette.gold)
                         ),
                         style = Stroke(
                             width = 2.3.dp.toPx(),
@@ -2002,6 +2216,7 @@ private fun PresetMiniSparkline(
     highlighted: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalStudioPalette.current
     Canvas(modifier = modifier) {
         val minDb = -8f
         val maxDb = 8f
@@ -2011,7 +2226,7 @@ private fun PresetMiniSparkline(
 
         val zeroY = yFor(0f)
         drawLine(
-            color = Color(0xFF3A181C),
+            color = palette.tabsTrayBorder,
             start = Offset(0f, zeroY),
             end = Offset(size.width, zeroY),
             strokeWidth = 0.7.dp.toPx()
@@ -2038,7 +2253,7 @@ private fun PresetMiniSparkline(
                 close()
             }
 
-            val strokeColor = if (highlighted) StudioCoral else StudioTextMuted
+            val strokeColor = if (highlighted) palette.coral else palette.textMuted
             drawPath(
                 path = fill,
                 brush = Brush.verticalGradient(
@@ -2196,7 +2411,7 @@ private fun StudioFilterPillChip(
     Box(
         modifier = Modifier
             .clip(CircleShape)
-            .background(if (selected) StudioChipSelectedBg else Color(0xFF240E12))
+            .background(if (selected) StudioChipSelectedBg else LocalStudioPalette.current.chipUnselectedBg)
             .border(
                 width = if (selected) 1.dp else 0.8.dp,
                 color = if (selected) StudioCrimson.copy(alpha = 0.82f) else StudioBorder,
@@ -2261,11 +2476,13 @@ private fun StudioSwitch(checked: Boolean, onChange: (Boolean) -> Unit, label: S
     val skin = LocalSkin.current
     val trackBg = when {
         checked -> skin.accent
+        skin.immersive && skin.isLight -> Color.White.copy(alpha = 0.70f)
         skin.immersive -> Color.White.copy(alpha = 0.14f)
         else -> skin.surface2
     }
     val trackBorder = when {
         checked -> skin.accent
+        skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.14f)
         skin.immersive -> Color.White.copy(alpha = 0.18f)
         else -> skin.border2
     }

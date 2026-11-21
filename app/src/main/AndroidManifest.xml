@@ -36,6 +36,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 睡眠定时：到点精确唤醒停播。Android 12+ 用户未授权精确闹钟时自动降级为 while-idle 闹钟 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 黑胶模式的触感反馈（install-time 普通权限） -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- 桌面歌词悬浮窗权限 -->
@@ -218,6 +220,11 @@
         -->
         <receiver
             android:name=".widget.WidgetCommandReceiver"
+            android:exported="false" />
+
+        <!-- 睡眠定时到点的系统闹钟入口：只接收本应用 PendingIntent 的显式 intent -->
+        <receiver
+            android:name=".playback.SleepTimerReceiver"
             android:exported="false" />
 
         <!--

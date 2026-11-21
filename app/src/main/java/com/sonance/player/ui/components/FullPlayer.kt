@@ -1515,6 +1515,11 @@ fun FullPlayer(
             dlnaActive = dlnaActive,
             switchMotion = switchMotion,
             onSwitchMotionChange = onSwitchMotionChange,
+            showEqualizerEntry = prefs.playerHideVolumeBar,
+            onOpenEqualizer = {
+                showTopMoreSheet = false
+                onOpenEqualizer()
+            },
             onOpenSleepTimer = {
                 showTopMoreSheet = false
                 onOpenSleepTimer()
@@ -2429,6 +2434,8 @@ private fun PlayerMoreActionsSheet(
     dlnaActive: Boolean,
     switchMotion: PlayerSwitchMotion,
     onSwitchMotionChange: (PlayerSwitchMotion) -> Unit,
+    showEqualizerEntry: Boolean = false,
+    onOpenEqualizer: () -> Unit = {},
     onOpenSleepTimer: () -> Unit,
     onOpenDlna: () -> Unit,
     onOpenGlow: () -> Unit,
@@ -2539,6 +2546,53 @@ private fun PlayerMoreActionsSheet(
             }
 
             Spacer(Modifier.height(10.dp))
+
+            // 音效工作室卡片：底部音量条被设置隐藏时，音效入口收进这里
+            if (showEqualizerEntry) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(skin.surface2)
+                        .clickable {
+                            hapticTick(context)
+                            onOpenEqualizer()
+                        }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(skin.surface3),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = SonanceIcons.Equalizer,
+                            contentDescription = null,
+                            tint = skin.accent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "音效工作室",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            color = skin.text
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "均衡器 · 预设音色 · DSP 音效",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+            }
 
             // 加入歌单卡片（调用方没提供回调时不显示）
             if (onAddToPlaylist != null) {
@@ -3532,11 +3586,13 @@ private fun PlayerPage(
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(Modifier.height(16.dp))
-                        BottomRow(
-                            volume = volume,
-                            onVolume = onVolume,
-                            onOpenEqualizer = onOpenEqualizer
-                        )
+                        if (!prefs.playerHideVolumeBar) {
+                            BottomRow(
+                                volume = volume,
+                                onVolume = onVolume,
+                                onOpenEqualizer = onOpenEqualizer
+                            )
+                        }
                         }
                     }
                     // 胶囊「词」：脱离右栏文档流，在歌名上方留白足够时垂直居中悬浮显示，不挤压任何控件
@@ -3773,11 +3829,13 @@ private fun PlayerPage(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
-                BottomRow(
-                    volume = volume,
-                    onVolume = onVolume,
-                    onOpenEqualizer = onOpenEqualizer
-                )
+                if (!prefs.playerHideVolumeBar) {
+                    BottomRow(
+                        volume = volume,
+                        onVolume = onVolume,
+                        onOpenEqualizer = onOpenEqualizer
+                    )
+                }
                 }
                 // 距底部 20dp（再叠加系统导航栏安全区）
                 Spacer(Modifier.height(BottomGap))

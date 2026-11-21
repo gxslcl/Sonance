@@ -1369,11 +1369,13 @@ fun GlassActionChip(
     val shape = RoundedCornerShape(16.dp)
     val bg = when {
         accent -> skin.accent.copy(alpha = if (skin.isLight) 0.12f else 0.17f)
+        skin.immersive && skin.isLight -> Color.White.copy(alpha = 0.66f)
         skin.immersive -> Color.White.copy(alpha = 0.09f)
         else -> skin.surface2
     }
     val stroke = when {
         accent -> skin.accent.copy(alpha = 0.38f)
+        skin.immersive && skin.isLight -> Color.Black.copy(alpha = 0.10f)
         skin.immersive -> Color.White.copy(alpha = 0.12f)
         else -> skin.border.copy(alpha = 0.35f)
     }

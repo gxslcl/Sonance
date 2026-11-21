@@ -75,16 +75,20 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -217,6 +221,14 @@ fun LyricsOverlay(
 
     // 全屏展现模式：全局设置，页内切换即时生效
     var style by remember { mutableStateOf(prefs.lyricsStyle) }
+
+    // 页面常亮：只在本页组合期间生效（切走歌词层本组件离开组合，onDispose 复位）
+    var keepScreenOn by remember { mutableStateOf(prefs.lyricsKeepScreenOn) }
+    val rootView = LocalView.current
+    DisposableEffect(keepScreenOn) {
+        rootView.keepScreenOn = keepScreenOn
+        onDispose { rootView.keepScreenOn = false }
+    }
     // 手动滑动歌词跨行轻震：全局设置，与封面内嵌歌词共享，实时监听变更
     var scrollHaptic by rememberLyricsScrollHaptic(prefs)
 
@@ -643,6 +655,16 @@ fun LyricsOverlay(
                     subtitle = "仅对全屏歌词页生效；下拉可临时呼出",
                     checked = hideStatusBar,
                     onCheckedChange = onHideStatusBarChange,
+                    skin = skin
+                )
+                ToggleSettingRow(
+                    title = "页面常亮",
+                    subtitle = "停留在歌词页时屏幕保持点亮，离开歌词页自动恢复",
+                    checked = keepScreenOn,
+                    onCheckedChange = {
+                        keepScreenOn = it
+                        prefs.lyricsKeepScreenOn = it
+                    },
                     skin = skin
                 )
                 ToggleSettingRow(
@@ -1360,7 +1382,8 @@ internal fun KaraokeLineText(
     fontSize: TextUnit,
     lineHeight: TextUnit,
     fontWeight: FontWeight,
-    textAlign: TextAlign = TextAlign.Start
+    textAlign: TextAlign = TextAlign.Start,
+    style: TextStyle = TextStyle.Default
 ) {
     val pos = smoothPos.longValue
     val text = remember(line, pos, unsungColor, sungColor) {
@@ -1372,7 +1395,8 @@ internal fun KaraokeLineText(
         lineHeight = lineHeight,
         fontWeight = fontWeight,
         color = unsungColor,
-        textAlign = textAlign
+        textAlign = textAlign,
+        style = style
     )
 }
 
@@ -1771,15 +1795,31 @@ internal fun SyncedLyrics(
                     index < current -> skin.textMuted
                     else -> skin.textDim
                 }
-                val color = if (bgProfile == null || !shouldAdapt(isCurrent, adaptMode)) {
+                val adaptActive = bgProfile != null && shouldAdapt(isCurrent, adaptMode)
+                val color = if (!adaptActive) {
                     baseColor
                 } else {
                     lyricColor(
                         base = baseColor,
                         screenFraction = (anchorPx + (index - current) * linePx) / containerPx,
                         isCurrent = isCurrent,
-                        profile = bgProfile
+                        profile = bgProfile!!
                     )
+                }
+                // 封面晕染背景上给文字垫一层柔影：调色只能保证「整块背景」的平均
+                // 对比度，字笔画压到封面亮斑上时仍会糊掉；阴影提供逐像素的局部反差。
+                // 往亮调的字配黑影、往暗调的字配白影，纯色皮肤背景不加（保持干净）。
+                val lineStyle = if (adaptActive) {
+                    TextStyle(
+                        shadow = Shadow(
+                            color = if (bgProfile!!.lighten) Color.Black.copy(alpha = 0.55f)
+                            else Color.White.copy(alpha = 0.65f),
+                            offset = Offset.Zero,
+                            blurRadius = 8f
+                        )
+                    )
+                } else {
+                    TextStyle.Default
                 }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1809,7 +1849,8 @@ internal fun SyncedLyrics(
                             fontSize = lineFontSize,
                             lineHeight = lineLineHeight,
                             fontWeight = lineWeight,
-                            textAlign = TextAlign.Center
+                            textAlign = TextAlign.Center,
+                            style = lineStyle
                         )
                     } else {
                         Text(
@@ -1818,7 +1859,8 @@ internal fun SyncedLyrics(
                             lineHeight = lineLineHeight,
                             fontWeight = lineWeight,
                             color = color,
-                            textAlign = TextAlign.Center
+                            textAlign = TextAlign.Center,
+                            style = lineStyle
                         )
                     }
                     // 译文：网易云 tlyric 拆出来的（见 LyricLine.translation），
@@ -1830,7 +1872,8 @@ internal fun SyncedLyrics(
                             lineHeight = (fontSizeSp * 0.72f * 1.4f).sp,
                             fontWeight = if (isCurrent) FontWeight.Medium else FontWeight.Normal,
                             color = color.copy(alpha = if (isCurrent) 0.85f else 0.55f),
-                            textAlign = TextAlign.Center
+                            textAlign = TextAlign.Center,
+                            style = lineStyle
                         )
                     }
                 }
@@ -1880,10 +1923,23 @@ internal fun PlainLyrics(
         userScrollEnabled = userScrollEnabled
     ) {
         itemsIndexed(lines) { index, line ->
-            val color = if (bgProfile == null || !shouldAdapt(isCurrent = false, mode = adaptMode)) {
+            val adaptActive = bgProfile != null && shouldAdapt(isCurrent = false, mode = adaptMode)
+            val color = if (!adaptActive) {
                 skin.textDim
             } else {
-                lyricColor(skin.textDim, fractions[index] ?: 0.5f, false, bgProfile)
+                lyricColor(skin.textDim, fractions[index] ?: 0.5f, false, bgProfile!!)
+            }
+            val lineStyle = if (adaptActive) {
+                TextStyle(
+                    shadow = Shadow(
+                        color = if (bgProfile!!.lighten) Color.Black.copy(alpha = 0.55f)
+                        else Color.White.copy(alpha = 0.65f),
+                        offset = Offset.Zero,
+                        blurRadius = 8f
+                    )
+                )
+            } else {
+                TextStyle.Default
             }
             Text(
                 text = line,
@@ -1891,6 +1947,7 @@ internal fun PlainLyrics(
                 lineHeight = (fontSizeSp * 1.5f).sp,
                 color = color,
                 textAlign = TextAlign.Center,
+                style = lineStyle,
                 modifier = Modifier.fillMaxWidth()
             )
         }

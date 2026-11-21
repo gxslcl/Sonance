@@ -78,7 +78,7 @@ internal enum class WidgetStyle(
         showCover = true, hasMiniCover = false, hasAccentBar = false, hasHqBadge = false,
         showBrand = false, supportsLyricToggle = true, isCornerPillControls = false,
         isPillPlayButton = false, progressMode = WidgetProgressMode.THIN_BOTTOM, triLineLyrics = false,
-        playBtnWdp = 34, playBtnHdp = 34, baseCoverDp = 52f, baseMiniDp = 0f,
+        playBtnWdp = 34, playBtnHdp = 34, baseCoverDp = 46f, baseMiniDp = 0f,
         coverPx = 144, miniCoverPx = 0,
         coverRadiusRatio = 0.22f, defaultWidthDp = 340, defaultHeightDp = 72
     ),
@@ -130,7 +130,7 @@ internal enum class WidgetStyle(
         showCover = true, hasMiniCover = false, hasAccentBar = false, hasHqBadge = false,
         showBrand = false, supportsLyricToggle = true, isCornerPillControls = false,
         isPillPlayButton = false, progressMode = WidgetProgressMode.THIN_BOTTOM, triLineLyrics = false,
-        playBtnWdp = 32, playBtnHdp = 32, baseCoverDp = 48f, baseMiniDp = 0f,
+        playBtnWdp = 32, playBtnHdp = 32, baseCoverDp = 40f, baseMiniDp = 0f,
         coverPx = 132, miniCoverPx = 0,
         coverRadiusRatio = 0.22f, defaultWidthDp = 280, defaultHeightDp = 70
     ),
@@ -150,7 +150,7 @@ internal enum class WidgetStyle(
         showCover = true, hasMiniCover = false, hasAccentBar = false, hasHqBadge = true,
         showBrand = false, supportsLyricToggle = true, isCornerPillControls = false,
         isPillPlayButton = false, progressMode = WidgetProgressMode.RAIL_WITH_DOT, triLineLyrics = false,
-        playBtnWdp = 34, playBtnHdp = 34, baseCoverDp = 98f, baseMiniDp = 0f,
+        playBtnWdp = 34, playBtnHdp = 34, baseCoverDp = 84f, baseMiniDp = 0f,
         coverPx = 232, miniCoverPx = 0,
         coverRadiusRatio = 0.13f, defaultWidthDp = 280, defaultHeightDp = 152
     ),

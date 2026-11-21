@@ -1,5 +1,6 @@
 package com.sonance.player.playback
 
+import android.app.AlarmManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -109,6 +110,8 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var shuttingDownForSleep = false
 
+    private var sleepAfterCurrentWatch: Runnable? = null
+
     @Volatile
     private var isScreenInteractive = true
 
@@ -118,6 +121,7 @@ class PlaybackService : MediaLibraryService() {
 
     private var sessionLyricsGeneration = 0
     private var lastPublishedLyricsSig: String? = null
+    private var lastPublishedLyricsTrackKey: String? = null
 
     private var shakeController: ShakeTrackController? = null
     private val headsetButtonCounter = HeadsetButtonClickCounter(380L)
@@ -247,6 +251,56 @@ class PlaybackService : MediaLibraryService() {
         if (Prefs(this).desktopLyricsEnabled && DesktopLyricsManager.hasOverlayPermission(this)) {
             DesktopLyricsManager.show(this)
         }
+
+        restoreSleepTimerFromPrefs()
+    }
+
+    /** 进程重建后从落盘状态恢复睡眠定时：倒计时已过期立即收尾，否则重挂闹钟 / 轮询。 */
+    private fun restoreSleepTimerFromPrefs() {
+        val prefs = Prefs(this)
+        val deadline = prefs.sleepTimerDeadlineElapsed
+        val anchor = prefs.sleepTimerAfterCurrentAnchor
+        when {
+            deadline > 0L -> {
+                if (deadline <= SystemClock.elapsedRealtime()) {
+                    prefs.sleepTimerDeadlineElapsed = 0L
+                    sleepShutdownAndStop()
+                } else {
+                    armSleepCountdown(this, deadline)
+                }
+            }
+            anchor >= 0L -> startSleepAfterCurrentWatch(anchor)
+        }
+    }
+
+    /** 「播完当前曲」的服务端轮询：离结尾 700ms 或曲目已切换就收尾，界面死了也照停。 */
+    internal fun startSleepAfterCurrentWatch(anchorSongId: Long) {
+        cancelSleepAfterCurrentWatch()
+        val watch = object : Runnable {
+            override fun run() {
+                val player = playerOrNull()
+                val curId = player?.currentMediaItem?.mediaId?.toLongOrNull() ?: -1L
+                val duration = player?.duration ?: 0L
+                val position = player?.currentPosition ?: 0L
+                val ended = player != null && (
+                    (curId != -1L && curId != anchorSongId) ||
+                        (duration > 0L && position >= duration - 700L)
+                    )
+                if (ended) {
+                    Prefs(this@PlaybackService).sleepTimerAfterCurrentAnchor = -1L
+                    sleepShutdownAndStop()
+                } else {
+                    mainHandler.postDelayed(this, 400L)
+                }
+            }
+        }
+        sleepAfterCurrentWatch = watch
+        mainHandler.postDelayed(watch, 400L)
+    }
+
+    internal fun cancelSleepAfterCurrentWatch() {
+        sleepAfterCurrentWatch?.let { mainHandler.removeCallbacks(it) }
+        sleepAfterCurrentWatch = null
     }
 
     private fun buildLibraryCallback(): MediaLibrarySession.Callback =
@@ -597,6 +651,12 @@ class PlaybackService : MediaLibraryService() {
             syncLiveLyrics(0L, title, artist, lines)
         }
 
+        /** 车载歌词 / 锁屏歌词开关变化后立即重估：关闭时马上还原歌名、撤掉岛歌词。 */
+        internal fun syncLyricOutputs() {
+            val svc = liveService ?: return
+            svc.runOnMain { svc.tickLive() }
+        }
+
         internal fun syncLiveLyrics(
             songId: Long,
             title: String,
@@ -610,7 +670,8 @@ class PlaybackService : MediaLibraryService() {
                 val item = player?.currentMediaItem
                 val curId = item?.mediaId?.toLongOrNull() ?: -1L
                 val curMeta = item?.mediaMetadata
-                val curTitle = curMeta?.title?.toString().orEmpty()
+                val curTitle = curMeta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+                    ?: curMeta?.title?.toString().orEmpty()
                 val curArtist = curMeta?.artist?.toString().orEmpty()
                 val hasActiveItem = item != null && (curId != -1L || curTitle.isNotBlank())
                 val matchesCurrent = !hasActiveItem || when {
@@ -642,6 +703,61 @@ class PlaybackService : MediaLibraryService() {
         /** 定时关闭触发：暂停并停播以释放音频焦点、关闭桌面悬浮词、移除前台通知并退出服务。 */
         internal fun stopAndReleaseForSleep() {
             liveService?.sleepShutdownAndStop()
+        }
+
+        private const val SLEEP_ALARM_REQUEST = 7021
+
+        private fun sleepAlarmIntent(context: Context): PendingIntent {
+            val intent = Intent(context, SleepTimerReceiver::class.java)
+                .setAction("sonance.sleep.FIRE")
+            return PendingIntent.getBroadcast(
+                context,
+                SLEEP_ALARM_REQUEST,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+
+        /**
+         * 倒计时睡眠：截止时间落盘 + 系统闹钟兜底。
+         *
+         * 只靠 ViewModel 协程计时的话，用户把界面划掉（任务移除、VM 销毁）后
+         * 前台服务还在播，倒计时却跟着死了 —— 这就是「定时到点不关」的根因。
+         * 闹钟由系统持有，进程死了也能准时把服务停掉。
+         */
+        internal fun armSleepCountdown(context: Context, deadlineElapsedMs: Long) {
+            val app = context.applicationContext
+            val prefs = Prefs(app)
+            prefs.sleepTimerDeadlineElapsed = deadlineElapsedMs
+            prefs.sleepTimerAfterCurrentAnchor = -1L
+            val am = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val pi = sleepAlarmIntent(app)
+            am.cancel(pi)
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadlineElapsedMs, pi)
+            } else {
+                am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadlineElapsedMs, pi)
+            }
+            liveService?.runOnMain { liveService?.cancelSleepAfterCurrentWatch() }
+        }
+
+        /** 「播完当前曲」：锚点落盘 + 服务端轮询，不再依赖界面协程活着。 */
+        internal fun armSleepAfterCurrent(context: Context, anchorSongId: Long) {
+            val app = context.applicationContext
+            val prefs = Prefs(app)
+            prefs.sleepTimerAfterCurrentAnchor = anchorSongId
+            prefs.sleepTimerDeadlineElapsed = 0L
+            (app.getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(sleepAlarmIntent(app))
+            liveService?.runOnMain { liveService?.startSleepAfterCurrentWatch(anchorSongId) }
+        }
+
+        internal fun disarmSleepTimer(context: Context) {
+            val app = context.applicationContext
+            val prefs = Prefs(app)
+            prefs.sleepTimerDeadlineElapsed = 0L
+            prefs.sleepTimerAfterCurrentAnchor = -1L
+            (app.getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(sleepAlarmIntent(app))
+            liveService?.runOnMain { liveService?.cancelSleepAfterCurrentWatch() }
         }
 
         internal fun refreshLyricsIfEmpty() {
@@ -820,7 +936,8 @@ class PlaybackService : MediaLibraryService() {
         val item = player.currentMediaItem
         val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
         val meta = item?.mediaMetadata
-        val title = meta?.title?.toString().orEmpty()
+        val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+            ?: meta?.title?.toString().orEmpty()
         val artist = meta?.artist?.toString().orEmpty()
         val album = meta?.albumTitle?.toString().orEmpty()
         val extras = meta?.extras
@@ -864,6 +981,12 @@ class PlaybackService : MediaLibraryService() {
         }
 
         val triplet = lyricTripletAt(effectivePosMs)
+
+        // 车载蓝牙歌词：息屏也要继续刷新（车机显示不依赖手机屏幕状态）
+        maybeUpdateCarLyricTitle(player, triplet)
+
+        // 小米超级岛歌词：岛 / AOD 同样不依赖亮屏
+        XiaomiLyricIsland.onTick(applicationContext, query.title, query.artist, triplet)
 
         if (!isScreenInteractive) return
 
@@ -930,7 +1053,8 @@ class PlaybackService : MediaLibraryService() {
             // 快速连滑切歌时原子合并待处理状态，避免主线程卡顿。
             val item = player.currentMediaItem
             val meta = item?.mediaMetadata
-            val title = meta?.title?.toString().orEmpty()
+            val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+                ?: meta?.title?.toString().orEmpty()
             val artist = meta?.artist?.toString().orEmpty()
             val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
             val extras = meta?.extras
@@ -1129,7 +1253,8 @@ class PlaybackService : MediaLibraryService() {
                 val prefs = Prefs(applicationContext)
                 val shouldFetchOnline = query.title.isNotBlank() &&
                     prefs.onlineLyricsEnabled &&
-                    (DesktopLyricsManager.isShowing() || prefs.desktopLyricsEnabled || SonanceWidgets.hasAnyWidgets(applicationContext))
+                    (prefs.lockScreenLyrics ||
+                        DesktopLyricsManager.isShowing() || prefs.desktopLyricsEnabled || SonanceWidgets.hasAnyWidgets(applicationContext))
 
                 if (applyLoadedLyricsIfStillCurrent(query, emptyList())) {
                     runOnMain {
@@ -1307,6 +1432,92 @@ class PlaybackService : MediaLibraryService() {
             next = lines.getOrNull(i + 1)?.text.orEmpty(),
             hasLyrics = true
         )
+    }
+
+    /* ===== 蓝牙车载歌词 =====
+     * 蓝牙 AVRCP 只传 歌名/歌手/专辑，车机没有歌词通道。QQ音乐等的「车载蓝牙歌词」
+     * 做法是把会话标题持续改写成当前歌词行，车机把它当歌名显示。
+     * 原歌名存在 EXTRA_ORIG_TITLE，内部所有标题读取都优先取它，
+     * 因此歌词匹配、小组件、应用内显示、锁屏歌词协议都不受影响。 */
+
+    private var carLyricMediaId: String? = null
+    private var lastCarLyricLine: String? = null
+
+    private fun maybeUpdateCarLyricTitle(
+        player: Player,
+        triplet: WidgetState.LyricTriplet
+    ) {
+        val item = player.currentMediaItem
+        val mediaId = item?.mediaId
+        if (carLyricMediaId != null && carLyricMediaId != mediaId) {
+            restoreCarLyricTitle(player, carLyricMediaId!!)
+            carLyricMediaId = null
+            lastCarLyricLine = null
+        }
+        val active = Prefs(applicationContext).carBluetoothLyrics &&
+            player.isPlaying &&
+            runCatching {
+                getSystemService(AudioManager::class.java)
+                    ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    ?.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+            }.getOrDefault(false) == true
+        if (!active || item == null) {
+            if (carLyricMediaId != null) {
+                restoreCarLyricTitle(player, carLyricMediaId!!)
+                carLyricMediaId = null
+                lastCarLyricLine = null
+            }
+            return
+        }
+        val line = triplet.cur.trim()
+        if (line.isEmpty()) return
+        if (carLyricMediaId == mediaId && line == lastCarLyricLine) return
+        val meta = item.mediaMetadata
+        val orig = meta.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+            ?: meta.title?.toString().orEmpty()
+        if (orig.isBlank() || orig == line) return
+        val extras = Bundle(meta.extras ?: Bundle()).apply {
+            putString(PlayerController.EXTRA_ORIG_TITLE, orig)
+        }
+        val updated = item.buildUpon()
+            .setMediaMetadata(meta.buildUpon().setTitle(line).setExtras(extras).build())
+            .build()
+        runCatching {
+            PlayerController.replaceQueueItemSafely(
+                player = player,
+                index = player.currentMediaItemIndex,
+                updated = updated,
+                isMediaController = false
+            )
+        }
+        carLyricMediaId = mediaId
+        lastCarLyricLine = line
+    }
+
+    private fun restoreCarLyricTitle(player: Player, mediaId: String) {
+        val count = runCatching { player.mediaItemCount }.getOrDefault(0)
+        for (i in 0 until count) {
+            val item = runCatching { player.getMediaItemAt(i) }.getOrNull() ?: continue
+            if (item.mediaId != mediaId) continue
+            val orig = item.mediaMetadata.extras?.getString(PlayerController.EXTRA_ORIG_TITLE) ?: return
+            val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
+                remove(PlayerController.EXTRA_ORIG_TITLE)
+            }
+            val updated = item.buildUpon()
+                .setMediaMetadata(
+                    item.mediaMetadata.buildUpon().setTitle(orig).setExtras(extras).build()
+                )
+                .build()
+            runCatching {
+                PlayerController.replaceQueueItemSafely(
+                    player = player,
+                    index = i,
+                    updated = updated,
+                    isMediaController = false
+                )
+            }
+            return
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1587,7 +1798,8 @@ class PlaybackService : MediaLibraryService() {
         val current = runCatching { player.getMediaItemAt(idx) }.getOrNull() ?: return
         val curId = current.mediaId.toLongOrNull() ?: -1L
         val curMeta = current.mediaMetadata
-        val curTitle = curMeta.title?.toString().orEmpty()
+        val curTitle = curMeta.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+            ?: curMeta.title?.toString().orEmpty()
         val curArtist = curMeta.artist?.toString().orEmpty()
         val matches = if (curId != -1L && expectedSongId != 0L && expectedSongId != -1L) {
             curId == expectedSongId
@@ -1605,7 +1817,15 @@ class PlaybackService : MediaLibraryService() {
         val sig = "$curId|$curTitle|$curArtist|${lrcText.orEmpty()}"
         if (sig == lastPublishedLyricsSig) return
         lastPublishedLyricsSig = sig
-        val gen = ++sessionLyricsGeneration
+        // 协议要求 generation 只在真实换曲时递增；同曲补全歌词沿用旧值，
+        // 否则 SystemUI 可能把补全当成新歌、丢弃已展示的歌词状态。
+        val trackKey = "$curId|$curTitle|$curArtist"
+        val gen = if (trackKey == lastPublishedLyricsTrackKey && sessionLyricsGeneration > 0) {
+            sessionLyricsGeneration
+        } else {
+            lastPublishedLyricsTrackKey = trackKey
+            ++sessionLyricsGeneration
+        }
 
         val json = LockScreenLyrics.buildJsonFromLrc(
             songId = curId,
@@ -1646,10 +1866,12 @@ class PlaybackService : MediaLibraryService() {
     internal fun sleepShutdownAndStop() {
         runOnMain {
             shuttingDownForSleep = true
+            cancelSleepAfterCurrentWatch()
             pendingOnlineLyricJob?.cancel()
             pendingOnlineLyricJob = null
             transitions?.cancelSwitchFade(restoreVolume = true)
             DesktopLyricsManager.hide(this)
+            XiaomiLyricIsland.cancel(this)
             mediaSession?.player?.let { player ->
                 player.playWhenReady = false
                 player.pause()
@@ -1735,6 +1957,7 @@ class PlaybackService : MediaLibraryService() {
         shakeController = null
         ExternalLyricBridge.clear(this)
         DesktopLyricsManager.hide(this)
+        XiaomiLyricIsland.cancel(this)
         screenStateReceiver?.let { receiver ->
             runCatching { unregisterReceiver(receiver) }
         }
@@ -1746,6 +1969,7 @@ class PlaybackService : MediaLibraryService() {
         }
         audioDeviceCallback = null
         mainHandler.removeCallbacksAndMessages(null)
+        sleepAfterCurrentWatch = null
         SystemAudioEffects.releaseSession(this)
         mediaSession?.run {
             persistServicePlaybackSnapshot(player)

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  STYLE A · 新增 4 列样式 2：横向控制条 4×1
-  适配 4 列满行：48dp 圆角方图封面 + 歌名/歌手或词 + 5 枚紧凑键 + 底缘细进度条。
+  STYLE A · 新增 4 列样式 2：横向控制条 4×1（两排）
+  左：圆角方图封面（跨两排）；右上排：歌名 + 歌手（或单行歌词）；
+  右下排：5 枚紧凑播控键；底缘细进度条。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -24,51 +25,59 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingStart="11dp"
-        android:paddingTop="8dp"
+        android:paddingTop="3dp"
         android:paddingEnd="13dp"
-        android:paddingBottom="13dp">
+        android:paddingBottom="8dp">
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
             android:contentDescription="@string/widget_cover_desc"
             android:scaleType="fitCenter"
             android:src="@drawable/widget_placeholder" />
 
-        <FrameLayout
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
-            android:layout_marginEnd="5dp"
-            android:layout_weight="1">
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <!-- 第一排：歌曲信息 / 歌词 -->
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
 
             <LinearLayout
                 android:id="@+id/widget_info_group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical">
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
                 <TextView
                     android:id="@+id/widget_title"
-                    android:layout_width="match_parent"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:ellipsize="end"
                     android:fontFamily="sans-serif-medium"
                     android:includeFontPadding="false"
                     android:maxLines="1"
                     android:text="@string/widget_idle_title"
                     android:textColor="#F5FFFFFF"
-                    android:textSize="13sp" />
+                    android:textSize="12.5sp" />
 
                 <TextView
                     android:id="@+id/widget_artist"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
+                    android:layout_marginStart="6dp"
                     android:ellipsize="end"
                     android:includeFontPadding="false"
                     android:maxLines="1"
+                    android:maxWidth="90dp"
                     android:text="@string/widget_idle_subtitle"
                     android:textColor="#ABFFFFFF"
                     android:textSize="10.5sp" />
@@ -78,7 +87,8 @@
                 android:id="@+id/widget_lyric_group"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:visibility="gone">
 
                 <TextView
@@ -89,8 +99,9 @@
 
                 <TextView
                     android:id="@+id/widget_lyric_cur"
-                    android:layout_width="match_parent"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:ellipsize="end"
                     android:fontFamily="sans-serif-medium"
                     android:includeFontPadding="false"
@@ -100,73 +111,75 @@
 
                 <TextView
                     android:id="@+id/widget_lyric_next"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:ellipsize="end"
-                    android:includeFontPadding="false"
-                    android:maxLines="1"
-                    android:textColor="#94FFFFFF"
-                    android:textSize="10sp" />
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
             </LinearLayout>
-        </FrameLayout>
+            </FrameLayout>
 
-        <LinearLayout
-            android:id="@+id/widget_controls"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            <!-- 第二排：播控按钮 -->
+            <LinearLayout
+                android:id="@+id/widget_controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <ImageView
-                android:id="@+id/widget_fav"
-                android:layout_width="31dp"
-                android:layout_height="31dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_fav_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_heart_outline" />
+                <ImageView
+                    android:id="@+id/widget_fav"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_fav_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_heart_outline" />
 
-            <ImageView
-                android:id="@+id/widget_prev"
-                android:layout_width="33dp"
-                android:layout_height="33dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_prev_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_prev" />
+                <ImageView
+                    android:id="@+id/widget_prev"
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_prev_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_prev" />
 
-            <ImageView
-                android:id="@+id/widget_play"
-                android:layout_width="39dp"
-                android:layout_height="39dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_play_desc"
-                android:padding="3dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_play" />
+                <ImageView
+                    android:id="@+id/widget_play"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_play_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_play" />
 
-            <ImageView
-                android:id="@+id/widget_next"
-                android:layout_width="33dp"
-                android:layout_height="33dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_next_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_next" />
+                <ImageView
+                    android:id="@+id/widget_next"
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_next_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_next" />
 
-            <ImageView
-                android:id="@+id/widget_lyric_toggle"
-                android:layout_width="31dp"
-                android:layout_height="31dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_lyric_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_lyric" />
+                <ImageView
+                    android:id="@+id/widget_lyric_toggle"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_lyric_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_lyric" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 

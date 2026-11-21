@@ -89,8 +89,8 @@ internal object WidgetSizing {
             }
             WidgetCoverClass.WIDE -> {
                 val maxByH = h - 24f
-                val maxByRatio = (w - 26f) * 0.44f
-                val maxByControls = w - (if (isFourCol) 166f else 178f)
+                val maxByRatio = (w - 26f) * 0.40f
+                val maxByControls = w - (if (isFourCol) 186f else 198f)
                 minOf(maxByH, maxByRatio, maxByControls).coerceIn(baseCoverDp, 224f)
             }
             WidgetCoverClass.LARGE -> {

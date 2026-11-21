@@ -618,6 +618,131 @@ class LyricsContrastTest {
         assertTrue(equalizeScrimAlphas(emptyList(), 320, 320, 1080f, 2000f, immersive, 100, true) == null)
     }
 
+    // ===== 浅色均衡遮罩（宣纸玻璃系列「统一提亮」，方案 C 的镜像）=====
+
+    private val xuan = Skins.XuanPaper
+
+    private fun lightEqualizedScrims(bands: List<Color>): List<Float> = equalizeScrimAlphas(
+        bands = bands, artW = 320, artH = 320,
+        boxW = 1080f, boxH = 2000f,
+        skin = xuan, visibility = 100, canBlur = true
+    )!!
+
+    private fun lightEqualizedProfile(bands: List<Color>): BgProfile {
+        val scrims = lightEqualizedScrims(bands)
+        return buildBgProfile(
+            bands = bands, artW = 320, artH = 320,
+            boxW = 1080f, boxH = 2000f,
+            skin = xuan, visibility = 100,
+            canBlur = true, liquid = true,
+            scrimSpread = 0.10f, topHighlight = false,
+            scrimAlphas = scrims
+        )!!
+    }
+
+    @Test
+    fun `浅色均衡遮罩把暗封面抬到目标档`() {
+        // 这条用例钉的是双向求解的「提亮」分支：旧实现假定遮罩只压不抬，
+        // 白遮罩遇到暗封面会静默返回全 0 —— 这里必须真的抬上去。
+        val bands = List(PROFILE_BANDS) { Color(0xFF101014) }
+        val scrims = lightEqualizedScrims(bands)
+        assertTrue("暗封面必须抬遮罩：$scrims", scrims.all { it > 0.3f })
+
+        val profile = lightEqualizedProfile(bands)
+        for (f in listOf(0.1f, 0.5f, 0.85f)) {
+            val lum = profile.at(f).luminance()
+            assertTrue(
+                "第 $f 处亮度 $lum 应钉在 $EQUALIZE_TARGET_LUM_LIGHT",
+                kotlin.math.abs(lum - EQUALIZE_TARGET_LUM_LIGHT) < 0.008f
+            )
+        }
+    }
+
+    @Test
+    fun `亮封面不需要浅色遮罩，均衡值趋零保住本色`() {
+        val bands = List(PROFILE_BANDS) { Color(0xFFF2F2F2) }
+        val scrims = lightEqualizedScrims(bands)
+        assertTrue("封面已比目标亮，遮罩应该为 0：$scrims", scrims.all { it == 0f })
+
+        val profile = lightEqualizedProfile(bands)
+        assertTrue(
+            "亮封面背景保持比目标更亮（只抬不压，保住亮）",
+            profile.at(0.5f).luminance() >= EQUALIZE_TARGET_LUM_LIGHT
+        )
+    }
+
+    @Test
+    fun `上暗下亮的封面浅色遮罩暗段更浓`() {
+        // 亮半段取比目标更亮的色（遮罩趋零、只抬不压），与深色系列那条测试镜像
+        val bands = List(PROFILE_BANDS) { i ->
+            if (i < PROFILE_BANDS / 2) Color(0xFF101014) else Color(0xFFF2F2F2)
+        }
+        val scrims = lightEqualizedScrims(bands)
+        assertTrue(
+            "暗段遮罩必须比亮段浓：${scrims.first()} vs ${scrims.last()}",
+            scrims.first() > scrims.last() + 0.2f
+        )
+
+        val profile = lightEqualizedProfile(bands)
+        for (f in listOf(0f, 0.25f, 0.5f)) {
+            val lum = profile.at(f).luminance()
+            assertTrue(
+                "暗段第 $f 处亮度 $lum 应钉在 $EQUALIZE_TARGET_LUM_LIGHT",
+                kotlin.math.abs(lum - EQUALIZE_TARGET_LUM_LIGHT) < 0.02f
+            )
+        }
+        for (f in listOf(0.75f, 1f)) {
+            assertTrue(
+                "亮段第 $f 处应保持比目标更亮，实际 ${profile.at(f).luminance()}",
+                profile.at(f).luminance() >= EQUALIZE_TARGET_LUM_LIGHT
+            )
+        }
+    }
+
+    @Test
+    fun `浅色钉住后深墨文字达标且封面色相还在`() {
+        val red = Color(0xFFD0342C)
+        val profile = lightEqualizedProfile(List(PROFILE_BANDS) { red })
+        val pinned = profile.at(0.5f)
+        assertTrue(
+            "亮度要钉住：${pinned.luminance()}",
+            kotlin.math.abs(pinned.luminance() - EQUALIZE_TARGET_LUM_LIGHT) < 0.01f
+        )
+        // 暗红封面抬到 0.82 需要 ≈0.97 的米白遮罩，色相会被暖底拉偏一些
+        //（mix 的固有属性，深色族近黑遮罩几乎中性所以偏得少）——
+        // 钉的是「没被洗成灰、还带着封面的色调」，不是色相角分毫不差。
+        assertTrue(
+            "色相偏移要在暖底拉偏范围内：${hueOf(red)} → ${hueOf(pinned)}",
+            hueGap(hueOf(red), hueOf(pinned)) < 30f
+        )
+        assertTrue(
+            "钉住后仍要有彩度（不是灰白）：${hsvOf(pinned)[1]}",
+            hsvOf(pinned)[1] > 0.03f
+        )
+        val text = ensureReadable(xuan.text, pinned, 4.5f, false)
+        assertTrue(
+            "深墨文字对比要达标：${contrastRatio(text, pinned)}",
+            contrastRatio(text, pinned) >= 4.5f
+        )
+    }
+
+    @Test
+    fun `浅色沉浸字色方向朝暗，亮暗两极封面不翻转`() {
+        val bright = lightEqualizedProfile(List(PROFILE_BANDS) { Color(0xFFF2F2F2) })
+        val dark = lightEqualizedProfile(List(PROFILE_BANDS) { Color(0xFF101014) })
+
+        // 浅底上深字只该往暗推 —— 不存在亮暗翻转
+        assertTrue(!bright.lighten)
+        assertTrue(!dark.lighten)
+
+        val onBright = ensureReadable(xuan.textMuted, bright.at(0.5f), 3.4f, false)
+        val onDark = ensureReadable(xuan.textMuted, dark.at(0.5f), 3.4f, false)
+        assertTrue(
+            "文字色不该随封面明暗翻转：$onBright vs $onDark",
+            kotlin.math.abs(valueOf(onBright) - valueOf(onDark)) < 0.15f
+        )
+    }
+
     @Test
     fun `停靠点插值是首尾闭合的分段线性`() {
         val stops = listOf(0.1f, 0.3f, 0.5f, 0.7f, 0.9f)

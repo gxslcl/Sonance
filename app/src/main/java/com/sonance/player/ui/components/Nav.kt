@@ -136,6 +136,7 @@ fun SideNavigation(
             // logoId 为空时用内置 Logo；为空时底色取默认图标自己的底色，
             // 这样左上角看起来就是桌面那个图标的缩小版
             val brandIcon = AppIcons.byId(logoId.ifBlank { AppIcons.DEFAULT_ID })
+            val logoNone = logoId == "none"
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -155,29 +156,42 @@ fun SideNavigation(
                 Box(
                     Modifier
                         .size(34.dp)
-                        .clip(RoundedCornerShape(9.dp))
-                        .background(
-                            if (logoId.isNotBlank()) skin.surface2 else brandIcon.bgColor
+                        .then(
+                            if (logoNone) {
+                                // 「无」图标：透明、融入背景，但保留可点区域 → 进设置
+                                Modifier.clickable { onSelect(LibraryTab.SETTINGS) }
+                            } else {
+                                Modifier
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(
+                                        if (logoId.isNotBlank()) skin.surface2 else brandIcon.bgColor
+                                    )
+                            }
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    androidx.compose.foundation.Image(
-                        painter = painterResource(brandIcon.preview),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    if (!logoNone) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(brandIcon.preview),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
                 if (expanded) {
                     Spacer(Modifier.width(11.dp))
                     Column {
-                        Text(
-                            text = appName.ifBlank { "Sonance" },
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = skin.text,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        // 名称留空时不渲染、不占位（只保留下方那行固定描述）
+                        if (appName.isNotBlank()) {
+                            Text(
+                                text = appName,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = skin.text,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Text(
                             text = "本地音乐播放器",
                             style = MaterialTheme.typography.labelSmall,
@@ -405,7 +419,12 @@ fun AppTopBar(
      * 藏在设置深处没人会去改；顶栏标题就是门面本身，双击它是最近的路。
      * 详情页不传：那里的双击没有语义，反而容易误触。
      */
-    onTitleDoubleTap: (() -> Unit)? = null
+    onTitleDoubleTap: (() -> Unit)? = null,
+    /**
+     * 顶栏图标选「无」（[logoId] == "none"）时，左上角保留一块**透明可点**区域，
+     * 单击走这里（进设置）。图标融入背景、但位置还在，用户不至于找不到入口。
+     */
+    onLogoClick: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -439,6 +458,23 @@ fun AppTopBar(
                 onClick = onBack,
                 iconSize = 20.dp,
                 tint = skin.text
+            )
+        } else if (logoId == "none") {
+            // 「无」图标：不画底色、不画图案，和背景融为一体，但保留同样大小的
+            // 可点区域 —— 单击进设置，用户不会把入口弄丢。
+            Box(
+                Modifier
+                    .padding(start = 10.dp)
+                    .size(if (dense) 26.dp else 30.dp)
+                    .then(
+                        if (onLogoClick != null) {
+                            Modifier.clickable(onClick = onLogoClick)
+                        } else if (titleDoubleTap != null) {
+                            Modifier.clickable(onClick = titleDoubleTap)
+                        } else {
+                            Modifier
+                        }
+                    )
             )
         } else {
             Box(
@@ -487,56 +523,62 @@ fun AppTopBar(
             // 标题 + 副标题同一行。用基线对齐，两种字号看起来才是在一条线上。
             // 标题 `weight(1f, fill = false)`：空间不够时先压缩标题（省略号），
             // 副标题（信息量更大）保持完整。
+            // 名称留空时整块标题不渲染、不占位，副标题去掉前导「·」独立显示。
+            val showTitle = title.isNotBlank()
             Row(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.Bottom
             ) {
+                if (showTitle) {
+                    Text(
+                        text = title,
+                        style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .alignByBaseline()
+                            .then(
+                                if (titleDoubleTap != null) {
+                                    Modifier.clickable(onClick = titleDoubleTap)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                    )
+                }
                 Text(
-                    text = title,
-                    style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = skin.text,
+                    text = if (showTitle) "· $subtitle" else subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = skin.textMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
-                        .weight(1f, fill = false)
+                        .padding(start = if (showTitle) 7.dp else 0.dp)
                         .alignByBaseline()
-                        .then(
+                )
+            }
+        } else {
+            Column(Modifier.weight(1f)) {
+                if (title.isNotBlank()) {
+                    Text(
+                        text = title,
+                        style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = skin.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.then(
                             if (titleDoubleTap != null) {
                                 Modifier.clickable(onClick = titleDoubleTap)
                             } else {
                                 Modifier
                             }
                         )
-                )
-                Text(
-                    text = "· $subtitle",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = skin.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .padding(start = 7.dp)
-                        .alignByBaseline()
-                )
-            }
-        } else {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = if (dense) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = skin.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.then(
-                        if (titleDoubleTap != null) {
-                            Modifier.clickable(onClick = titleDoubleTap)
-                        } else {
-                            Modifier
-                        }
                     )
-                )
+                }
                 if (subtitle != null && !dense) {
                     Text(
                         text = subtitle,

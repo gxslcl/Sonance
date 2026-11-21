@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  STYLE A · 保留 5 列样式 2：横向控制条 5×1
-  左：52dp 圆角方图封面；
-  中：歌名+歌手（或双行歌词）；
-  右：红心 + 上一首 + 高对比圆形播放键 + 下一首 + 歌词开关；
+  STYLE A · 保留 5 列样式 2：横向控制条 5×1（两排）
+  左：圆角方图封面（跨两排）；
+  右上排：歌名 + 歌手（或单行歌词），不再与按钮挤同一行；
+  右下排：红心 + 上一首 + 高对比圆形播放键 + 下一首 + 歌词开关；
   底缘：2.5dp 贴边实时细进度条。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -27,149 +27,161 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingStart="12dp"
-        android:paddingTop="8dp"
+        android:paddingTop="6dp"
         android:paddingEnd="14dp"
-        android:paddingBottom="13dp">
+        android:paddingBottom="10dp">
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="52dp"
-            android:layout_height="52dp"
+            android:layout_width="46dp"
+            android:layout_height="46dp"
             android:contentDescription="@string/widget_cover_desc"
             android:scaleType="fitCenter"
             android:src="@drawable/widget_placeholder" />
 
-        <FrameLayout
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="9dp"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1">
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
 
+            <!-- 第一排：歌曲信息 / 歌词 -->
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <LinearLayout
+                    android:id="@+id/widget_info_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/widget_title"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:fontFamily="sans-serif-medium"
+                        android:includeFontPadding="false"
+                        android:maxLines="1"
+                        android:text="@string/widget_idle_title"
+                        android:textColor="#F5FFFFFF"
+                        android:textSize="13.5sp" />
+
+                    <TextView
+                        android:id="@+id/widget_artist"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:ellipsize="end"
+                        android:includeFontPadding="false"
+                        android:maxLines="1"
+                        android:maxWidth="120dp"
+                        android:text="@string/widget_idle_subtitle"
+                        android:textColor="#ABFFFFFF"
+                        android:textSize="11sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/widget_lyric_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/widget_lyric_prev"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/widget_lyric_cur"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:fontFamily="sans-serif-medium"
+                        android:includeFontPadding="false"
+                        android:maxLines="1"
+                        android:textColor="#F5FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/widget_lyric_next"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:visibility="gone" />
+                </LinearLayout>
+            </FrameLayout>
+
+            <!-- 第二排：播控按钮 -->
             <LinearLayout
-                android:id="@+id/widget_info_group"
+                android:id="@+id/widget_controls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical">
+                android:layout_marginTop="3dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-                <TextView
-                    android:id="@+id/widget_title"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:ellipsize="end"
-                    android:fontFamily="sans-serif-medium"
-                    android:includeFontPadding="false"
-                    android:maxLines="1"
-                    android:text="@string/widget_idle_title"
-                    android:textColor="#F5FFFFFF"
-                    android:textSize="13.5sp" />
+                <ImageView
+                    android:id="@+id/widget_fav"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_fav_desc"
+                    android:padding="3dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_heart_outline" />
 
-                <TextView
-                    android:id="@+id/widget_artist"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:ellipsize="end"
-                    android:includeFontPadding="false"
-                    android:maxLines="1"
-                    android:text="@string/widget_idle_subtitle"
-                    android:textColor="#ABFFFFFF"
-                    android:textSize="11sp" />
+                <ImageView
+                    android:id="@+id/widget_prev"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_prev_desc"
+                    android:padding="3dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_prev" />
+
+                <ImageView
+                    android:id="@+id/widget_play"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_play_desc"
+                    android:padding="2dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_play" />
+
+                <ImageView
+                    android:id="@+id/widget_next"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_next_desc"
+                    android:padding="3dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_next" />
+
+                <ImageView
+                    android:id="@+id/widget_lyric_toggle"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/widget_btn_ripple"
+                    android:contentDescription="@string/widget_lyric_desc"
+                    android:padding="3dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/widget_ic_lyric" />
             </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/widget_lyric_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone">
-
-                <TextView
-                    android:id="@+id/widget_lyric_prev"
-                    android:layout_width="0dp"
-                    android:layout_height="0dp"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/widget_lyric_cur"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:ellipsize="end"
-                    android:fontFamily="sans-serif-medium"
-                    android:includeFontPadding="false"
-                    android:maxLines="1"
-                    android:textColor="#F5FFFFFF"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/widget_lyric_next"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:ellipsize="end"
-                    android:includeFontPadding="false"
-                    android:maxLines="1"
-                    android:textColor="#94FFFFFF"
-                    android:textSize="10.5sp" />
-            </LinearLayout>
-        </FrameLayout>
-
-        <LinearLayout
-            android:id="@+id/widget_controls"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <ImageView
-                android:id="@+id/widget_fav"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_fav_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_heart_outline" />
-
-            <ImageView
-                android:id="@+id/widget_prev"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_prev_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_prev" />
-
-            <ImageView
-                android:id="@+id/widget_play"
-                android:layout_width="42dp"
-                android:layout_height="42dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_play_desc"
-                android:padding="3dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_play" />
-
-            <ImageView
-                android:id="@+id/widget_next"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_next_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_next" />
-
-            <ImageView
-                android:id="@+id/widget_lyric_toggle"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
-                android:background="@drawable/widget_btn_ripple"
-                android:contentDescription="@string/widget_lyric_desc"
-                android:padding="4dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/widget_ic_lyric" />
         </LinearLayout>
     </LinearLayout>
 

@@ -85,6 +85,22 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_USB_EXCLUSIVE, false)
         set(v) = sp.edit().putBoolean(KEY_USB_EXCLUSIVE, v).apply()
 
+    /**
+     * USB 独占采样率策略："auto" = 自动选设备支持的最优采样率（可能升频）；
+     * "source" = 尽量按源文件采样率输出，不升频。默认 auto。
+     */
+    var usbExclusiveRatePolicy: String
+        get() = sp.getString(KEY_USB_RATE_POLICY, "auto") ?: "auto"
+        set(v) = sp.edit().putString(KEY_USB_RATE_POLICY, v).apply()
+
+    /**
+     * 蓝牙车载歌词：连着蓝牙 A2DP（车机/音箱）播放时，把媒体会话标题逐行改写成当前歌词，
+     * 车机按 AVRCP 歌名显示歌词。代价是车机（及手机通知/锁屏）标题变为歌词行。默认关闭。
+     */
+    var carBluetoothLyrics: Boolean
+        get() = sp.getBoolean(KEY_CAR_BT_LYRICS, false)
+        set(v) = sp.edit().putBoolean(KEY_CAR_BT_LYRICS, v).apply()
+
     /** 无缝播放（gapless）。默认开启：曲目之间无间隙衔接；关闭后曲间插入短暂停顿。 */
     var gaplessEnabled: Boolean
         get() = sp.getBoolean(KEY_GAPLESS, true)
@@ -203,6 +219,21 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_SKIN, null) ?: "immersive"
         set(v) = sp.edit().putString(KEY_SKIN, v).apply()
 
+    /** 主题跟随系统深浅色（默认关）。开启后按系统深色模式在亮/暗两套皮肤间自动切换。 */
+    var skinFollowSystem: Boolean
+        get() = sp.getBoolean(KEY_SKIN_FOLLOW_SYSTEM, false)
+        set(v) = sp.edit().putBoolean(KEY_SKIN_FOLLOW_SYSTEM, v).apply()
+
+    /** 跟随系统时，系统浅色模式用的皮肤 id。 */
+    var skinLightId: String
+        get() = sp.getString(KEY_SKIN_LIGHT, null) ?: "xuan_paper"
+        set(v) = sp.edit().putString(KEY_SKIN_LIGHT, v).apply()
+
+    /** 跟随系统时，系统深色模式用的皮肤 id。 */
+    var skinDarkId: String
+        get() = sp.getString(KEY_SKIN_DARK, null) ?: "immersive"
+        set(v) = sp.edit().putString(KEY_SKIN_DARK, v).apply()
+
     var sortField: String
         get() = sp.getString(KEY_SORT, SortField.TITLE.name) ?: SortField.TITLE.name
         set(v) = sp.edit().putString(KEY_SORT, v).apply()
@@ -218,6 +249,49 @@ class Prefs(context: Context) {
     var lastTab: String
         get() = sp.getString(KEY_TAB, LibraryTab.SONGS.id) ?: LibraryTab.SONGS.id
         set(v) = sp.edit().putString(KEY_TAB, v).apply()
+
+    /** 上次打开的文件夹路径（冷启动恢复文件夹详情用）；null 表示没有打开的文件夹。 */
+    var lastFolderPath: String?
+        get() = sp.getString(KEY_LAST_FOLDER, null)
+        set(v) = sp.edit().putString(KEY_LAST_FOLDER, v).apply()
+
+    /**
+     * 冷启动是否直接进入全屏播放页（默认开）。
+     *
+     * 只在启动后恢复出当前歌时生效；没有可播的歌就停在列表。
+     * 关掉它的人通常更想一进来就浏览曲库。
+     */
+    var openPlayerOnLaunch: Boolean
+        get() = sp.getBoolean(KEY_OPEN_PLAYER_ON_LAUNCH, true)
+        set(v) = sp.edit().putBoolean(KEY_OPEN_PLAYER_ON_LAUNCH, v).apply()
+
+    /**
+     * 固定在列表顶部的切换栏页签（[LibraryTab] 的 id，逗号分隔，按显示顺序）。
+     *
+     * 默认「全部 / 最近 / 收藏 / 歌单」四页；最多 5 个，「全部歌曲」必选且排第一。
+     * 候选浏览类视图：专辑 / 艺术家 / 文件夹。空值或非法值回退到默认四页。
+     */
+    var pagerTabIds: String
+        get() = sp.getString(KEY_PAGER_TABS, null) ?: ""
+        set(v) = sp.edit().putString(KEY_PAGER_TABS, v).apply()
+
+    /**
+     * 顶栏右上角的呈现方式："icons" = 三个独立图标（视图 / 在线 / 设置），
+     * "menu" = 一个竖向三点菜单，把这三项收进去。默认 icons。
+     */
+    var topBarIconMode: String
+        get() = sp.getString(KEY_TOP_BAR_ICON_MODE, "icons") ?: "icons"
+        set(v) = sp.edit().putString(KEY_TOP_BAR_ICON_MODE, if (v == "menu") "menu" else "icons").apply()
+
+    /** 三图标模式下是否显示「视图切换」图标（默认开）。设置图标恒显，不受此开关影响。 */
+    var showViewIcon: Boolean
+        get() = sp.getBoolean(KEY_SHOW_VIEW_ICON, true)
+        set(v) = sp.edit().putBoolean(KEY_SHOW_VIEW_ICON, v).apply()
+
+    /** 三图标模式下是否显示「在线音乐」图标（默认开）。设置图标恒显，不受此开关影响。 */
+    var showOnlineIcon: Boolean
+        get() = sp.getBoolean(KEY_SHOW_ONLINE_ICON, true)
+        set(v) = sp.edit().putBoolean(KEY_SHOW_ONLINE_ICON, v).apply()
 
     var lastSongId: Long
         get() = sp.getLong(KEY_LAST_SONG, -1L)
@@ -432,6 +506,29 @@ class Prefs(context: Context) {
         get() = LyricPlaybarStyle.fromId(sp.getString(KEY_LYRICS_PLAYBAR_STYLE, null))
         set(v) = sp.edit().putString(KEY_LYRICS_PLAYBAR_STYLE, v.id).apply()
 
+    /** 歌词页常亮：停留在歌词页时保持屏幕点亮，离开歌词页自动恢复 */
+    var lyricsKeepScreenOn: Boolean
+        get() = sp.getBoolean(KEY_LYRICS_KEEP_SCREEN_ON, false)
+        set(v) = sp.edit().putBoolean(KEY_LYRICS_KEEP_SCREEN_ON, v).apply()
+
+    /** 隐藏普通播放页底部音量条；音效入口随之收进右上角「更多」菜单 */
+    var playerHideVolumeBar: Boolean
+        get() = sp.getBoolean(KEY_PLAYER_HIDE_VOLUME_BAR, false)
+        set(v) = sp.edit().putBoolean(KEY_PLAYER_HIDE_VOLUME_BAR, v).apply()
+
+    /**
+     * 睡眠定时（倒计时模式）到点的 elapsedRealtime 时刻，0 = 未开启。
+     * 落盘是为了进程被杀后服务重建时仍能恢复/执行定时关闭。
+     */
+    var sleepTimerDeadlineElapsed: Long
+        get() = sp.getLong(KEY_SLEEP_TIMER_DEADLINE, 0L)
+        set(v) = sp.edit().putLong(KEY_SLEEP_TIMER_DEADLINE, v).apply()
+
+    /** 睡眠定时（播完当前曲模式）锚定的 mediaId，-1 = 未开启 */
+    var sleepTimerAfterCurrentAnchor: Long
+        get() = sp.getLong(KEY_SLEEP_TIMER_ANCHOR, -1L)
+        set(v) = sp.edit().putLong(KEY_SLEEP_TIMER_ANCHOR, v).apply()
+
     /**
      * 歌词进度偏移，**按歌记忆**：不同歌的歌词源不同、偏差方向也不同，
      * 全局一个值会互相打架。正数 = 歌词比音频慢（提前显示），负数 = 歌词快了（推迟显示）。
@@ -639,10 +736,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_DESKTOP_LYRICS_LOCKED, false)
         set(v) = sp.edit().putBoolean(KEY_DESKTOP_LYRICS_LOCKED, v).apply()
 
-    /** 桌面歌词字号 (sp) */
+    /** 桌面歌词字号 (sp)，大范围可调（12~120） */
     var desktopLyricsFontSizeSp: Int
-        get() = sp.getInt(KEY_DESKTOP_LYRICS_FONT_SIZE, 18).coerceIn(14, 26)
-        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_FONT_SIZE, v.coerceIn(14, 26)).apply()
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_FONT_SIZE, 18).coerceIn(12, 120)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_FONT_SIZE, v.coerceIn(12, 120)).apply()
 
     /** 桌面歌词保存的 X 轴坐标（px） */
     var desktopLyricsX: Int
@@ -941,10 +1038,13 @@ class Prefs(context: Context) {
      *
      * 顶栏原来跟着页签走（"全部歌曲 · 共 N 首 · 21 小时"），每次切页文字都在变；
      * 固定成应用名之后它才是"这是哪个应用"的锚点。允许用户改 —— 想显示
-     * 自己起的名字（比如"我的音乐"）也随他。空值回退到 "Sonance"。
+     * 自己起的名字（比如"我的音乐"）也随他。
+     *
+     * 从未设置过（null）回退到 "Sonance"；用户**显式存空**（""）则保持空，
+     * 顶栏据此收起名称、不占空间（见 #108）。
      */
     var appDisplayName: String
-        get() = sp.getString(KEY_APP_NAME, null)?.takeIf { it.isNotBlank() } ?: "Sonance"
+        get() = sp.getString(KEY_APP_NAME, null) ?: "Sonance"
         set(v) = sp.edit().putString(KEY_APP_NAME, v.trim()).apply()
 
     /**
@@ -1652,6 +1752,8 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
         private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
         private const val KEY_USB_EXCLUSIVE = "usb_exclusive_enabled"
+        private const val KEY_USB_RATE_POLICY = "usb_exclusive_rate_policy"
+        private const val KEY_CAR_BT_LYRICS = "car_bluetooth_lyrics"
         private const val KEY_GAPLESS = "gapless_enabled"
         private const val KEY_CROSSFADE = "crossfade_enabled"
         private const val KEY_CROSSFADE_SEC = "crossfade_sec"
@@ -1661,10 +1763,19 @@ class Prefs(context: Context) {
         private const val KEY_PLAY_BTN_ICON_STYLE = "play_btn_icon_style"
         private const val KEY_PLAY_BTN_ICON_SCALE = "play_btn_icon_scale"
         private const val KEY_SKIN = "skin_id"
+        private const val KEY_SKIN_FOLLOW_SYSTEM = "skin_follow_system"
+        private const val KEY_SKIN_LIGHT = "skin_light_id"
+        private const val KEY_SKIN_DARK = "skin_dark_id"
         private const val KEY_SORT = "sort_field"
         private const val KEY_SORT_ASC = "sort_asc"
         private const val KEY_VIEW = "view_mode"
         private const val KEY_TAB = "last_tab"
+        private const val KEY_LAST_FOLDER = "last_folder_path"
+        private const val KEY_OPEN_PLAYER_ON_LAUNCH = "open_player_on_launch"
+        private const val KEY_PAGER_TABS = "pager_tab_ids"
+        private const val KEY_TOP_BAR_ICON_MODE = "top_bar_icon_mode"
+        private const val KEY_SHOW_VIEW_ICON = "show_view_icon"
+        private const val KEY_SHOW_ONLINE_ICON = "show_online_icon"
         private const val KEY_FAV = "favorites"
         private const val KEY_ONLINE_FAVORITES = "online_favorites"
         private const val KEY_RECENT = "recent"
@@ -1825,6 +1936,10 @@ class Prefs(context: Context) {
         private const val KEY_KARAOKE_ENABLED = "karaoke_enabled"
         private const val KEY_LYRICS_HIDE_STATUS_BAR = "lyrics_hide_status_bar"
         private const val KEY_LYRICS_SCROLL_HAPTIC = "lyrics_scroll_haptic"
+        private const val KEY_LYRICS_KEEP_SCREEN_ON = "lyrics_keep_screen_on"
+        private const val KEY_PLAYER_HIDE_VOLUME_BAR = "player_hide_volume_bar"
+        private const val KEY_SLEEP_TIMER_DEADLINE = "sleep_timer_deadline_elapsed"
+        private const val KEY_SLEEP_TIMER_ANCHOR = "sleep_timer_after_current_anchor"
         private const val KEY_VISUALIZER_HIDE_STATUS_BAR = "visualizer_hide_status_bar"
         private const val KEY_EXCLUDED_DIRS = "excluded_dirs"
         private const val KEY_SONGS_CACHE = "songs_cache_json"

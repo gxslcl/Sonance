@@ -245,7 +245,9 @@ class PlayerController(private val context: Context) {
                 override fun onPlayerError(error: PlaybackException) {
                     // 报错时 `_state.value.title` 可能还停在上一条（元数据是异步回调的），
                     // 直接读播放器当前的媒体项才不会把「鸟之诗」报成上一首。
-                    val failedTitle = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
+                    val failedTitle = controller?.currentMediaItem?.mediaMetadata?.let {
+                        it.extras?.getString(EXTRA_ORIG_TITLE) ?: it.title?.toString()
+                    }
                         ?.takeIf { it.isNotBlank() } ?: _state.value.title
                     val failedUri = controller?.currentMediaItem?.localConfiguration?.uri?.toString()
                         ?: _state.value.sourceUri
@@ -351,7 +353,7 @@ class PlayerController(private val context: Context) {
                 isBuffering = player.playbackState == Player.STATE_BUFFERING,
                 playWhenReady = activePlaybackIntent(player.playWhenReady, player.playbackState, player.playerError != null),
                 mediaId = id,
-                title = meta?.title?.toString().orEmpty(),
+                title = meta?.extras?.getString(EXTRA_ORIG_TITLE) ?: meta?.title?.toString().orEmpty(),
                 artist = meta?.artist?.toString().orEmpty(),
                 album = meta?.albumTitle?.toString().orEmpty(),
                 albumId = meta?.extras?.getLong(EXTRA_ALBUM_ID, -1L) ?: -1L,
@@ -485,8 +487,11 @@ class PlayerController(private val context: Context) {
      * 后台预取拿到地址后用它原地替换队列项。替换当前项会让 ExoPlayer 用新地址
      * 重新准备 —— 这正是「轮到这首时还没地址」想要的补救，所以只有**正在出声**
      * 的当前项会跳过，避免把播放中的流打断。
+     *
+     * [forceCurrent] = true 用于「文件改名后旧 uri 已失效」的场景：当前项也必须换，
+     * 替换后 seek 回原进度，听感上只是短暂缓冲。
      */
-    fun patchQueueUri(mediaId: Long, uri: Uri) {
+    fun patchQueueUri(mediaId: Long, uri: Uri, forceCurrent: Boolean = false) {
         val c = controller
         if (c == null) {
             pendingRequest?.let { req ->
@@ -508,7 +513,9 @@ class PlayerController(private val context: Context) {
             if (item.mediaId != mediaId.toString()) continue
             if (item.localConfiguration?.uri == uri) return
             val curUri = item.localConfiguration?.uri?.toString()
-            if (i == target.currentMediaItemIndex && target.isPlaying && !isUnresolvedStreamUri(curUri)) return
+            val isCurrent = i == target.currentMediaItemIndex
+            if (isCurrent && target.isPlaying && !isUnresolvedStreamUri(curUri) && !forceCurrent) return
+            val resumePos = if (isCurrent && forceCurrent) target.currentPosition.coerceAtLeast(0L) else 0L
             val extras = android.os.Bundle(item.mediaMetadata.extras ?: android.os.Bundle()).apply {
                 putString(EXTRA_URI, uri.toString())
             }
@@ -522,6 +529,9 @@ class PlayerController(private val context: Context) {
                     isMediaController = (target === c)
                 )
             }.onFailure { android.util.Log.w("Sonance", "补流地址失败: ${it.message}") }
+            if (isCurrent && forceCurrent) {
+                runCatching { target.seekTo(i, resumePos) }
+            }
             return
         }
     }
@@ -1198,6 +1208,12 @@ class PlayerController(private val context: Context) {
         const val EXTRA_SOURCE = "sonance.source"
         const val EXTRA_REMOTE_ID = "sonance.remote_id"
         const val EXTRA_DURATION_MS = "sonance.duration_ms"
+
+        /**
+         * 蓝牙车载歌词模式把会话标题改写成当前歌词行时，原歌名存在这里。
+         * 所有内部读取标题的地方都必须优先取它，保证歌词匹配 / 小组件 / 应用内显示不受影响。
+         */
+        const val EXTRA_ORIG_TITLE = "sonance.orig_title"
 
         /**
          * 连接服务端成功时判断是否应丢弃等待中的「恢复现场」请求：

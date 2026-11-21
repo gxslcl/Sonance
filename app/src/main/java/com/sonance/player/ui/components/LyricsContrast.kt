@@ -41,7 +41,13 @@ internal const val PROFILE_BANDS = 16
  */
 internal const val ART_ZOOM = 1.35f
 
-/** 当前句的目标对比度。WCAG 对大字号文字的门槛是 3:1，这里留一点余量。 */
+/**
+ * 当前句的目标对比度。WCAG 对大字号文字的门槛是 3:1，这里留足余量。
+ *
+ * 不再往上抬：中灰背景（0x808080）上纯白的物理上限只有约 3.95，抬到 4.5 会迫使
+ * 调色走到纯白、把色相丢掉（用户要的是"还是原来那套颜色"）。剩余的"看不清"
+ * 由 Lyrics.kt 里随背景自适应的逐字软阴影补足，而不是继续抬这个数。
+ */
 internal const val TARGET_CURRENT = 4.0f
 
 /**
@@ -51,6 +57,9 @@ internal const val TARGET_CURRENT = 4.0f
  * 和屏幕上真正画出来的那个背景之间总有一点差（模糊会把明暗交界处往对面拉，
  * 实测残差约 0.02~0.03 亮度）。调色是照着算出来的背景做的，算出来偏亮时，
  * 屏幕上就会差一口气 —— 实测刚好卡在 2.9 左右。把目标抬一档，实测才稳稳落在 3:1 以上。
+ *
+ * 上限注意：液态玻璃亮带（亮度约 0.24）上纯白的物理极限约 3.62，目标高过它
+ * 就永远"够不到"，只能停在最高档。3.4 留了余量，再往上抬没有意义。
  */
 internal const val TARGET_OTHER = 3.4f
 
@@ -265,15 +274,35 @@ internal const val EQUALIZE_STOPS = 5
  */
 internal const val EQUALIZE_TARGET_LUM = 0.065f
 
-/** 均衡遮罩单个停靠点的不透明度上限（与旧画法的 0.97/0.99 上限同一量级）。 */
-internal const val SCRIM_ALPHA_MAX = 0.95f
+/**
+ * 浅色沉浸（宣纸玻璃系列）的目标合成亮度 —— 方案 C 的镜像「统一提亮」。
+ *
+ * 0.72 大约是 #DCDCDC 那一档的浅灰：深墨文字对比 ≈12、深色强调对比 ≈4.8，都达标。
+ * 刻意不取更亮的 0.82 —— 目标越亮，把暗封面抬上去所需的白遮罩越浓（接近不透明），
+ * 封面色相会被洗得越淡、"透出"越不明显。降到 0.72 后遮罩薄了一截，封面颜色透得更清楚，
+ * 同时整屏仍是明确的浅色主题。封面越暗白遮罩越浓、越亮越薄（已比目标亮时为 0，保住本色）——
+ * 换歌时亮度基本不动、只有色相在变。亮封面允许超过目标，字色按**最暗**色带校准
+ * （见 SonanceRoot.adaptedSkin），全程达标。
+ */
+internal const val EQUALIZE_TARGET_LUM_LIGHT = 0.72f
 
 /**
- * 为每个停靠点算出让「底色 × 封面 × 遮罩」的合成亮度钉在 [EQUALIZE_TARGET_LUM]
- * 的遮罩不透明度。
+ * 均衡遮罩单个停靠点的不透明度上限。
  *
- * 封面越亮遮罩越浓、越暗遮罩越薄（已经比目标暗时干脆为 0）—— 遮罩色是皮肤底色
- * （近黑），所以合成结果永远 ≤ 封面亮度：只压不抬，暗封面保住自己的深。
+ * 浅色方向留足余地：米白遮罩自身亮度 ≈0.87，把极暗封面抬到目标 0.72 需要 ≈0.85 的
+ * 不透明度；上限取 0.985 保证再暗的封面也抬得动（深色方向近黑遮罩离目标远，永远不顶到）。
+ * [GlassBackdrop] 对均衡停靠点只做 0~1 夹紧，不会把这个值再压下去，画与算对齐。
+ */
+internal const val SCRIM_ALPHA_MAX = 0.985f
+
+/**
+ * 为每个停靠点算出让「底色 × 封面 × 遮罩」的合成亮度钉在目标档的遮罩不透明度。
+ * 目标按皮肤明暗取：深色沉浸 [EQUALIZE_TARGET_LUM]（统一压暗），
+ * 浅色沉浸 [EQUALIZE_TARGET_LUM_LIGHT]（统一提亮）。
+ *
+ * 深色：封面越亮遮罩越浓、越暗越薄（已经比目标暗时干脆为 0）—— 遮罩色近黑，
+ * 合成结果永远 ≤ 封面亮度：只压不抬，暗封面保住自己的深。
+ * 浅色：方向相反，封面越暗遮罩越浓（白遮罩把它抬上来）、已比目标亮时为 0。
  *
  * 折算方式与 [buildBgProfile] 完全同参（Crop 填满 → 放大 [ART_ZOOM] → 取可见段），
  * 算出来的停靠点交给 [GlassBackdrop] 画、再原样交给 [buildBgProfile] 折算字色，
@@ -298,13 +327,14 @@ internal fun equalizeScrimAlphas(
     val visibleH = boxH / scale
     val topInArt = (artH - visibleH) / 2f
     val artAlpha = GlassStyle.artAlpha(visibility) * if (canBlur) 1f else 0.45f
+    val target = if (skin.isLight) EQUALIZE_TARGET_LUM_LIGHT else EQUALIZE_TARGET_LUM
 
     val out = ArrayList<Float>(EQUALIZE_STOPS)
     for (i in 0 until EQUALIZE_STOPS) {
         val f = i.toFloat() / (EQUALIZE_STOPS - 1)
         val artColor = sampleBands(bands, ((topInArt + f * visibleH) / artH).coerceIn(0f, 1f))
         val overArt = mix(skin.bg, artColor, artAlpha)
-        out += solveScrimAlpha(overArt, skin.bg, EQUALIZE_TARGET_LUM)
+        out += solveScrimAlpha(overArt, skin.bg, target)
     }
     return out
 }
@@ -312,17 +342,31 @@ internal fun equalizeScrimAlphas(
 /**
  * 二分求 s：lum(mix(overArt, scrim, s)) = [target]。
  *
- * [scrim]（皮肤底色，近黑）比 [overArt] 暗时，合成亮度随 s 单调下降 ——
- * 二分对真实的 [mix] + [Color.luminance] 求解，不靠线性近似，算出来的就是
- * 画出来的那个值。封面本身已比目标暗时返回 0（没有可压的余地）。
+ * 方向由**遮罩与目标**的明暗关系决定（不是遮罩与封面 —— 深色族的近黑底
+ * 也可能比极暗封面略亮，按封面判会误入提亮分支）：
+ *  - [scrim] 比 [target] 暗（深色沉浸）：合成亮度随 s 单调**下降**，只压不抬；
+ *  - [scrim] 比 [target] 亮（浅色沉浸）：合成亮度随 s 单调**上升**，只抬不压。
+ * 封面本身已达标（深色够暗 / 浅色够亮）时返回 0。二分对真实的 [mix] +
+ * [Color.luminance] 求解，不靠线性近似，算出来的就是画出来的那个值。
  */
 private fun solveScrimAlpha(overArt: Color, scrim: Color, target: Float): Float {
-    if (overArt.luminance() <= target) return 0f
+    val artLum = overArt.luminance()
+    val lighten = scrim.luminance() > target
+    if (lighten) {
+        if (artLum >= target) return 0f
+    } else {
+        if (artLum <= target) return 0f
+    }
     var lo = 0f
     var hi = SCRIM_ALPHA_MAX
     repeat(12) {
         val mid = (lo + hi) / 2f
-        if (mix(overArt, scrim, mid).luminance() > target) lo = mid else hi = mid
+        val lum = mix(overArt, scrim, mid).luminance()
+        if (lighten) {
+            if (lum < target) lo = mid else hi = mid
+        } else {
+            if (lum > target) lo = mid else hi = mid
+        }
     }
     return (lo + hi) / 2f
 }

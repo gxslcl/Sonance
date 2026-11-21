@@ -30,8 +30,8 @@
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="98dp"
-            android:layout_height="98dp"
+            android:layout_width="84dp"
+            android:layout_height="84dp"
             android:contentDescription="@string/widget_cover_desc"
             android:scaleType="fitCenter"
             android:src="@drawable/widget_placeholder" />

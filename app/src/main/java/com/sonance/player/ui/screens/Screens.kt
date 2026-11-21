@@ -939,6 +939,10 @@ fun AlbumsScreen(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
     modifier: Modifier = Modifier,
+    /** 放进曲库 Pager 时由共享表头接管搜索/排序，这里不再画自己的表头 */
+    showHeader: Boolean = true,
+    /** 外面传进来才能从外部滚到顶部 / 池化避免循环翻页共享状态 */
+    gridState: LazyGridState = rememberLazyGridState(),
     onOpenAlbum: (Album) -> Unit
 ) {
     val dense = LocalDenseLayout.current
@@ -952,26 +956,28 @@ fun AlbumsScreen(
     }
 
     Column(modifier.fillMaxSize()) {
-        ListHeader(
-            query = vm.searchQuery,
-            onQueryChange = vm::changeQuery,
-            sortField = vm.sortField,
-            sortAscending = vm.sortAscending,
-            onSort = vm::changeSort,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            actions = if (vm.songs.isNotEmpty()) {
-                { m ->
-                    GlassActionChip(
-                        label = "随机播放全部",
-                        icon = SonanceIcons.Shuffle,
-                        accent = true,
-                        onClick = { vm.playAll(vm.songs, shuffled = true) },
-                        modifier = m
-                    )
-                }
-            } else null
-        )
-        Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        if (showHeader) {
+            ListHeader(
+                query = vm.searchQuery,
+                onQueryChange = vm::changeQuery,
+                sortField = vm.sortField,
+                sortAscending = vm.sortAscending,
+                onSort = vm::changeSort,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
+                actions = if (vm.songs.isNotEmpty()) {
+                    { m ->
+                        GlassActionChip(
+                            label = "随机播放全部",
+                            icon = SonanceIcons.Shuffle,
+                            accent = true,
+                            onClick = { vm.playAll(vm.songs, shuffled = true) },
+                            modifier = m
+                        )
+                    }
+                } else null
+            )
+            Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        }
         if (vm.scanState == ScanState.SCANNING && vm.songs.isEmpty()) {
             LoadingState(title = "正在扫描本地音乐…", subtitle = "首次扫描可能需要几秒钟")
         } else if (albums.isEmpty()) {
@@ -981,7 +987,7 @@ fun AlbumsScreen(
                 subtitle = "扫描本地音乐后，专辑会自动归类"
             )
         } else {
-            AlbumGrid(albums, vm, playerState, onOpenAlbum = onOpenAlbum)
+            AlbumGrid(albums, vm, playerState, gridState = gridState, onOpenAlbum = onOpenAlbum)
         }
     }
 }
@@ -994,6 +1000,8 @@ fun AlbumsScreen(
 fun ArtistsScreen(
     vm: SonanceViewModel,
     modifier: Modifier = Modifier,
+    showHeader: Boolean = true,
+    gridState: LazyGridState = rememberLazyGridState(),
     onOpenArtist: (String) -> Unit
 ) {
     val dense = LocalDenseLayout.current
@@ -1004,15 +1012,17 @@ fun ArtistsScreen(
     }
 
     Column(modifier.fillMaxSize()) {
-        ListHeader(
-            query = vm.searchQuery,
-            onQueryChange = vm::changeQuery,
-            sortField = vm.sortField,
-            sortAscending = vm.sortAscending,
-            onSort = vm::changeSort,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-        )
-        Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        if (showHeader) {
+            ListHeader(
+                query = vm.searchQuery,
+                onQueryChange = vm::changeQuery,
+                sortField = vm.sortField,
+                sortAscending = vm.sortAscending,
+                onSort = vm::changeSort,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
+            )
+            Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        }
         if (vm.scanState == ScanState.SCANNING && vm.songs.isEmpty()) {
             LoadingState(title = "正在扫描本地音乐…", subtitle = "首次扫描可能需要几秒钟")
         } else if (artists.isEmpty()) {
@@ -1022,7 +1032,6 @@ fun ArtistsScreen(
                 subtitle = "扫描本地音乐后，艺术家会自动归类"
             )
         } else {
-            val gridState = rememberLazyGridState()
             LaunchedEffect(gridState) {
                 snapshotFlow { gridState.isScrollInProgress }.collect { ArtworkLoader.paused = it }
             }
@@ -1055,6 +1064,8 @@ fun ArtistsScreen(
 fun FoldersScreen(
     vm: SonanceViewModel,
     modifier: Modifier = Modifier,
+    showHeader: Boolean = true,
+    gridState: LazyGridState = rememberLazyGridState(),
     onOpenFolder: (String) -> Unit
 ) {
     val dense = LocalDenseLayout.current
@@ -1090,45 +1101,58 @@ fun FoldersScreen(
         (visible + hidden).sortedBy { it.folder.name.lowercase() }
     }
 
-    Column(modifier.fillMaxSize()) {
-        ListHeader(
-            query = vm.searchQuery,
-            onQueryChange = vm::changeQuery,
-            sortField = vm.sortField,
-            sortAscending = vm.sortAscending,
-            onSort = vm::changeSort,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-            actions = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (selectMode) {
-                        GlassActionChip(
-                            label = "取消",
-                            onClick = { selectMode = false }
-                        )
-                        GlassActionChip(
-                            label = "排除 (${selected.size})",
-                            icon = SonanceIcons.FolderMinus,
-                            accent = true,
-                            onClick = { batchConfirm = true },
-                            enabled = selected.isNotEmpty()
-                        )
-                    } else {
-                        GlassActionChip(
-                            label = "排除",
-                            icon = SonanceIcons.FolderMinus,
-                            onClick = { selectMode = true }
-                        )
-                        GlassActionChip(
-                            label = if (vm.scanState == ScanState.SCANNING) "扫描中…" else "重新扫描",
-                            icon = SonanceIcons.Refresh,
-                            accent = true,
-                            onClick = { vm.scan() }
-                        )
-                    }
-                }
+    // 文件夹专属动作（排除 / 重新扫描 / 多选态的取消 + 批量排除）。
+    // 独立页时挂在 ListHeader 的 actions 槽；并入 Pager 后共享表头接管了搜索/排序，
+    // 这一组就落到内容顶部单独一行，功能不丢。
+    val folderActions: @Composable (Modifier) -> Unit = { m ->
+        Row(m, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (selectMode) {
+                GlassActionChip(
+                    label = "取消",
+                    onClick = { selectMode = false }
+                )
+                GlassActionChip(
+                    label = "排除 (${selected.size})",
+                    icon = SonanceIcons.FolderMinus,
+                    accent = true,
+                    onClick = { batchConfirm = true },
+                    enabled = selected.isNotEmpty()
+                )
+            } else {
+                GlassActionChip(
+                    label = "排除",
+                    icon = SonanceIcons.FolderMinus,
+                    onClick = { selectMode = true }
+                )
+                GlassActionChip(
+                    label = if (vm.scanState == ScanState.SCANNING) "扫描中…" else "重新扫描",
+                    icon = SonanceIcons.Refresh,
+                    accent = true,
+                    onClick = { vm.scan() }
+                )
             }
-        )
-        Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        }
+    }
+
+    Column(modifier.fillMaxSize()) {
+        if (showHeader) {
+            ListHeader(
+                query = vm.searchQuery,
+                onQueryChange = vm::changeQuery,
+                sortField = vm.sortField,
+                sortAscending = vm.sortAscending,
+                onSort = vm::changeSort,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
+                actions = folderActions
+            )
+            Spacer(Modifier.height(if (dense) 4.dp else 10.dp))
+        } else {
+            folderActions(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = if (dense) 2.dp else 6.dp)
+            )
+        }
         if (vm.scanState == ScanState.SCANNING && vm.songs.isEmpty()) {
             LoadingState(title = "正在扫描本地音乐…", subtitle = "首次扫描可能需要几秒钟")
         } else if (entries.isEmpty()) {
@@ -1138,7 +1162,6 @@ fun FoldersScreen(
                 subtitle = "把音乐文件放进设备存储后重新扫描"
             )
         } else {
-            val gridState = rememberLazyGridState()
             LaunchedEffect(gridState) {
                 snapshotFlow { gridState.isScrollInProgress }.collect { ArtworkLoader.paused = it }
             }
@@ -1375,9 +1398,13 @@ fun SongCollectionScreen(
     showCover: Boolean = true,
     /**
      * 无封面头部（[showCover] = false，文件夹详情走这里）的 ⁝ 溢出菜单内容。
-     * 文件夹详情用它放「排除此文件夹」。
+     * 传 null 就不显示这个按钮。
      */
-    headerOverflow: (@Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit)? = null
+    headerOverflow: (@Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit)? = null,
+    /** 无封面头部右侧「播放全部」按钮（文件夹详情用）。null 不显示。 */
+    onPlayAll: (() -> Unit)? = null,
+    /** 无封面头部右侧「定位当前歌曲」按钮（文件夹详情用）。null 不显示。 */
+    onLocate: (() -> Unit)? = null
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
@@ -1441,7 +1468,33 @@ fun SongCollectionScreen(
                 sortAscending = vm.sortAscending,
                 onSort = vm::changeSort,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
-                actions = { m -> QuickActions(songs = songs, vm = vm, modifier = m) },
+                actions = { m ->
+                    Row(
+                        modifier = m,
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        if (onPlayAll != null) {
+                            IconAction(
+                                icon = SonanceIcons.Play,
+                                contentDescription = "播放全部",
+                                onClick = onPlayAll,
+                                iconSize = 20.dp,
+                                tint = skin.accent
+                            )
+                        }
+                        if (onLocate != null) {
+                            IconAction(
+                                icon = SonanceIcons.Locate,
+                                contentDescription = "定位当前歌曲",
+                                onClick = onLocate,
+                                iconSize = 20.dp,
+                                tint = skin.textMuted
+                            )
+                        }
+                        QuickActions(songs = songs, vm = vm)
+                    }
+                },
                 overflow = headerOverflow
             )
         }
@@ -1505,46 +1558,55 @@ fun SongCollectionScreen(
  *  - 指示器可点：滑动是隐藏功能，光靠滑动新用户发现不了。
  * ============================================================ */
 
-/** 参与左右滑动的四个页签（歌单是第四页：头部底部不动，只换中间内容）。 */
-val pagerTabs: List<LibraryTab> = listOf(
-    LibraryTab.SONGS,
-    LibraryTab.RECENT,
-    LibraryTab.FAVORITES,
-    LibraryTab.PLAYLISTS
-)
-
 /**
- * 循环用的"虚拟页数"：真实四页 × 1000 圈，从正中间那一圈起步。
+ * 循环用的"虚拟页数"：固定一大圈，从正中间起步。
  *
- * 这么做的代价是 Pager 会为 4000 页建状态 —— 但它只为**可见的那几页**组合内容，
+ * 这么做的代价是 Pager 会为这么多页建状态 —— 但它只为**可见的那几页**组合内容，
  * 状态本身只是一个整数列表，开销可以忽略。换来的是滑到任何方向都不会撞墙。
+ *
+ * 页数固定（不随页签数量变）：页签数可在 1~5 之间被用户改，固定页数能保证
+ * 改完之后当前页码不会越界；真实下标用 [realIndex] 对页签数取模得到。
  */
 private const val PAGER_LOOP_PAGES = 4 * 1000
 private const val PAGER_LOOP_START = 4 * 500
 
 /** 虚拟页码 → 真实页下标（对负数也成立，往左滑出起点时会用到） */
-private fun realIndex(page: Int): Int = Math.floorMod(page, pagerTabs.size)
+private fun realIndex(page: Int, n: Int): Int = Math.floorMod(page, n)
 
 /**
  * 滚动状态的"池子"大小 —— **故意比真实页数大**。
  *
  * 分页器是循环的，翻页时必然"销毁一个虚拟页 + 新建一个虚拟页"，而这俩的
- * [realIndex] 是同一个。如果按"三个页签三份状态"来存，被销毁的那个
+ * [realIndex] 是同一个。如果按"几个页签几份状态"来存，被销毁的那个
  * `LazyColumn` 和新建的那个会有一小段时间**同时抓着同一个 `LazyListState`**
  * （Compose 的销毁是下一帧才生效的）。一份滚动状态被两个列表同时 attach，
  * 内部的测量回调与位置记录会互相覆盖，表现就是：这一页**纵向彻底滑不动**，
  * 而横向翻页、点浮窗全都正常 —— 正是那个偶发的卡死。
  *
  * 池化之后相邻虚拟页落在不同槽位，刚销毁的和新建的至少隔 [SCROLL_SLOTS]
- * 页才可能撞到同一个槽，而一次滑动跨 8 页不会发生。
+ * 页才可能撞到同一个槽，而一次滑动跨 8 页不会发生。页签数哪怕只有 1~2 个
+ * （相邻虚拟页是同一页签）也靠它错开，不会共享状态。
  */
 private const val SCROLL_SLOTS = 8
 
 /** 虚拟页码 → 状态槽位 */
 private fun slotFor(page: Int): Int = Math.floorMod(page, SCROLL_SLOTS)
 
-/** 该 tab 是否属于三页滑动的范围（紧凑屏据此决定渲染哪套内容）。 */
-val LibraryTab.inPager: Boolean get() = this in pagerTabs
+/** 有歌曲列表、能「定位到正在播放」的页签（歌单 / 专辑 / 艺术家 / 文件夹是网格，没有歌曲定位）。 */
+val LibraryTab.isSongListTab: Boolean
+    get() = this == LibraryTab.SONGS || this == LibraryTab.RECENT || this == LibraryTab.FAVORITES
+
+/** 切换栏 chip 用的短标签（比 [LibraryTab.label] 短，窄屏才放得下）。 */
+fun pagerShortLabel(tab: LibraryTab): String = when (tab) {
+    LibraryTab.SONGS -> "全部"
+    LibraryTab.RECENT -> "最近"
+    LibraryTab.FAVORITES -> "收藏"
+    LibraryTab.PLAYLISTS -> "歌单"
+    LibraryTab.ALBUMS -> "专辑"
+    LibraryTab.ARTISTS -> "艺术家"
+    LibraryTab.FOLDERS -> "文件夹"
+    else -> tab.label
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1554,51 +1616,63 @@ fun LibraryPagerScreen(
     modifier: Modifier = Modifier,
     onOpenFolder: (String) -> Unit = {},
     onOpenAlbum: (Album) -> Unit = {},
+    onOpenArtist: (String) -> Unit = {},
     onOpenCoverWall: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val dense = LocalDenseLayout.current
 
+    // 切换栏页签由用户在视图弹层里自定义（1~5 个，SONGS 恒在首位）。
+    val tabs = vm.pagerTabs
+    val n = tabs.size
+
+    // 起步页码对齐到 n 的整数倍，保证 realIndex(initialPage) 正好落在 vm.tab 上。
+    // 页数固定（PAGER_LOOP_PAGES），改页签数量不会让当前页码越界。
+    val alignedStart = PAGER_LOOP_START - Math.floorMod(PAGER_LOOP_START, n)
     val pagerState = rememberPagerState(
-        initialPage = PAGER_LOOP_START + pagerTabs.indexOf(vm.tab).coerceAtLeast(0)
+        initialPage = alignedStart + tabs.indexOf(vm.tab).coerceAtLeast(0)
     ) { PAGER_LOOP_PAGES }
 
     /**
      * 指示器用的「当前是第几页」——**必须读 pager 自己**。
      *
      * 早先读的是 vm.tab，而 vm.tab 要等页面停稳才回写（见下面 settledPage 那条），
-     * 于是手指滑过半页、页面都换好了，上面那段「全部 / 最近 / 收藏」还停在原处，
+     * 于是手指滑过半页、页面都换好了，上面那段切换栏还停在原处，
      * 松手才"啪"地跳一下 —— 就是那个慢半拍。
      */
-    val liveIndex by remember { derivedStateOf { realIndex(pagerState.currentPage) } }
+    val liveIndex by remember { derivedStateOf { realIndex(pagerState.currentPage, vm.pagerTabs.size) } }
+    /** 当前停在哪一个页签：表头 / 滚动条 / 自愈都按它分流，而不是按死下标。 */
+    val liveTab = tabs.getOrElse(liveIndex) { LibraryTab.SONGS }
 
     // 滚动状态 hoist 到分页器外面：表头的「回到顶部」、右侧快速滚动条、卡死自愈
     // 都要操作/观察**当前这一页**的列表，状态放在页面内部就拿不到。
     //
     // ⚠️ 状态**必须留在组合里**，不能挂到 ViewModel 上常驻（试过，见
     // `SonanceViewModel.readLibraryScroll` 的注释：会导致纵向滚动偶发彻底失效）。
-    // 跨"进出设置页 / 冷启动"的位置靠 Prefs 里的"下标 + 偏移"恢复：
-    // `remember` 只在**首次进入本屏**时读一次初值，之后一直由组合自己维护。
+    // 跨"进出设置页 / 冷启动"的位置靠 Prefs 里的"下标 + 偏移"恢复。
     val savedScroll = remember { vm.readLibraryScroll() }
 
     // 「列表卡死」的兜底自愈开关：见下面 healConnection 的说明。
-    // 变化时滚动状态池会按**当前可见位置**重建，列表节点也跟着重挂一次。
     var healEpoch by remember { mutableIntStateOf(0) }
 
-    // 每个页签（全部 / 最近 / 收藏）上次离开时的位置：**下标 + 偏移**。
-    //
-    // 状态对象是按虚拟页池化的（见 SCROLL_SLOTS 的注释），绕一圈回来是另一份状态，
-    // 所以位置不能赖在状态对象里，得按页签单独记一份 —— 翻页进出、绕圈、自愈
-    // 重建，都靠它把用户"停在第几首"还原回去。
-    val scrollSave = remember {
-        Array(pagerTabs.size) { i -> savedScroll.getOrElse(i) { 0 to 0 } }
+    // 每个页签上次离开时的位置：**下标 + 偏移**。状态对象按虚拟页池化，
+    // 绕一圈回来是另一份状态，所以位置按页签单独记一份。页签数变了就重建。
+    val scrollSave = remember(n) {
+        Array(n) { i -> savedScroll.getOrElse(i) { 0 to 0 } }
     }
 
-    // 滚动状态池：槽位 → 状态。为什么不是三页三份，见 SCROLL_SLOTS 的注释。
-    val slotStates = remember(healEpoch) {
+    val gridMode by rememberUpdatedState(vm.viewMode == ViewMode.GRID)
+    /** 网格类页签：歌单 / 专辑 / 艺术家 / 文件夹，以及「全部歌曲」的网格视图。 */
+    fun isGridTab(t: LibraryTab): Boolean =
+        t == LibraryTab.PLAYLISTS || t == LibraryTab.ALBUMS ||
+            t == LibraryTab.ARTISTS || t == LibraryTab.FOLDERS ||
+            (t == LibraryTab.SONGS && gridMode)
+
+    // 列表状态池（全部·列表视图 / 最近 / 收藏）。为什么不是几页几份，见 SCROLL_SLOTS。
+    val slotStates = remember(healEpoch, n) {
         List(SCROLL_SLOTS) { slot ->
             // 首屏就用上次的位置建，省掉"先显示第一首再跳走"的闪一下
-            val (idx, off) = scrollSave[realIndex(slot)]
+            val (idx, off) = scrollSave[realIndex(slot, n)]
             LazyListState(
                 firstVisibleItemIndex = idx.coerceAtLeast(0),
                 firstVisibleItemScrollOffset = off
@@ -1608,20 +1682,18 @@ fun LibraryPagerScreen(
     // 各个回调（回到顶部、滚动条跳转、自愈探针）都是**延迟执行**的，捕获
     // 状态列表本身会在自愈换掉那一批之后还指向旧的 —— 走 UpdatedState 拿最新。
     val slotStatesNow by rememberUpdatedState(slotStates)
-    // 歌单页（第四页）用的是网格而不是列表：同样按虚拟页池化一份 LazyGridState，
-    // 槽位划分与列表一致（slotFor），位置单独记在 scrollSave[3]。
-    val playlistGridStates = remember(healEpoch) {
-        val (idx, off) = scrollSave.getOrElse(3) { 0 to 0 }
-        List(SCROLL_SLOTS) {
+    // 网格状态池（歌单 / 专辑 / 艺术家 / 文件夹 / 全部·网格视图）：同样按虚拟页池化，
+    // 取代原来「歌单一份 + 全部网格单独一份」，任何页签数（哪怕 1~2 个）都不会共享状态。
+    val gridStates = remember(healEpoch, n) {
+        List(SCROLL_SLOTS) { slot ->
+            val (idx, off) = scrollSave[realIndex(slot, n)]
             LazyGridState(
                 firstVisibleItemIndex = idx.coerceAtLeast(0),
                 firstVisibleItemScrollOffset = off
             )
         }
     }
-    val playlistGridStatesNow by rememberUpdatedState(playlistGridStates)
-    val gridState = remember(healEpoch) { LazyGridState() }
-    val gridStateNow by rememberUpdatedState(gridState)
+    val gridStatesNow by rememberUpdatedState(gridStates)
     val scope = rememberCoroutineScope()
 
     // 离开本屏（进设置、进详情页、退出）时把位置写进 Prefs，下次进来/冷启动接着用。
@@ -1629,29 +1701,28 @@ fun LibraryPagerScreen(
     DisposableEffect(Unit) {
         onDispose {
             val out = scrollSave.toMutableList()
-            if (liveIndex == 3) {
-                val g = playlistGridStatesNow[slotFor(pagerState.currentPage)]
-                out[3] = g.firstVisibleItemIndex to g.firstVisibleItemScrollOffset
+            val slot = slotFor(pagerState.currentPage)
+            out[liveIndex] = if (isGridTab(liveTab)) {
+                val g = gridStatesNow[slot]
+                g.firstVisibleItemIndex to g.firstVisibleItemScrollOffset
             } else {
-                val st = slotStatesNow[slotFor(pagerState.currentPage)]
-                out[liveIndex] = st.firstVisibleItemIndex to st.firstVisibleItemScrollOffset
+                val st = slotStatesNow[slot]
+                st.firstVisibleItemIndex to st.firstVisibleItemScrollOffset
             }
             vm.saveLibraryScroll(out)
         }
     }
 
-    // 读的是**调用那一刻**的页码 / 视图模式，所以这个 lambda 不用跟着重组换实例 ——
+    // 读的是**调用那一刻**的页码 / 页签 / 视图模式，所以这个 lambda 不用跟着重组换实例 ——
     // 表头的 pointerInput 也就不会因为换实例而反复重启手势检测。
     val pageNow by rememberUpdatedState(liveIndex)
-    val gridMode by rememberUpdatedState(vm.viewMode == ViewMode.GRID)
+    val tabNow by rememberUpdatedState(liveTab)
     val jumpToTop: () -> Unit = remember(scope) {
         {
             scope.launch {
-                when {
-                    gridMode && pageNow == 0 -> gridStateNow.animateScrollToItem(0)
-                    pageNow == 3 -> playlistGridStatesNow[slotFor(pagerState.currentPage)].animateScrollToItem(0)
-                    else -> slotStatesNow[slotFor(pagerState.currentPage)].animateScrollToItem(0)
-                }
+                val slot = slotFor(pagerState.currentPage)
+                if (isGridTab(tabNow)) gridStatesNow[slot].animateScrollToItem(0)
+                else slotStatesNow[slot].animateScrollToItem(0)
             }
         }
     }
@@ -1659,29 +1730,26 @@ fun LibraryPagerScreen(
     /** 当前页是不是停在顶部（决定右下角那个「回到顶部」出不出来） */
     val atTop by remember {
         derivedStateOf {
-            when {
-                gridMode && liveIndex == 0 -> {
-                    gridStateNow.firstVisibleItemIndex == 0 && gridStateNow.firstVisibleItemScrollOffset == 0
-                }
-                liveIndex == 3 -> {
-                    val g = playlistGridStatesNow[slotFor(pagerState.currentPage)]
-                    g.firstVisibleItemIndex == 0 && g.firstVisibleItemScrollOffset == 0
-                }
-                else -> {
-                    val st = slotStatesNow[slotFor(pagerState.currentPage)]
-                    st.firstVisibleItemIndex == 0 && st.firstVisibleItemScrollOffset == 0
-                }
+            // 直接读 vm.pagerTabs / currentPage（都是快照状态），不能捕获重组期的临时 val
+            val curTabs = vm.pagerTabs
+            val curTab = curTabs.getOrElse(realIndex(pagerState.currentPage, curTabs.size)) { LibraryTab.SONGS }
+            val slot = slotFor(pagerState.currentPage)
+            if (isGridTab(curTab)) {
+                val g = gridStatesNow[slot]
+                g.firstVisibleItemIndex == 0 && g.firstVisibleItemScrollOffset == 0
+            } else {
+                val st = slotStatesNow[slot]
+                st.firstVisibleItemIndex == 0 && st.firstVisibleItemScrollOffset == 0
             }
         }
     }
 
-    // 外部改 tab（视图弹层、侧栏、搜索跳转）→ 滚到**最近**的那一页。
-    // 循环之后同一个页签对应 1000 个页码，随便挑一个会让页面绕一大圈。
-    LaunchedEffect(vm.tab) {
-        val idx = pagerTabs.indexOf(vm.tab)
+    // 外部改 tab（视图弹层、侧栏、搜索跳转）或页签集合变化 → 滚到**最近**的那一页。
+    // 循环之后同一个页签对应上千个页码，随便挑一个会让页面绕一大圈。
+    LaunchedEffect(vm.tab, tabs) {
+        val idx = tabs.indexOf(vm.tab)
         if (idx < 0) return@LaunchedEffect
         val cur = pagerState.currentPage
-        val n = pagerTabs.size
         val base = cur - Math.floorMod(cur, n)
         val target = listOf(base + idx - n, base + idx, base + idx + n)
             .minByOrNull { kotlin.math.abs(it - cur) } ?: return@LaunchedEffect
@@ -1691,9 +1759,11 @@ fun LibraryPagerScreen(
     // 后者在拖拽过程中就变，会让顶栏标题在手指还没松时就来回跳。
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }.collect { page ->
-                pagerTabs.getOrNull(realIndex(page))?.let { tab ->
-                    // 滑动切页不触发「滚到正在播放」——那会把用户在全部歌曲里的位置重置
-                    if (vm.tab != tab) vm.selectTab(tab)
+            // 在协程里现读 vm.pagerTabs：页签集合可能被用户改过，不能用组合期捕获的旧值
+            val curTabs = vm.pagerTabs
+            curTabs.getOrNull(realIndex(page, curTabs.size))?.let { tab ->
+                // 滑动切页不触发「滚到正在播放」——那会把用户在全部歌曲里的位置重置
+                if (vm.tab != tab) vm.selectTab(tab)
             }
         }
     }
@@ -1708,7 +1778,7 @@ fun LibraryPagerScreen(
             .collect { swiping -> ArtworkLoader.paused = swiping }
     }
 
-    // sortKeys 就绪后排序键会变（码点序 → 拼音序），三个列表都得跟着重排，
+    // sortKeys 就绪后排序键会变（码点序 → 拼音序），列表都得跟着重排，
     // 否则列表停在旧顺序、字母条却按新键分组，两边对不上。
     val all = remember(vm.songs, vm.sortField, vm.sortAscending, vm.searchQuery, vm.sortKeys) {
         vm.visibleSongs()
@@ -1723,14 +1793,13 @@ fun LibraryPagerScreen(
     val currentList = when (vm.tab) {
         LibraryTab.RECENT -> recent
         LibraryTab.FAVORITES -> favorites
-        // 歌单页没有"歌曲列表"：播放模式键随之隐藏，搜索统计也换成歌单口径
-        LibraryTab.PLAYLISTS -> emptyList()
-        else -> all
+        LibraryTab.SONGS -> all
+        // 歌单 / 专辑 / 艺术家 / 文件夹是网格，没有歌曲列表：播放模式键随之隐藏，统计另算
+        else -> emptyList()
     }
 
-    // 右侧轨道只服务「全部歌曲」这一页：both 列表内容用的都是 all，
-    // 分页器的其它两页虽然也会经过这里，useLetters 会是 false。
-    val useLetters = letterRailEnabled(vm, isAllSongs = liveIndex == 0)
+    // 右侧字母轨道只服务「全部歌曲」列表视图；其它页签 useLetters 会是 false。
+    val useLetters = letterRailEnabled(vm, isAllSongs = liveTab == LibraryTab.SONGS)
     val letterSections = rememberLetterSections(all, vm)
 
     // 「全部歌曲」搜索时的队列要传完整曲库：搜索是找入口，不是只听这几首
@@ -1766,13 +1835,20 @@ fun LibraryPagerScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
             leading = { m ->
                 if (vm.searchQuery.isNotBlank()) {
-                    // 搜索时让位给结果统计（和 SongsScreen 同一套逻辑）；
-                    // 歌单页统计的是歌单数量，不是歌曲
+                    // 搜索时让位给结果统计；不同页签统计各自的口径
+                    val q = vm.searchQuery
                     Text(
-                        text = if (liveIndex == 3) {
-                            "找到 ${vm.userPlaylists.filterPlaylistsByQuery(vm.searchQuery).size} 个歌单"
-                        } else {
-                            "找到 ${currentList.size} 首 · ${formatDuration(currentList.sumOf { it.durationMs })}"
+                        text = when (liveTab) {
+                            LibraryTab.PLAYLISTS ->
+                                "找到 ${vm.userPlaylists.filterPlaylistsByQuery(q).size} 个歌单"
+                            LibraryTab.ALBUMS ->
+                                "找到 ${vm.albums.count { it.name.contains(q, true) || it.artist.contains(q, true) }} 张专辑"
+                            LibraryTab.ARTISTS ->
+                                "找到 ${vm.artists.count { it.name.contains(q, true) }} 位艺术家"
+                            LibraryTab.FOLDERS ->
+                                "共 ${vm.folders.size} 个文件夹"
+                            else ->
+                                "找到 ${currentList.size} 首 · ${formatDuration(currentList.sumOf { it.durationMs })}"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
@@ -1782,9 +1858,9 @@ fun LibraryPagerScreen(
                     )
                 } else {
                     LibrarySegmented(
-                        labels = listOf("全部", "最近", "收藏", "歌单"),
+                        labels = tabs.map { pagerShortLabel(it) },
                         selected = liveIndex,
-                        onSelect = { idx -> pagerTabs.getOrNull(idx)?.let(vm::selectTab) },
+                        onSelect = { idx -> tabs.getOrNull(idx)?.let(vm::selectTab) },
                         modifier = m
                     )
                 }
@@ -1809,10 +1885,11 @@ fun LibraryPagerScreen(
             // 这里不再有 ⁝ 菜单：「扫描」属于设置类操作，已归到
             // 「设置 → 媒体库 → 重新扫描本地音乐」，列表头只留日常动作。
             // 双击指示器右边的空白 → 回到顶部（替代原来那个刷新图标的位置感）
-            onDoubleTapToTop = jumpToTop
+            onDoubleTapToTop = jumpToTop,
+            searchFocusSignal = vm.searchFocusSignal
         )
 
-        PageDots(count = pagerTabs.size, selected = liveIndex)
+        PageDots(count = tabs.size, selected = liveIndex)
 
         // 下拉刷新**整个去掉了**。
         //
@@ -1842,49 +1919,38 @@ fun LibraryPagerScreen(
             // 只加一道关不够准：惯性滚动收尾那一两帧、或者在列表首尾继续用力拖，
             // 都会出现"有剩余位移但没滚"，光看 ① 会误判 —— 误判会让列表白跳一下，
             // 比卡住还烦。加上 ② 之后，只有真的"动了但没动"才触发。
-            val gridOnPage0 = vm.viewMode == ViewMode.GRID && liveIndex == 0
-            val onPlaylistPage = liveIndex == 3
+            val onGridPage = isGridTab(liveTab)
             val probeState = rememberUpdatedState<(Float) -> Boolean> { availY ->
+                val slot = slotFor(pagerState.currentPage)
                 if (availY > 0f) {
-                    when {
-                        gridOnPage0 -> gridStateNow.canScrollBackward
-                        onPlaylistPage -> playlistGridStatesNow[slotFor(pagerState.currentPage)].canScrollBackward
-                        else -> slotStatesNow[slotFor(pagerState.currentPage)].canScrollBackward
-                    }
+                    if (onGridPage) gridStatesNow[slot].canScrollBackward
+                    else slotStatesNow[slot].canScrollBackward
                 } else {
-                    when {
-                        gridOnPage0 -> gridStateNow.canScrollForward
-                        onPlaylistPage -> playlistGridStatesNow[slotFor(pagerState.currentPage)].canScrollForward
-                        else -> slotStatesNow[slotFor(pagerState.currentPage)].canScrollForward
-                    }
+                    if (onGridPage) gridStatesNow[slot].canScrollForward
+                    else slotStatesNow[slot].canScrollForward
                 }
             }
             /** 当前列表位置的指纹：下标 × 大质数 + 偏移，两条一起变才算动过 */
             val posState = rememberUpdatedState {
-                when {
-                    gridOnPage0 -> {
-                        gridStateNow.firstVisibleItemIndex * 1_000_003 +
-                            gridStateNow.firstVisibleItemScrollOffset
-                    }
-                    onPlaylistPage -> {
-                        val g = playlistGridStatesNow[slotFor(pagerState.currentPage)]
-                        g.firstVisibleItemIndex * 1_000_003 + g.firstVisibleItemScrollOffset
-                    }
-                    else -> {
-                        val st = slotStatesNow[slotFor(pagerState.currentPage)]
-                        st.firstVisibleItemIndex * 1_000_003 + st.firstVisibleItemScrollOffset
-                    }
+                val slot = slotFor(pagerState.currentPage)
+                if (onGridPage) {
+                    val g = gridStatesNow[slot]
+                    g.firstVisibleItemIndex * 1_000_003 + g.firstVisibleItemScrollOffset
+                } else {
+                    val st = slotStatesNow[slot]
+                    st.firstVisibleItemIndex * 1_000_003 + st.firstVisibleItemScrollOffset
                 }
             }
             val healAction = rememberUpdatedState {
                 // 自愈前补记一下当前页的位置：其它页签在离开时已经存进 scrollSave 了，
                 // 正在看的这一页还没走 onDispose，这里先落一次，重建后按它还原。
-                if (liveIndex == 3) {
-                    val g = playlistGridStatesNow[slotFor(pagerState.currentPage)]
-                    scrollSave[3] = g.firstVisibleItemIndex to g.firstVisibleItemScrollOffset
+                val slot = slotFor(pagerState.currentPage)
+                scrollSave[liveIndex] = if (onGridPage) {
+                    val g = gridStatesNow[slot]
+                    g.firstVisibleItemIndex to g.firstVisibleItemScrollOffset
                 } else {
-                    val st = slotStatesNow[slotFor(pagerState.currentPage)]
-                    scrollSave[liveIndex] = st.firstVisibleItemIndex to st.firstVisibleItemScrollOffset
+                    val st = slotStatesNow[slot]
+                    st.firstVisibleItemIndex to st.firstVisibleItemScrollOffset
                 }
                 healEpoch++
             }
@@ -1941,30 +2007,35 @@ fun LibraryPagerScreen(
                 userScrollEnabled = !vm.selectionMode,
                 beyondViewportPageCount = 1
             ) { page ->
-                // 本虚拟页用的滚动状态（池化，见 SCROLL_SLOTS 的注释）
-                val pageState = slotStatesNow[slotFor(page)]
+                // 本虚拟页对应的页签 + 池化滚动状态（见 SCROLL_SLOTS 的注释）
+                val idx = realIndex(page, n)
+                val tab = tabs.getOrElse(idx) { LibraryTab.SONGS }
+                val grid = isGridTab(tab)
+                val pageListState = slotStatesNow[slotFor(page)]
+                val pageGridState = gridStatesNow[slotFor(page)]
                 //
                 // 位置**按页签**存取，不跟着状态对象走：状态是池化的，同一个页签
                 // 在不同虚拟页上拿到的是不同对象，位置存在对象里就会串。
-                //
-                // 这里两个 effect 的 key 都是 page，所以只在**本页首次组合**时跑一次 ——
-                // 翻页回来、卡死自愈重建，都靠它们把"停在第几首"接上。
-                // 歌单页（3）用的是网格状态，位置存取在它自己的分支里做，这里跳过。
-                LaunchedEffect(page) {
-                    if (realIndex(page) == 3) return@LaunchedEffect
-                    val (idx, off) = scrollSave[realIndex(page)]
-                    if (idx != 0 || off != 0) pageState.scrollToItem(idx, off)
+                // key 含 idx / grid：翻页回来、自愈重建、全部歌曲切列表↔网格、
+                // 页签集合变化，都靠它们把"停在第几首"接上。
+                LaunchedEffect(page, idx, grid) {
+                    val (si, so) = scrollSave[idx]
+                    if (si != 0 || so != 0) {
+                        if (grid) pageGridState.scrollToItem(si, so)
+                        else pageListState.scrollToItem(si, so)
+                    }
                 }
-                DisposableEffect(page) {
+                DisposableEffect(page, idx, grid) {
                     onDispose {
-                        if (realIndex(page) != 3) {
-                            scrollSave[realIndex(page)] =
-                                pageState.firstVisibleItemIndex to pageState.firstVisibleItemScrollOffset
+                        scrollSave[idx] = if (grid) {
+                            pageGridState.firstVisibleItemIndex to pageGridState.firstVisibleItemScrollOffset
+                        } else {
+                            pageListState.firstVisibleItemIndex to pageListState.firstVisibleItemScrollOffset
                         }
                     }
                 }
-                when (realIndex(page)) {
-                    0 -> {
+                when (tab) {
+                    LibraryTab.SONGS -> {
                         when {
                             vm.scanState == ScanState.SCANNING && vm.songs.isEmpty() -> LoadingState(
                                 title = "正在扫描本地音乐…",
@@ -1982,7 +2053,7 @@ fun LibraryPagerScreen(
                                 albums = vm.albums,
                                 vm = vm,
                                 playerState = playerState,
-                                gridState = gridState,
+                                gridState = pageGridState,
                                 onOpenAlbum = onOpenAlbum
                             )
                             else -> {
@@ -1991,22 +2062,22 @@ fun LibraryPagerScreen(
                                     vm = vm,
                                     playerState = playerState,
                                     scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                    listState = pageState,
+                                    listState = pageListState,
                                     queueSongs = playQueue,
-                                    contentPadding = if (useLetters && realIndex(page) == 0) PaddingValues(
+                                    contentPadding = if (useLetters) PaddingValues(
                                         start = 16.dp,
                                         end = 30.dp,
                                         top = if (dense) 2.dp else 4.dp,
                                         bottom = if (dense) 2.dp else 4.dp
                                     ) else null,
                                     onRemoveFromLibrary = removeSong,
-                                    reportCurrentVisibility = realIndex(page) == liveIndex
+                                    reportCurrentVisibility = idx == liveIndex
                                 )
                             }
                         }
                     }
 
-                    1 -> {
+                    LibraryTab.RECENT -> {
                         if (recent.isEmpty()) {
                             EmptyState(
                                 icon = SonanceIcons.Clock,
@@ -2025,15 +2096,15 @@ fun LibraryPagerScreen(
                                         vm = vm,
                                         playerState = playerState,
                                         scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                        listState = pageState,
-                                        reportCurrentVisibility = realIndex(page) == liveIndex
+                                        listState = pageListState,
+                                        reportCurrentVisibility = idx == liveIndex
                                     )
                                 }
                             }
                         }
                     }
 
-                    2 -> {
+                    LibraryTab.FAVORITES -> {
                         if (favorites.isEmpty()) {
                             EmptyState(
                                 icon = SonanceIcons.Heart,
@@ -2046,38 +2117,49 @@ fun LibraryPagerScreen(
                                 vm = vm,
                                 playerState = playerState,
                                 scrollToCurrentSignal = vm.scrollToCurrentSignal,
-                                listState = pageState,
-                                reportCurrentVisibility = realIndex(page) == liveIndex
+                                listState = pageListState,
+                                reportCurrentVisibility = idx == liveIndex
                             )
                         }
                     }
 
-                    else -> {
-                        // 歌单页：网格状态同样按虚拟页池化，位置记在 scrollSave[3]，
-                        // 与歌曲页那套"离开存、回来取"完全对称。
-                        val playlistState = playlistGridStatesNow[slotFor(page)]
-                        LaunchedEffect(page) {
-                            val (idx, off) = scrollSave.getOrElse(3) { 0 to 0 }
-                            if (idx != 0 || off != 0) playlistState.scrollToItem(idx, off)
-                        }
-                        DisposableEffect(page) {
-                            onDispose {
-                                scrollSave[3] =
-                                    playlistState.firstVisibleItemIndex to playlistState.firstVisibleItemScrollOffset
-                            }
-                        }
-                        UserPlaylistsScreen(
-                            vm = vm,
-                            playerState = playerState,
-                            gridState = playlistState
-                        )
-                    }
+                    LibraryTab.PLAYLISTS -> UserPlaylistsScreen(
+                        vm = vm,
+                        playerState = playerState,
+                        gridState = pageGridState
+                    )
+
+                    // 浏览类视图：共享表头已接管搜索/排序/切换栏，这里只画内容（showHeader=false），
+                    // 网格状态用池化的那一份，外部「回到顶部」/ 自愈才能操作到它。
+                    LibraryTab.ALBUMS -> AlbumsScreen(
+                        vm = vm,
+                        playerState = playerState,
+                        showHeader = false,
+                        gridState = pageGridState,
+                        onOpenAlbum = onOpenAlbum
+                    )
+
+                    LibraryTab.ARTISTS -> ArtistsScreen(
+                        vm = vm,
+                        showHeader = false,
+                        gridState = pageGridState,
+                        onOpenArtist = onOpenArtist
+                    )
+
+                    LibraryTab.FOLDERS -> FoldersScreen(
+                        vm = vm,
+                        showHeader = false,
+                        gridState = pageGridState,
+                        onOpenFolder = onOpenFolder
+                    )
+
+                    else -> {}
                 }
             }
             }
 
             // 首次进入的滑动提示（浮在列表上，3.2 秒后自己消失；点一下也能立刻关）
-            if (showSwipeHint) {
+            if (showSwipeHint && n > 1) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -2091,7 +2173,7 @@ fun LibraryPagerScreen(
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
                     Text(
-                        text = "← 左右滑动切换「全部 / 最近 / 收藏 / 歌单」→",
+                        text = "← 左右滑动切换「${tabs.joinToString(" / ") { pagerShortLabel(it) }}」→",
                         style = MaterialTheme.typography.labelSmall,
                         // textMuted 在深色皮肤下几乎不可读，提示必须一眼看到
                         color = skin.text
@@ -2103,8 +2185,10 @@ fun LibraryPagerScreen(
             //
             // 滑块长度 = 可见比例，拖动即可快速跳转；按住时变粗变亮。
             // 同样是**独立组件**：它每帧读滚动位置，放在主函数体里会让整页每帧重组。
-            val barOnGrid = vm.viewMode == ViewMode.GRID && liveIndex == 0
-            val barState = slotStatesNow[slotFor(pagerState.currentPage)]
+            val barOnGrid = liveTab == LibraryTab.SONGS && vm.viewMode == ViewMode.GRID
+            val barSlot = slotFor(pagerState.currentPage)
+            val barState = slotStatesNow[barSlot]
+            val barGridState = gridStatesNow[barSlot]
             val railModifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 2.dp)
@@ -2116,22 +2200,22 @@ fun LibraryPagerScreen(
                     onSeek = { index -> scope.launch { barState.scrollToItem(index) } },
                     modifier = railModifier
                 )
-            } else if (liveIndex != 3) {
-                // 歌单页是网格、没有对应的歌曲滚动状态，不画快速滚动条（否则是条死轨）
+            } else if (liveTab.isSongListTab) {
+                // 歌单 / 专辑 / 艺术家 / 文件夹是网格、没有歌曲滚动状态，不画快速滚动条（否则是条死轨）
                 FastScrollBar(
                     itemCount = { if (barOnGrid) vm.albums.size else currentList.size },
                     visibleCount = {
-                        if (barOnGrid) gridStateNow.layoutInfo.visibleItemsInfo.size
+                        if (barOnGrid) barGridState.layoutInfo.visibleItemsInfo.size
                         else barState.layoutInfo.visibleItemsInfo.size
                     },
                     firstIndex = {
-                        if (barOnGrid) gridStateNow.firstVisibleItemIndex
+                        if (barOnGrid) barGridState.firstVisibleItemIndex
                         else barState.firstVisibleItemIndex
                     },
                     hapticEnabled = vm.scrollHaptic,
                     onSeek = { index ->
                         scope.launch {
-                            if (barOnGrid) gridStateNow.scrollToItem(index)
+                            if (barOnGrid) barGridState.scrollToItem(index)
                             else barState.scrollToItem(index)
                         }
                     },

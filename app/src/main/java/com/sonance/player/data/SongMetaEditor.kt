@@ -1,5 +1,6 @@
 package com.sonance.player.data
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.IntentSender
@@ -41,8 +42,17 @@ object SongMetaEditor {
 
     sealed interface Result {
 
-        /** 标签写进去了（renamed = 文件是否也改成了「歌名 - 歌手」） */
-        data class Written(val renamed: Boolean) : Result
+        /**
+         * 标签写进去了（renamed = 文件是否也改成了「歌名 - 歌手」）。
+         * 改名成功时 [newUri] / [newDisplayName] 带回改名后的新地址与新文件名 ——
+         * SAF 文档改名会让旧 uri 失效，调用方必须把它们同步进内存列表与播放队列，
+         * 否则下次播放就是「找不到文件，可能已被移动或者删除」。
+         */
+        data class Written(
+            val renamed: Boolean,
+            val newUri: Uri? = null,
+            val newDisplayName: String? = null
+        ) : Result
 
         /** 在线歌没有本地文件可写 */
         data object NotLocal : Result
@@ -153,10 +163,10 @@ object SongMetaEditor {
                 temp.inputStream().use { i -> i.copyTo(o, BUF) }
             }
 
-            val renamed = renameBestEffort(app, song, title, artist)
-            rescan(app, song.uri)
+            val rename = renameBestEffort(app, song, title, artist)
+            rescan(app, rename.newUri ?: song.uri)
             Log.i(TAG, "歌曲信息已写入文件：${song.displayName}")
-            Result.Written(renamed)
+            Result.Written(rename.renamed, rename.newUri, rename.newDisplayName)
         } catch (t: Throwable) {
             permissionWall(t, app, song.uri) ?: run {
                 Log.w(TAG, "写入歌曲信息失败: ${t.javaClass.simpleName}: ${t.message}")
@@ -195,10 +205,10 @@ object SongMetaEditor {
                 dstTmp.inputStream().use { i -> i.copyTo(o, BUF) }
             }
 
-            val renamed = renameBestEffort(app, song, title, artist)
-            rescan(app, song.uri)
+            val rename = renameBestEffort(app, song, title, artist)
+            rescan(app, rename.newUri ?: song.uri)
             Log.i(TAG, "歌曲信息已写入文件：${song.displayName}")
-            Result.Written(renamed)
+            Result.Written(rename.renamed, rename.newUri, rename.newDisplayName)
         } catch (t: Throwable) {
             permissionWall(t, app, song.uri) ?: run {
                 Log.w(TAG, "写入歌曲信息失败: ${t.javaClass.simpleName}: ${t.message}")
@@ -252,10 +262,10 @@ object SongMetaEditor {
                 temp.inputStream().use { i -> i.copyTo(o, BUF) }
             }
 
-            val renamed = renameBestEffort(app, song, title, artist)
-            rescan(app, song.uri)
+            val rename = renameBestEffort(app, song, title, artist)
+            rescan(app, rename.newUri ?: song.uri)
             Log.i(TAG, "歌曲信息已写入文件：${song.displayName}")
-            Result.Written(renamed)
+            Result.Written(rename.renamed, rename.newUri, rename.newDisplayName)
         } catch (t: Throwable) {
             permissionWall(t, app, song.uri) ?: run {
                 Log.w(TAG, "写入歌曲信息失败: ${t.javaClass.simpleName}: ${t.message}")
@@ -270,6 +280,13 @@ object SongMetaEditor {
      * 改名与重扫
      * ============================================================ */
 
+    /** 改名结果：是否改成 + 改名后的新地址 / 新文件名（没改成时后两者为 null） */
+    private data class RenameOutcome(
+        val renamed: Boolean,
+        val newUri: Uri? = null,
+        val newDisplayName: String? = null
+    )
+
     /**
      * 文件名改成「歌名 - 歌手.原扩展名」。**best-effort**：
      * MediaStore 行（update DISPLAY_NAME）与 SAF 文档（renameDocument）各试一次，
@@ -280,34 +297,76 @@ object SongMetaEditor {
         song: Song,
         title: String,
         artist: String
-    ): Boolean {
+    ): RenameOutcome {
         val stem = outputStem(title, artist)
-        if (stem.isBlank()) return false
+        if (stem.isBlank()) return RenameOutcome(false)
         val ext = song.displayName.substringAfterLast('.', "")
         val newName = if (ext.isBlank()) stem else "$stem.$ext"
-        if (newName == song.displayName) return false
+        if (newName == song.displayName) return RenameOutcome(false)
 
         // 1) MediaStore 行：改 DISPLAY_NAME（API 30+ 支持且等于改名）
         runCatching {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, newName)
             }
-            context.contentResolver.update(song.uri, values, null, null)
+            val rows = context.contentResolver.update(song.uri, values, null, null)
+            check(rows > 0) { "MediaStore update 影响 0 行" }
         }.onSuccess {
             Log.i(TAG, "文件已改名：$newName")
-            return true
+            val resolved = resolveRenamedUri(context, song.uri, newName, song.folderPath)
+            return RenameOutcome(true, resolved, newName)
         }
 
-        // 2) SAF 文档 URI：renameDocument 返回新 Uri
+        // 2) SAF 文档 URI：renameDocument 返回新 Uri（旧 Uri 随即失效，必须带回给调用方）
         runCatching {
             DocumentsContract.renameDocument(context.contentResolver, song.uri, newName)
-        }.onSuccess {
-            Log.i(TAG, "SAF 文件已改名：$newName")
-            return true
+        }.onSuccess { newUri ->
+            if (newUri != null) {
+                Log.i(TAG, "SAF 文件已改名：$newName")
+                return RenameOutcome(true, newUri, newName)
+            }
         }
 
         Log.w(TAG, "文件改名未生效（provider 不支持），标签已写入")
-        return false
+        return RenameOutcome(false)
+    }
+
+    /**
+     * MediaStore 改名后重新定位行：多数系统改名不换行 id，旧 uri 还能查到就直接用；
+     * 个别系统重扫会换行 —— 按新文件名 + 原目录再找一次。找不到返回 null（调用方沿用旧 uri）。
+     */
+    private fun resolveRenamedUri(
+        context: Context,
+        oldUri: Uri,
+        newName: String,
+        folderPath: String
+    ): Uri? {
+        if (oldUri.authority != MediaStore.AUTHORITY) return null
+        runCatching {
+            context.contentResolver.query(
+                oldUri,
+                arrayOf(MediaStore.Audio.Media._ID),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    return ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, c.getLong(0))
+                }
+            }
+        }
+        runCatching {
+            context.contentResolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Audio.Media._ID),
+                "${MediaStore.Audio.Media.DISPLAY_NAME} = ? AND ${MediaStore.Audio.Media.DATA} LIKE ?",
+                arrayOf(newName, "$folderPath/%"),
+                null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    return ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, c.getLong(0))
+                }
+            }
+        }
+        return null
     }
 
     /** 让媒体库重新读一遍这个文件（标题/歌手从标签回读） */

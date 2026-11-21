@@ -280,8 +280,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     // ===== 偏好 =====
-    var skin by mutableStateOf(Skins.byId(prefs.skinId))
+    /** 主题跟随系统深浅色（默认关）。开启后亮/暗各用一套皮肤，随系统自动切换。 */
+    var skinFollowSystem by mutableStateOf(prefs.skinFollowSystem)
         private set
+    var skinLightId by mutableStateOf(prefs.skinLightId)
+        private set
+    var skinDarkId by mutableStateOf(prefs.skinDarkId)
+        private set
+
+    var skin by mutableStateOf(
+        if (prefs.skinFollowSystem)
+            Skins.byId(if (systemDarkNow()) prefs.skinDarkId else prefs.skinLightId)
+        else Skins.byId(prefs.skinId)
+    )
+        private set
+
+    /** 当前系统是否深色模式（读资源配置，不依赖 Compose，供初始化/设置项即时套用）。 */
+    private fun systemDarkNow(): Boolean {
+        val ui = getApplication<Application>().resources.configuration.uiMode
+        return (ui and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+    }
 
     /**
      * 启动时把皮肤色同步给桌面小组件一次。
@@ -313,6 +332,57 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var searchQuery by mutableStateOf("")
         private set
+
+    // ===== 顶部切换栏（可自定义，#105）=====
+
+    /**
+     * 可放进顶部切换栏的浏览类视图。ONLINE / STATS 是整页（不左右滑），不在此列。
+     * 「全部歌曲」必选且恒排第一，其余可增删 / 替换 / 调整顺序，最多 5 个。
+     */
+    val pagerTabCandidates: List<LibraryTab> = listOf(
+        LibraryTab.SONGS,
+        LibraryTab.RECENT,
+        LibraryTab.FAVORITES,
+        LibraryTab.PLAYLISTS,
+        LibraryTab.ALBUMS,
+        LibraryTab.ARTISTS,
+        LibraryTab.FOLDERS
+    )
+
+    /** 当前固定在列表顶部的切换栏页签（按显示顺序，SONGS 恒在首位）。 */
+    var pagerTabs by mutableStateOf(parsePagerTabs(prefs.pagerTabIds))
+        private set
+
+    fun changePagerTabs(tabs: List<LibraryTab>) {
+        val normalized = normalizePagerTabs(tabs)
+        if (normalized == pagerTabs) return
+        pagerTabs = normalized
+        prefs.pagerTabIds = normalized.joinToString(",") { it.id }
+        // 当前停留的页签被删掉了 → 回到「全部歌曲」，避免停在一个不存在的页上
+        if (tab !in normalized) selectTab(LibraryTab.SONGS)
+    }
+
+    /** 规整：只留候选、去重、SONGS 置顶、截断到 5 个。 */
+    private fun normalizePagerTabs(tabs: List<LibraryTab>): List<LibraryTab> {
+        val picked = tabs.filter { it in pagerTabCandidates }.distinct().toMutableList()
+        picked.remove(LibraryTab.SONGS)
+        picked.add(0, LibraryTab.SONGS)
+        return picked.take(5)
+    }
+
+    /** 解析持久化值；空 / 全非法 → 默认四页（全部 / 最近 / 收藏 / 歌单）。 */
+    private fun parsePagerTabs(raw: String): List<LibraryTab> {
+        val default = listOf(
+            LibraryTab.SONGS, LibraryTab.RECENT, LibraryTab.FAVORITES, LibraryTab.PLAYLISTS
+        )
+        if (raw.isBlank()) return default
+        val picked = raw.split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { id -> pagerTabCandidates.firstOrNull { it.id == id } }
+        if (picked.isEmpty()) return default
+        return normalizePagerTabs(picked)
+    }
     var filterShortAudio by mutableStateOf(prefs.scanFilterShortAudio)
         private set
 
@@ -329,6 +399,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changeAutoScanOnLaunch(value: Boolean) {
         autoScanOnLaunch = value
         prefs.autoScanOnLaunch = value
+    }
+
+    /** 冷启动直接进入全屏播放页（默认开）；只在恢复出当前歌时生效。 */
+    var openPlayerOnLaunch by mutableStateOf(prefs.openPlayerOnLaunch)
+        private set
+
+    fun changeOpenPlayerOnLaunch(value: Boolean) {
+        openPlayerOnLaunch = value
+        prefs.openPlayerOnLaunch = value
     }
 
     /** 最近一次扫描的排除明细，供「曲库清理」区块展示 */
@@ -2509,9 +2588,18 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var usbExclusiveEnabled by mutableStateOf(prefs.usbExclusiveEnabled)
         private set
 
+    var usbRatePolicy by mutableStateOf(prefs.usbExclusiveRatePolicy)
+        private set
+
+    var usbOutputLabel by mutableStateOf(com.sonance.player.playback.UsbExclusive.outputFormatLabel)
+        private set
+
     init {
         com.sonance.player.playback.UsbExclusive.onStateChanged = { enabled ->
             usbExclusiveEnabled = enabled
+        }
+        com.sonance.player.playback.UsbExclusive.onFormatChanged = { label ->
+            usbOutputLabel = label
         }
         com.sonance.player.desktoplyrics.DesktopLyricsManager.onTextColorChanged = { color ->
             desktopLyricsTextColor = color
@@ -2523,6 +2611,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         usbExclusiveEnabled = prefs.usbExclusiveEnabled
         if (err != null) showToast(err)
         else showToast(if (on) "USB 独占已开启 · bit-perfect 直通" else "USB 独占已关闭")
+    }
+
+    fun changeUsbRatePolicy(policy: String) {
+        usbRatePolicy = policy
+        com.sonance.player.playback.UsbExclusive.setRatePolicy(getApplication(), policy)
     }
 
     var gaplessEnabled by mutableStateOf(prefs.gaplessEnabled)
@@ -2772,6 +2865,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
     }
 
+    var carBtLyricsEnabled by mutableStateOf(prefs.carBluetoothLyrics)
+        private set
+
+    fun changeCarBtLyrics(value: Boolean) {
+        carBtLyricsEnabled = value
+        prefs.carBluetoothLyrics = value
+        com.sonance.player.playback.PlaybackService.syncLyricOutputs()
+    }
+
     /** 换歌代次：迟到的旧歌词结果靠它丢弃 */
     private var lockLyricsGeneration = 0
 
@@ -2784,6 +2886,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             val id = player.state.value.mediaId
             songById(id)?.let { publishLockScreenLyrics(it) }
         }
+        com.sonance.player.playback.PlaybackService.syncLyricOutputs()
     }
 
     /**
@@ -2912,6 +3015,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         topBarLogoId = id
         prefs.topBarLogoId = id
         showToast("已更换顶栏图标")
+    }
+
+    // ===== 顶栏右上角呈现方式（#107）=====
+
+    /** true = 三个独立图标；false = 一个竖向三点菜单。 */
+    var topBarIconsMode by mutableStateOf(prefs.topBarIconMode != "menu")
+        private set
+
+    fun changeTopBarIconsMode(icons: Boolean) {
+        topBarIconsMode = icons
+        prefs.topBarIconMode = if (icons) "icons" else "menu"
+    }
+
+    /** 三图标模式下是否显示「视图切换」图标。 */
+    var showViewIcon by mutableStateOf(prefs.showViewIcon)
+        private set
+
+    fun changeShowViewIcon(value: Boolean) {
+        showViewIcon = value
+        prefs.showViewIcon = value
+    }
+
+    /** 三图标模式下是否显示「在线音乐」图标。 */
+    var showOnlineIcon by mutableStateOf(prefs.showOnlineIcon)
+        private set
+
+    fun changeShowOnlineIcon(value: Boolean) {
+        showOnlineIcon = value
+        prefs.showOnlineIcon = value
     }
 
     /**
@@ -3660,7 +3792,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val result = SongMetaEditor.edit(app, song, title, artist, album)
         when (result) {
             is SongMetaEditor.Result.Written -> {
-                applySongMetaInMemory(song, title, artist, album)
+                applySongMetaInMemory(song, title, artist, album, result.newUri, result.newDisplayName)
                 val msg = if (recognizedPrefix != null) {
                     if (result.renamed) "$recognizedPrefix，已写入并改名" else "$recognizedPrefix，已写入文件"
                 } else {
@@ -3695,9 +3827,27 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 标签写盘成功后把内存列表同步改掉：MediaStore 的回读是异步的（rescan
      * 不保证立即可见），等下次扫描再刷新会让用户以为没改成功。
      */
-    private fun applySongMetaInMemory(song: Song, title: String, artist: String, album: String) {
-        val patched = song.copy(title = title, artist = artist, album = album)
+    private fun applySongMetaInMemory(
+        song: Song,
+        title: String,
+        artist: String,
+        album: String,
+        newUri: Uri? = null,
+        newDisplayName: String? = null
+    ) {
+        val patched = song.copy(
+            title = title,
+            artist = artist,
+            album = album,
+            uri = newUri ?: song.uri,
+            displayName = newDisplayName ?: song.displayName
+        )
         songs = songs.map { if (it.id == song.id) patched else it }
+        // 改名可能让旧地址失效（SAF 文档改名必失效，个别系统 MediaStore 重扫换行）：
+        // 播放队列里的 uri 同步换掉，否则识别完再播就是「找不到文件」
+        if (newUri != null && newUri != song.uri) {
+            player.patchQueueUri(song.id, newUri, forceCurrent = true)
+        }
         if (pinyinIndex.isNotEmpty()) {
             pinyinIndex = pinyinIndex + (patched.id to PinyinIndex.build("${patched.title} ${patched.artist} ${patched.album}"))
         }
@@ -3884,6 +4034,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         scrollToCurrentSignal++
     }
 
+    /** 每次自增代表一次「聚焦列表搜索框并弹键盘」的请求；列表头部监听它。 */
+    var searchFocusSignal by mutableIntStateOf(0)
+        private set
+
+    fun requestSearchFocus() {
+        searchFocusSignal++
+    }
+
     /**
      * 当前播放歌曲是否已经在列表可见区内。由**当前显示的列表页**根据
      * `LazyListState.layoutInfo.visibleItemsInfo` 实时上报；悬浮的
@@ -3898,6 +4056,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun exportSettingsBaseline(): java.io.File? = prefs.exportSettingsBaseline(getApplication())
 
     fun changeSkin(value: Skin) {
+        applySkin(value, announce = true)
+    }
+
+    /**
+     * 真正套用一套皮肤：状态 + 持久化 + 配套玻璃 + 悬浮迷你条 + 小组件换色。
+     * 手动换肤（[changeSkin]）与跟随系统的自动切换共用这一条路径，
+     * 保证两种入口的副作用完全一致；[announce] 控制是否弹"已切换皮肤"提示
+     * （系统深浅色自动切换时不弹，避免打扰）。
+     */
+    private fun applySkin(value: Skin, announce: Boolean) {
         skin = value
         prefs.skinId = value.id
         // 玻璃主题：颜色之外还要把三处玻璃铺开，并顺手把迷你播放条换成悬浮卡片
@@ -3919,10 +4087,53 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             accent = value.accent.toArgb(),
             onAccent = value.onAccent.toArgb()
         )
-        showToast(
-            if (value.glass != null) "已切换皮肤 · ${value.name}（含玻璃背景）"
-            else "已切换皮肤 · ${value.name}"
-        )
+        if (announce) {
+            showToast(
+                if (value.glass != null) "已切换皮肤 · ${value.name}（含玻璃背景）"
+                else "已切换皮肤 · ${value.name}"
+            )
+        }
+    }
+
+    /** 跟随系统时，指定深浅色该用的那套皮肤。 */
+    private fun followTarget(isDark: Boolean): Skin =
+        Skins.byId(if (isDark) skinDarkId else skinLightId)
+
+    /** 开关「跟随系统深浅色」。开启时立刻按当前系统模式套用对应皮肤。 */
+    fun changeSkinFollowSystem(on: Boolean) {
+        if (on == skinFollowSystem) return
+        skinFollowSystem = on
+        prefs.skinFollowSystem = on
+        if (on) {
+            applySkin(followTarget(systemDarkNow()), announce = false)
+            showToast("已开启跟随系统 · 亮/暗可分别设置")
+        } else {
+            showToast("已关闭跟随系统 · 保持当前皮肤")
+        }
+    }
+
+    /** 设置「系统浅色模式」用的皮肤；若此刻正处浅色且跟随开启，立即套用。 */
+    fun setFollowLightSkin(value: Skin) {
+        skinLightId = value.id
+        prefs.skinLightId = value.id
+        if (skinFollowSystem && !systemDarkNow()) applySkin(value, announce = false)
+    }
+
+    /** 设置「系统深色模式」用的皮肤；若此刻正处深色且跟随开启，立即套用。 */
+    fun setFollowDarkSkin(value: Skin) {
+        skinDarkId = value.id
+        prefs.skinDarkId = value.id
+        if (skinFollowSystem && systemDarkNow()) applySkin(value, announce = false)
+    }
+
+    /**
+     * 系统深浅色可能变了（Compose 侧观察到 [androidx.compose.foundation.isSystemInDarkTheme]
+     * 变化时回调）。仅在跟随开启且目标皮肤与当前不同才套用，避免无谓重铺玻璃/重画小组件。
+     */
+    fun onSystemThemeMaybeChanged(isDark: Boolean) {
+        if (!skinFollowSystem) return
+        val target = followTarget(isDark)
+        if (target.id != skin.id) applySkin(target, announce = false)
     }
 
     /** 当前选中的应用图标（id 对应 manifest 里的 activity-alias 后缀） */
@@ -3943,10 +4154,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeDisplayName(name: String) {
         val trimmed = name.trim()
-        if (trimmed.isEmpty() || trimmed == appDisplayName) return
+        if (trimmed == appDisplayName) return
         appDisplayName = trimmed
         prefs.appDisplayName = trimmed
-        showToast("已改名为「$trimmed」")
+        // 允许存空：顶栏据此收起名称、不占空间（#108）
+        showToast(if (trimmed.isEmpty()) "已隐藏顶栏名称" else "已改名为「$trimmed」")
     }
 
     /**
@@ -6799,6 +7011,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun folderByPath(path: String): MusicFolder? = folders.firstOrNull { it.path == path }
 
+    /** 上次打开的文件夹路径（冷启动恢复文件夹详情用）。 */
+    fun savedFolderPath(): String? = prefs.lastFolderPath
+
+    /** 记录/清除当前打开的文件夹路径。detail 离开文件夹详情时传 null。 */
+    fun persistFolderDetail(path: String?) {
+        prefs.lastFolderPath = path
+    }
+
     // ===== 均衡器 =====
     //
     // 走**软件实现**（EqProcessor 挂在音频链路上），不是系统 AudioEffect ——
@@ -7245,6 +7465,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.visualizerHideStatusBar = value
     }
 
+    /** 隐藏普通播放页底部音量条（音效入口随之收进右上角「更多」菜单） */
+    var playerHideVolumeBar by mutableStateOf(prefs.playerHideVolumeBar)
+        private set
+
+    fun changePlayerHideVolumeBar(value: Boolean) {
+        playerHideVolumeBar = value
+        prefs.playerHideVolumeBar = value
+    }
+
     /** 解析持久化的自定义曲线；长度不对或含脏数据都返回 null（回落到预设） */
     private fun parseEqBands(raw: String): FloatArray? = parseEqBandsCsv(raw)
 
@@ -7290,6 +7519,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      * 4. 通知 MainActivity 关闭应用窗口并移出近期任务。
      */
     private fun finishPlaybackForSleepTimer() {
+        if (sleepTimerMode == SleepTimerMode.OFF) return
         clearSleepTimer()
         persistPlayback()
         runCatching { com.sonance.player.playback.BiliVideoSession.of(getApplication()).onAppExit() }
@@ -7306,6 +7536,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         val totalMs = minutes * 60_000L
         sleepTimerRemainingMs = totalMs
         val startedAt = android.os.SystemClock.elapsedRealtime()
+        // 系统闹钟兜底：界面划掉、VM 协程死了也能到点停播（见 PlaybackService.armSleepCountdown）
+        PlaybackService.armSleepCountdown(getApplication(), startedAt + totalMs)
 
         sleepTimerJob = viewModelScope.launch {
             while (isActive) {
@@ -7331,7 +7563,13 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         sleepTimerTotalMinutes = 0
         sleepTimerRemainingMs = 0L
         sleepAnchorSongId = player.state.value.mediaId
+        // 服务端轮询兜底：界面死了也照停
+        PlaybackService.armSleepAfterCurrent(getApplication(), sleepAnchorSongId)
+        launchAfterCurrentWatch()
+        showToast("播完当前这首后将暂停并关闭应用")
+    }
 
+    private fun launchAfterCurrentWatch() {
         sleepTimerJob = viewModelScope.launch {
             while (isActive) {
                 val st = player.state.value
@@ -7345,7 +7583,6 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 delay(400L)
             }
         }
-        showToast("播完当前这首后将暂停并关闭应用")
     }
 
     fun clearSleepTimer() {
@@ -7355,6 +7592,35 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         sleepTimerTotalMinutes = 0
         sleepTimerRemainingMs = 0L
         sleepAnchorSongId = -1L
+        PlaybackService.disarmSleepTimer(getApplication())
+    }
+
+    init {
+        // 进程重建后恢复睡眠定时的界面状态；到点 enforcement 由服务端闹钟/轮询负责。
+        val deadline = prefs.sleepTimerDeadlineElapsed
+        val anchor = prefs.sleepTimerAfterCurrentAnchor
+        val now = android.os.SystemClock.elapsedRealtime()
+        when {
+            deadline > now -> {
+                sleepTimerMode = SleepTimerMode.COUNTDOWN
+                sleepTimerTotalMinutes = ((deadline - now + 59_999L) / 60_000L).toInt()
+                sleepTimerRemainingMs = deadline - now
+                sleepTimerJob = viewModelScope.launch {
+                    while (isActive) {
+                        val left = deadline - android.os.SystemClock.elapsedRealtime()
+                        if (left <= 0L) break
+                        sleepTimerRemainingMs = left
+                        delay(1_000L)
+                    }
+                    finishPlaybackForSleepTimer()
+                }
+            }
+            anchor >= 0L -> {
+                sleepTimerMode = SleepTimerMode.AFTER_CURRENT
+                sleepAnchorSongId = anchor
+                launchAfterCurrentWatch()
+            }
+        }
     }
 
     /**

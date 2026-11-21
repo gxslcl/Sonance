@@ -44,6 +44,14 @@ object UsbExclusive {
     @Volatile
     var onStateChanged: ((Boolean) -> Unit)? = null
 
+    /** 当前实际协商出的输出格式（如 "96kHz / 24bit"）；未生效时为 null。供设置页实时显示。 */
+    @Volatile
+    var outputFormatLabel: String? = null
+        private set
+
+    @Volatile
+    var onFormatChanged: ((String?) -> Unit)? = null
+
     @Volatile
     private var lastTrackSampleRate = 44_100
 
@@ -89,7 +97,7 @@ object UsbExclusive {
             ?: return@synchronized "无法访问系统音频服务"
         val device = usbOutput(am)
             ?: return@synchronized "未检测到 USB 音频设备，请先连接 USB DAC / 耳机再开启"
-        val err = applyLocked(am, device)
+        val err = applyLocked(app, am, device)
         if (err != null) {
             prefs.usbExclusiveEnabled = false
             notifyStateChanged(false)
@@ -116,7 +124,7 @@ object UsbExclusive {
         val device = usbOutput(am)
         if (device != null) {
             // 若设备刚完成上电枚举期间偶发报错，不立刻粗暴关闭偏好，等待后续音轨或设备回调重协商
-            applyLocked(am, device)
+            applyLocked(app, am, device)
         }
     }
 
@@ -141,7 +149,7 @@ object UsbExclusive {
                     if (!Prefs(app).usbExclusiveEnabled) return@synchronized
                     val am = app.getSystemService(AudioManager::class.java) ?: return@synchronized
                     val device = usbOutput(am) ?: return@synchronized
-                    applyLocked(am, device)
+                    applyLocked(app, am, device)
                 }
             }
             pendingFormatSync = task
@@ -164,11 +172,26 @@ object UsbExclusive {
         else -> 0
     }
 
-    private fun applyLocked(am: AudioManager, device: AudioDeviceInfo): String? {
+    /**
+     * 切换采样率策略（"auto" 自动最优 / "source" 跟随源）并立即重协商。
+     * 写入偏好后只在独占已开启且设备在线时生效，其余情况等下次开启/音轨变化时自然应用。
+     */
+    fun setRatePolicy(context: Context, policy: String) = synchronized(lock) {
+        val app = context.applicationContext
+        val prefs = Prefs(app)
+        prefs.usbExclusiveRatePolicy = policy
+        if (Build.VERSION.SDK_INT < 34 || !prefs.usbExclusiveEnabled) return@synchronized
+        val am = app.getSystemService(AudioManager::class.java) ?: return@synchronized
+        val device = usbOutput(am) ?: return@synchronized
+        applyLocked(app, am, device)
+    }
+
+    private fun applyLocked(context: Context, am: AudioManager, device: AudioDeviceInfo): String? {
         if (Build.VERSION.SDK_INT < 34) return "USB 独占需要 Android 14 及以上系统"
         return runCatching {
             val desiredRate = lastTrackSampleRate.coerceAtLeast(8000)
             val desiredEnc = toAndroidEncoding(lastTrackEncoding)
+            val followSource = Prefs(context).usbExclusiveRatePolicy == "source"
             val desiredChannelMask = if (lastTrackChannels == 1) {
                 AudioFormat.CHANNEL_OUT_MONO
             } else {
@@ -183,11 +206,12 @@ object UsbExclusive {
             val bestSupported = supportedBitPerfect.maxByOrNull { attr ->
                 val f = attr.format
                 var score = 0
+                // 跟随源策略不给「更高采样率」加分：宁可回落到 44.1/48k 也不升频
                 score += when {
                     f.sampleRate == desiredRate -> 10_000
-                    f.sampleRate == desiredRate * 2 -> 3_000
+                    !followSource && f.sampleRate == desiredRate * 2 -> 3_000
                     f.sampleRate == 48_000 || f.sampleRate == 44_100 -> 1_000
-                    f.sampleRate > desiredRate -> 500
+                    !followSource && f.sampleRate > desiredRate -> 500
                     else -> 0
                 }
                 score += if (f.encoding == desiredEnc) 500 else encodingRank(f.encoding) * 80
@@ -258,6 +282,7 @@ object UsbExclusive {
             appliedSampleRate = chosenFormat.sampleRate
             appliedEncoding = chosenFormat.encoding
             appliedChannels = lastTrackChannels
+            updateOutputLabelLocked()
         }.exceptionOrNull()?.let { "USB 独占开启失败：${it.message ?: "设备不支持"}" }
     }
 
@@ -273,6 +298,7 @@ object UsbExclusive {
         appliedSampleRate = 0
         appliedEncoding = AudioFormat.ENCODING_INVALID
         appliedChannels = 0
+        updateOutputLabelLocked()
     }
 
     /** USB 设备拔出后系统规则随之失效：延迟 500ms 复核，避免 DAC 切换采样率瞬断重枚举误关开关。 */
@@ -291,7 +317,7 @@ object UsbExclusive {
                     pendingUnplugCheck = null
                     if (Prefs(app).usbExclusiveEnabled) {
                         val dev = usbOutput(am)
-                        if (dev != null) applyLocked(am, dev)
+                        if (dev != null) applyLocked(app, am, dev)
                     }
                 }
             }
@@ -309,6 +335,7 @@ object UsbExclusive {
                         appliedSampleRate = 0
                         appliedEncoding = AudioFormat.ENCODING_INVALID
                         appliedChannels = 0
+                        updateOutputLabelLocked()
                     }
                     pendingUnplugCheck?.let { mainHandler.removeCallbacks(it) }
                     val check = Runnable {
@@ -318,7 +345,7 @@ object UsbExclusive {
                             val dev = usbOutput(am)
                             if (dev != null) {
                                 // DAC 只是重枚举（如切采样率），自动恢复独占
-                                applyLocked(am, dev)
+                                applyLocked(app, am, dev)
                             } else {
                                 Prefs(app).usbExclusiveEnabled = false
                                 notifyStateChanged(false)
@@ -342,6 +369,33 @@ object UsbExclusive {
             listener(enabled)
         } else {
             mainHandler.post { listener(enabled) }
+        }
+    }
+
+    private fun updateOutputLabelLocked() {
+        val label = if (appliedDeviceId == -1 || appliedSampleRate <= 0) {
+            null
+        } else {
+            val rate = if (appliedSampleRate % 1000 == 0) {
+                "${appliedSampleRate / 1000}kHz"
+            } else {
+                String.format(java.util.Locale.US, "%.1fkHz", appliedSampleRate / 1000f)
+            }
+            val bits = when (appliedEncoding) {
+                AudioFormat.ENCODING_PCM_24BIT_PACKED -> "24bit"
+                AudioFormat.ENCODING_PCM_32BIT -> "32bit"
+                AudioFormat.ENCODING_PCM_FLOAT -> "32bit float"
+                else -> "16bit"
+            }
+            "$rate / $bits"
+        }
+        if (label != outputFormatLabel) {
+            outputFormatLabel = label
+            val listener = onFormatChanged
+            if (listener != null) {
+                if (Looper.myLooper() == Looper.getMainLooper()) listener(label)
+                else mainHandler.post { listener(label) }
+            }
         }
     }
 }

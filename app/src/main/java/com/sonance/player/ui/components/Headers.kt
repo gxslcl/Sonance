@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,7 +31,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -97,10 +101,23 @@ fun SearchField(
      * 本地曲库搜索是**随输入即时过滤**的，不需要这个动作（所以默认 null，
      * 保持回车换行的原样行为）；在线搜索要走网络，用户按一下回车才是明确意图。
      */
-    onSearch: (() -> Unit)? = null
+    onSearch: (() -> Unit)? = null,
+    /**
+     * 外部「聚焦搜索框」信号：每次自增代表一次请求（列表右下角的放大镜悬浮按钮）。
+     * 收到新值就让输入框获取焦点并弹出软键盘。0 = 无请求。
+     */
+    focusSignal: Int = 0
 ) {
     val skin = LocalSkin.current
     var focused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(focusSignal) {
+        if (focusSignal > 0) {
+            focusRequester.requestFocus()
+            keyboard?.show()
+        }
+    }
     Row(
         modifier = modifier
             .height(height)
@@ -149,6 +166,7 @@ fun SearchField(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
+                    .focusRequester(focusRequester)
                     .onFocusChanged { focused = it.isFocused }
             )
         }
@@ -346,7 +364,9 @@ fun ListHeader(
      * 双击而不是单击：这一行同时是分类切换的操作区，单击很容易误触
      * （比如想点「最近」却把列表拽回顶部）。
      */
-    onDoubleTapToTop: (() -> Unit)? = null
+    onDoubleTapToTop: (() -> Unit)? = null,
+    /** 透传给搜索框的「外部聚焦」信号（列表右下角放大镜按钮）。 */
+    searchFocusSignal: Int = 0
 ) {
     val dense = LocalDenseLayout.current
 
@@ -365,7 +385,8 @@ fun ListHeader(
                 value = query,
                 onValueChange = onQueryChange,
                 modifier = Modifier.weight(1f),
-                height = fieldHeight
+                height = fieldHeight,
+                focusSignal = searchFocusSignal
             )
             SortButton(
                 field = sortField,
