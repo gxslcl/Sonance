@@ -1,0 +1,46 @@
+/* 设计变量：取自 App 的皮肤「素白极简」、截图实测与 SonanceTypography */
+:root {
+  /* 晕染色板（运行时由 glow.js 覆盖） */
+  --g1: #F3C9C2;
+  --g2: #F6D6BE;
+  --g3: #EBC9D6;
+  --bg-tone: #F8F1EF;
+  --drop: #9A5A4E;
+
+  --bg-base: #F5F6F8;
+  --accent: #3D5BD9;
+  --accent-deep: #2346A8;
+  --accent-soft: rgba(61, 91, 217, .12);
+  --text: #1C1D21;
+  --text-dim: #5B5F6B;
+  --text-faint: #9097A3;
+  --line: rgba(28, 29, 33, .08);
+
+  --glass-bg: rgba(255, 255, 255, .74);
+  --glass-bg-strong: rgba(255, 255, 255, .86);
+  --glass-blur: blur(14px) saturate(135%);
+  --glass-stroke: inset 0 0 0 1px rgba(255, 255, 255, .62);
+  --shadow-soft: 0 12px 40px -12px rgba(30, 30, 60, .18);
+  --shadow-float: 0 18px 50px -14px rgba(30, 30, 60, .28);
+
+  /* 暗色章节（午夜琥珀 + 黑胶唱机） */
+  --dark-bg: #1A1410;
+  --amber: #E8A838;
+  --amber-bright: #FFBE55;
+
+  --r-cover: 24px;
+  --r-card: 20px;
+  --r-mini: 22px;
+  --r-pill: 999px;
+
+  --font: "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Noto Sans SC", "Microsoft YaHei UI", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .5, 1);
+  --t-color: 600ms;
+
+  --wrap: 1180px;
+  --nav-h: 68px;
+}

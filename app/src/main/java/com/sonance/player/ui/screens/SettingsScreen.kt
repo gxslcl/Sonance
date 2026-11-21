@@ -63,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.ScrollState
 import androidx.compose.runtime.compositionLocalOf
@@ -267,7 +268,7 @@ private val SETTINGS_MODULES = listOf(
     SettingsModule("overview", SettingsCategory.LIBRARY_ONLINE, "曲库统计概览",
         "曲库统计 统计 概览 歌曲数 专辑 艺术家 收藏 总时长 占用空间"),
     SettingsModule("about", SettingsCategory.ABOUT, "关于应用",
-        "关于 版本 更新 检查更新 设置基线 基线 导出 备份 署名 作者"),
+        "关于 版本 更新 检查更新 设置基线 基线 导出 备份 署名 作者 官网 网站 主页 链接 ssyinyue"),
     SettingsModule("donate", SettingsCategory.ABOUT, "支持作者",
         "支持作者 赞赏 捐赠 微信 二维码 支持")
 )
@@ -1014,12 +1015,26 @@ private fun SettingsSearchResults(
     val skin = LocalSkin.current
     val q = query.lowercase()
     val matched = remember(q) { SETTINGS_MODULES.filter { it.matches(q) } }
-    // 每次新搜索把命中模块展开：搜索是「给我看这个」的明确意图，
-    // 不该被上次的收起状态挡住；结果里仍然可以手动收起
-    LaunchedEffect(matched) { matched.forEach { FoldState.expanded[it.id] = true } }
+    // 搜索命中的模块默认展开：用户是来找具体控件的，不该再点一层标题；结果里仍然可以手动收起。
+    // 但展开只发生在搜索页里 —— 直接把 true 写进全局 FoldState 的话，搜过一次
+    // 「版本 / 作者 / 支持」这类高频词，分组页里对应的卡片就永远停在展开态，
+    // 看起来就像「收不起来」。离开搜索（或换了关键词）时把进搜索前的值还原回去。
+    val pinnedRestore = remember { mutableStateMapOf<String, Boolean?>() }
+    DisposableEffect(matched) {
+        matched.forEach { m ->
+            if (!pinnedRestore.containsKey(m.id)) pinnedRestore[m.id] = FoldState.expanded[m.id]
+            FoldState.expanded[m.id] = true
+        }
+        onDispose {
+            pinnedRestore.forEach { (id, prior) ->
+                if (prior == null) FoldState.expanded.remove(id) else FoldState.expanded[id] = prior
+            }
+            pinnedRestore.clear()
+        }
+    }
     CompositionLocalProvider(
         LocalSettingsHighlight provides query,
-        // 搜索命中的模块默认展开：用户是来找具体控件的，不该再点一层标题
+        // 没被动过的模块走这个默认值：命中即在结果里直接展开
         LocalSettingsCardDefaultExpanded provides true
     ) {
         Column(
@@ -1076,8 +1091,12 @@ private fun SettingsSearchResults(
                             .background(skin.settingsCardContainer(expanded = false))
                             .border(0.8.dp, skin.settingsCardBorder(expanded = false), RoundedCornerShape(14.dp))
                             .clickable {
-                                // 跳过去就把命中的模块展开，不然落地还是一排收起的标题
-                                mods.forEach { FoldState.expanded[it.id] = true }
+                                // 跳过去就把命中的模块展开，不然落地还是一排收起的标题；
+                                // 同时把它们从上面的还原名单里摘掉，别在离开搜索页时被还原成收起
+                                mods.forEach { m ->
+                                    pinnedRestore.remove(m.id)
+                                    FoldState.expanded[m.id] = true
+                                }
                                 onJump(cat)
                             }
                             .padding(horizontal = 12.dp, vertical = 9.dp),
@@ -4170,6 +4189,9 @@ private fun DuplicateCleanupContent(vm: SonanceViewModel) {
  * 五、关于与支持
  * ============================================================ */
 
+/** 官网地址：设置 → 关于应用 里的「官方网站」行点击跳转用 */
+private const val ABOUT_SITE_URL = "https://ssyinyue.netlify.app/"
+
 @Composable
 private fun AboutSettingsSection(vm: SonanceViewModel) {
     val context = LocalContext.current
@@ -4220,6 +4242,58 @@ private fun AboutSettingsSection(vm: SonanceViewModel) {
                     "长按版本号可导出当前设置为基线文件",
                     style = MaterialTheme.typography.labelSmall,
                     color = skin.text.copy(alpha = 0.30f)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            // 官网入口：整行可点，系统浏览器打开
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(skin.surface2)
+                    .clickable {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ABOUT_SITE_URL)))
+                        }.onFailure {
+                            Toast.makeText(context, "没有找到可以打开网页的应用", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(skin.accentGlow),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = SonanceIcons.Maximize,
+                        contentDescription = null,
+                        tint = skin.accent,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "官方网站",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = skin.text
+                    )
+                    Spacer(Modifier.height(1.dp))
+                    Text(
+                        "ssyinyue.netlify.app",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
+                Icon(
+                    imageVector = SonanceIcons.ChevronDown,
+                    contentDescription = "打开官网",
+                    tint = skin.textMuted,
+                    modifier = Modifier.size(14.dp).rotate(-90f)
                 )
             }
             Spacer(Modifier.height(10.dp))

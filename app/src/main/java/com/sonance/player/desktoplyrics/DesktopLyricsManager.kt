@@ -57,8 +57,8 @@ object DesktopLyricsManager {
     @Volatile
     var onTextColorChanged: ((Int) -> Unit)? = null
 
-    /** 悬浮窗字号按钮的循环档位：从小到大覆盖大范围，设置页滑杆可细调 12–120sp */
-    private val FONT_SIZE_LADDER = listOf(16, 20, 24, 28, 32, 40, 48, 64, 96)
+    /** 悬浮窗字号加减按钮的步长：设置页滑杆仍可细调 12–120sp */
+    private const val FONT_SIZE_STEP_SP = 4
 
     /** 写入字号偏好并立即刷新悬浮窗（设置页滑杆 / 悬浮窗按钮共用） */
     fun applyFontSize(context: Context, sizeSp: Int) {
@@ -68,6 +68,15 @@ object DesktopLyricsManager {
             tvCurrent?.textSize = size.toFloat()
             tvNext?.textSize = (size - 4).coerceAtLeast(12).toFloat()
         }
+    }
+
+    /** 悬浮窗上加号/减号直接放大或缩小字号 */
+    fun adjustFontSize(context: Context, deltaSp: Int) {
+        if (deltaSp == 0) return
+        val cur = Prefs(context.applicationContext).desktopLyricsFontSizeSp
+        val next = (cur + deltaSp).coerceIn(12, 120)
+        applyFontSize(context, next)
+        Toast.makeText(context, "桌面歌词字号: ${next}sp", Toast.LENGTH_SHORT).show()
     }
 
     private const val CHANNEL_ID = "sonance_desktop_lyrics"
@@ -94,7 +103,8 @@ object DesktopLyricsManager {
     private var btnNext: ImageButton? = null
     private var btnBgStyle: ImageButton? = null
     private var btnTextColor: ImageButton? = null
-    private var btnFontSize: ImageButton? = null
+    private var btnFontMinus: ImageButton? = null
+    private var btnFontPlus: ImageButton? = null
     private var btnLock: ImageButton? = null
     private var btnClose: ImageButton? = null
 
@@ -237,7 +247,8 @@ object DesktopLyricsManager {
                 btnNext?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnTextColor?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
-                btnFontSize?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnFontMinus?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnFontPlus?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x33FFFFFF)
             }
@@ -259,7 +270,8 @@ object DesktopLyricsManager {
                 btnNext?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnTextColor?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
-                btnFontSize?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
+                btnFontMinus?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
+                btnFontPlus?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintDark, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x26000000)
             }
@@ -281,7 +293,8 @@ object DesktopLyricsManager {
                 btnNext?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnBgStyle?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnTextColor?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
-                btnFontSize?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnFontMinus?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
+                btnFontPlus?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 btnLock?.setColorFilter(tintWhite, PorterDuff.Mode.SRC_IN)
                 divider?.setBackgroundColor(0x33FFFFFF)
             }
@@ -296,7 +309,7 @@ object DesktopLyricsManager {
             val alpha = (Color.alpha(custom) * 0.68f).toInt().coerceIn(80, 255)
             nextTv.setTextColor(Color.argb(alpha, Color.red(custom), Color.green(custom), Color.blue(custom)))
             val tint = custom and 0x00FFFFFF or (0xD9 shl 24)
-            listOf(btnPrev, btnPlayPause, btnNext, btnBgStyle, btnTextColor, btnFontSize, btnLock)
+            listOf(btnPrev, btnPlayPause, btnNext, btnBgStyle, btnTextColor, btnFontMinus, btnFontPlus, btnLock)
                 .forEach { it?.setColorFilter(tint, PorterDuff.Mode.SRC_IN) }
         }
     }
@@ -361,7 +374,8 @@ object DesktopLyricsManager {
             btnNext = view.findViewById(R.id.btn_next)
             btnBgStyle = view.findViewById(R.id.btn_bg_style)
             btnTextColor = view.findViewById(R.id.btn_text_color)
-            btnFontSize = view.findViewById(R.id.btn_font_size)
+            btnFontMinus = view.findViewById(R.id.btn_font_minus)
+            btnFontPlus = view.findViewById(R.id.btn_font_plus)
             btnLock = view.findViewById(R.id.btn_lock)
             btnClose = view.findViewById(R.id.btn_close)
 
@@ -443,11 +457,12 @@ object DesktopLyricsManager {
                 cycleTextColor(app)
                 scheduleAutoHide()
             }
-            btnFontSize?.setOnClickListener {
-                val curSize = prefs.desktopLyricsFontSizeSp
-                val nextSize = FONT_SIZE_LADDER.firstOrNull { it > curSize } ?: FONT_SIZE_LADDER.first()
-                applyFontSize(app, nextSize)
-                Toast.makeText(app, "桌面歌词字号: ${nextSize}sp", Toast.LENGTH_SHORT).show()
+            btnFontMinus?.setOnClickListener {
+                adjustFontSize(app, -FONT_SIZE_STEP_SP)
+                scheduleAutoHide()
+            }
+            btnFontPlus?.setOnClickListener {
+                adjustFontSize(app, +FONT_SIZE_STEP_SP)
                 scheduleAutoHide()
             }
             btnLock?.setOnClickListener {
@@ -490,7 +505,8 @@ object DesktopLyricsManager {
             btnNext = null
             btnBgStyle = null
             btnTextColor = null
-            btnFontSize = null
+            btnFontMinus = null
+            btnFontPlus = null
             btnLock = null
             btnClose = null
 

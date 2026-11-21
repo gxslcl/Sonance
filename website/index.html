@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>山水有清音 · Sonance — 干净的 Android 本地音乐播放器</title>
+  <meta name="description" content="山水有清音（Sonance）是一个干净的 Android 本地音乐播放器：界面只留曲库与播放，封面晕染、水滴播放键、五种全屏歌词、律动可视化、封面墙、3D 黑胶唱机、10 段音效工作室，能力都收在深处。免费开源，MIT 协议。">
+  <meta name="theme-color" content="#F5F6F8">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="山水有清音 · Sonance">
+  <meta property="og:description" content="非必丝与竹，山水有清音。一个干净的 Android 本地音乐播放器。">
+  <meta property="og:image" content="img/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/sections.css">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"山水有清音 Sonance","alternateName":"Sonance","operatingSystem":"Android 7.0+","applicationCategory":"MultimediaApplication","softwareVersion":"2.5","offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"},"license":"https://opensource.org/licenses/MIT"}
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+
+  <!-- 全站晕染背景层：颜色由 glow.js 跟随滚动写入 -->
+  <div id="glow" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="grain"></i></div>
+
+  <!-- 顶部导航 -->
+  <header id="nav">
+    <a class="brand" href="#hero" aria-label="山水有清音 首页"><span class="brand-ic" id="brandIc"></span><span class="brand-name">山水有清音</span></a>
+    <nav class="seg nav-seg" aria-label="主导航">
+      <a href="#player">功能</a><a href="#skins">皮肤</a><a href="#download">下载</a><a href="#community">交流赞赏</a>
+    </nav>
+    <div class="nav-right">
+      <button type="button" id="bgmBtn" class="bgm-btn" aria-label="背景音乐：星轨（原创氛围曲）" title="背景音乐：星轨（点击播放/暂停）" aria-pressed="false"><span class="bgm-bars" aria-hidden="true"><i></i><i></i><i></i></span><span class="bgm-lbl">星轨</span></button>
+      <a class="nav-dl" href="#download"><s-drop ambient><i data-ic="download"></i></s-drop><span>获取</span></a>
+    </div>
+  </header>
+
+  <!-- 章节索引栏（复刻曲库右侧的 A–Z 索引） -->
+  <nav id="rail" aria-label="章节索引"></nav>
+
+  <main id="main">
+
+    <!-- 00 · Hero -->
+    <section id="hero" class="sec hero" data-cover="sunset" data-title="山水有清音" data-sub="Sonance · 序曲">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow" data-reveal>ANDROID 本地音乐播放器 · v<span data-cfg="version">2.5</span></p>
+          <h1 class="hero-title" data-reveal>山水有清音</h1>
+          <p class="hero-en" data-reveal>Sonance</p>
+          <blockquote class="hero-quote" data-reveal>非必丝与竹，山水有清音。<cite>—— 左思《招隐诗》</cite></blockquote>
+          <p class="hero-lead" data-reveal>界面只留曲库和播放，其余的能力都收在深处。<br>颜色从封面里来，换一首歌，整块屏幕跟着换一种心情。</p>
+          <div class="hero-cta" data-reveal>
+            <a class="cta-main" data-cfg="quarkUrl" href="https://pan.quark.cn/s/f5e9b71419b3" target="_blank" rel="noopener noreferrer">
+              <s-drop ambient><i data-ic="download"></i></s-drop>
+              <span><b>夸克网盘下载</b><small>v<span data-cfg="version">2.5</span> · Android 7.0+</small></span>
+            </a>
+            <button type="button" class="btn-glass" data-copy="quark"><i data-ic="copy"></i>复制下载口令</button>
+          </div>
+          <ul class="hero-meta" data-reveal><li>Android 7.0+</li><li>免费开源 · MIT</li><li>无广告 · 无追踪</li></ul>
+          <div class="hero-comm" data-reveal>
+            <button type="button" class="pill-mini" data-copy="qq"><i data-ic="chat"></i>QQ 交流群：<b>1129486853</b><span>复制</span></button>
+            <a class="pill-mini accent" href="#community"><i data-ic="heart"></i>扫码入群 / 赞赏支持 ↓</a>
+            <a class="pill-mini" data-repo href="https://github.com/gxslcl/Sonance" target="_blank" rel="noopener noreferrer"><i data-ic="github"></i>GitHub 源码 ↗</a>
+          </div>
+        </div>
+        <div class="hero-stage" data-reveal>
+          <div class="phone" data-phone="hero" aria-label="播放页演示：封面每隔几秒自动切换"></div>
+        </div>
+      </div>
+      <a class="scroll-hint" href="#philosophy"><span>向下滚动，换一首歌</span><i data-ic="chevronDown"></i></a>
+    </section>
+
+    <!-- 01 · 设计理念 -->
+    <section id="philosophy" class="sec" data-cover="type" data-title="干净，能力藏在深处" data-sub="Track 01 · 设计理念">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">01</span>
+          <h2>干净，能力藏在深处</h2>
+          <p>主界面只有曲库和播放。均衡器、在线补全、标签编辑、容器还原，都收进设置和长按菜单里，不占视线。</p>
+        </header>
+        <div class="phil-grid">
+          <article class="card glass phil" data-reveal>
+            <span class="phil-no">壹</span>
+            <h3>干净</h3>
+            <p>打开就是你的歌。没有推荐流，没有广告位，没有红点。</p>
+            <p class="phil-proof"><i data-ic="layers"></i>高级功能收进设置与长按菜单</p>
+          </article>
+          <article class="card glass phil" data-reveal>
+            <span class="phil-no">贰</span>
+            <h3>跟着音乐变</h3>
+            <p>播放页、曲库、小组件的颜色都从封面里取，换歌时颜色跟着手指一起过渡。</p>
+            <p class="phil-proof"><i data-ic="sparkle"></i>莫兰迪取色，黑白封面饱和度锁 0</p>
+          </article>
+          <article class="card glass phil" data-reveal>
+            <span class="phil-no">叁</span>
+            <h3>不糊弄</h3>
+            <p>读不到的参数就写“未知”；只拿到试听片段就标“试听”，不冒充无损。</p>
+            <p class="phil-proof"><i data-ic="shield"></i>Hi·Res 金标按真实采样率与位深判定</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 02 · 晕染播放页 -->
+    <section id="player" class="sec" data-cover="conicA" data-title="晕染播放页" data-sub="Track 02 · 封面的颜色，铺满整块屏幕">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">02</span>
+          <h2>晕染播放页</h2>
+          <p>颜色从封面四周向外晕开。上下滑动换晕染方式，左右滑动在封面、歌词和律动柱之间切换。试试右边的选项。</p>
+        </header>
+        <div class="player-grid">
+          <div class="player-stage" data-reveal>
+            <div class="phone" data-phone="demo" aria-label="播放页演示"></div>
+          </div>
+          <div class="player-ctrl" data-reveal>
+            <div class="ctrl-group">
+              <h3>晕染方式</h3>
+              <div class="seg seg-wrap" id="glowSeg" role="radiogroup" aria-label="晕染方式">
+                <button type="button" data-v="bottom">下方</button><button type="button" data-v="sides">左右</button><button type="button" data-v="around" class="on">四周</button><button type="button" data-v="full">全屏</button><button type="button" data-v="immersive">沉浸</button>
+              </div>
+              <p class="ctrl-hint" id="glowHint">封面四条边都向外晕开，上方也带一点</p>
+            </div>
+            <div class="ctrl-group">
+              <h3>换一张封面</h3>
+              <div class="cover-dots" id="coverDots" role="radiogroup" aria-label="选择封面"></div>
+              <label class="drop-zone" id="dropZone">
+                <input type="file" id="coverFile" accept="image/*">
+                <i data-ic="sparkle"></i>
+                <span><b>拖一张你自己的图片进来</b><small>在浏览器本地取色，不会上传</small></span>
+              </label>
+            </div>
+            <div class="ctrl-group">
+              <h3>切歌动效</h3>
+              <div class="seg seg-wrap" id="motionSeg" role="radiogroup" aria-label="切歌动效">
+                <button type="button" data-v="slide" class="on">丝滑横推</button><button type="button" data-v="depth">景深叠切</button><button type="button" data-v="tilt">3D 轻掀</button><button type="button" data-v="dissolve">焦点溶切</button>
+              </div>
+              <p class="ctrl-hint" id="motionHint">双封面并排横滑切换，标题同步随动</p>
+              <div class="sw-btns">
+                <button type="button" class="btn-glass sm" id="swPrev"><i data-ic="prev"></i>上一首</button>
+                <button type="button" class="btn-glass sm" id="swNext">下一首<i data-ic="next"></i></button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mini-cards">
+          <article class="card glass mc" data-reveal>
+            <div class="mc-visual">
+              <s-drop id="shapeDemo" playing class="drop-lg"><i data-ic="pause"></i></s-drop>
+            </div>
+            <h3>水滴播放键</h3>
+            <p>播放时像水滴一样起伏，暂停时回到正圆。光晕取封面色，沿轮廓实时重算。</p>
+            <div class="seg sm" id="shapeSeg"><button type="button" data-v="droplet" class="on">水滴</button><button type="button" data-v="normal">普通</button></div>
+          </article>
+          <article class="card glass mc" data-reveal>
+            <div class="mc-visual"><span class="hires-badge big"><b>Hi·Res</b><small>AUDIO</small></span></div>
+            <h3>Hi·Res 金标</h3>
+            <p>按音频流的真实采样率、位深、码率和容器判定，不看文件后缀。可以关掉，也可以换尺寸。</p>
+          </article>
+          <article class="card glass mc" data-reveal>
+            <div class="mc-visual gesture">
+              <span class="g-arrow v"><i data-ic="chevronDown"></i></span><span class="g-dot"></span><span class="g-arrow h"><i data-ic="next"></i></span>
+            </div>
+            <h3>顺手的手势</h3>
+            <p>上下滑换晕染方式，左右滑切到歌词或律动柱。单击封面看整块歌词，双击换晕染，长按换封面。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 03 · 五种歌词 -->
+    <section id="lyrics" class="sec" data-cover="halftone" data-title="五种歌词" data-sub="Track 03 · 逐字高亮，也能浮在桌面上">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">03</span>
+          <h2>五种全屏歌词</h2>
+          <p>经典列表之外，还有竖排、流体景深、黑胶环形声轨和 3D 星廊。支持 TTML / Apple Music 逐字歌词，内嵌翻译一起显示。</p>
+        </header>
+        <div class="ly-wrap" data-reveal>
+          <div class="seg seg-wrap ly-tabs" id="lyTabs" role="tablist" aria-label="歌词风格">
+            <button type="button" data-style="classic" class="on">经典</button><button type="button" data-style="vertical">竖屏歌词</button><button type="button" data-style="fluid">流体声波景深</button><button type="button" data-style="vinyl">黑胶环形声轨</button><button type="button" data-style="spatial">3D 深空星廊</button>
+          </div>
+          <div class="ly-stage glass" id="lyStage" aria-live="off"></div>
+          <p class="ly-note">示例歌词为本站原创文字，仅用于演示排版。</p>
+        </div>
+
+        <div class="ly-bottom">
+          <div class="card glass ttml-card" data-reveal>
+            <p class="eyebrow">TTML · 逐字高亮</p>
+            <div class="ttml" id="ttml" aria-label="逐字歌词演示"></div>
+            <p class="ttml-tr" id="ttmlTr"></p>
+          </div>
+          <ul class="points" data-reveal>
+            <li><b>来源有先后</b>手动导入 &gt; 内嵌 &gt; 本地缓存 &gt; 在线补全，在线补全带时长校验，避开同名不同版本。</li>
+            <li><b>繁转简只改显示</b>缓存里保留原文，切回来不丢字。</li>
+            <li><b>自动避开撞色</b>按每行在屏幕上的位置取背景色，把歌词明度调到刚好看得清。</li>
+            <li><b>桌面悬浮歌词</b>三种背景、自由拖动、锁定后手势完全穿透。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 04 · 律动 -->
+    <section id="visualizer" class="sec" data-cover="dotsCoral" data-title="律动" data-sub="Track 04 · 看得见的声音">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">04</span>
+          <h2>律动可视化</h2>
+          <p>自研 FFT 加自动增益。取样点在均衡器之后，所以你看到的，就是你实际听到的声音。</p>
+        </header>
+        <div class="viz-card glass" data-reveal>
+          <canvas id="vizCanvas" aria-label="律动柱演示动画"></canvas>
+          <div class="viz-ui">
+            <div class="seg sm" id="vizSeg"><button type="button" data-v="bars" class="on">直立柱</button><button type="button" data-v="mirror">镜像柱</button><button type="button" data-v="wave">波形</button></div>
+            <button type="button" class="btn-glass sm" id="vizMic"><i data-ic="mic"></i><span>用麦克风试试</span></button>
+          </div>
+          <div class="viz-meta"><span id="vizHz">-- Hz</span><span>当前屏幕刷新率 · 衰减速度与帧率无关</span></div>
+        </div>
+        <div class="viz-facts">
+          <div class="fact" data-reveal><b>解析解</b><span>物理衰减直接用公式算，不靠逐帧累加。60Hz 和 120Hz 屏幕上落下的速度一样。</span></div>
+          <div class="fact" data-reveal><b>3 种样式</b><span>直立柱、镜像柱、波形。颜色可以跟随皮肤，也可以单独选。</span></div>
+          <div class="fact" data-reveal><b>不需要录音权限</b><span>读的是本应用自己的音频会话，App 不会去听你的麦克风。</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 05 · 封面墙 -->
+    <section id="wall" class="sec" data-cover="checker" data-title="封面墙" data-sub="Track 05 · 抽出一张唱片">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">05</span>
+          <h2>封面墙</h2>
+          <p>把整个曲库铺成一面墙。点一张，唱片从封套里滑出来开始转；往下一拖，又插回墙上。</p>
+        </header>
+      </div>
+      <div class="wall-wrap" data-reveal>
+        <div class="wall-grid" id="wallGrid"></div>
+        <button type="button" class="wall-random glass" id="wallRandom"><i data-ic="dice"></i>随便听听</button>
+      </div>
+      <div class="wrap">
+        <p class="wall-note" data-reveal>没有封面的歌，会用 8 套内置封面补上，就是你在这面墙上看到的这些渐变和几何图形。也可以从相册里选一张，写回到音频文件里。</p>
+      </div>
+    </section>
+
+    <!-- 06 · 黑胶唱机（暗色章节） -->
+    <section id="vinyl" class="sec sec-dark" data-cover="halftone" data-dark data-title="黑胶唱机" data-sub="Track 06 · 落针时刻">
+      <div class="wrap vinyl-grid">
+        <div class="vinyl-copy">
+          <header class="sec-head" data-reveal>
+            <span class="sec-no">06</span>
+            <h2>一台放在屏幕里的唱机</h2>
+            <p>木纹底座、唱臂、落针。唱片在上方排成一列，滑动选一张，放上去就开始转。</p>
+          </header>
+          <ul class="points dark" data-reveal>
+            <li><b>真实 3D</b>可以拖动旋转唱机，切换远近视角。</li>
+            <li><b>日间 / 夜间</b>两套暖调主题，白天强光下也看得清。</li>
+            <li><b>歌词同屏</b>当前句与翻译显示在唱机下方。</li>
+          </ul>
+          <button type="button" class="vinyl-btn" id="vinylLoad"><s-drop ambient><i data-ic="play"></i></s-drop><span><b>放上唱片</b><small>加载 3D 场景（约 0.8 MB）</small></span></button>
+        </div>
+        <div class="vinyl-stage" data-reveal>
+          <div class="vinyl-frame" id="vinylStage">
+            <div class="tt-poster" aria-hidden="true">
+              <div class="tt-records"><i></i><i></i><i></i><i class="on"></i><i></i><i></i><i></i></div>
+              <div class="tt-deck">
+                <div class="tt-plinth"></div>
+                <div class="tt-platter"><div class="tt-disc"><div class="tt-label"></div></div></div>
+                <div class="tt-arm"><i></i></div>
+              </div>
+              <div class="tt-info"><b>正午</b><span>Sonance</span></div>
+              <div class="tt-bar"><i></i></div>
+              <div class="tt-ctrl"><i data-ic="shuffle"></i><i data-ic="skipPrev"></i><span class="tt-play"><i data-ic="pause"></i></span><i data-ic="skipNext"></i><i data-ic="more"></i></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 07 · 音效工作室 -->
+    <section id="studio" class="sec" data-cover="rings" data-title="音效工作室" data-sub="Track 07 · 10 段 EQ 与 13 套预设">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">07</span>
+          <h2>音效工作室</h2>
+          <p>64 位双精度 biquad 的 10 段均衡器，不走系统 AudioEffect，在一些会拒绝它的机型上也能用。13 套预设按耳机、外放、空间分类。</p>
+        </header>
+        <div class="studio glass" id="studioPanel" data-reveal>
+          <div class="studio-tabs seg" role="tablist">
+            <button type="button" data-tab="preset" class="on">音色预设</button><button type="button" data-tab="eq">均衡器</button><button type="button" data-tab="field">声场效果</button><button type="button" data-tab="karaoke">伴奏消音</button>
+          </div>
+          <div class="studio-body">
+            <div class="pane on" data-pane="preset"><div class="preset-cats seg sm" id="presetCats"></div><div class="preset-grid" id="presetGrid"></div></div>
+            <div class="pane" data-pane="eq">
+              <div class="eq-top">
+                <svg class="eq-curve" id="eqCurve" viewBox="0 0 1000 220" preserveAspectRatio="none" aria-hidden="true"></svg>
+              </div>
+              <div class="eq-sliders" id="eqSliders"></div>
+              <div class="eq-tools">
+                <div class="eq-chips" id="eqChips"></div>
+                <div class="eq-actions">
+                  <button type="button" class="ab" id="abToggle" aria-pressed="false"><span class="on">A</span><span>B</span></button>
+                  <button type="button" class="btn-glass sm" id="eqListen"><i data-ic="play"></i><span>试听合成音</span></button>
+                </div>
+              </div>
+            </div>
+            <div class="pane" data-pane="field"><div class="field-grid" id="fieldGrid"></div></div>
+            <div class="pane" data-pane="karaoke">
+              <div class="karaoke">
+                <svg viewBox="0 0 600 200" class="kara-svg" aria-hidden="true">
+                  <defs><linearGradient id="karaG" x1="0" x2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".2"/><stop offset="1" stop-color="var(--accent)" stop-opacity=".05"/></linearGradient></defs>
+                  <path class="kara-full" d=""/>
+                  <rect class="kara-band" x="150" y="10" width="270" height="170" rx="10"/>
+                  <text x="285" y="34" text-anchor="middle" class="kara-t">160 Hz – 4.8 kHz · 中置人声</text>
+                  <text x="20" y="194" class="kara-ax">20 Hz</text><text x="560" y="194" class="kara-ax">20 kHz</text>
+                </svg>
+                <div class="kara-side">
+                  <h3>频带限制的中置消除</h3>
+                  <p>只在人声所在的 160 Hz 到 4.8 kHz 之间做中置消除，低频的鼓和贝斯原样保留，单声道歌曲也不会被消成静音。</p>
+                  <label class="switch"><input type="checkbox" id="karaOn"><span></span>开启伴奏消音</label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="studio-foot">
+          <div class="card glass sf" data-reveal>
+            <h3><i data-ic="speaker"></i>接入系统音效</h3>
+            <p>把播放会话交给系统音效链，厂商面板可以直接拉起。</p>
+            <div class="chips"><span>杜比全景声</span><span>SoundAlive</span><span>MiSound</span><span>OReality</span><span>Histen</span><span>MusicFX</span></div>
+          </div>
+          <div class="card glass sf" data-reveal>
+            <h3><i data-ic="headphone"></i>按输出设备记住音色</h3>
+            <p>插上耳机、连上蓝牙或接上 USB DAC 时，自动切到你上次给它调的那套（默认关闭）。</p>
+            <div class="chips"><span>外放</span><span>平板</span><span>有线</span><span>蓝牙</span><span>USB</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 08 · 曲库 -->
+    <section id="library" class="sec" data-cover="conicB" data-title="曲库" data-sub="Track 08 · 一首都不漏">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">08</span>
+          <h2>扎实的本地曲库</h2>
+          <p>中、英、日、韩、泰文混在一起也能稳稳排好序。按专辑、艺术家、文件夹归类，收藏、最近播放、播放次数都有。</p>
+        </header>
+        <div class="lib-grid">
+          <div class="lib-demo glass" data-reveal>
+            <div class="lib-head">
+              <span class="brand-ic sm" id="libIc"></span><b>我的曲库</b><small>· 共 <span id="libCount">0</span> 首</small>
+              <span class="lib-tools"><i data-ic="layers"></i><i data-ic="gear"></i></span>
+            </div>
+            <div class="lib-search"><i data-ic="search"></i><input id="libSearch" type="search" placeholder="搜索歌曲、专辑或艺术家" aria-label="搜索演示曲库"></div>
+            <div class="lib-tabsrow">
+              <div class="seg sm" id="libTabs"><button type="button" data-v="all" class="on">全部</button><button type="button" data-v="recent">最近</button><button type="button" data-v="fav">收藏</button></div>
+              <span class="lib-random"><i data-ic="dice"></i>随便听听</span>
+            </div>
+            <div class="lib-body">
+              <ul class="lib-list" id="libList"></ul>
+              <div class="lib-index" id="libIndex" aria-label="字母索引"></div>
+            </div>
+          </div>
+          <div class="feat-grid">
+            <article class="feat" data-reveal><i data-ic="scan"></i><h3>四层扫描</h3><p>MediaStore、Files 表补漏、磁盘直扫、外置盘授权目录，再用文件头确认一次。</p></article>
+            <article class="feat" data-reveal><i data-ic="usb"></i><h3>车机 / U 盘</h3><p>自动探测车机挂载点，勾选即可扫描；拔盘时静默跳过。</p></article>
+            <article class="feat" data-reveal><i data-ic="open"></i><h3>从文件管理器打开</h3><p>“打开方式”选它就能播，优先认出曲库里已有的那首。</p></article>
+            <article class="feat" data-reveal><i data-ic="tag"></i><h3>标签写回</h3><p>mp3 · m4a · aac · flac · ogg · opus · wav · aiff · dsf，按各自规范改写，先改副本再写回。</p></article>
+            <article class="feat" data-reveal><i data-ic="info"></i><h3>歌曲信息</h3><p>真实的采样率、位深、码率和声道。读不到就写“未知”。</p></article>
+            <article class="feat" data-reveal><i data-ic="shuffle"></i><h3>聪明的随机</h3><p>一轮不重复，少听的优先，同一位歌手、同一张专辑的歌会被打散。</p></article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 09 · 连接与延展 -->
+    <section id="connect" class="sec" data-cover="dotsLime" data-title="连接与延展" data-sub="Track 09 · 投屏、小组件与桌面歌词">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">09</span>
+          <h2>不止在播放页里</h2>
+          <p>投到音箱和电视上，放在桌面上，浮在别的应用上面。</p>
+        </header>
+        <div class="conn-grid">
+          <article class="card glass conn dlna" data-reveal>
+            <div class="dlna-vis" aria-hidden="true">
+              <span class="node c"><i data-ic="phone"></i></span>
+              <span class="node n1"><i data-ic="tv"></i></span><span class="node n2"><i data-ic="speaker"></i></span><span class="node n3"><i data-ic="nas"></i></span>
+              <svg viewBox="0 0 300 160" class="dlna-lines"><path d="M150 80 L50 30"/><path d="M150 80 L250 30"/><path d="M150 80 L150 145"/></svg>
+            </div>
+            <h3>D-LAN 投屏与局域网曲库</h3>
+            <p>浏览 NAS 或电脑上的共享目录直接播放，也能投到音箱、电视并远程控制。纯 Kotlin 实现，不暴露你的目录。</p>
+          </article>
+          <article class="card glass conn widgets" data-reveal>
+            <div class="wg-vis" aria-hidden="true">
+              <div class="wg dark"><span class="wg-cv" data-wcover="dusk"></span><span class="wg-t"><b>黄昏车站</b><small>海盐</small></span><span class="wg-c"><i data-ic="prev"></i><i data-ic="pause"></i><i data-ic="next"></i></span></div>
+              <div class="wg light"><span class="wg-cv" data-wcover="mint"></span><span class="wg-t"><b>薄荷雨</b><small>林间</small></span><span class="wg-c"><i data-ic="prev"></i><i data-ic="play"></i><i data-ic="next"></i></span></div>
+            </div>
+            <h3>10 套桌面小组件</h3>
+            <p>4 列与 5 列桌面各 5 种尺寸。卡片可选深色烟熏、浅色磨砂，或跟随皮肤。</p>
+          </article>
+          <article class="card glass conn dly" data-reveal>
+            <div class="dly-vis">
+              <button type="button" class="dly-bar mode-none" id="dlyBar" aria-label="桌面歌词演示，点击切换背景"><span class="dly-line">风从山那边过来</span></button>
+              <p class="dly-tip">点一下歌词条，切换三种背景</p>
+            </div>
+            <h3>桌面歌词</h3>
+            <p>无背景立体字、浅色磨砂、深色磨砂三种背景。单击展开迷你播控，锁定后手势完全穿透。</p>
+          </article>
+        </div>
+      </div>
+      <div class="icons-band" data-reveal>
+        <div class="wrap"><h3 class="band-title">53 款桌面图标，点一下就换，不用重装</h3></div>
+        <div class="marquee" id="iconMarquee"></div>
+      </div>
+    </section>
+
+    <!-- 10 · 皮肤 -->
+    <section id="skins" class="sec" data-cover="arcs" data-title="31 套皮肤" data-sub="Track 10 · 从午夜琥珀到青花瓷">
+      <div class="skins-bg" aria-hidden="true"></div>
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">10</span>
+          <h2>31 套皮肤</h2>
+          <p>17 套深色、14 套浅色，还有液态玻璃、霜华玻璃和会跟着封面变色的沉浸皮肤。把鼠标移到一张卡片上试试。</p>
+        </header>
+        <div class="seg sm" id="skinFilter" data-reveal><button type="button" data-v="all" class="on">全部</button><button type="button" data-v="dark">深色</button><button type="button" data-v="light">浅色</button></div>
+      </div>
+      <div class="skin-rail" id="skinRail" data-reveal></div>
+    </section>
+
+    <!-- 11 · 工艺 -->
+    <section id="craft" class="sec" data-cover="mint" data-title="工艺" data-sub="Track 11 · 看不见的部分">
+      <div class="wrap">
+        <header class="sec-head" data-reveal>
+          <span class="sec-no">11</span>
+          <h2>看不见的部分</h2>
+          <p>歌词解析、匹配打分、去重排序、均衡器 DSP、可视化物理、ID3 读写，这些最容易悄悄出错的地方都有单元测试。</p>
+        </header>
+        <div class="nums">
+          <div class="num" data-reveal><b data-count="707">0</b><span>个单元测试</span></div>
+          <div class="num" data-reveal><b data-count="10">0</b><span>段均衡器</span></div>
+          <div class="num" data-reveal><b data-count="5">0</b><span>种全屏歌词</span></div>
+          <div class="num" data-reveal><b data-count="31">0</b><span>套皮肤</span></div>
+          <div class="num" data-reveal><b data-count="53">0</b><span>款图标</span></div>
+          <div class="num" data-reveal><b data-count="0">0</b><span>个广告</span></div>
+        </div>
+        <div class="craft-grid">
+          <div class="card glass" data-reveal>
+            <h3><i data-ic="code"></i>技术栈</h3>
+            <div class="chips"><span>Kotlin 2.0</span><span>Jetpack Compose</span><span>AndroidX Media3</span><span>MediaSessionService</span><span>minSdk 24</span><span>targetSdk 35</span></div>
+            <p class="muted">单 Activity，前台服务常驻后台播放。核心逻辑写成纯函数，直接在 JVM 上跑测试。</p>
+          </div>
+          <div class="card glass" data-reveal>
+            <h3><i data-ic="shield"></i>隐私与权限</h3>
+            <table class="perm">
+              <tr><td>读取音频</td><td>扫描本地曲库</td></tr>
+              <tr><td>网络</td><td>补全歌词与封面，可在设置里随时关闭</td></tr>
+              <tr><td>前台服务 / 通知</td><td>后台播放与通知栏控制</td></tr>
+              <tr><td>音频设置</td><td>读取本应用自己的频谱，不需要录音权限</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12 · 下载 -->
+    <section id="download" class="sec dl" data-cover="sunset" data-title="下载" data-sub="Track 12 · 尾声">
+      <div class="wrap">
+        <div class="dl-card glass" data-reveal>
+          <div class="dl-cover" id="dlCover"></div>
+          <div class="dl-main">
+            <p class="eyebrow">免费 · 开源 · 无广告</p>
+            <h2>把山水装进口袋</h2>
+            <p class="dl-lead">非必丝与竹，山水有清音。</p>
+            <div class="dl-actions">
+              <a class="cta-main big" data-cfg="quarkUrl" href="https://pan.quark.cn/s/f5e9b71419b3" target="_blank" rel="noopener noreferrer">
+                <s-drop playing><i data-ic="open"></i></s-drop>
+                <span><b>打开夸克网盘下载 · v<span data-cfg="version">2.5</span></b><small>pan.quark.cn · Android 7.0+</small></span>
+              </a>
+              <button type="button" class="btn-glass" data-copy="quark"><i data-ic="copy"></i>复制夸克口令</button>
+            </div>
+            <div class="quark-box" data-copy="quark" role="button" tabindex="0" title="点击复制整段夸克口令">
+              <div class="qb-top"><span>夸克网盘口令（打开夸克 APP 即可获取）</span><b><i data-ic="copy"></i>点击复制</b></div>
+              <p class="qb-url">链接：https://pan.quark.cn/s/f5e9b71419b3</p>
+              <pre class="qb-code">我用夸克网盘给你分享了「山水有清音」，点击链接或复制整段内容，打开「夸克网盘APP」即可获取。
+亝一五枫及并词让哈走看忛
+/~602e3cRirc~:/</pre>
+            </div>
+            <p class="dl-links"><a class="gh-link" data-repo href="https://github.com/gxslcl/Sonance" target="_blank" rel="noopener noreferrer"><i data-ic="github"></i><span>GitHub 开源仓库 · github.com/gxslcl/Sonance ↗</span></a></p>
+            <p class="sha">SHA-256 <code data-cfg="sha256" data-copy="sha256" title="点击复制 SHA-256"></code></p>
+          </div>
+        </div>
+
+        <div id="community" class="comm-wrap" data-reveal>
+          <div class="comm-head">
+            <h3>交流与支持</h3>
+            <p>欢迎加入交流群反馈建议或抢先体验，也欢迎随心赞赏支持独立开发。</p>
+          </div>
+          <div class="comm-grid">
+            <article class="card glass comm-card">
+              <span class="comm-badge">沟通 · 反馈 · 尝鲜</span>
+              <h4>QQ 交流群</h4>
+              <div class="qq-bar">
+                <span class="qq-num tnum">群号：<b>1129486853</b></span>
+                <button type="button" class="btn-glass sm" data-copy="qq"><i data-ic="copy"></i>复制群号</button>
+              </div>
+              <button type="button" class="qr-box qr-zoom" data-qr="img/qq-group.jpg" data-qr-title="山水有清音 · QQ 交流群（1129486853）" aria-label="放大查看 QQ 交流群二维码">
+                <img src="img/qq-group.jpg" alt="山水有清音 QQ 交流群二维码（群号 1129486853）" loading="lazy">
+              </button>
+              <p class="comm-note">手机 QQ 扫码或长按识别加入（点击二维码可放大）</p>
+            </article>
+            <article class="card glass comm-card">
+              <span class="comm-badge gold">独立开发 · 用爱发电</span>
+              <h4>赞赏与支持</h4>
+              <button type="button" class="qr-box qr-zoom" data-qr="img/tip-qr.jpg" data-qr-title="赞赏与支持 · 感谢鼓励" aria-label="放大查看赞赏码">
+                <img src="img/tip-qr.jpg" alt="山水有清音 开发者赞赏码" loading="lazy">
+              </button>
+              <p class="comm-note">软件开发不易，如果「山水有清音」陪你听过好歌，欢迎随心赞赏支持。遇到问题也可联系微信号：<button type="button" class="wx-chip" data-copy="wechat"><i data-ic="copy"></i>gxslcl · 复制</button></p>
+            </article>
+          </div>
+        </div>
+
+        <div class="changelog" data-reveal>
+          <h3>更新日志</h3>
+          <details open>
+            <summary><b>v2.5</b><span>2026-11-16</span></summary>
+            <ul>
+              <li>桌面歌词悬浮窗：三种背景、自由拖动、锁定后手势穿透</li>
+              <li>TTML / Apple Music 逐字歌词，行内逐字高亮与内嵌翻译</li>
+              <li>自定义封面：8 套内置封面，或从相册选图并写回文件</li>
+              <li>查看歌曲信息：真实采样率、位深、码率与声道</li>
+              <li>列表序号与时长可以分别隐藏</li>
+              <li>修复部分机型连接蓝牙后无声；USB 独占模式切采样率更稳定</li>
+            </ul>
+          </details>
+          <details>
+            <summary><b>v2.4</b><span>2026-11-15</span></summary>
+            <ul>
+              <li>全屏音效工作室：13 套预设、竖向推子、A/B 对比、声场与伴奏消音</li>
+              <li>接入系统音效：杜比全景声、SoundAlive、MiSound 等</li>
+              <li>D-LAN 投屏与局域网曲库；桌面小组件扩到 10 套</li>
+              <li>车载 U 盘扫描；从文件管理器直接打开音频</li>
+              <li>随机播放重写，新增顺序播放；全格式标签编辑</li>
+              <li>水滴 / 普通两种播放键；53 款重新设计的图标</li>
+            </ul>
+          </details>
+          <details>
+            <summary><b>v2.1</b><span>2026-10-27</span></summary>
+            <ul>
+              <li>沉浸皮肤统一压暗：换歌时只有色相在变，亮度不动</li>
+              <li>主界面背景的玻璃样式、模糊程度、可见度可调</li>
+              <li>换歌背景支持“滑动 / 渐变”两种过渡</li>
+              <li>曲库新增“定位到正在播放”按钮</li>
+            </ul>
+          </details>
+          <details>
+            <summary><b>v2.0</b><span>2026-10-26</span></summary>
+            <ul>
+              <li>黑胶唱机模式、播放页 5 种晕染背景、歌词圆盘模式</li>
+              <li>列表删除二次确认（仅隐藏 / 永久删除）</li>
+            </ul>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer id="foot">
+    <div class="wrap foot-grid">
+      <div class="foot-brand"><span class="brand-ic" id="footIc"></span><div><b>山水有清音</b><small>Sonance · v<span data-cfg="version">2.5</span></small></div></div>
+      <p class="disclaimer">本项目仅供个人学习与技术研究使用，请勿用于商业用途或传播受版权保护的内容。联网补全歌词与封面使用第三方接口，接口可能随时变更失效，相关功能可以在设置中随时关闭。因使用本项目产生的一切后果由使用者自行承担。</p>
+      <p class="foot-meta">QQ 交流群：1129486853 · 微信：gxslcl · <a data-repo href="https://github.com/gxslcl/Sonance" target="_blank" rel="noopener noreferrer">GitHub：gxslcl/Sonance ↗</a></p>
+      <p class="foot-meta">MIT License · © 2026 山水有清音 · 本站封面均为程序生成</p>
+    </div>
+  </footer>
+
+  <!-- 悬浮玻璃播放条 -->
+  <div id="mini" class="glass" role="region" aria-label="章节播放条">
+    <div class="mini-cover"></div>
+    <div class="mini-text"><b class="mini-title">山水有清音</b><small class="mini-sub">Sonance · 序曲</small></div>
+    <div class="mini-ctl">
+      <button type="button" class="mini-prev" aria-label="上一节"><i data-ic="prev"></i></button>
+      <span class="mini-drop"><s-drop playing></s-drop><button type="button" class="mini-play" aria-label="暂停全站动效"></button></span>
+      <button type="button" class="mini-next" aria-label="下一节"><i data-ic="next"></i></button>
+    </div>
+    <div class="mini-progress"><i></i></div>
+  </div>
+
+  <!-- 封面墙聚焦层 -->
+  <div id="wallFocus" aria-hidden="true" role="dialog" aria-label="正在播放"></div>
+
+  <!-- 二维码放大预览弹窗 -->
+  <div id="qrModal" class="qr-modal" aria-hidden="true" role="dialog" aria-label="二维码放大预览"></div>
+
+  <script src="js/data/skins.js" defer></script>
+  <script src="js/data/icons.js" defer></script>
+  <script src="js/data/eq-presets.js" defer></script>
+  <script src="js/color-extract.js" defer></script>
+  <script src="js/ui-icons.js" defer></script>
+  <script src="js/covers.js" defer></script>
+  <script src="js/main.js" defer></script>
+  <script src="js/bgm.js" defer></script>
+  <script src="js/drop-button.js" defer></script>
+  <script src="js/glow.js" defer></script>
+  <script src="js/mini-player.js" defer></script>
+  <script src="js/demo-player.js" defer></script>
+  <script src="js/demo-lyrics.js" defer></script>
+  <script src="js/demo-visualizer.js" defer></script>
+  <script src="js/demo-wall.js" defer></script>
+  <script src="js/demo-eq.js" defer></script>
+  <script src="js/demo-misc.js" defer></script>
+</body>
+</html>

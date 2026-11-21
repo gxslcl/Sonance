@@ -228,6 +228,14 @@
             android:exported="false" />
 
         <!--
+          桌面歌词通知栏快捷操作（解锁 / 关闭歌词）入口。
+          ⚠️ 不注册的话通知按钮的广播会发给不存在的组件，点了没有任何反应。
+        -->
+        <receiver
+            android:name=".desktoplyrics.DesktopLyricsReceiver"
+            android:exported="false" />
+
+        <!--
           ===== 桌面小组件：5 列保留（5 套）+ 4 列新增（5 套），共计 10 套独立样式 =====
         -->
         <receiver

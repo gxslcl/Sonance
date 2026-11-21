@@ -128,15 +128,25 @@
             android:src="@drawable/ic_dl_text_color"
             android:contentDescription="歌词颜色" />
 
-        <!-- 字号切换 -->
+        <!-- 字号缩小 -->
         <ImageButton
-            android:id="@+id/btn_font_size"
+            android:id="@+id/btn_font_minus"
             android:layout_width="30dp"
             android:layout_height="30dp"
             android:layout_marginStart="4dp"
             android:background="@drawable/desktop_lyrics_btn_bg"
-            android:src="@drawable/ic_dl_text_size"
-            android:contentDescription="字号" />
+            android:src="@drawable/ic_dl_font_minus"
+            android:contentDescription="缩小字号" />
+
+        <!-- 字号放大 -->
+        <ImageButton
+            android:id="@+id/btn_font_plus"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="4dp"
+            android:background="@drawable/desktop_lyrics_btn_bg"
+            android:src="@drawable/ic_dl_font_plus"
+            android:contentDescription="放大字号" />
 
         <!-- 锁定 -->
         <ImageButton

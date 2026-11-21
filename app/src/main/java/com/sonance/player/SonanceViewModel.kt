@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
@@ -2331,21 +2332,54 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 下载成功之后把新文件并进曲库。**必须做** ——
+     * 下载/缓存转换成功之后**增量**并入曲库。
      *
-     * 应用的曲库是缓存的，不重扫的话「文件夹」页永远不会出现下载目录那个分类，
-     * 而那正是用户要的（"下载之后的歌曲在文件夹里面有一个独立的分类"）。
+     * 原来这里会触发一次全量重扫（用户没有选扫描范围时 folderPaths=null），
+     * 界面先进入扫描态、整库重新过滤分组一遍，只为多出一首歌 —— 太重了。
      *
-     * 和 [scan] 的两点区别：
-     * - **不清封面缓存**（见 [runScan] 的参数说明）—— 正在播的封面不该闪
-     * - **不做播放现场恢复** —— 那会把正在播的队列重新排一遍
+     * 现在只扫两个产出目录（在线下载的「山水有清音下载」、网易云缓存转换的
+     * 「本机缓存转换」），把库里还没有的新歌**直接追加**进全部列表：
+     * 不进扫描态、不动已有条目、封面缓存不清 —— 用户下载完立刻就能在
+     * 「全部歌曲 / 文件夹」里看到新歌。
      */
     fun rescanAfterDownload() {
         viewModelScope.launch {
-            scanState = ScanState.SCANNING
-            val scopedPaths = scanScopeSelection.takeIf { it.isNotEmpty() }?.plus("Music/Sonance")
-            runScan(clearArtwork = false, folderPaths = scopedPaths, preserveExistingOnEmpty = true)
-            scanState = ScanState.READY
+            // Q+ 的 folder 过滤比的是 RELATIVE_PATH；Q- 比的是 DATA 绝对路径 —— 两种形态都给
+            val musicRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                .absolutePath.trimEnd('/')
+            val downloadFolders = setOf(
+                "Music/${OnlineDownloader.FOLDER_NAME}",
+                LocalCacheRules.STANDALONE_DISPLAY_PATH,
+                "$musicRoot/${OnlineDownloader.FOLDER_NAME}",
+                "$musicRoot/${LocalCacheRules.STANDALONE_FOLDER_NAME}"
+            )
+            val outcome = runCatching {
+                repo.scan(
+                    filterShortAudio = filterShortAudio,
+                    filters = currentScanFilters(),
+                    folderPaths = downloadFolders,
+                    safTrees = emptyList()
+                )
+            }.getOrNull() ?: return@launch
+
+            val existingIds = songs.mapTo(HashSet()) { it.id }
+            val fresh = outcome.songs.filter { it.id !in existingIds }
+            val visible = filterHidden(fresh)
+            if (visible.isEmpty()) return@launch
+
+            val (pinyin, keys) = withContext(Dispatchers.Default) { computePinyinAndKeys(visible) }
+            pinyinIndex = pinyinIndex + pinyin
+            sortKeys = sortKeys + keys
+            songs = songs + visible
+            albums = MediaRepository.groupAlbums(songs)
+            artists = MediaRepository.groupArtists(songs)
+            folders = MediaRepository.groupFolders(songs)
+            prefs.songsCacheJson = encodeSongsToJson(songs)
+            // 全量扫描的结果快照还在（去重面板拿它当数据源）：只补「库里没有的」，
+            // 否则下载目录里那些早已入库的歌会被追加成重复项
+            lastScanOutcome?.let {
+                lastScanOutcome = it.copy(songs = it.songs + fresh)
+            }
         }
     }
 
