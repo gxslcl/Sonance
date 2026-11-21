@@ -67,7 +67,13 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -306,6 +312,14 @@ fun SongList(
     val playFromSongs = remember(vm, queueSongs) { { song: Song -> vm.playFrom(queueSongs, song) } }
     val toggleFav = remember(vm) { { id: Long -> vm.toggleFavorite(id) } }
     val playNextSong = remember(vm) { { song: Song -> vm.playNext(song) } }
+    val showInfoFor = remember { { song: Song -> infoTarget = song } }
+    val addToPlaylistFor = remember { { song: Song -> addToPlaylistTarget = song } }
+    val deleteFor = remember { { song: Song -> deleteTarget = song } }
+    val editFor = remember { { song: Song -> editTarget = song } }
+    val recognizeFor = remember(vm) { { id: Long -> vm.startRecognize(id) } }
+    val enterSelectionFor = remember(vm) { { id: Long -> vm.enterSelection(id) } }
+    val toggleSelectionFor = remember(vm) { { id: Long -> vm.toggleSelection(id) } }
+    val noteLongPress = remember(vm) { { vm.noteLongPressUsed() } }
 
     // 行分隔方式由用户在设置里定（默认保持原来的"无分界线"）
     val rowStyle = vm.listRowStyle
@@ -347,47 +361,51 @@ fun SongList(
             contentPadding = padding,
             verticalArrangement = Arrangement.spacedBy(rowGap)
         ) {
-            itemsIndexed(items = songs, key = { _, s -> s.id }) { index, song ->
+            itemsIndexed(
+                items = songs,
+                key = { _, s -> s.id },
+                contentType = { _, _ -> "song_row" }
+            ) { index, song ->
                 Column {
                     SongRow(
                         song = song,
                         index = index,
                         showIndex = showIndex && !vm.hideListIndex,
                         showDuration = !vm.hideListDuration,
-                        onShowInfo = { infoTarget = song },
+                        onShowInfo = { showInfoFor(song) },
                         isCurrent = currentId == song.id,
                         isPlaying = isPlaying,
                         isFavorite = favorites.contains(song.id) ||
                             (onlineFavorites.isNotEmpty() &&
                                 com.sonance.player.data.OnlineFavorites.isFavoriteSong(song, favorites, onlineFavorites)),
                         onClick = if (vm.selectionMode) {
-                            { vm.toggleSelection(song.id) }
+                            { toggleSelectionFor(song.id) }
                         } else {
                             { playFromSongs(song) }
                         },
                         onToggleFavorite = { toggleFav(song.id) },
                         onPlayNext = { playNextSong(song) },
-                        onAddToPlaylist = { addToPlaylistTarget = song },
+                        onAddToPlaylist = { addToPlaylistFor(song) },
                         onRemoveFromLibrary = onRemoveFromLibrary?.let { remove ->
                             { remove(song) }
                         },
                         onDeleteFile = if (song.isLocal) {
-                            { deleteTarget = song }
+                            { deleteFor(song) }
                         } else null,
                         onEnterMultiSelect = if (song.isLocal) {
-                            { vm.enterSelection(song.id) }
+                            { enterSelectionFor(song.id) }
                         } else null,
                         selectionMode = vm.selectionMode,
                         selected = song.id in vm.selectedSongIds,
                         onEditInfo = if (song.isLocal) {
-                            { editTarget = song }
+                            { editFor(song) }
                         } else null,
                         onRecognize = if (song.isLocal) {
-                            { vm.startRecognize(song.id) }
+                            { recognizeFor(song.id) }
                         } else null,
                         compact = compact || dense,
                         coverScale = coverScale,
-                        onLongPressHintUsed = { vm.noteLongPressUsed() }
+                        onLongPressHintUsed = noteLongPress
                     )
                     // 细分隔线：**左右各缩 12dp**，不顶到屏幕边 —— 顶满会变成
                     // "表格线"，把列表切成一条条格子，反而更乱。
@@ -641,6 +659,8 @@ private fun QuickActions(
     vm: SonanceViewModel,
     modifier: Modifier = Modifier
 ) {
+    // 设置里可整体隐藏这个模式切换图标；隐藏时所有调用点统一不渲染
+    if (!vm.showPlayModeIcon) return
     val skin = LocalSkin.current
     // 自己订阅播放状态，不从参数拿：这个按钮在好几处表头里复用，
     // 让每个调用点都多传一个 playerState 只会增加漏传的机会
@@ -923,7 +943,7 @@ fun AlbumGrid(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(albums, key = { "${it.albumId}::${it.name}" }) { album ->
+        items(albums, key = { "${it.albumId}::${it.name}" }, contentType = { "album_card" }) { album ->
             AlbumCard(
                 album = album,
                 onClick = { onOpenAlbum(album) },
@@ -1048,7 +1068,7 @@ fun ArtistsScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(artists, key = { it.name }) { artist ->
+                items(artists, key = { it.name }, contentType = { "artist_row" }) { artist ->
                     ArtistRow(artist = artist, onClick = { onOpenArtist(artist.name) })
                 }
             }
@@ -1178,7 +1198,7 @@ fun FoldersScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(entries, key = { it.folder.path }) { entry ->
+                items(entries, key = { it.folder.path }, contentType = { "folder_row" }) { entry ->
                     val folder = entry.folder
                     FolderRow(
                         folder = folder,
@@ -1825,6 +1845,14 @@ fun LibraryPagerScreen(
         }
     }
 
+    val tabCountState = rememberUpdatedState(n)
+    val pagePositionProvider = remember(pagerState) {
+        {
+            val cnt = tabCountState.value.coerceAtLeast(1)
+            Math.floorMod(pagerState.currentPage, cnt).toFloat() + pagerState.currentPageOffsetFraction
+        }
+    }
+
     Column(modifier.fillMaxSize()) {
         ListHeader(
             query = vm.searchQuery,
@@ -1832,7 +1860,11 @@ fun LibraryPagerScreen(
             sortField = vm.sortField,
             sortAscending = vm.sortAscending,
             onSort = vm::changeSort,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = if (dense) 4.dp else 10.dp),
+            modifier = Modifier.padding(
+                start = 16.dp,
+                end = 16.dp,
+                top = if (dense) 4.dp else 8.dp
+            ),
             leading = { m ->
                 if (vm.searchQuery.isNotBlank()) {
                     // 搜索时让位给结果统计；不同页签统计各自的口径
@@ -1861,7 +1893,8 @@ fun LibraryPagerScreen(
                         labels = tabs.map { pagerShortLabel(it) },
                         selected = liveIndex,
                         onSelect = { idx -> tabs.getOrNull(idx)?.let(vm::selectTab) },
-                        modifier = m
+                        modifier = m,
+                        pagePositionProvider = pagePositionProvider
                     )
                 }
             },
@@ -1877,9 +1910,9 @@ fun LibraryPagerScreen(
                     // 封面墙入口：从顶栏小图标移到这里（chips 右边、播放模式键左边），
                     // 图标 + 文字「随便听听」，空列表时也保留入口。
                     RandomListenEntry(onClick = onOpenCoverWall)
-                    if (currentList.isNotEmpty()) {
-                        QuickActions(songs = currentList, vm = vm)
-                    }
+                    // 模式切换图标：显示与否由设置决定（QuickActions 内部读开关）；
+                    // 显示时**不再按列表是否为空隐藏**，保证全部页签（含空页）都保留。
+                    QuickActions(songs = currentList, vm = vm)
                 }
             },
             // 这里不再有 ⁝ 菜单：「扫描」属于设置类操作，已归到
@@ -1889,7 +1922,7 @@ fun LibraryPagerScreen(
             searchFocusSignal = vm.searchFocusSignal
         )
 
-        PageDots(count = tabs.size, selected = liveIndex)
+        PageDots(count = tabs.size, selected = liveIndex, pagePositionProvider = pagePositionProvider)
 
         // 下拉刷新**整个去掉了**。
         //
@@ -2064,12 +2097,12 @@ fun LibraryPagerScreen(
                                     scrollToCurrentSignal = vm.scrollToCurrentSignal,
                                     listState = pageListState,
                                     queueSongs = playQueue,
-                                    contentPadding = if (useLetters) PaddingValues(
+                                    contentPadding = PaddingValues(
                                         start = 16.dp,
-                                        end = 30.dp,
-                                        top = if (dense) 2.dp else 4.dp,
+                                        end = if (useLetters) 30.dp else 16.dp,
+                                        top = 0.dp,
                                         bottom = if (dense) 2.dp else 4.dp
-                                    ) else null,
+                                    ),
                                     onRemoveFromLibrary = removeSong,
                                     reportCurrentVisibility = idx == liveIndex
                                 )
@@ -2693,19 +2726,69 @@ internal fun LibrarySegmented(
     labels: List<String>,
     selected: Int,
     onSelect: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    pagePositionProvider: (() -> Float)? = null
 ) {
     val skin = LocalSkin.current
     // 四个 chip（含「歌单」）时收窄内边距：窄屏上表头左侧槽位只有 ~180dp，
     // 12dp 内边距会把最后一个 chip 挤出可视区
     val chipPadH = if (labels.size > 3) 9.dp else 12.dp
+    val chipLefts = remember(labels.size) { FloatArray(labels.size) { Float.NaN } }
+    val chipWidths = remember(labels.size) { FloatArray(labels.size) }
+    val chipHeights = remember(labels.size) { FloatArray(labels.size) }
+    val chipTops = remember(labels.size) { FloatArray(labels.size) }
+    val pillColor = skin.accent.copy(alpha = if (skin.isLight) 0.14f else 0.24f)
+
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             // 用 surface2 而不是 surface：列表页底色是 bg，surface 和它只差一点点，
             // 深色皮肤下几乎看不出这个控件的边界
             .background(skin.surface2)
-            .padding(3.dp),
+            .padding(3.dp)
+            .drawBehind {
+                if (pagePositionProvider == null || labels.isEmpty()) return@drawBehind
+                val count = labels.size
+                val pos = pagePositionProvider()
+                val base = kotlin.math.floor(pos).toInt()
+                val frac = (pos - base).coerceIn(0f, 1f)
+                val i0 = Math.floorMod(base, count)
+                val i1 = Math.floorMod(base + 1, count)
+                val x0 = chipLefts.getOrElse(i0) { Float.NaN }
+                val w0 = chipWidths.getOrElse(i0) { 0f }
+                val h0 = chipHeights.getOrElse(i0) { 0f }
+                val y0 = chipTops.getOrElse(i0) { 0f }
+                if (x0.isNaN() || w0 <= 0f || h0 <= 0f) return@drawBehind
+                val corner = CornerRadius(9.dp.toPx(), 9.dp.toPx())
+                val x1 = chipLefts.getOrElse(i1) { Float.NaN }
+                val w1 = chipWidths.getOrElse(i1) { 0f }
+                if (i1 == i0 + 1 && !x1.isNaN() && w1 > 0f) {
+                    val left = x0 + (x1 - x0) * frac
+                    val width = w0 + (w1 - w0) * frac
+                    drawRoundRect(
+                        color = pillColor,
+                        topLeft = Offset(left, y0),
+                        size = Size(width, h0),
+                        cornerRadius = corner
+                    )
+                } else {
+                    // 环绕边界（尾页↔首页）：在两端优雅交叉淡化，避免指示条横穿整个控件闪现
+                    drawRoundRect(
+                        color = pillColor.copy(alpha = pillColor.alpha * (1f - frac)),
+                        topLeft = Offset(x0, y0),
+                        size = Size(w0, h0),
+                        cornerRadius = corner
+                    )
+                    if (!x1.isNaN() && w1 > 0f && frac > 0.01f) {
+                        drawRoundRect(
+                            color = pillColor.copy(alpha = pillColor.alpha * frac),
+                            topLeft = Offset(x1, chipTops.getOrElse(i1) { y0 }),
+                            size = Size(w1, chipHeights.getOrElse(i1) { h0 }),
+                            cornerRadius = corner
+                        )
+                    }
+                }
+            },
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2713,12 +2796,16 @@ internal fun LibrarySegmented(
             val on = i == selected
             Box(
                 modifier = Modifier
+                    .onPlaced { coords ->
+                        val p = coords.positionInParent()
+                        chipLefts[i] = p.x
+                        chipTops[i] = p.y
+                        chipWidths[i] = coords.size.width.toFloat()
+                        chipHeights[i] = coords.size.height.toFloat()
+                    }
                     .clip(RoundedCornerShape(9.dp))
-                    // 深色底上 14% 的强调色几乎看不出来，按明暗分两档
-                    .background(
-                        if (on) skin.accent.copy(alpha = if (skin.isLight) 0.14f else 0.24f)
-                        else androidx.compose.ui.graphics.Color.Transparent
-                    )
+                    // 跟手滑动时由外层 Row.drawBehind 绘制连续滑行胶囊；未传 provider 时保持原背景
+                    .background(if (on && pagePositionProvider == null) pillColor else Color.Transparent)
                     .clickable { onSelect(i) }
                     .padding(horizontal = chipPadH, vertical = 6.dp)
             ) {
@@ -2737,27 +2824,62 @@ internal fun LibrarySegmented(
 /**
  * 页码点：当前页拉长成小横条。
  *
- * 固定显示 [count] 个点（不做无限轮播），用户永远知道"一共三页、我在第几页"。
+ * 固定显示 [count] 个点（不做无限轮播），用户永远知道"一共几页、我在第几页"。
+ * 传入 [pagePositionProvider] 后按 120Hz 绘制帧连续变形，跟随手指实时拉伸/收缩。
  */
 @Composable
-private fun PageDots(count: Int, selected: Int) {
+private fun PageDots(
+    count: Int,
+    selected: Int,
+    pagePositionProvider: (() -> Float)? = null
+) {
+    if (count <= 0) return
     val skin = LocalSkin.current
-    Row(
+    val accent = skin.accent
+    val border = skin.border
+    // 上下留白对称：表头只垫 top，底部间隙改由 PageDots 自己上下均分，
+    // 总高度不变（普通 7+7=14 / 紧凑 3+3=6），指示条不再偏贴列表。
+    val topPad = 0.dp
+    // 总宽度：(count - 1) 个 5dp 圆点 + 1 个 14dp 激活条 + (count - 1) 个 5dp 间距
+    val totalW = ((count - 1) * 5 + 14 + (count - 1).coerceAtLeast(0) * 5).dp
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = if (LocalDenseLayout.current) 2.dp else 4.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
+            .padding(top = topPad),
+        contentAlignment = Alignment.Center
     ) {
-        repeat(count) { i ->
-            val on = i == selected
-            Box(
-                Modifier
-                    .padding(horizontal = 2.5.dp)
-                    .size(width = if (on) 14.dp else 5.dp, height = 5.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(if (on) skin.accent else skin.border)
-            )
+        androidx.compose.foundation.Canvas(
+            modifier = Modifier
+                .width(totalW)
+                .height(4.dp)
+        ) {
+            val dotW = 5.dp.toPx()
+            val activeW = 14.dp.toPx()
+            val gap = 5.dp.toPx()
+            val r = CornerRadius(3.dp.toPx(), 3.dp.toPx())
+            val pos = pagePositionProvider?.invoke() ?: selected.toFloat()
+            val base = kotlin.math.floor(pos).toInt()
+            val frac = (pos - base).coerceIn(0f, 1f)
+            val i0 = Math.floorMod(base, count)
+            val i1 = Math.floorMod(base + 1, count)
+            var x = 0f
+            for (i in 0 until count) {
+                val weight = when {
+                    i == i0 && i0 == i1 -> 1f
+                    i == i0 -> 1f - frac
+                    i == i1 -> frac
+                    else -> 0f
+                }
+                val w = dotW + (activeW - dotW) * weight
+                val color = androidx.compose.ui.graphics.lerp(border, accent, weight)
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(x, 0f),
+                    size = Size(w, size.height),
+                    cornerRadius = r
+                )
+                x += w + gap
+            }
         }
     }
 }

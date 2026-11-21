@@ -238,6 +238,57 @@ enum class PlayerSwitchMotion(val id: String, val label: String, val hint: Strin
     }
 }
 
+/**
+ * 全局流体动效手感档位。
+ * 控制全屏播放页展开/收起、切页转场与按钮切歌的弹簧阻尼与时长倍率。
+ */
+enum class MotionFeel(
+    val id: String,
+    val label: String,
+    val hint: String,
+    val durationScale: Float,
+    val springStiffness: Float,
+    val springDamping: Float
+) {
+    SNAPPY("snappy", "灵动极速", "干脆利落，贴近 Poweramp 高速响应", 0.78f, 620f, 0.86f),
+    FLUID("fluid", "丝滑自然", "柔韧平衡的默认黄金阻尼手感", 1.0f, 460f, 0.88f),
+    GENTLE("gentle", "舒缓优雅", "更舒展柔和的过渡与视觉呼吸", 1.25f, 340f, 0.90f);
+
+    companion object {
+        fun fromId(id: String?): MotionFeel =
+            entries.firstOrNull { it.id == id } ?: FLUID
+    }
+}
+
+/**
+ * 播放页展开/收起过渡样式（支持从迷你条上滑、顶栏下拉的跟手连续物理手势）。
+ */
+enum class PlayerSheetStyle(val id: String, val label: String, val hint: String) {
+    DEPTH_SHEET("depth_sheet", "景深浮层", "跟手上滑带动态圆角，底层曲库同步微缩压暗"),
+    SLIDE_UP("slide_up", "经典上推", "纯净垂直跟手上滑，底层保持静止"),
+    ZOOM_FADE("zoom_fade", "焦点缩放", "弹性微缩淡入淡出，轻盈利落");
+
+    companion object {
+        fun fromId(id: String?): PlayerSheetStyle =
+            entries.firstOrNull { it.id == id } ?: DEPTH_SHEET
+    }
+}
+
+/**
+ * 曲库列表与专辑/艺术家/文件夹/歌单/设置页之间的跳转转场样式。
+ */
+enum class PageTransitionStyle(val id: String, val label: String, val hint: String) {
+    FLUID_DEPTH("fluid_depth", "景深缩放", "进入微放大淡入、返回微缩淡出"),
+    SLIDE("slide", "横向推入", "经典左右推片式页面切换"),
+    FADE("fade", "轻柔淡化", "零位移极简交叉淡入"),
+    NONE("none", "极速直切", "零延迟立即切换页面");
+
+    companion object {
+        fun fromId(id: String?): PageTransitionStyle =
+            entries.firstOrNull { it.id == id } ?: FLUID_DEPTH
+    }
+}
+
 enum class LibraryTab(val id: String, val label: String) {
     SONGS("songs", "全部歌曲"),
     ALBUMS("albums", "专辑"),

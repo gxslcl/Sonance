@@ -92,11 +92,17 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.LaunchCoverSnapshot
 import com.sonance.player.data.PlayButtonShape
 import com.sonance.player.data.Prefs
+import com.sonance.player.ui.theme.LocalMotionConfig
+import com.sonance.player.ui.theme.LocalPrefs
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.Skin
+import com.sonance.player.ui.theme.pressSpring
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -128,7 +134,7 @@ fun CoverArt(
     coverKey: String? = null
 ) {
     val context = LocalContext.current
-    val prefs = remember(context) { Prefs(context.applicationContext) }
+    val prefs = LocalPrefs.current ?: remember(context) { Prefs(context.applicationContext) }
     val coverRevision = ArtworkLoader.coverRevision(coverKey)
     val selectedRevision = ArtworkLoader.selectedRevision(songId)
     val resetVersion = ArtworkLoader.cacheResetVersion
@@ -138,8 +144,13 @@ fun CoverArt(
     // sizePx 也进 key：尺寸档变了要重新 peek，否则播放页会拿到列表留下的缩略图。
     // peekAny（不是 peek）：本尺寸档没现成的就先用缩略图档那份顶上，
     // 免得播放页在解码 900px 的那几百毫秒里先闪一张占位图。
-    var bitmap by remember(albumId, sizePx, sourceUri, coverKey, resetVersion) {
-        mutableStateOf(ArtworkLoader.peekAny(albumId, sizePx, sourceUri, coverKey))
+    var bitmap by remember(albumId, sizePx, sourceUri, songId, coverKey, resetVersion) {
+        // 内存缓存没有时回落到「上次播放封面」落盘快照：放进 bitmap（而非 selected），
+        // 避免无自定义封面时 LaunchedEffect 里的 selected = null 把首帧快照清空闪回占位图
+        mutableStateOf(
+            ArtworkLoader.peekAny(albumId, sizePx, sourceUri, coverKey)
+                ?: LaunchCoverSnapshot.peekCover(context, songId)
+        )
     }
     var selected by remember(albumId, sizePx, sourceUri, songId, selectedRevision, resetVersion) {
         mutableStateOf(ArtworkLoader.peekSelected(albumId, sizePx, sourceUri, songId))
@@ -154,12 +165,18 @@ fun CoverArt(
         val chosen = ArtworkLoader.loadSelected(context, albumId, sizePx, sourceUri, songId, coverKey, legacyPinned)
         if (chosen != null) {
             selected = chosen
+            if (sizePx >= 512) {
+                withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveCover(context, songId, chosen) }
+            }
             return@LaunchedEffect
         }
         selected = null
-        // 缓存命中：同步取，不走协程
+        // 缓存命中：同步取，不走协程；大图命中时若尚未落盘快照则补写一次（避免预取命中后跳过保存）
         ArtworkLoader.peek(albumId, sizePx, sourceUri, coverKey)?.let {
             bitmap = it
+            if (sizePx >= 512 && LaunchCoverSnapshot.anySongId(context) != songId) {
+                withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveCover(context, songId, it) }
+            }
             return@LaunchedEffect
         }
         if (albumId <= 0 && sourceUri == null && coverKey == null) return@LaunchedEffect
@@ -169,6 +186,9 @@ fun CoverArt(
         val loaded = ArtworkLoader.load(context, albumId, sizePx, sourceUri, coverKey)
         if (loaded != null) {
             bitmap = loaded
+            if (sizePx >= 512) {
+                withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveCover(context, songId, loaded) }
+            }
         } else {
             // 临时媒体服务/文件读失败不视为永久无图；可见行稍后重试一次。
             delay(2_800)
@@ -404,8 +424,10 @@ fun CtrlButton(
     highlight: Boolean = true
 ) {
     val skin = LocalSkin.current
+    val motion = LocalMotionConfig.current
     Box(
         modifier = modifier
+            .pressSpring(enabled = motion.touchSpringFeedback, pressedScale = 0.90f)
             .size(size)
             .clip(CircleShape)
             .background(if (highlight && active) skin.accentGlow else Color.Transparent)
@@ -453,7 +475,7 @@ fun PlayPauseButton(
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
-    val prefs = remember(context) { Prefs(context.applicationContext) }
+    val prefs = LocalPrefs.current ?: remember(context) { Prefs(context.applicationContext) }
     var prefsTick by remember { mutableIntStateOf(0) }
     DisposableEffect(prefs) {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -1331,9 +1353,11 @@ fun PillButton(
     compact: Boolean = false
 ) {
     val skin = LocalSkin.current
+    val motion = LocalMotionConfig.current
     val shape = RoundedCornerShape(if (compact) 8.dp else 10.dp)
     Box(
         modifier = modifier
+            .pressSpring(enabled = enabled && motion.touchSpringFeedback, pressedScale = 0.96f)
             .clip(shape)
             .background(if (filled) skin.accent else skin.surface2)
             .alpha(if (enabled) 1f else 0.42f)

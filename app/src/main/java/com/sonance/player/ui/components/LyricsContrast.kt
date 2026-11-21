@@ -639,3 +639,67 @@ internal fun hsvColor(h: Float, s: Float, v: Float): Color {
         alpha = 1f
     )
 }
+
+/**
+ * 封面后/封面下歌词使用的纯二元高对比配色（仅亮色 / 暗色两套，不跟随主题强调色）。
+ */
+internal data class BinaryLyricPalette(
+    val active: Color,
+    val inactive: Color
+)
+
+internal fun binaryLyricPaletteForBg(bg: Color): BinaryLyricPalette {
+    val light = Color.White
+    val dark = Color(0xFF14161A)
+    return if (contrastRatio(light, bg) >= contrastRatio(dark, bg)) {
+        BinaryLyricPalette(
+            active = light,
+            inactive = light.copy(alpha = 0.72f)
+        )
+    } else {
+        BinaryLyricPalette(
+            active = dark,
+            inactive = dark.copy(alpha = 0.68f)
+        )
+    }
+}
+
+internal fun sampleInlineBackdropColor(
+    glowImage: ImageBitmap?,
+    skin: Skin,
+    yFraction: Float = 0.5f
+): Color {
+    if (glowImage == null || glowImage.width <= 0 || glowImage.height <= 0) {
+        return skin.bg
+    }
+    val px = runCatching { glowImage.toPixelMap() }.getOrNull() ?: return skin.bg
+    val x = glowImage.width / 2
+    val y = (yFraction.coerceIn(0f, 1f) * (glowImage.height - 1)).toInt()
+    val c = px[x, y]
+    return mix(skin.bg, Color(c.red, c.green, c.blue, 1f), c.alpha)
+}
+
+internal fun sampleInlineBackdropAreaColor(
+    glowImage: ImageBitmap?,
+    skin: Skin
+): Color {
+    if (glowImage == null || glowImage.width <= 0 || glowImage.height <= 0) {
+        return skin.bg
+    }
+    val px = runCatching { glowImage.toPixelMap() }.getOrNull() ?: return skin.bg
+    val x = glowImage.width / 2
+    val fracs = floatArrayOf(0.25f, 0.35f, 0.45f, 0.55f, 0.65f)
+    var rSum = 0f
+    var gSum = 0f
+    var bSum = 0f
+    for (f in fracs) {
+        val y = (f * (glowImage.height - 1)).toInt()
+        val c = px[x, y]
+        val m = mix(skin.bg, Color(c.red, c.green, c.blue, 1f), c.alpha)
+        rSum += m.red
+        gSum += m.green
+        bSum += m.blue
+    }
+    val n = fracs.size.toFloat()
+    return Color(rSum / n, gSum / n, bSum / n, 1f)
+}

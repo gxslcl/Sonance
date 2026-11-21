@@ -183,6 +183,36 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_PLAYER_SWITCH_MOTION, null) ?: PlayerSwitchMotion.POWERAMP_SLIDE.id
         set(v) = sp.edit().putString(KEY_PLAYER_SWITCH_MOTION, v).apply()
 
+    /** 全局流体动效手感（见 [MotionFeel]）。 */
+    var motionFeel: String
+        get() = sp.getString(KEY_MOTION_FEEL, null) ?: MotionFeel.FLUID.id
+        set(v) = sp.edit().putString(KEY_MOTION_FEEL, v).apply()
+
+    /** 全屏播放页展开/收起动效样式（见 [PlayerSheetStyle]）。 */
+    var playerSheetStyle: String
+        get() = sp.getString(KEY_PLAYER_SHEET_STYLE, null) ?: PlayerSheetStyle.DEPTH_SHEET.id
+        set(v) = sp.edit().putString(KEY_PLAYER_SHEET_STYLE, v).apply()
+
+    /** 页面跳转转场样式（见 [PageTransitionStyle]）。 */
+    var pageTransitionStyle: String
+        get() = sp.getString(KEY_PAGE_TRANSITION_STYLE, null) ?: PageTransitionStyle.FLUID_DEPTH.id
+        set(v) = sp.edit().putString(KEY_PAGE_TRANSITION_STYLE, v).apply()
+
+    /** 触控微弹反馈（按钮/卡片按压轻盈回弹） */
+    var touchSpringFeedback: Boolean
+        get() = sp.getBoolean(KEY_TOUCH_SPRING_FEEDBACK, true)
+        set(v) = sp.edit().putBoolean(KEY_TOUCH_SPRING_FEEDBACK, v).apply()
+
+    /** 全屏播放页封面圆角 (8~32dp) */
+    var playerCoverCornerDp: Int
+        get() = sp.getInt(KEY_PLAYER_COVER_CORNER_DP, 20).coerceIn(8, 32)
+        set(v) = sp.edit().putInt(KEY_PLAYER_COVER_CORNER_DP, v.coerceIn(8, 32)).apply()
+
+    /** 底部迷你播放条上滑跟手展开播放页 */
+    var miniSwipeUpToOpen: Boolean
+        get() = sp.getBoolean(KEY_MINI_SWIPE_UP_TO_OPEN, true)
+        set(v) = sp.edit().putBoolean(KEY_MINI_SWIPE_UP_TO_OPEN, v).apply()
+
     /**
      * 「渐变」模式下的补间时长（毫秒）。只在 [glowTransition] 为 FADE 时有意义。
      *
@@ -292,6 +322,11 @@ class Prefs(context: Context) {
     var showOnlineIcon: Boolean
         get() = sp.getBoolean(KEY_SHOW_ONLINE_ICON, true)
         set(v) = sp.edit().putBoolean(KEY_SHOW_ONLINE_ICON, v).apply()
+
+    /** 列表筛选行「随便听听」右边的播放模式切换图标是否显示（默认开）。显示时全部页签都保留。 */
+    var showPlayModeIcon: Boolean
+        get() = sp.getBoolean(KEY_SHOW_PLAY_MODE_ICON, true)
+        set(v) = sp.edit().putBoolean(KEY_SHOW_PLAY_MODE_ICON, v).apply()
 
     var lastSongId: Long
         get() = sp.getLong(KEY_LAST_SONG, -1L)
@@ -1749,6 +1784,12 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_SFX_ENABLED = "player_vinyl_sfx_enabled"
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
         private const val KEY_PLAYER_SWITCH_MOTION = "player_switch_motion"
+        private const val KEY_MOTION_FEEL = "motion_feel"
+        private const val KEY_PLAYER_SHEET_STYLE = "player_sheet_style"
+        private const val KEY_PAGE_TRANSITION_STYLE = "page_transition_style"
+        private const val KEY_TOUCH_SPRING_FEEDBACK = "touch_spring_feedback"
+        private const val KEY_PLAYER_COVER_CORNER_DP = "player_cover_corner_dp"
+        private const val KEY_MINI_SWIPE_UP_TO_OPEN = "mini_swipe_up_to_open"
         private const val KEY_PLAY_BTN_HAPTICS = "play_btn_haptics"
         private const val KEY_PLAY_BTN_GLOW = "play_btn_glow"
         private const val KEY_USB_EXCLUSIVE = "usb_exclusive_enabled"
@@ -1776,6 +1817,7 @@ class Prefs(context: Context) {
         private const val KEY_TOP_BAR_ICON_MODE = "top_bar_icon_mode"
         private const val KEY_SHOW_VIEW_ICON = "show_view_icon"
         private const val KEY_SHOW_ONLINE_ICON = "show_online_icon"
+        private const val KEY_SHOW_PLAY_MODE_ICON = "show_play_mode_icon"
         private const val KEY_FAV = "favorites"
         private const val KEY_ONLINE_FAVORITES = "online_favorites"
         private const val KEY_RECENT = "recent"

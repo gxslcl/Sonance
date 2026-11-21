@@ -37,6 +37,9 @@ import java.io.ByteArrayOutputStream
 import com.sonance.player.data.ExternalStoragePaths
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
+import com.sonance.player.data.MotionFeel
+import com.sonance.player.data.PageTransitionStyle
+import com.sonance.player.data.PlayerSheetStyle
 import com.sonance.player.data.PlayerSwitchMotion
 import com.sonance.player.data.MediaFileDeleter
 import com.sonance.player.data.OnlineCover
@@ -3046,6 +3049,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.showOnlineIcon = value
     }
 
+    var showPlayModeIcon by mutableStateOf(prefs.showPlayModeIcon)
+        private set
+
+    fun changeShowPlayModeIcon(value: Boolean) {
+        showPlayModeIcon = value
+        prefs.showPlayModeIcon = value
+    }
+
     /**
      * 把一套玻璃样式**同时**铺到歌词页 / 律动柱页 / 悬浮迷你播放条。
      *
@@ -3130,6 +3141,61 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 普通播放页点击上一曲 / 下一曲的切换动效 */
     var playerSwitchMotion by mutableStateOf(PlayerSwitchMotion.fromId(prefs.playerSwitchMotion))
         private set
+
+    /** 全局流体动效手感（灵动极速 / 丝滑自然 / 舒缓优雅） */
+    var motionFeel by mutableStateOf(MotionFeel.fromId(prefs.motionFeel))
+        private set
+
+    /** 全屏播放页展开/收起动效样式 */
+    var playerSheetStyle by mutableStateOf(PlayerSheetStyle.fromId(prefs.playerSheetStyle))
+        private set
+
+    /** 页面与详情页切换过渡样式 */
+    var pageTransitionStyle by mutableStateOf(PageTransitionStyle.fromId(prefs.pageTransitionStyle))
+        private set
+
+    /** 触控微弹反馈开关 */
+    var touchSpringFeedback by mutableStateOf(prefs.touchSpringFeedback)
+        private set
+
+    /** 播放页封面圆角大小 (8~32dp) */
+    var playerCoverCornerDp by mutableIntStateOf(prefs.playerCoverCornerDp)
+        private set
+
+    /** 底部迷你播放条上滑跟手展开播放页 */
+    var miniSwipeUpToOpen by mutableStateOf(prefs.miniSwipeUpToOpen)
+        private set
+
+    fun changeMotionFeel(feel: MotionFeel) {
+        motionFeel = feel
+        prefs.motionFeel = feel.id
+    }
+
+    fun changePlayerSheetStyle(style: PlayerSheetStyle) {
+        playerSheetStyle = style
+        prefs.playerSheetStyle = style.id
+    }
+
+    fun changePageTransitionStyle(style: PageTransitionStyle) {
+        pageTransitionStyle = style
+        prefs.pageTransitionStyle = style.id
+    }
+
+    fun changeTouchSpringFeedback(enabled: Boolean) {
+        touchSpringFeedback = enabled
+        prefs.touchSpringFeedback = enabled
+    }
+
+    fun changePlayerCoverCornerDp(dp: Int) {
+        val clamped = dp.coerceIn(8, 32)
+        playerCoverCornerDp = clamped
+        prefs.playerCoverCornerDp = clamped
+    }
+
+    fun changeMiniSwipeUpToOpen(enabled: Boolean) {
+        miniSwipeUpToOpen = enabled
+        prefs.miniSwipeUpToOpen = enabled
+    }
 
     /** 「渐变」模式的补间时长（毫秒） */
     var glowFadeMs by mutableIntStateOf(prefs.glowFadeMs)

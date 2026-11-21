@@ -99,8 +99,11 @@ import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.LyricPlaybarStyle
+import com.sonance.player.data.MotionFeel
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.OnlineMode
+import com.sonance.player.data.PageTransitionStyle
+import com.sonance.player.data.PlayerSheetStyle
 import com.sonance.player.data.lx.LxQuality
 import com.sonance.player.data.netease.NeteaseLevel
 import com.sonance.player.data.PlayButtonColorMode
@@ -212,6 +215,8 @@ private val SETTINGS_MODULES = listOf(
     SettingsModule("shellBg", SettingsCategory.APPEARANCE, "主界面背景与过渡",
         "主界面背景 切歌背景过渡 背景过渡 滑动切换 渐变切换 渐变过渡时长 过渡时长 主界面封面玻璃 " +
             "封面玻璃 玻璃样式 液态玻璃 毛玻璃 磨砂 模糊 模糊度 可见度 不透明度 透出浓度 沉浸式背景 封面 晕染 关闭玻璃"),
+    SettingsModule("motion", SettingsCategory.APPEARANCE, "流体动效与手感",
+        "流体 动效 动画 流畅 手感 灵动 极速 舒缓 播放页展开 景深浮层 焦点缩放 页面切换 过渡 封面圆角 圆角 触控微弹 迷你条上滑 Poweramp"),
     SettingsModule("list", SettingsCategory.APPEARANCE, "列表外观与索引",
         "列表外观 行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 听歌概览 概览卡 字母索引 右侧索引 " +
             "滚动条震动 紧凑 卡片 列表"),
@@ -485,6 +490,7 @@ private fun SettingsModuleContent(
         }
 
         "shellBg" -> ShellBackgroundSection(vm = vm)
+        "motion" -> FluidMotionSettingsSection(vm = vm)
         "list" -> ListAppearanceSection(vm = vm)
         "topBar" -> TopBarAndLaunchSection(vm = vm)
         "mini" -> MiniPlayerSettingsSection(vm = vm)
@@ -1302,6 +1308,162 @@ private fun ShellBackgroundSection(vm: SonanceViewModel) {
 }
 
 /**
+ * 全局流体动效与手感自定义：控制播放页跟手展开样式、页面转场、全局速度手感、封面圆角与触控微弹。
+ */
+@Composable
+private fun FluidMotionSettingsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val summary = "${vm.motionFeel.label} · ${vm.playerSheetStyle.label} · ${vm.pageTransitionStyle.label} · 圆角 ${vm.playerCoverCornerDp}dp"
+
+    SettingsSectionCard(
+        title = "流体动效与手感",
+        summary = summary,
+        icon = SonanceIcons.Sliders,
+        badge = vm.motionFeel.label
+    ) {
+        SettingsGroupLabel("全局动效手感")
+        Text(
+            vm.motionFeel.hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MotionFeel.entries.forEach { feel ->
+                val on = vm.motionFeel == feel
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changeMotionFeel(feel) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        feel.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        SettingsGroupLabel("播放页展开动效")
+        Text(
+            vm.playerSheetStyle.hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlayerSheetStyle.entries.forEach { style ->
+                val on = vm.playerSheetStyle == style
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (on) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (on) 1.dp else 0.dp,
+                            color = if (on) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changePlayerSheetStyle(style) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        style.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (on) skin.accent else skin.textMuted
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        SettingsGroupLabel("页面切换过渡")
+        Text(
+            vm.pageTransitionStyle.hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            PageTransitionStyle.entries.chunked(2).forEach { rowItems ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowItems.forEach { style ->
+                        val on = vm.pageTransitionStyle == style
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (on) skin.accentGlow else skin.surface2)
+                                .border(
+                                    width = if (on) 1.dp else 0.dp,
+                                    color = if (on) skin.accent else Color.Transparent,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable { vm.changePageTransitionStyle(style) }
+                                .padding(vertical = 9.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                style.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (on) skin.accent else skin.textMuted
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "播放页封面圆角：${vm.playerCoverCornerDp} dp",
+            style = MaterialTheme.typography.bodySmall,
+            color = skin.textMuted
+        )
+        SonanceSlider(
+            value = (vm.playerCoverCornerDp - 8) / 24f,
+            onValueChange = { f ->
+                val raw = 8 + (f * 24f).toInt()
+                vm.changePlayerCoverCornerDp((raw / 2) * 2)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            activeColor = skin.accent,
+            inactiveColor = skin.surface3
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("8 dp · 利落", style = MaterialTheme.typography.labelSmall, color = skin.textDim)
+            Text("32 dp · 润圆", style = MaterialTheme.typography.labelSmall, color = skin.textDim)
+        }
+
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "触控微弹反馈",
+            subtitle = "按钮与专辑卡片按压时轻盈微缩回弹（纯图形层动画）",
+            checked = vm.touchSpringFeedback,
+            onCheckedChange = vm::changeTouchSpringFeedback
+        )
+        SettingsSwitchRow(
+            title = "迷你播放条上滑展开",
+            subtitle = "在底部播放条上轻轻上滑即可跟手拉出全屏播放页（不冲突左右滑切歌）",
+            checked = vm.miniSwipeUpToOpen,
+            onCheckedChange = vm::changeMiniSwipeUpToOpen
+        )
+    }
+}
+
+/**
  * 底部那个「正在播放」的形态与质感。
  */
 @Composable
@@ -1749,9 +1911,16 @@ private fun TopBarAndLaunchSection(vm: SonanceViewModel) {
         // ---- 启动行为 ----
         SettingsSwitchRow(
             title = "启动时直接打开播放界面",
-            subtitle = "默认开启：重开应用直接进入正在播放页，而不是曲库列表；关闭则回到上次的列表页",
+            subtitle = "默认开启：进入应用的第一帧就是播放页（无展开动作）；关闭则第一帧是曲库列表",
             checked = vm.openPlayerOnLaunch,
             onCheckedChange = vm::changeOpenPlayerOnLaunch
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "显示播放模式切换图标",
+            subtitle = "列表页『随便听听』右边的模式图标；显示时全部页签都保留（空列表页也显示）",
+            checked = vm.showPlayModeIcon,
+            onCheckedChange = vm::changeShowPlayModeIcon
         )
 
         // ---- 右上角呈现方式 ----

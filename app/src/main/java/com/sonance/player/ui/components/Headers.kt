@@ -53,7 +53,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+
+class SearchFocusTracker {
+    var focusedBounds: Rect? = null
+}
+
+val LocalSearchFocusTracker = staticCompositionLocalOf<SearchFocusTracker?> { null }
 
 /**
  * 列表头部的圆角：16dp 对 40dp 高是「圆润矩形」而不是两端半圆。
@@ -110,8 +121,20 @@ fun SearchField(
 ) {
     val skin = LocalSkin.current
     var focused by remember { mutableStateOf(false) }
+    val focusTracker = LocalSearchFocusTracker.current
+    var fieldBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    DisposableEffect(focusTracker, focused, fieldBoundsInRoot) {
+        if (focusTracker != null && focused) {
+            focusTracker.focusedBounds = fieldBoundsInRoot
+        }
+        onDispose {
+            if (focusTracker != null && focusTracker.focusedBounds == fieldBoundsInRoot) {
+                focusTracker.focusedBounds = null
+            }
+        }
+    }
     LaunchedEffect(focusSignal) {
         if (focusSignal > 0) {
             focusRequester.requestFocus()
@@ -120,6 +143,12 @@ fun SearchField(
     }
     Row(
         modifier = modifier
+            .onGloballyPositioned { coords ->
+                fieldBoundsInRoot = coords.boundsInRoot()
+                if (focused && focusTracker != null) {
+                    focusTracker.focusedBounds = fieldBoundsInRoot
+                }
+            }
             .height(height)
             .headerGlass(skin, HeaderFieldShape)
             // 平时克制、聚焦时明确：给一条 accent 细边，也进一步拉开层次
@@ -372,7 +401,7 @@ fun ListHeader(
 
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(if (dense) 8.dp else 12.dp)
+        verticalArrangement = Arrangement.spacedBy(if (dense) 10.dp else 16.dp)
     ) {
         // ---- 行 1：搜索 + 排序 ----
         val fieldHeight = if (dense) 36.dp else 40.dp

@@ -14,12 +14,23 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import com.sonance.player.ui.components.LocalSearchFocusTracker
+import com.sonance.player.ui.components.SearchFocusTracker
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.CoroutineStart
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -61,8 +72,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -70,6 +85,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
@@ -89,6 +105,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
@@ -96,9 +113,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.LaunchCoverSnapshot
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.OnlineMode
+import com.sonance.player.data.PlayerSheetStyle
+import com.sonance.player.data.Prefs
 import com.sonance.player.data.RemotePlaylist
 import com.sonance.player.data.Song
 import com.sonance.player.data.SongMetaEditor
@@ -153,10 +173,16 @@ import com.sonance.player.ui.sheets.EqualizerStudioScreen
 import com.sonance.player.ui.sheets.QueueSheet
 import com.sonance.player.ui.sheets.SleepTimerSheet
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.LocalPrefs
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.LocalMotionConfig
 import com.sonance.player.ui.theme.MiniPlayerStyle
+import com.sonance.player.ui.theme.MotionConfig
 import com.sonance.player.ui.theme.SonanceTheme
 import com.sonance.player.ui.theme.glassCardBorder
+import com.sonance.player.ui.theme.pageTransitionSpec
+import com.sonance.player.ui.theme.resolveSheetTargetOpen
+import com.sonance.player.ui.theme.sheetSpringSpec
 import com.sonance.player.ui.theme.softPillBg
 import com.sonance.player.ui.theme.solidSurface
 import com.sonance.player.ui.vinyl.VinylWebScreen
@@ -244,6 +270,11 @@ sealed interface Detail {
     data class LxSheetDetail(val target: LxSheetDetailTarget) : Detail
 }
 
+private data class ContentStageKey(
+    val detail: Detail?,
+    val nonPagerTab: LibraryTab?
+)
+
 /* ============================================================
  * 根
  * ============================================================ */
@@ -280,19 +311,34 @@ fun SonanceRoot(vm: SonanceViewModel) {
         vm.onSystemThemeMaybeChanged(systemDark)
     }
 
-    SonanceTheme(vm.skin) {
-        val rawPlayerState by vm.player.state.collectAsStateWithLifecycle()
-        val playerState = remember(
-            rawPlayerState,
-            vm.dlnaActiveRenderer,
-            vm.dlnaTransportState,
-            vm.dlnaCastPositionMs,
-            vm.dlnaCastDurationMs
-        ) {
-            vm.effectivePlayerState(rawPlayerState)
-        }
-        PermissionGate(vm) {
-            Shell(vm, playerState)
+    val prefsSingleton = remember(appContext) { Prefs(appContext) }
+    val motionConfig = MotionConfig(
+        feel = vm.motionFeel,
+        sheetStyle = vm.playerSheetStyle,
+        pageStyle = vm.pageTransitionStyle,
+        touchSpringFeedback = vm.touchSpringFeedback,
+        playerCoverCornerDp = vm.playerCoverCornerDp,
+        miniSwipeUpToOpen = vm.miniSwipeUpToOpen
+    )
+
+    CompositionLocalProvider(
+        LocalPrefs provides prefsSingleton,
+        LocalMotionConfig provides motionConfig
+    ) {
+        SonanceTheme(vm.skin) {
+            val rawPlayerState by vm.player.state.collectAsStateWithLifecycle()
+            val playerState = remember(
+                rawPlayerState,
+                vm.dlnaActiveRenderer,
+                vm.dlnaTransportState,
+                vm.dlnaCastPositionMs,
+                vm.dlnaCastDurationMs
+            ) {
+                vm.effectivePlayerState(rawPlayerState)
+            }
+            PermissionGate(vm) {
+                Shell(vm, playerState)
+            }
         }
     }
 }
@@ -590,7 +636,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     val configuration = LocalConfiguration.current
     val layout = resolveLayout(configuration.screenWidthDp, configuration.screenHeightDp)
 
-    var fullPlayerOpen by rememberSaveable { mutableStateOf(false) }
+    // 冷启动首帧即播放页：开关打开时**第一帧就是展开态**（sheetProgress 直接=1，无展开动画），
+    // 关闭时第一帧就是列表。用 remember 而非 rememberSaveable：每次进程启动都重新读开关，
+    // 保证「进入应用」永远落在开关指定的页面，而不是上次的残留状态。
+    var fullPlayerOpen by remember { mutableStateOf(vm.openPlayerOnLaunch) }
 
     // 状态栏只由**当前播放层**决定：歌词页 / 律动柱页各自的外观开关，
     // 封面主界面两个开关都不认（只保留手机横屏那条自动沉浸，在 FullPlayer 里算）。
@@ -631,18 +680,34 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
     // 黑胶 / 封面墙任一盖稳后，下层（主界面 + 播放页）统一停绘、冻结动画
     val suppressVinylUnderlay = (vinylOpen && vinylCovered) || (nativeWallOpen && nativeWallCovered)
-    // 全屏播放页盖稳后冻结底层主界面与玻璃模糊背景（停绘 + 清空无障碍语义树 + 冻结派生参数），
-    // 防止快速切歌时 SongList / GlassBackdrop / Accessibility 抢占主线程。退出时立即恢复。
-    var fullPlayerCovered by remember { mutableStateOf(false) }
-    LaunchedEffect(fullPlayerOpen) {
-        if (fullPlayerOpen) {
-            delay(320)
-            fullPlayerCovered = true
-        } else {
-            fullPlayerCovered = false
+    // 全屏播放页跟手连续进度（0f=收起，1f=完全展开）与拖拽状态：
+    // 兼顾点击展开、迷你条上滑跟手展开与顶栏下拉跟手收起。
+    val sheetScope = rememberCoroutineScope()
+    val sheetProgress = remember { Animatable(if (fullPlayerOpen) 1f else 0f) }
+    var sheetDragging by remember { mutableStateOf(false) }
+    var pendingSheetVel by remember { mutableFloatStateOf(0f) }
+    var sheetSnapSignal by remember { mutableIntStateOf(0) }
+    LaunchedEffect(fullPlayerOpen, sheetSnapSignal, vm.motionFeel) {
+        if (!sheetDragging) {
+            val target = if (fullPlayerOpen) 1f else 0f
+            val initVel = pendingSheetVel
+            pendingSheetVel = 0f
+            if (kotlin.math.abs(sheetProgress.value - target) > 0.001f || kotlin.math.abs(initVel) > 0.01f) {
+                sheetProgress.animateTo(
+                    targetValue = target,
+                    initialVelocity = initVel,
+                    animationSpec = sheetSpringSpec(vm.motionFeel)
+                )
+            } else {
+                sheetProgress.snapTo(target)
+            }
         }
     }
-    val suppressHomeUnderlay = (fullPlayerOpen && fullPlayerCovered) || suppressVinylUnderlay
+    // 全屏播放页完全落定覆盖后（>=0.998f 且非拖拽态）冻结底层主界面，退出起手瞬间立即恢复。
+    val fullPlayerCovered by remember {
+        derivedStateOf { fullPlayerOpen && !sheetDragging && sheetProgress.value >= 0.998f }
+    }
+    val suppressHomeUnderlay = fullPlayerCovered || suppressVinylUnderlay
     var queueOpen by rememberSaveable { mutableStateOf(false) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
@@ -668,6 +733,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 只在「上次停在文件夹页」时恢复；一次性，恢复过就不再管。
     LaunchedEffect(vm.folders) {
         if (folderRestored) return@LaunchedEffect
+        // 启动首帧即播放页时跳过文件夹恢复：恢复出的 detail 会触发「打开详情收起播放页」，
+        // 把本该是第一帧的播放页顶掉。关闭该开关时恢复行为照旧。
+        if (vm.openPlayerOnLaunch) {
+            folderRestored = true
+            return@LaunchedEffect
+        }
         if (vm.tab != LibraryTab.FOLDERS || savedFolderPath == null) {
             folderRestored = true
             return@LaunchedEffect
@@ -688,27 +759,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         vm.persistFolderDetail((detail as? Detail.FolderDetail)?.path)
     }
 
-    // ===== 冷启动默认直接打开播放界面（设置里可关）=====
-    // 一次性 + 有限窗口：只在本次启动后 5 秒内、曲库已就绪且有播放项时自动展开播放页。
-    // 窗口过期后即便用户稍后手动播放也不再自动弹，避免「空曲库启动 → 之后一播就跳脸」。
-    // rememberSaveable 保证旋转 / 重组不会重复触发。
-    var launchAutoOpenDone by rememberSaveable { mutableStateOf(false) }
-    var launchWindowOpen by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) {
-        delay(5000)
-        launchWindowOpen = false
-    }
-    LaunchedEffect(playerState.hasItem, launchWindowOpen, launchAutoOpenDone) {
-        if (launchAutoOpenDone || !launchWindowOpen) return@LaunchedEffect
-        if (!vm.openPlayerOnLaunch) {
-            launchAutoOpenDone = true
-            return@LaunchedEffect
-        }
-        if (playerState.hasItem && !fullPlayerOpen) {
-            fullPlayerOpen = true
-            launchAutoOpenDone = true
-        }
-    }
+    // 冷启动不再做「进入后再自动打开」的动作：首帧状态已由 fullPlayerOpen 初值决定
+    // （见 Shell 顶部），这里无需任何延迟 / 窗口 / 自动展开逻辑。
 
     /**
      * 收掉输入法焦点。
@@ -810,19 +862,32 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
 
     // 封面与歌词页同一来源、同一张图：背景画它，字色也从它算，两边不能各拿各的。
     // 状态**不按歌曲 id 重置** —— 换歌时旧图保留到新图加载完成，GlassBackdrop 才能做
-    // 一次连贯的滑动过渡；若在这里清空，背景会「先消失、再淡入」两段闪变
-    var shellArt by remember { mutableStateOf<ImageBitmap?>(null) }
+    // 一次连贯的滑动过渡；若在这里清空，背景会「先消失、再淡入」两段闪变。
+    // 初值直接取「上次播放封面」落盘快照：冷启动第一帧就有封面和色带，
+    // 不经历「兜底色 → 黑 → 渐变到封面」的闪变
+    var shellArt by remember { mutableStateOf(LaunchCoverSnapshot.peekAnyCover(context)) }
     // 封面的分段平均色：**与封面同一帧换上**（先算色带、再换图）——
     // 均衡遮罩由色带算出，两者错帧的话新封面会顶着旧遮罩闪一帧错误的亮度
-    var shellBands by remember { mutableStateOf<List<Color>?>(null) }
+    var shellBands by remember { mutableStateOf(LaunchCoverSnapshot.peekAnyBands(context)) }
+    // 启动种子只消费一次：同一张图不重复赋值（避免 GlassBackdrop 对同图做过渡），
+    // 之后的正常切歌照常走滑动过渡
+    var launchSeedConsumed by remember { mutableStateOf(false) }
     LaunchedEffect(skin.immersive, suppressHomeUnderlay, currentSong?.albumId, currentSong?.id, currentSong?.title, currentSong?.artist) {
-        if (suppressHomeUnderlay) return@LaunchedEffect
+        // 已有封面时才允许被「播放页覆盖」跳过（省解码）；**首帧还没封面时必须照加载**。
+        // 否则重进应用直接落在播放页时 suppress 恒真，背景一直停在兜底色，
+        // 等回到列表才第一次加载 → 用户看到「闪一下再渐变到封面」。
+        // 种子图只在「确实是当前这首歌」时才允许跳过加载
+        if (suppressHomeUnderlay && shellArt != null &&
+            (launchSeedConsumed || currentSong == null || LaunchCoverSnapshot.anySongId(context) == currentSong.id)
+        ) return@LaunchedEffect
         val s = currentSong
-        if (!skin.immersive || s == null) {
+        if (!skin.immersive) {
             shellArt = null
             shellBands = null
             return@LaunchedEffect
         }
+        // 队列还没恢复出来时保留种子图，不清空 —— 清空会露出兜底色造成闪变
+        if (s == null) return@LaunchedEffect
         val bmp = ArtworkLoader.load(
             context = context,
             albumId = s.albumId,
@@ -832,8 +897,25 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         ) ?: ArtworkLoader.online(s.id)
         // 像素读取放后台线程（320px 位图几千次采样，毫秒级）；色带先就位、
         // 封面后换，两个赋值在同一次重组里一起生效
-        shellBands = if (bmp == null) null else withContext(Dispatchers.Default) { artBandColors(bmp) }
+        val bands = if (bmp == null) null else withContext(Dispatchers.Default) { artBandColors(bmp) }
+        val sameAsSeed = !launchSeedConsumed && shellArt != null && LaunchCoverSnapshot.anySongId(context) == s.id
+        launchSeedConsumed = true
+        if (sameAsSeed) {
+            // 种子就是当前封面：不重新赋值（同图过渡会闪），只补齐/落盘色带
+            if (bands != null) {
+                if (shellBands == null) shellBands = bands
+                withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveBands(context, s.id, bands) }
+            }
+            return@LaunchedEffect
+        }
+        shellBands = bands
         shellArt = bmp
+        if (bmp != null) {
+            withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveCover(context, s.id, bmp) }
+        }
+        if (bands != null) {
+            withContext(Dispatchers.IO) { LaunchCoverSnapshot.saveBands(context, s.id, bands) }
+        }
     }
 
     // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
@@ -932,12 +1014,25 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         nativeWallOpen = true
     }
 
+    // 把高频跳动的 positionMs 从传给主界面各布局的 PlayerUiState 中剥离出去：
+    // 仅 positionMs 变化时不重建 structuralPlayerState，使列表与分页器在播放期间 0 次无效重组；
+    // 迷你条 / 播放栏 / 侧栏在绘制期直读 positionMsProvider()。
+    val latestPositionMs = remember { mutableLongStateOf(playerState.positionMs) }
+    latestPositionMs.longValue = playerState.positionMs
+    val positionMsProvider = remember { { latestPositionMs.longValue } }
+    val zeroedPlayerState = playerState.copy(positionMs = 0L)
+    val structuralStateHolder = remember { mutableStateOf(zeroedPlayerState) }
+    if (structuralStateHolder.value != zeroedPlayerState) {
+        structuralStateHolder.value = zeroedPlayerState
+    }
+    val structuralPlayerState = structuralStateHolder.value
+
     // 播放页完全覆盖后冻结传给主界面的状态，让 Compact/Medium/ExpandedLayout 完全跳过重组。
-    val frozenShellPlayerState = remember { mutableStateOf(playerState) }
+    val frozenShellPlayerState = remember { mutableStateOf(structuralPlayerState) }
     val frozenShellSongTitle = remember { mutableStateOf(currentSong?.title) }
     val frozenShellAdaptedSkin = remember { mutableStateOf(adaptedSkin) }
     if (!suppressHomeUnderlay) {
-        frozenShellPlayerState.value = playerState
+        frozenShellPlayerState.value = structuralPlayerState
         frozenShellSongTitle.value = currentSong?.title
         frozenShellAdaptedSkin.value = adaptedSkin
     }
@@ -945,8 +1040,73 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     val activeShellSongTitle = frozenShellSongTitle.value
     val activeShellAdaptedSkin = frozenShellAdaptedSkin.value
 
-    CompositionLocalProvider(LocalDenseLayout provides dense) {
-        Box(Modifier.fillMaxSize()) {
+    val onSheetDragStart: () -> Unit = {
+        dismissInput()
+        sheetDragging = true
+        sheetScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sheetProgress.stop()
+        }
+    }
+    val onSheetDragDelta: (Float) -> Unit = { dy ->
+        val h = screenH.coerceAtLeast(1f)
+        val next = (sheetProgress.value - dy / h).coerceIn(0f, 1f)
+        sheetScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            sheetProgress.snapTo(next)
+        }
+    }
+    val onSheetDragEnd: (Float) -> Unit = { vy ->
+        val targetOpen = resolveSheetTargetOpen(
+            progress = sheetProgress.value,
+            velocityPxPerSec = vy,
+            currentlyOpen = fullPlayerOpen
+        )
+        val h = screenH.coerceAtLeast(1f)
+        pendingSheetVel = (-vy / h).coerceIn(-12f, 12f)
+        sheetDragging = false
+        fullPlayerOpen = targetOpen
+        sheetSnapSignal++
+    }
+
+    val searchFocusTracker = remember { SearchFocusTracker() }
+
+    CompositionLocalProvider(
+        LocalDenseLayout provides dense,
+        LocalSearchFocusTracker provides searchFocusTracker
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(searchFocusTracker) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitPointerEventScope {
+                        var startPos: androidx.compose.ui.geometry.Offset? = null
+                        var dismissedThisGesture = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val bounds = searchFocusTracker.focusedBounds
+                            val first = event.changes.firstOrNull()
+                            if (first == null) continue
+                            if (first.changedToDownIgnoreConsumed()) {
+                                startPos = first.position
+                                dismissedThisGesture = false
+                                if (bounds != null && !bounds.contains(first.position)) {
+                                    dismissedThisGesture = true
+                                    dismissInput()
+                                }
+                            } else if (first.pressed && !dismissedThisGesture && bounds != null) {
+                                val origin = startPos
+                                if (origin != null && (first.position - origin).getDistance() > touchSlop) {
+                                    dismissedThisGesture = true
+                                    dismissInput()
+                                }
+                            } else if (!first.pressed) {
+                                startPos = null
+                                dismissedThisGesture = false
+                            }
+                        }
+                    }
+                }
+        ) {
 
         // 沉浸皮肤：整块主界面铺「当前播放封面的玻璃背景」。样式 / 模糊 / 透出强度
         // 由设置页「主界面背景」区块控制（默认 = 原写死的液态玻璃 40 / 100）。
@@ -989,7 +1149,32 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer { alpha = if (suppressHomeUnderlay) 0f else 1f }
+                .graphicsLayer {
+                    if (suppressHomeUnderlay) {
+                        alpha = 0f
+                    } else {
+                        alpha = 1f
+                        val p = sheetProgress.value.coerceIn(0f, 1f)
+                        if (vm.playerSheetStyle == PlayerSheetStyle.DEPTH_SHEET && p > 0.001f) {
+                            val s = 1f - 0.055f * p
+                            scaleX = s
+                            scaleY = s
+                            if (p < 0.998f) {
+                                shape = RoundedCornerShape((p * 24f).dp)
+                                clip = true
+                            }
+                        }
+                    }
+                }
+                .drawWithContent {
+                    drawContent()
+                    if (!suppressHomeUnderlay && vm.playerSheetStyle == PlayerSheetStyle.DEPTH_SHEET) {
+                        val p = sheetProgress.value.coerceIn(0f, 1f)
+                        if (p > 0.001f) {
+                            drawRect(Color.Black.copy(alpha = 0.38f * p))
+                        }
+                    }
+                }
                 .then(if (suppressHomeUnderlay) Modifier.clearAndSetSemantics {} else Modifier)
         ) {
         CompositionLocalProvider(LocalSkin provides activeShellAdaptedSkin) {
@@ -997,12 +1182,16 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             LayoutMode.COMPACT -> CompactLayout(
                 vm = vm,
                 playerState = activeShellPlayerState,
+                positionMsProvider = positionMsProvider,
                 detail = detail,
                 currentSongTitle = activeShellSongTitle,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
+                onExpandDragStart = onSheetDragStart,
+                onExpandDragDelta = onSheetDragDelta,
+                onExpandDragEnd = onSheetDragEnd,
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
                 onOpenCoverWall = openCoverWall
@@ -1011,11 +1200,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             LayoutMode.MEDIUM -> MediumLayout(
                 vm = vm,
                 playerState = activeShellPlayerState,
+                positionMsProvider = positionMsProvider,
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
+                onExpandDragStart = onSheetDragStart,
+                onExpandDragDelta = onSheetDragDelta,
+                onExpandDragEnd = onSheetDragEnd,
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
                 onOpenCoverWall = openCoverWall
@@ -1024,11 +1217,15 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             LayoutMode.EXPANDED -> ExpandedLayout(
                 vm = vm,
                 playerState = activeShellPlayerState,
+                positionMsProvider = positionMsProvider,
                 detail = detail,
                 onOpenDetail = { detail = it },
                 onCloseDetail = { detail = null },
                 // 打开播放页前先收掉输入法焦点 —— 否则搜索框的光标手柄会飘在播放页上
                 onOpenFullPlayer = { dismissInput(); fullPlayerOpen = true },
+                onExpandDragStart = onSheetDragStart,
+                onExpandDragDelta = onSheetDragDelta,
+                onExpandDragEnd = onSheetDragEnd,
                 onOpenQueue = { queueOpen = true },
                 onOpenEqualizer = openEqualizer,
                 onOpenCoverWall = openCoverWall
@@ -1037,26 +1234,60 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         }
         }
 
-        // ===== 全屏播放页 =====
+        // ===== 全屏播放页（连续 Animatable 跟手展开/收起，支持景深/经典上推/焦点缩放）=====
         // 播放页「更多 → 添加到歌单」的目标歌（弹层挂在根布局，盖住播放页）
         var playerAddToPlaylistTarget by remember { mutableStateOf<Song?>(null) }
-        AnimatedVisibility(
-            visible = fullPlayerOpen,
-            enter = slideInVertically { it },
-            exit = slideOutVertically { it },
-            modifier = Modifier
-                .fillMaxSize()
-                .zIndex(20f)
-                .graphicsLayer { alpha = if (suppressVinylUnderlay) 0f else 1f }
-                // 兜底：个别 ROM 在横屏 hide() 之后仍会派发非零的 statusBars
-                // insets，那几处 statusBarsPadding() 就还会把内容往下推。
-                // 这里在播放页根节点把这段 inset 消费掉，子层统一拿到 0。
-                // 只对「手机横屏播放页」生效，其它形态的 padding 原样保留。
-                .then(
-                    if (hideStatusBar) Modifier.consumeWindowInsets(WindowInsets.statusBars)
-                    else Modifier
-                )
-        ) {
+        val showPlayerSheet by remember {
+            derivedStateOf { fullPlayerOpen || sheetDragging || sheetProgress.value > 0.002f }
+        }
+        if (showPlayerSheet) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(20f)
+                    .graphicsLayer {
+                        if (suppressVinylUnderlay) {
+                            alpha = 0f
+                        } else {
+                            val p = sheetProgress.value.coerceIn(0f, 1f)
+                            when (vm.playerSheetStyle) {
+                                PlayerSheetStyle.DEPTH_SHEET -> {
+                                    alpha = 1f
+                                    translationY = (1f - p) * screenH
+                                    if (p < 0.998f) {
+                                        val r = ((1f - p) * 28f).dp.toPx()
+                                        shape = RoundedCornerShape(
+                                            topStart = r,
+                                            topEnd = r,
+                                            bottomStart = 0f,
+                                            bottomEnd = 0f
+                                        )
+                                        clip = true
+                                    }
+                                }
+                                PlayerSheetStyle.SLIDE_UP -> {
+                                    alpha = 1f
+                                    translationY = (1f - p) * screenH
+                                }
+                                PlayerSheetStyle.ZOOM_FADE -> {
+                                    val sc = 0.92f + 0.08f * p
+                                    scaleX = sc
+                                    scaleY = sc
+                                    translationY = (1f - p) * screenH * 0.12f
+                                    alpha = p
+                                }
+                            }
+                        }
+                    }
+                    // 兜底：个别 ROM 在横屏 hide() 之后仍会派发非零的 statusBars
+                    // insets，那几处 statusBarsPadding() 就还会把内容往下推。
+                    // 这里在播放页根节点把这段 inset 消费掉，子层统一拿到 0。
+                    // 只对「手机横屏播放页」生效，其它形态的 padding 原样保留。
+                    .then(
+                        if (hideStatusBar) Modifier.consumeWindowInsets(WindowInsets.statusBars)
+                        else Modifier
+                    )
+            ) {
             FullPlayer(
                 state = playerState,
                 queue = queue,
@@ -1101,6 +1332,11 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 glowTransition = vm.glowTransition,
                 glowFadeMs = vm.glowFadeMs,
                 switchMotion = vm.playerSwitchMotion,
+                motionFeel = vm.motionFeel,
+                coverCornerDp = vm.playerCoverCornerDp.dp,
+                onSheetDragStart = onSheetDragStart,
+                onSheetDragDelta = onSheetDragDelta,
+                onSheetDragEnd = onSheetDragEnd,
                 onGlowModeChange = { vm.changeGlowMode(it) },
                 onGlowStrengthChange = { vm.changeGlowStrength(it) },
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
@@ -1111,6 +1347,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 hiResBadgeEnabled = vm.hiResBadgeEnabled,
                 hiResBadgeSize = vm.hiResBadgeSize
             )
+            }
         }
 
         playerAddToPlaylistTarget?.let { target ->
@@ -1294,11 +1531,15 @@ private val MINI_FLOAT_RESERVE = 86.dp
 private fun CompactLayout(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
+    positionMsProvider: () -> Long,
     detail: Detail?,
     currentSongTitle: String?,
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
+    onExpandDragStart: () -> Unit,
+    onExpandDragDelta: (Float) -> Unit,
+    onExpandDragEnd: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
     onOpenCoverWall: () -> Unit
@@ -1485,25 +1726,41 @@ private fun CompactLayout(
                         .fillMaxWidth()
                         .padding(bottom = if (floating && playerState.hasItem) miniReserve else 0.dp)
                 ) {
-                    if (detail == null && vm.tab in vm.pagerTabs) {
-                        // 左右滑动的曲库页（页签集合可在视图弹层里自定义）
-                        LibraryPagerScreen(
-                            vm = vm,
-                            playerState = playerState,
-                            onOpenFolder = { path -> onOpenDetail(Detail.FolderDetail(path)) },
-                            onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) },
-                            onOpenArtist = { name -> onOpenDetail(Detail.ArtistDetail(name)) },
-                            onOpenCoverWall = onOpenCoverWall
-                        )
-                    } else {
-                        ScreenBody(
-                            vm = vm,
-                            playerState = playerState,
-                            detail = detail,
-                            onOpenDetail = onOpenDetail,
-                            onOpenEqualizer = onOpenEqualizer,
-                            reportCurrentVisibility = detail == null
-                        )
+                    val routeKey = ContentStageKey(
+                        detail = detail,
+                        nonPagerTab = if (detail == null && vm.tab in vm.pagerTabs) null else vm.tab
+                    )
+                    AnimatedContent(
+                        targetState = routeKey,
+                        transitionSpec = {
+                            val forward = (targetState.detail != null && initialState.detail == null) ||
+                                (initialState.nonPagerTab == null && targetState.nonPagerTab != null)
+                            pageTransitionSpec(vm.pageTransitionStyle, vm.motionFeel, forward = forward)
+                        },
+                        label = "compactContentRoute",
+                        modifier = Modifier.fillMaxSize()
+                    ) { key ->
+                        if (key.detail == null && key.nonPagerTab == null) {
+                            // 左右滑动的曲库页（页签集合可在视图弹层里自定义）
+                            LibraryPagerScreen(
+                                vm = vm,
+                                playerState = playerState,
+                                onOpenFolder = { path -> onOpenDetail(Detail.FolderDetail(path)) },
+                                onOpenAlbum = { album -> onOpenDetail(Detail.AlbumDetail(album.albumId)) },
+                                onOpenArtist = { name -> onOpenDetail(Detail.ArtistDetail(name)) },
+                                onOpenCoverWall = onOpenCoverWall
+                            )
+                        } else {
+                            ScreenBody(
+                                vm = vm,
+                                playerState = playerState,
+                                detail = key.detail,
+                                onOpenDetail = onOpenDetail,
+                                onOpenEqualizer = onOpenEqualizer,
+                                reportCurrentVisibility = key.detail == null,
+                                tabOverride = key.nonPagerTab ?: vm.tab
+                            )
+                        }
                     }
 
                     // 右下角悬浮按钮组：放大镜（聚焦搜索框 + 弹键盘）在上，
@@ -1552,6 +1809,11 @@ private fun CompactLayout(
                     coverScale = vm.miniCoverScale / 100f,
                     bottomDp = vm.miniFloatBottomDp,
                     cornerDp = vm.miniFloatCornerDp,
+                    positionMsProvider = positionMsProvider,
+                    swipeUpToOpen = vm.miniSwipeUpToOpen,
+                    onExpandDragStart = onExpandDragStart,
+                    onExpandDragDelta = onExpandDragDelta,
+                    onExpandDragEnd = onExpandDragEnd,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         // 量出真实高度：内容让位、回到顶部按钮的避让都靠它
@@ -1978,10 +2240,14 @@ private fun ViewSheetFeatureCard(
 private fun MediumLayout(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
+    positionMsProvider: () -> Long,
     detail: Detail?,
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
+    onExpandDragStart: () -> Unit,
+    onExpandDragDelta: (Float) -> Unit,
+    onExpandDragEnd: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
     onOpenCoverWall: () -> Unit
@@ -2034,14 +2300,26 @@ private fun MediumLayout(
                     }
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    ScreenBody(
-                        vm = vm,
-                        playerState = playerState,
-                        detail = detail,
-                        onOpenDetail = onOpenDetail,
-                        onOpenEqualizer = onOpenEqualizer,
-                        reportCurrentVisibility = detail == null
-                    )
+                    val mediumRouteKey = ContentStageKey(detail = detail, nonPagerTab = vm.tab)
+                    AnimatedContent(
+                        targetState = mediumRouteKey,
+                        transitionSpec = {
+                            val forward = targetState.detail != null && initialState.detail == null
+                            pageTransitionSpec(vm.pageTransitionStyle, vm.motionFeel, forward = forward)
+                        },
+                        label = "mediumContentRoute",
+                        modifier = Modifier.fillMaxSize()
+                    ) { key ->
+                        ScreenBody(
+                            vm = vm,
+                            playerState = playerState,
+                            detail = key.detail,
+                            onOpenDetail = onOpenDetail,
+                            onOpenEqualizer = onOpenEqualizer,
+                            reportCurrentVisibility = key.detail == null,
+                            tabOverride = key.nonPagerTab ?: vm.tab
+                        )
+                    }
                 }
             }
 
@@ -2067,6 +2345,11 @@ private fun MediumLayout(
                     coverScale = vm.miniCoverScale / 100f,
                     bottomDp = vm.miniFloatBottomDp,
                     cornerDp = vm.miniFloatCornerDp,
+                    positionMsProvider = positionMsProvider,
+                    swipeUpToOpen = vm.miniSwipeUpToOpen,
+                    onExpandDragStart = onExpandDragStart,
+                    onExpandDragDelta = onExpandDragDelta,
+                    onExpandDragEnd = onExpandDragEnd,
                     modifier = Modifier.navigationBarsPadding()
                 )
             } else {
@@ -2084,10 +2367,14 @@ private fun MediumLayout(
 private fun ExpandedLayout(
     vm: SonanceViewModel,
     playerState: PlayerUiState,
+    positionMsProvider: () -> Long,
     detail: Detail?,
     onOpenDetail: (Detail) -> Unit,
     onCloseDetail: () -> Unit,
     onOpenFullPlayer: () -> Unit,
+    onExpandDragStart: () -> Unit,
+    onExpandDragDelta: (Float) -> Unit,
+    onExpandDragEnd: (Float) -> Unit,
     onOpenQueue: () -> Unit,
     onOpenEqualizer: () -> Unit,
     onOpenCoverWall: () -> Unit
@@ -2186,14 +2473,26 @@ private fun ExpandedLayout(
                                     bottom = if (floating && playerState.hasItem) miniReserve else 0.dp
                                 )
                         ) {
-                            ScreenBody(
-                                vm = vm,
-                                playerState = playerState,
-                                detail = detail,
-                                onOpenDetail = onOpenDetail,
-                                onOpenEqualizer = onOpenEqualizer,
-                                reportCurrentVisibility = detail == null
-                            )
+                            val expandedRouteKey = ContentStageKey(detail = detail, nonPagerTab = vm.tab)
+                            AnimatedContent(
+                                targetState = expandedRouteKey,
+                                transitionSpec = {
+                                    val forward = targetState.detail != null && initialState.detail == null
+                                    pageTransitionSpec(vm.pageTransitionStyle, vm.motionFeel, forward = forward)
+                                },
+                                label = "expandedContentRoute",
+                                modifier = Modifier.fillMaxSize()
+                            ) { key ->
+                                ScreenBody(
+                                    vm = vm,
+                                    playerState = playerState,
+                                    detail = key.detail,
+                                    onOpenDetail = onOpenDetail,
+                                    onOpenEqualizer = onOpenEqualizer,
+                                    reportCurrentVisibility = key.detail == null,
+                                    tabOverride = key.nonPagerTab ?: vm.tab
+                                )
+                            }
                         }
 
                         // 「定位到正在播放」：与手机布局同一个按钮、同一套滚动逻辑。
@@ -2236,6 +2535,11 @@ private fun ExpandedLayout(
                                 coverScale = vm.miniCoverScale / 100f,
                     bottomDp = vm.miniFloatBottomDp,
                     cornerDp = vm.miniFloatCornerDp,
+                    positionMsProvider = positionMsProvider,
+                    swipeUpToOpen = vm.miniSwipeUpToOpen,
+                    onExpandDragStart = onExpandDragStart,
+                    onExpandDragDelta = onExpandDragDelta,
+                    onExpandDragEnd = onExpandDragEnd,
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
                                     // 量出真实高度：内容让位靠它（设置里能把卡片调到 2 倍高）
@@ -2269,6 +2573,7 @@ private fun ExpandedLayout(
                     // 面板内上下滑切歌，方向和手机播放页一致：上滑下一首、下滑上一首
                     onSwipeUp = { vm.nextOrRandom() },
                     onSwipeDown = { vm.previousOrRandom() },
+                    positionMsProvider = positionMsProvider,
                     modifier = Modifier
                         .width(if (wide) 344.dp else 312.dp)
                         .fillMaxHeight()
@@ -2288,6 +2593,7 @@ private fun ExpandedLayout(
                     onVolume = { vm.player.setVolume(it) },
                     onSeek = { vm.dispatchSeekTo(it) },
                     onOpenQueue = onOpenQueue,
+                    positionMsProvider = positionMsProvider,
                     modifier = Modifier.navigationBarsPadding()
                 )
             } else {
@@ -2318,7 +2624,8 @@ private fun ScreenBody(
      * 是否上报「当前播放歌曲是否在列表可见区内」。只有宽屏（无 Pager）
      * 的歌曲/最近/收藏列表传 true；手机 Pager 由 LibraryPagerScreen 自己处理。
      */
-    reportCurrentVisibility: Boolean = false
+    reportCurrentVisibility: Boolean = false,
+    tabOverride: LibraryTab = vm.tab
 ) {
     val skin = LocalSkin.current
 
@@ -2414,7 +2721,7 @@ private fun ScreenBody(
         return
     }
 
-    when (vm.tab) {
+    when (tabOverride) {
         LibraryTab.SONGS -> SongsScreen(
             vm = vm,
             playerState = playerState,

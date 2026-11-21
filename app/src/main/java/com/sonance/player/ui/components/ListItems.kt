@@ -47,7 +47,9 @@ import com.sonance.player.data.MusicFolder
 import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Song
 import com.sonance.player.ui.icon.SonanceIcons
+import com.sonance.player.ui.theme.LocalMotionConfig
 import com.sonance.player.ui.theme.LocalSkin
+import com.sonance.player.ui.theme.pressSpring
 import com.sonance.player.ui.theme.glassCardBg
 import com.sonance.player.ui.theme.glassCardBorder
 import com.sonance.player.ui.theme.softPillBg
@@ -430,8 +432,10 @@ fun AlbumCard(
     coverCorner: Dp = 14.dp
 ) {
     val skin = LocalSkin.current
+    val motion = LocalMotionConfig.current
     Column(
         modifier = modifier
+            .pressSpring(enabled = motion.touchSpringFeedback, pressedScale = 0.97f)
             .clip(RoundedCornerShape(coverCorner + 4.dp))
             .background(skin.glassCardBg(highlighted = isCurrent))
             .border(

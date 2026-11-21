@@ -71,9 +71,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,6 +90,7 @@ import com.sonance.player.playback.PlayMode
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.icon.SonanceIcons
 import com.sonance.player.ui.theme.GlassStyle
+import com.sonance.player.ui.theme.LocalPrefs
 import com.sonance.player.ui.theme.LocalSkin
 import com.sonance.player.ui.theme.MiniPlayerStyle
 import com.sonance.player.ui.theme.MiniProgressStyle
@@ -233,6 +236,11 @@ private fun progressFraction(state: PlayerUiState): Float {
     return (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
 }
 
+private fun progressFraction(positionMs: Long, durationMs: Long): Float {
+    if (durationMs <= 0L) return 0f
+    return (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+}
+
 /**
  * 仅在卡片外缘绘制柔和外投影：内区用 [ClipOp.Difference] 挖空，
  * 避免半透明玻璃卡片在正常显示或滑出淡化时透出底层硬件阴影的矩形暗区。
@@ -303,10 +311,25 @@ fun MiniPlayer(
     /** 悬浮卡片距屏幕底部留白 (dp) */
     bottomDp: Int = 10,
     /** 悬浮卡片圆角 (dp) */
-    cornerDp: Int = 20
+    cornerDp: Int = 20,
+    /** 绘制期进度回调：传入后在绘制层直读进度，避免 500ms 触发整卡重组 */
+    positionMsProvider: (() -> Long)? = null,
+    /** 上滑迷你条跟手展开全屏播放页 */
+    swipeUpToOpen: Boolean = true,
+    onExpandDragStart: () -> Unit = {},
+    onExpandDragDelta: (Float) -> Unit = {},
+    onExpandDragEnd: (Float) -> Unit = {}
 ) {
     val skin = LocalSkin.current
-    val frac = progressFraction(state)
+    val posProvider = positionMsProvider ?: { state.positionMs }
+    val fracProvider = remember(state.durationMs, posProvider) {
+        { progressFraction(posProvider(), state.durationMs) }
+    }
+    val swipeUpNow = rememberUpdatedState(swipeUpToOpen)
+    val onExpandStartNow = rememberUpdatedState(onExpandDragStart)
+    val onExpandDeltaNow = rememberUpdatedState(onExpandDragDelta)
+    val onExpandEndNow = rememberUpdatedState(onExpandDragEnd)
+
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
     val coverUri = remember(state.sourceUri) {
         state.sourceUri?.let { android.net.Uri.parse(it) }
@@ -317,7 +340,8 @@ fun MiniPlayer(
             state = state,
             song = song,
             coverUri = coverUri,
-            frac = frac,
+            posProvider = posProvider,
+            fracProvider = fracProvider,
             coverScale = coverScale,
             // 环形进度只给悬浮卡片（经典贴底那条通栏本来就只有线），
             // 具体显示环还是线由用户在设置里定，见 MiniProgressStyle
@@ -335,9 +359,48 @@ fun MiniPlayer(
                 modifier = modifier
                     .fillMaxWidth()
                     .background(skin.surface2)
+                    .pointerInput(Unit) {
+                        val slop = viewConfiguration.touchSlop
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var dy = 0f
+                            var dx = 0f
+                            var locked = false
+                            val tracker = VelocityTracker()
+                            tracker.addPointerInputChange(down)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val c = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!c.pressed) {
+                                    if (locked) {
+                                        val vy = tracker.calculateVelocity().y
+                                        onExpandEndNow.value(vy)
+                                    }
+                                    break
+                                }
+                                tracker.addPointerInputChange(c)
+                                val delta = c.positionChange()
+                                if (!locked) {
+                                    dx += delta.x
+                                    dy += delta.y
+                                    if (!swipeUpNow.value) continue
+                                    if (abs(dx) > slop && abs(dx) >= abs(dy)) break
+                                    if (dy < -slop && abs(dy) > abs(dx)) {
+                                        locked = true
+                                        onExpandStartNow.value()
+                                        onExpandDeltaNow.value(dy)
+                                        c.consume()
+                                    }
+                                } else {
+                                    onExpandDeltaNow.value(delta.y)
+                                    c.consume()
+                                }
+                            }
+                        }
+                    }
             ) {
                 // 顶部进度线
-                MiniProgressLine(frac = frac, thickness = 2.dp, rounded = false)
+                MiniProgressLine(fracProvider = fracProvider, thickness = 2.dp, rounded = false)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -400,6 +463,7 @@ fun MiniPlayer(
                         }
                     }
                     .pointerInput(Unit) {
+                        val slop = viewConfiguration.touchSlop
                         // 位移动画：总是先停掉上一条，保证永远只有一条在跑
                         fun slideTo(target: Float, spec: AnimationSpec<Float>) {
                             animJob[0]?.cancel()
@@ -410,61 +474,91 @@ fun MiniPlayer(
                             }
                         }
 
-                        detectHorizontalDragGestures(
-                            // 手指一落下就接管：正在跑的归位/入场动画立刻停住，
-                            // 从卡片当前的位置继续跟手（**不清零** —— 清零就是"弹一下"）
-                            onDragStart = {
-                                animJob[0]?.cancel()
-                                animJob[0] = null
-                            },
-                            onDragEnd = {
-                                val w = cardW
-                                // 左右阈值分开：右手持机时左滑顺手、右滑要往回够，
-                                // 同一个百分比会让右滑经常划不满
-                                val pct = if (dragX < 0) leftPctNow.value else rightPctNow.value
-                                val threshold = w * pct / 100f
-                                val dir = when {
-                                    dragX <= -threshold -> -1
-                                    dragX >= threshold -> 1
-                                    else -> 0
-                                }
-                                if (dir == 0) {
-                                    // 没过阈值：快速平滑归位（ease-out，无过冲）
-                                    slideTo(0f, tween(140, easing = FastOutSlowInEasing))
-                                } else {
-                                    // ① 滑出：100ms，只走剩下这点距离
-                                    animJob[0]?.cancel()
-                                    val outFrom = dragX
-                                    val out = scope.launch {
-                                        animate(
-                                            outFrom, dir * w * 1.2f,
-                                            animationSpec = tween(100, easing = FastOutLinearInEasing)
-                                        ) { v, _ -> dragX = v }
-                                    }
-                                    animJob[0] = out
-                                    // ② 精确等①跑完（不用写死的 delay），再换歌接力滑入
-                                    scope.launch {
-                                        out.join()
-                                        // 被新手势打断了就别换歌 —— 用户又抓住卡片了
-                                        if (out.isCancelled) return@launch
-                                        if (dir < 0) nextNow.value() else prevNow.value()
-                                        // 此刻卡片在屏外：直接摆到另一侧屏外，看不见跳变
-                                        dragX = -dir * w * 1.2f
-                                        val inJob = scope.launch {
-                                            animate(
-                                                -dir * w * 1.2f, 0f,
-                                                animationSpec = tween(170, easing = FastOutSlowInEasing)
-                                            ) { v, _ -> dragX = v }
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var dx = 0f
+                            var dy = 0f
+                            var axis = 0 // 0=未判定, 1=左右切歌, 2=上滑展开
+                            val tracker = VelocityTracker()
+                            tracker.addPointerInputChange(down)
+
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val c = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!c.pressed) {
+                                    when (axis) {
+                                        1 -> {
+                                            val w = cardW
+                                            val pct = if (dragX < 0) leftPctNow.value else rightPctNow.value
+                                            val threshold = w * pct / 100f
+                                            val dir = when {
+                                                dragX <= -threshold -> -1
+                                                dragX >= threshold -> 1
+                                                else -> 0
+                                            }
+                                            if (dir == 0) {
+                                                slideTo(0f, tween(140, easing = FastOutSlowInEasing))
+                                            } else {
+                                                animJob[0]?.cancel()
+                                                val outFrom = dragX
+                                                val out = scope.launch {
+                                                    animate(
+                                                        outFrom, dir * w * 1.2f,
+                                                        animationSpec = tween(100, easing = FastOutLinearInEasing)
+                                                    ) { v, _ -> dragX = v }
+                                                }
+                                                animJob[0] = out
+                                                scope.launch {
+                                                    out.join()
+                                                    if (out.isCancelled) return@launch
+                                                    if (dir < 0) nextNow.value() else prevNow.value()
+                                                    dragX = -dir * w * 1.2f
+                                                    val inJob = scope.launch {
+                                                        animate(
+                                                            -dir * w * 1.2f, 0f,
+                                                            animationSpec = tween(170, easing = FastOutSlowInEasing)
+                                                        ) { v, _ -> dragX = v }
+                                                    }
+                                                    animJob[0] = inJob
+                                                }
+                                            }
                                         }
-                                        animJob[0] = inJob
+                                        2 -> {
+                                            val vy = tracker.calculateVelocity().y
+                                            onExpandEndNow.value(vy)
+                                        }
                                     }
+                                    break
                                 }
-                            },
-                            onDragCancel = { slideTo(0f, tween(140, easing = FastOutSlowInEasing)) }
-                        ) { change, delta ->
-                            change.consume()
-                            // 1:1 跟手；只夹住"别拖出屏外太远"，不做阻尼
-                            dragX = (dragX + delta).coerceIn(-cardW * 1.2f, cardW * 1.2f)
+                                tracker.addPointerInputChange(c)
+                                val delta = c.positionChange()
+                                if (axis == 0) {
+                                    dx += delta.x
+                                    dy += delta.y
+                                    when {
+                                        abs(dx) > slop && abs(dx) >= abs(dy) -> {
+                                            axis = 1
+                                            animJob[0]?.cancel()
+                                            animJob[0] = null
+                                            dragX = (dragX + dx).coerceIn(-cardW * 1.2f, cardW * 1.2f)
+                                            c.consume()
+                                        }
+                                        swipeUpNow.value && dy < -slop && abs(dy) > abs(dx) -> {
+                                            axis = 2
+                                            onExpandStartNow.value()
+                                            onExpandDeltaNow.value(dy)
+                                            c.consume()
+                                        }
+                                        dy > slop && abs(dy) > abs(dx) -> break
+                                    }
+                                } else if (axis == 1) {
+                                    c.consume()
+                                    dragX = (dragX + delta.x).coerceIn(-cardW * 1.2f, cardW * 1.2f)
+                                } else {
+                                    c.consume()
+                                    onExpandDeltaNow.value(delta.y)
+                                }
+                            }
                         }
                     }
             ) {
@@ -532,7 +626,7 @@ fun MiniPlayer(
                         // 进度线收进卡片下沿。设成"只用圆环"时这里不画 ——
                         // 同一个进度说两遍，看着就是重复
                         if (progressStyle.showsBar) {
-                            MiniProgressLine(frac = frac, thickness = 2.5.dp, rounded = true)
+                            MiniProgressLine(fracProvider = fracProvider, thickness = 2.5.dp, rounded = true)
                         }
                     }
                 }
@@ -542,24 +636,27 @@ fun MiniPlayer(
 }
 
 @Composable
-private fun MiniProgressLine(frac: Float, thickness: Dp, rounded: Boolean) {
+private fun MiniProgressLine(fracProvider: () -> Float, thickness: Dp, rounded: Boolean) {
     val skin = LocalSkin.current
-    // 圆角只在悬浮卡片里用；经典模式那条线本来就是通栏的，
-    // 圆角反而让它两头缩进去
-    val shape = if (rounded) RoundedCornerShape(50) else RoundedCornerShape(0)
-    Box(
+    val trackColor = if (rounded) Color.Transparent else skin.surface3
+    val accent = skin.accent
+    Canvas(
         Modifier
             .fillMaxWidth()
             .height(thickness)
-            .background(if (rounded) Color.Transparent else skin.surface3)
     ) {
+        if (trackColor.alpha > 0f) {
+            drawRect(color = trackColor)
+        }
+        val frac = fracProvider().coerceIn(0f, 1f)
         if (frac > 0f) {
-            Box(
-                Modifier
-                    .fillMaxWidth(frac)
-                    .height(thickness)
-                    .clip(shape)
-                    .background(skin.accent)
+            val w = size.width * frac
+            val r = if (rounded) size.height / 2f else 0f
+            drawRoundRect(
+                color = accent,
+                topLeft = Offset.Zero,
+                size = Size(w, size.height),
+                cornerRadius = CornerRadius(r, r)
             )
         }
     }
@@ -597,8 +694,10 @@ private fun RowScope.MiniPlayerBody(
     state: PlayerUiState,
     song: Song?,
     coverUri: android.net.Uri?,
-    /** 播放进度 0~1，环形进度用。CLASSIC 不用它 */
-    frac: Float = 0f,
+    /** 播放进度毫秒读取器：供孤立时间文字读取，避免 500ms 整卡重组 */
+    posProvider: () -> Long,
+    /** 播放进度 0~1 读取器：环形进度绘制层直读 */
+    fracProvider: () -> Float,
     /** 封面大小倍数（设置里可调） */
     coverScale: Float = 1f,
     /** 播放键外圈套环形进度（悬浮玻璃卡片专用） */
@@ -642,22 +741,7 @@ private fun RowScope.MiniPlayerBody(
         if (showTime && state.hasItem) {
             Spacer(Modifier.height(2.dp))
             val totalMs = if (state.durationMs > 0L) state.durationMs else (song?.durationMs ?: 0L)
-            val timeText = if (totalMs > 0L) {
-                "${formatDuration(state.positionMs)} / ${formatDuration(totalMs)}"
-            } else {
-                formatDuration(state.positionMs)
-            }
-            Text(
-                text = timeText,
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    fontFeatureSettings = "tnum"
-                ),
-                color = skin.accent.copy(alpha = 0.90f),
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Clip
-            )
+            MiniTimeText(posProvider = posProvider, totalMs = totalMs, accentColor = skin.accent.copy(alpha = 0.90f))
         }
     }
     CtrlButton(
@@ -669,7 +753,7 @@ private fun RowScope.MiniPlayerBody(
     )
     if (progressRing) {
         PlayPauseRing(
-            frac = frac,
+            fracProvider = fracProvider,
             isPlaying = state.isPlaybackActive,
             onClick = onPlayPause,
             palette = palette
@@ -692,6 +776,27 @@ private fun RowScope.MiniPlayerBody(
     )
 }
 
+@Composable
+private fun MiniTimeText(posProvider: () -> Long, totalMs: Long, accentColor: Color) {
+    val posMs = posProvider()
+    val timeText = if (totalMs > 0L) {
+        "${formatDuration(posMs)} / ${formatDuration(totalMs)}"
+    } else {
+        formatDuration(posMs)
+    }
+    Text(
+        text = timeText,
+        style = MaterialTheme.typography.labelMedium.copy(
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontFeatureSettings = "tnum"
+        ),
+        color = accentColor,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Clip
+    )
+}
+
 /**
  * 套着环形进度的播放键（悬浮玻璃卡片用）。
  *
@@ -703,7 +808,7 @@ private fun RowScope.MiniPlayerBody(
  */
 @Composable
 private fun PlayPauseRing(
-    frac: Float,
+    fracProvider: () -> Float,
     isPlaying: Boolean,
     onClick: () -> Unit,
     palette: PlayButtonPalette
@@ -724,6 +829,7 @@ private fun PlayPauseRing(
                 size = Size(d, d),
                 style = Stroke(width = stroke, cap = StrokeCap.Round)
             )
+            val frac = fracProvider()
             if (frac > 0f) {
                 drawArc(
                     color = skin.accent,
@@ -764,7 +870,8 @@ fun PlayerBar(
     onSeek: (Long) -> Unit,
     onOpenQueue: () -> Unit,
     modifier: Modifier = Modifier,
-    height: Dp = 78.dp
+    height: Dp = 78.dp,
+    positionMsProvider: (() -> Long)? = null
 ) {
     val palette = rememberPlayerControlPalette(state, song)
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
@@ -773,7 +880,7 @@ fun PlayerBar(
     }
 
     val skin = LocalSkin.current
-    val frac = progressFraction(state)
+    val posProvider = positionMsProvider ?: { state.positionMs }
     val duration = if (state.durationMs > 0) state.durationMs else (song?.durationMs ?: 0L)
 
     Row(
@@ -842,21 +949,7 @@ fun PlayerBar(
                 gap = 4.dp,
                 playButtonPalette = palette
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                TimeLabel(formatDuration(state.positionMs))
-                SonanceSlider(
-                    value = frac,
-                    onValueChange = { f -> onSeek((f * duration).toLong()) },
-                    modifier = Modifier.weight(1f),
-                    trackHeight = 4.dp,
-                    thumbSize = 11.dp
-                )
-                TimeLabel(formatDuration(duration))
-            }
+            PlayerBarProgressRow(posProvider = posProvider, duration = duration, onSeek = onSeek)
         }
 
         Row(
@@ -876,6 +969,27 @@ fun PlayerBar(
                 tint = skin.textMuted
             )
         }
+    }
+}
+
+@Composable
+private fun PlayerBarProgressRow(posProvider: () -> Long, duration: Long, onSeek: (Long) -> Unit) {
+    val posMs = posProvider()
+    val frac = progressFraction(posMs, duration)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        TimeLabel(formatDuration(posMs))
+        SonanceSlider(
+            value = frac,
+            onValueChange = { f -> onSeek((f * duration).toLong()) },
+            modifier = Modifier.weight(1f),
+            trackHeight = 4.dp,
+            thumbSize = 11.dp
+        )
+        TimeLabel(formatDuration(duration))
     }
 }
 
@@ -926,7 +1040,8 @@ fun NowPlayingPanel(
     /** 面板内**上滑** = 下一首（和手机播放页同一方向语义） */
     onSwipeUp: (() -> Unit)? = null,
     /** 面板内**下滑** = 上一首 */
-    onSwipeDown: (() -> Unit)? = null
+    onSwipeDown: (() -> Unit)? = null,
+    positionMsProvider: (() -> Long)? = null
 ) {
     val palette = rememberPlayerControlPalette(state, song)
     // 封面来源：state 里是 String，这里解析一次复用，避免每次重组都 new 一个 Uri
@@ -935,7 +1050,7 @@ fun NowPlayingPanel(
     }
 
     val skin = LocalSkin.current
-    val frac = progressFraction(state)
+    val posProvider = positionMsProvider ?: { state.positionMs }
     val duration = if (state.durationMs > 0) state.durationMs else (song?.durationMs ?: 0L)
     val pulsePhase = rememberThrottledPhase(
         active = state.isPlaying,
@@ -1089,7 +1204,7 @@ fun NowPlayingPanel(
                     // 只读歌词层：同一套解析/渲染（含逐字高亮），没有任何设置入口
                     PanelLyrics(
                         song = song,
-                        positionMs = state.positionMs,
+                        positionMs = posProvider(),
                         prefs = prefs,
                         isPlaying = state.isPlaying,
                         modifier = Modifier.fillMaxSize()
@@ -1151,20 +1266,7 @@ fun NowPlayingPanel(
 
         Spacer(Modifier.height(16.dp))
 
-        SonanceSlider(
-            value = frac,
-            onValueChange = { f -> onSeek((f * duration).toLong()) },
-            modifier = Modifier.fillMaxWidth(),
-            trackHeight = 4.dp,
-            thumbSize = 12.dp
-        )
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(formatDuration(state.positionMs), style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
-            Text(formatDuration(duration), style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
-        }
+        PanelProgressBlock(posProvider = posProvider, duration = duration, onSeek = onSeek)
 
         Spacer(Modifier.height(16.dp))
 
@@ -1206,6 +1308,27 @@ fun NowPlayingPanel(
                 tint = skin.textMuted
             )
         }
+    }
+}
+
+@Composable
+private fun PanelProgressBlock(posProvider: () -> Long, duration: Long, onSeek: (Long) -> Unit) {
+    val skin = LocalSkin.current
+    val posMs = posProvider()
+    val frac = progressFraction(posMs, duration)
+    SonanceSlider(
+        value = frac,
+        onValueChange = { f -> onSeek((f * duration).toLong()) },
+        modifier = Modifier.fillMaxWidth(),
+        trackHeight = 4.dp,
+        thumbSize = 12.dp
+    )
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(formatDuration(posMs), style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
+        Text(formatDuration(duration), style = MaterialTheme.typography.labelSmall, color = skin.textMuted)
     }
 }
 

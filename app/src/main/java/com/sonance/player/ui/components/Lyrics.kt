@@ -1426,6 +1426,8 @@ fun InlineLyrics(
     compact: Boolean = false,
     /** 同步歌词行点击是否跳进度；封面内歌词只读浏览设为 false */
     seekEnabled: Boolean = true,
+    /** 是否仅根据背景明暗采用亮/暗两色，不随主题色变换 */
+    binaryContrast: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -1474,8 +1476,11 @@ fun InlineLyrics(
     // 字体大小、调色档位都跟全屏歌词页的设置走。这里的背景是晕染层不是封面模糊，
     // 色带从晕染烘焙位图直接采样（见 [buildInlineBgProfile]），档位关了就不调。
     val adaptMode = prefs.lyricsAdaptMode
-    val bgProfile = remember(glowImage, skin, adaptMode) {
-        if (adaptMode == LyricAdaptMode.OFF) null else buildInlineBgProfile(glowImage, skin)
+    val binaryPalette = remember(binaryContrast, glowImage, skin) {
+        if (binaryContrast) binaryLyricPaletteForBg(sampleInlineBackdropAreaColor(glowImage, skin)) else null
+    }
+    val bgProfile = remember(binaryContrast, glowImage, skin, adaptMode) {
+        if (binaryContrast || adaptMode == LyricAdaptMode.OFF) null else buildInlineBgProfile(glowImage, skin)
     }
     // 歌词偏移同样跟全屏歌词页按歌记忆的值走。直接读 prefs（走内存缓存）：
     // positionMs 每 500ms 驱动重组，在歌词页调完关掉这里最多半秒就跟上
@@ -1497,7 +1502,7 @@ fun InlineLyrics(
             loading -> Text(
                 "正在读取歌词…",
                 style = MaterialTheme.typography.bodyMedium,
-                color = skin.textMuted,
+                color = binaryPalette?.inactive ?: skin.textMuted,
                 modifier = Modifier.align(Alignment.Center)
             )
 
@@ -1509,13 +1514,13 @@ fun InlineLyrics(
                 Text(
                     "这首歌还没有歌词",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = skin.textMuted
+                    color = binaryPalette?.inactive ?: skin.textMuted
                 )
                 if (onlineEnabled) {
                     Text(
                         "打开歌词页可以按歌名搜索",
                         style = MaterialTheme.typography.labelSmall,
-                        color = skin.textDim
+                        color = binaryPalette?.inactive ?: skin.textDim
                     )
                 }
             }
@@ -1530,10 +1535,11 @@ fun InlineLyrics(
                 adaptMode = adaptMode,
                 seekEnabled = seekEnabled,
                 timelineOffsetMs = offsetMs,
-                scrollHaptic = scrollHaptic
+                scrollHaptic = scrollHaptic,
+                binaryPalette = binaryPalette
             )
 
-            else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize, bgProfile, adaptMode)
+            else -> PlainLyrics((lyrics as Lyrics.Plain).lines, fontSize, bgProfile, adaptMode, binaryPalette = binaryPalette)
         }
     }
 }
@@ -1667,7 +1673,8 @@ internal fun SyncedLyrics(
      */
     seekEnabled: Boolean = true,
     timelineOffsetMs: Long = 0L,
-    scrollHaptic: Boolean = true
+    scrollHaptic: Boolean = true,
+    binaryPalette: BinaryLyricPalette? = null
 ) {
     val skin = LocalSkin.current
     val density = LocalDensity.current
@@ -1795,8 +1802,10 @@ internal fun SyncedLyrics(
                     index < current -> skin.textMuted
                     else -> skin.textDim
                 }
-                val adaptActive = bgProfile != null && shouldAdapt(isCurrent, adaptMode)
-                val color = if (!adaptActive) {
+                val adaptActive = binaryPalette == null && bgProfile != null && shouldAdapt(isCurrent, adaptMode)
+                val color = if (binaryPalette != null) {
+                    if (isCurrent) binaryPalette.active else binaryPalette.inactive
+                } else if (!adaptActive) {
                     baseColor
                 } else {
                     lyricColor(
@@ -1898,7 +1907,8 @@ internal fun PlainLyrics(
      */
     adaptMode: LyricAdaptMode = LyricAdaptMode.ALL,
     /** 同 [SyncedLyrics]：平板面板传 false，把上下滑留给切歌 */
-    userScrollEnabled: Boolean = true
+    userScrollEnabled: Boolean = true,
+    binaryPalette: BinaryLyricPalette? = null
 ) {
     val skin = LocalSkin.current
 
@@ -1923,8 +1933,10 @@ internal fun PlainLyrics(
         userScrollEnabled = userScrollEnabled
     ) {
         itemsIndexed(lines) { index, line ->
-            val adaptActive = bgProfile != null && shouldAdapt(isCurrent = false, mode = adaptMode)
-            val color = if (!adaptActive) {
+            val adaptActive = binaryPalette == null && bgProfile != null && shouldAdapt(isCurrent = false, mode = adaptMode)
+            val color = if (binaryPalette != null) {
+                binaryPalette.inactive
+            } else if (!adaptActive) {
                 skin.textDim
             } else {
                 lyricColor(skin.textDim, fractions[index] ?: 0.5f, false, bgProfile!!)
@@ -2517,10 +2529,14 @@ fun CoverInlineLyrics(
     positionMs: Long,
     prefs: Prefs,
     onClick: (() -> Unit)? = null,
+    backdropColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val skin = LocalSkin.current
+    val binaryPalette = remember(backdropColor, skin) {
+        binaryLyricPaletteForBg(backdropColor ?: skin.bg)
+    }
     var result by remember(song.id) { mutableStateOf<LyricsResult?>(null) }
     var loaded by remember(song.id) { mutableStateOf(false) }
     val lyricsRev by LyricsRepository.revision.collectAsState()
@@ -2620,9 +2636,9 @@ fun CoverInlineLyrics(
                             lineHeight = 23.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = if (state.isCurrentActive) {
-                                skin.text
+                                binaryPalette.active
                             } else {
-                                skin.textMuted.copy(alpha = 0.72f)
+                                binaryPalette.inactive
                             },
                             textAlign = TextAlign.Center,
                             maxLines = 1,
@@ -2635,7 +2651,7 @@ fun CoverInlineLyrics(
                             fontSize = 14.sp,
                             lineHeight = 19.sp,
                             fontWeight = FontWeight.Normal,
-                            color = skin.textMuted.copy(alpha = 0.70f),
+                            color = binaryPalette.inactive,
                             textAlign = TextAlign.Center,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -2655,7 +2671,7 @@ fun CoverInlineLyrics(
                         fontSize = 17.sp,
                         lineHeight = 23.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = skin.text,
+                        color = binaryPalette.active,
                         textAlign = TextAlign.Center,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -2667,7 +2683,7 @@ fun CoverInlineLyrics(
                         fontSize = 14.sp,
                         lineHeight = 19.sp,
                         fontWeight = FontWeight.Normal,
-                        color = skin.textMuted.copy(alpha = 0.70f),
+                        color = binaryPalette.inactive,
                         textAlign = TextAlign.Center,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -2680,7 +2696,7 @@ fun CoverInlineLyrics(
                     text = if (loaded) "暂无歌词" else "···",
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
-                    color = skin.textMuted.copy(alpha = 0.6f),
+                    color = binaryPalette.inactive,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     modifier = Modifier.fillMaxWidth()
