@@ -659,24 +659,14 @@ private fun QuickActions(
     vm: SonanceViewModel,
     modifier: Modifier = Modifier
 ) {
-    // 设置里可整体隐藏这个模式切换图标；隐藏时所有调用点统一不渲染
+    // 设置里可整体隐藏这个随机播放图标；隐藏时所有调用点统一不渲染
     if (!vm.showPlayModeIcon) return
     val skin = LocalSkin.current
-    // 自己订阅播放状态，不从参数拿：这个按钮在好几处表头里复用，
-    // 让每个调用点都多传一个 playerState 只会增加漏传的机会
-    val st by vm.player.state.collectAsState()
-    val mode = PlayMode.of(st.shuffle, st.repeat)
     IconAction(
-        icon = when (mode) {
-            PlayMode.SHUFFLE -> SonanceIcons.Shuffle
-            PlayMode.REPEAT_ALL -> SonanceIcons.Repeat
-            PlayMode.REPEAT_ONE -> SonanceIcons.RepeatOne
-            PlayMode.SEQUENTIAL -> SonanceIcons.Sequential
-        },
-        contentDescription = "播放模式：${mode.label}",
-        onClick = { vm.cyclePlayMode(songs) },
+        icon = SonanceIcons.Shuffle,
+        contentDescription = "随机播放一首",
+        onClick = { vm.playRandomSong(songs) },
         iconSize = 20.dp,
-        // 用强调色：它显示的是**状态**而不是装饰，灰着放会被当成列表的一部分
         tint = skin.accent,
         modifier = modifier
     )
@@ -2712,7 +2702,7 @@ private fun RandomListenEntry(onClick: () -> Unit, modifier: Modifier = Modifier
             modifier = Modifier.size(15.dp)
         )
         Text(
-            text = "随便听听",
+            text = "封面墙",
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             color = skin.accent,

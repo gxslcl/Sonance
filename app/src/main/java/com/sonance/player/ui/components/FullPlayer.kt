@@ -109,6 +109,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.asImageBitmap
@@ -292,6 +293,8 @@ fun FullPlayer(
     playbackSpeed: Float = 1f,
     /** 设置播放速度 */
     onSetSpeed: (Float) -> Unit = {},
+    /** 切换 A-B 循环（未开启 → 设 A 点 → 设 B 点开启循环 → 关闭） */
+    onToggleAbLoop: () -> Unit = {},
     /** 全屏歌词页是否隐藏系统状态栏（**只作用于歌词层**） */
     lyricsHideStatusBar: Boolean = false,
     /** 全屏歌词页：改「隐藏状态栏」开关 */
@@ -364,9 +367,9 @@ fun FullPlayer(
 
     /**
      * 胶囊「词」：封面下方显示两行歌词（当前 + 下一句），不再把封面藏掉。
-     * 原来「封面位置换成歌词」的行为改由单击封面触发。
+     * 状态写入 [Prefs.coverLyricsInline]，冷启动/重建后依然保持用户的选择。
      */
-    var coverLyricsInline by rememberSaveable { mutableStateOf(false) }
+    var coverLyricsInline by remember { mutableStateOf(prefs.coverLyricsInline) }
 
     /** 双击封面打开的「晕染」面板 */
     var showGlowSheet by rememberSaveable { mutableStateOf(false) }
@@ -1489,6 +1492,9 @@ fun FullPlayer(
                         eqEnabled = eqEnabled,
                         playbackSpeed = playbackSpeed,
                         onSetSpeed = onSetSpeed,
+                        abLoopStartMs = if (songMatchesState) state.abLoopStartMs else -1L,
+                        abLoopEndMs = if (songMatchesState) state.abLoopEndMs else -1L,
+                        onToggleAbLoop = onToggleAbLoop,
                         prefs = prefs,
                         swipePager = pagerState,
                         swipePage = page,
@@ -1508,7 +1514,9 @@ fun FullPlayer(
                             if (lyricsExpanded) {
                                 lyricsExpanded = false
                             } else {
-                                coverLyricsInline = !coverLyricsInline
+                                val nextInline = !coverLyricsInline
+                                coverLyricsInline = nextInline
+                                prefs.coverLyricsInline = nextInline
                             }
                         },
                         onCoverTap = { lyricsExpanded = !lyricsExpanded },
@@ -3403,6 +3411,10 @@ private fun PlayerPage(
     playbackSpeed: Float,
     /** 设置播放速度 */
     onSetSpeed: (Float) -> Unit,
+    /** A-B 循环起点/终点（< 0 表示未设置） */
+    abLoopStartMs: Long = -1L,
+    abLoopEndMs: Long = -1L,
+    onToggleAbLoop: () -> Unit = {},
     prefs: Prefs,
     /** 上下切歌的分页器 —— 只用来在绘制层读「本页离视口中心多远」，做退场过渡 */
     swipePager: PagerState,
@@ -3665,7 +3677,17 @@ private fun PlayerPage(
                         // 上下切歌时这一组「进度 / 控制 / 音量」随页面离开而退场，
                         // 避免旧页的音量条一路升到屏幕顶端再被硬裁掉（见 [swipeExitFade]）。
                         Column(Modifier.fillMaxWidth().swipeExitFade(swipePager, swipePage)) {
-                        ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
+                        ProgressBlock(
+                            frac = frac,
+                            positionMs = positionMs,
+                            durationMs = durationMs,
+                            onSeek = onSeek,
+                            playbackSpeed = playbackSpeed,
+                            onSetSpeed = onSetSpeed,
+                            abLoopStartMs = abLoopStartMs,
+                            abLoopEndMs = abLoopEndMs,
+                            onToggleAbLoop = onToggleAbLoop
+                        )
                         Spacer(Modifier.height(16.dp))
                         TransportControls(
                             isPlaying = controlsPlaying,
@@ -3915,7 +3937,17 @@ private fun PlayerPage(
                 Spacer(Modifier.height(12.dp))
                 // 同横屏：这一组随页面离开而退场（见 [swipeExitFade]）
                 Column(Modifier.fillMaxWidth().swipeExitFade(swipePager, swipePage)) {
-                ProgressBlock(frac, positionMs, durationMs, onSeek, playbackSpeed, onSetSpeed)
+                ProgressBlock(
+                    frac = frac,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    onSeek = onSeek,
+                    playbackSpeed = playbackSpeed,
+                    onSetSpeed = onSetSpeed,
+                    abLoopStartMs = abLoopStartMs,
+                    abLoopEndMs = abLoopEndMs,
+                    onToggleAbLoop = onToggleAbLoop
+                )
                 Spacer(Modifier.height(14.dp))
                 TransportControls(
                     isPlaying = controlsPlaying,
@@ -3989,7 +4021,7 @@ private fun TrackMetaBar(
         Column(modifier = mod, horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 text = t,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                 color = skin.text,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -4276,24 +4308,59 @@ private fun ProgressBlock(
     durationMs: Long,
     onSeek: (Long) -> Unit,
     playbackSpeed: Float,
-    onSetSpeed: (Float) -> Unit
+    onSetSpeed: (Float) -> Unit,
+    abLoopStartMs: Long = -1L,
+    abLoopEndMs: Long = -1L,
+    onToggleAbLoop: () -> Unit = {}
 ) {
     val skin = LocalSkin.current
     val context = LocalContext.current
+    val abHasA = abLoopStartMs >= 0L
+    val abLooping = abHasA && abLoopEndMs > abLoopStartMs
     Column(Modifier.fillMaxWidth()) {
-        SonanceSlider(
-            value = frac,
-            onValueChange = { f -> onSeek((f * durationMs).toLong()) },
-            modifier = Modifier.fillMaxWidth(),
-            trackHeight = 4.dp,
-            thumbSize = 13.dp,
-            alwaysShowThumb = true,
-            // 与下方音量滑块同一套配色：已播放/滑块 = textDim，未播放 = surface3。
-            // 不再用 accent 渐变 —— 深色皮肤里 accent 近似黑色，和界面不协调。
-            activeColor = skin.textDim,
-            inactiveColor = skin.surface3,
-            thumbHalo = true
-        )
+        Box(Modifier.fillMaxWidth()) {
+            SonanceSlider(
+                value = frac,
+                onValueChange = { f -> onSeek((f * durationMs).toLong()) },
+                modifier = Modifier.fillMaxWidth(),
+                trackHeight = 4.dp,
+                thumbSize = 13.dp,
+                alwaysShowThumb = true,
+                // 与下方音量滑块同一套配色：已播放/滑块 = textDim，未播放 = surface3。
+                // 不再用 accent 渐变 —— 深色皮肤里 accent 近似黑色，和界面不协调。
+                activeColor = skin.textDim,
+                inactiveColor = skin.surface3,
+                thumbHalo = true
+            )
+            if (durationMs > 0L && abHasA) {
+                androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
+                    val padPx = 6.5.dp.toPx()
+                    val usableW = (size.width - padPx * 2f).coerceAtLeast(1f)
+                    val cy = size.height / 2f
+                    val tickH = 8.dp.toPx()
+                    val aFrac = (abLoopStartMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    val ax = padPx + usableW * aFrac
+                    drawLine(
+                        color = skin.accent,
+                        start = Offset(ax, cy - tickH / 2f),
+                        end = Offset(ax, cy + tickH / 2f),
+                        strokeWidth = 2.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                    if (abLooping) {
+                        val bFrac = (abLoopEndMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                        val bx = padPx + usableW * bFrac
+                        drawLine(
+                            color = skin.accent,
+                            start = Offset(bx, cy - tickH / 2f),
+                            end = Offset(bx, cy + tickH / 2f),
+                            strokeWidth = 2.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
+        }
         Box(Modifier.fillMaxWidth()) {
             Text(
                 formatDuration(positionMs),
@@ -4304,27 +4371,54 @@ private fun ProgressBlock(
                 color = skin.textMuted,
                 modifier = Modifier.align(Alignment.CenterStart)
             )
-            // 播放速度胶囊：**点一下切到下一档**（0.5× → 0.75× → 1× → … 循环），不弹菜单。
-            // 非 1.0× 时亮主题色，一眼能看出"正在快进/慢放"。
-            // 每次切换给一次短震动，闭着眼睛点也能确认"档位变了"。
-            // 用 Box(Center) + tnum 等宽数字固定水平中心，避免左侧时间跳动时导致胶囊左右抖动。
-            Text(
-                text = formatSpeed(playbackSpeed),
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = 11.sp,
-                    fontFeatureSettings = "tnum"
-                ),
-                fontWeight = FontWeight.Medium,
-                color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable {
-                        hapticTick(context)
-                        onSetSpeed(nextSpeed(playbackSpeed))
-                    }
-                    .padding(horizontal = 10.dp, vertical = 2.dp)
-            )
+            // 播放速度 + A-B 循环胶囊并排居于进度条下方中轴
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = formatSpeed(playbackSpeed),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 11.sp,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    fontWeight = FontWeight.Medium,
+                    color = if (playbackSpeed != 1f) skin.accent else skin.textMuted,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            hapticTick(context)
+                            onSetSpeed(nextSpeed(playbackSpeed))
+                        }
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+                Text(
+                    text = when {
+                        abLooping -> "A-B"
+                        abHasA -> "A→"
+                        else -> "A-B"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 11.sp,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    fontWeight = if (abHasA) FontWeight.SemiBold else FontWeight.Medium,
+                    color = if (abHasA) skin.accent else skin.textMuted,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .then(
+                            if (abHasA) {
+                                Modifier.background(skin.accent.copy(alpha = if (abLooping) 0.18f else 0.10f))
+                            } else Modifier
+                        )
+                        .clickable {
+                            hapticTick(context)
+                            onToggleAbLoop()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
             Text(
                 formatDuration(durationMs),
                 style = MaterialTheme.typography.labelSmall.copy(

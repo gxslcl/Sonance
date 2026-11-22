@@ -119,6 +119,29 @@ class LxCatalogParserTest {
         assertEquals("888", rcm[0].id)
         assertEquals(30, rcm[0].trackCount)
 
+        val qzJson = """
+            [
+              {
+                "name": "经典老歌精选",
+                "list": [
+                  {"id": "1001", "name": "80年代经典", "img": "http://img4.kuwo.cn/star/userpl2015/a.jpg", "uname": "怀旧君", "total": "50", "desc": "经典"},
+                  {"id": "1002", "name": "90年代粤语", "pic": "http://img4.kuwo.cn/star/userpl2015/b.jpg", "info": "港乐"}
+                ]
+              },
+              {
+                "name": "DJ专区",
+                "list": [
+                  {"id": "1001", "name": "80年代经典", "img": "http://img4.kuwo.cn/star/userpl2015/a.jpg"},
+                  {"id": "1003", "name": "车载DJ热歌", "img": "http://img4.kuwo.cn/star/userpl2015/c.jpg", "total": "40"}
+                ]
+              }
+            ]
+        """.trimIndent()
+        val qz = LxCatalogProvider.parseKuwoQzSheets(qzJson)!!
+        assertEquals(3, qz.size)
+        assertEquals(listOf("1001", "1002", "1003"), qz.map { it.id })
+        assertEquals(50, qz[0].trackCount)
+
         val sheetTracks = LxCatalogProvider.parseKuwoSheetTracks(boardTracksJson)!!
         assertEquals(1, sheetTracks.size)
 

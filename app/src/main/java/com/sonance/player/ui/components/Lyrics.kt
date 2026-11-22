@@ -523,6 +523,11 @@ fun LyricsOverlay(
                     swipeRightPct = prefs.miniSwipeRightPct,
                     heightScale = prefs.miniHeightScale / 100f,
                     coverScale = prefs.miniCoverScale / 100f,
+                    cornerDp = prefs.miniFloatCornerDp,
+                    topCornerDp = if (prefs.miniFloatCornerIndependent) prefs.miniFloatTopCornerDp else prefs.miniFloatCornerDp,
+                    bottomCornerDp = if (prefs.miniFloatCornerIndependent) prefs.miniFloatBottomCornerDp else prefs.miniFloatCornerDp,
+                    coverCornerDp = prefs.miniCoverCornerDp,
+                    sideMarginDp = prefs.miniFloatSideMarginDp,
                     modifier = Modifier.navigationBarsPadding().padding(top = 8.dp)
                 )
             } else {
@@ -1986,6 +1991,7 @@ fun PanelLyrics(
     positionMs: Long,
     prefs: Prefs,
     isPlaying: Boolean,
+    onSeek: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -2052,15 +2058,15 @@ fun PanelLyrics(
                 positionMs = positionMs - offsetMs,
                 isPlaying = isPlaying,
                 fontSizeSp = fontSizeSp,
-                onSeek = {},
-                userScrollEnabled = false,
-                seekEnabled = false
+                onSeek = onSeek,
+                userScrollEnabled = true,
+                seekEnabled = true
             )
 
             else -> PlainLyrics(
                 lines = (lyrics as Lyrics.Plain).lines,
                 fontSizeSp = fontSizeSp,
-                userScrollEnabled = false
+                userScrollEnabled = true
             )
         }
     }

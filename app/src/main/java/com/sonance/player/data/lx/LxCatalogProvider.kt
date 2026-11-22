@@ -194,9 +194,21 @@ object LxCatalogProvider {
                         "https://wapi.kuwo.cn/api/pc/classify/playlist/getRcmPlayList?loginUid=0&loginSid=0&appUid=76039576&pn=$safePage&rn=$limit&order=hot"
                     )?.let(::parseKuwoRcmSheets)
                 } else {
-                    httpGet(
-                        "http://wapi.kuwo.cn/api/pc/classify/playlist/getTagPlayList?loginUid=0&loginSid=0&appUid=76039576&pn=$safePage&id=${enc(tag!!.id)}&rn=$limit"
-                    )?.let(::parseKuwoRcmSheets)
+                    val activeTag = tag!!
+                    if (activeTag.digest == "43") {
+                        val qz = httpGet(
+                            "http://mobileinterfaces.kuwo.cn/er.s?type=get_pc_qz_data&f=web&id=${enc(activeTag.id)}&prod=pc"
+                        )?.let(::parseKuwoQzSheets)?.takeIf { it.isNotEmpty() }
+                        qz ?: searchKuwoSheets(activeTag.name, limit, (safePage - 1) * limit)?.sheets
+                    } else {
+                        val tagList = httpGet(
+                            "http://wapi.kuwo.cn/api/pc/classify/playlist/getTagPlayList?loginUid=0&loginSid=0&appUid=76039576&pn=$safePage&id=${enc(activeTag.id)}&rn=$limit"
+                        )?.let(::parseKuwoRcmSheets)?.takeIf { it.isNotEmpty() }
+                        tagList ?: httpGet(
+                            "http://mobileinterfaces.kuwo.cn/er.s?type=get_pc_qz_data&f=web&id=${enc(activeTag.id)}&prod=pc"
+                        )?.let(::parseKuwoQzSheets)?.takeIf { it.isNotEmpty() }
+                            ?: searchKuwoSheets(activeTag.name, limit, (safePage - 1) * limit)?.sheets
+                    }
                 }
             }
             "tx" -> {
@@ -709,6 +721,48 @@ object LxCatalogProvider {
                 trackCount = o.optString("total").toIntOrNull() ?: o.optInt("total", 0),
                 desc = decodeHtmlEntities(o.optString("desc"))
             )
+        }
+        list
+    }.getOrNull()
+
+    internal fun parseKuwoQzSheets(raw: String): List<LxSheetSummary>? = runCatching {
+        val trimmed = raw.trim()
+        val sections: JSONArray = when {
+            trimmed.startsWith("[") -> JSONArray(trimmed)
+            trimmed.startsWith("{") -> {
+                val root = JSONObject(trimmed)
+                root.optJSONArray("data")
+                    ?: root.optJSONArray("list")?.let { JSONArray().put(root) }
+                    ?: return@runCatching null
+            }
+            else -> return@runCatching null
+        }
+        val list = ArrayList<LxSheetSummary>()
+        val seenIds = HashSet<String>()
+        for (i in 0 until sections.length()) {
+            val sec = sections.optJSONObject(i) ?: continue
+            val items = sec.optJSONArray("list") ?: continue
+            for (j in 0 until items.length()) {
+                val o = items.optJSONObject(j) ?: continue
+                val id = o.optString("id")
+                    .ifBlank { o.optString("pid") }
+                    .ifBlank { o.optString("playlistid") }
+                    .trim()
+                if (id.isEmpty() || !seenIds.add(id)) continue
+                val name = decodeHtmlEntities(o.optString("name").ifBlank { o.optString("title") })
+                if (name.isBlank()) continue
+                list += LxSheetSummary(
+                    id = id,
+                    platform = "kw",
+                    name = name,
+                    coverUrl = normalizeKuwoCoverUrl(o.optString("img").ifBlank { o.optString("pic") }),
+                    creatorName = decodeHtmlEntities(o.optString("uname").ifBlank { o.optString("info") }),
+                    trackCount = o.optString("total").toIntOrNull()
+                        ?: o.optInt("total", 0).takeIf { it > 0 }
+                        ?: (o.optString("listencnt").toIntOrNull() ?: 0),
+                    desc = decodeHtmlEntities(o.optString("desc").ifBlank { o.optString("info") })
+                )
+            }
         }
         list
     }.getOrNull()

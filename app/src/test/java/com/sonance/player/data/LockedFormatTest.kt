@@ -66,8 +66,9 @@ class LockedFormatTest {
     fun `isPlainUnsupported 认出系统解码不了的格式`() {
         assertTrue(LockedFormat.isPlainUnsupported("x.ape"))
         assertTrue(LockedFormat.isPlainUnsupported("x.wma"))
-        assertTrue(LockedFormat.isPlainUnsupported("x.dsf"))
         assertTrue(LockedFormat.isPlainUnsupported("x.TAK"))
+        assertFalse(LockedFormat.isPlainUnsupported("x.dsf"))
+        assertFalse(LockedFormat.isPlainUnsupported("x.dff"))
         assertFalse(LockedFormat.isPlainUnsupported("x.mp3"))
         assertFalse(LockedFormat.isPlainUnsupported("x.flac"))
     }

@@ -245,21 +245,37 @@ private fun progressFraction(positionMs: Long, durationMs: Long): Float {
  * 仅在卡片外缘绘制柔和外投影：内区用 [ClipOp.Difference] 挖空，
  * 避免半透明玻璃卡片在正常显示或滑出淡化时透出底层硬件阴影的矩形暗区。
  */
-private fun Modifier.outerCardShadow(cornerRadius: Dp): Modifier = drawBehind {
-    val r = cornerRadius.toPx()
+private fun Modifier.outerCardShadow(
+    topCornerRadius: Dp,
+    bottomCornerRadius: Dp = topCornerRadius
+): Modifier = drawBehind {
+    val rt = topCornerRadius.toPx()
+    val rb = bottomCornerRadius.toPx()
     val cardPath = Path().apply {
-        addRoundRect(RoundRect(0f, 0f, size.width, size.height, r, r))
+        addRoundRect(
+            RoundRect(
+                left = 0f,
+                top = 0f,
+                right = size.width,
+                bottom = size.height,
+                topLeftCornerRadius = CornerRadius(rt, rt),
+                topRightCornerRadius = CornerRadius(rt, rt),
+                bottomRightCornerRadius = CornerRadius(rb, rb),
+                bottomLeftCornerRadius = CornerRadius(rb, rb)
+            )
+        )
     }
     clipPath(cardPath, ClipOp.Difference) {
         for (i in 1..4) {
             val spread = (i * 2.5f).dp.toPx()
             val yOffset = (i * 0.9f).dp.toPx()
             val alpha = 0.085f * (5 - i) / 4f
+            val rSpread = ((rt + rb) * 0.5f) + spread
             drawRoundRect(
                 color = Color.Black.copy(alpha = alpha),
                 topLeft = Offset(-spread, -spread + yOffset),
                 size = Size(size.width + spread * 2f, size.height + spread * 2f),
-                cornerRadius = CornerRadius(r + spread, r + spread)
+                cornerRadius = CornerRadius(rSpread, rSpread)
             )
         }
     }
@@ -311,7 +327,15 @@ fun MiniPlayer(
     /** 悬浮卡片距屏幕底部留白 (dp) */
     bottomDp: Int = 10,
     /** 悬浮卡片圆角 (dp) */
-    cornerDp: Int = 20,
+    cornerDp: Int = 22,
+    /** 悬浮卡片顶部圆角 (dp) */
+    topCornerDp: Int = cornerDp,
+    /** 悬浮卡片底部圆角 (dp) */
+    bottomCornerDp: Int = cornerDp,
+    /** 悬浮卡片封面圆角 (dp) */
+    coverCornerDp: Int = 10,
+    /** 悬浮卡片左右边距 (dp) */
+    sideMarginDp: Int = 16,
     /** 绘制期进度回调：传入后在绘制层直读进度，避免 500ms 触发整卡重组 */
     positionMsProvider: (() -> Long)? = null,
     /** 上滑迷你条跟手展开全屏播放页 */
@@ -343,6 +367,7 @@ fun MiniPlayer(
             posProvider = posProvider,
             fracProvider = fracProvider,
             coverScale = coverScale,
+            coverCornerDp = coverCornerDp,
             // 环形进度只给悬浮卡片（经典贴底那条通栏本来就只有线），
             // 具体显示环还是线由用户在设置里定，见 MiniProgressStyle
             progressRing = style == MiniPlayerStyle.FLOAT && progressStyle.showsRing,
@@ -412,7 +437,12 @@ fun MiniPlayer(
         }
 
         MiniPlayerStyle.FLOAT -> {
-            val shape = RoundedCornerShape(cornerDp.dp)
+            val shape = RoundedCornerShape(
+                topStart = topCornerDp.dp,
+                topEnd = topCornerDp.dp,
+                bottomStart = bottomCornerDp.dp,
+                bottomEnd = bottomCornerDp.dp
+            )
 
             // ---- 轮播式左右滑动切歌 ----
             //
@@ -447,9 +477,7 @@ fun MiniPlayer(
             // 2) clickable 不能挂在未裁圆角的外层上，否则左半边无子按钮区起滑时会触发默认矩形按压涟漪闪框。
             Box(
                 modifier = modifier
-                    // 16dp 与列表高亮框、搜索框同一条边线 —— 12dp 的时候
-                    // 三个"左右边界"是三套数，纵着看下来是歪的
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = sideMarginDp.dp)
                     .padding(bottom = bottomDp.dp)
                     .fillMaxWidth()
                     .onSizeChanged { cardW = it.width.toFloat().coerceAtLeast(1f) }
@@ -584,7 +612,7 @@ fun MiniPlayer(
                         // 整卡模式仅在静止且卡片外缘画柔和投影；滑动期间关闭外扩投影，杜绝离屏层直角底
                         // 投影的圆角必须跟卡片一致，否则调小/调大圆角后
                         // 后面还留着一圈按 20dp 画出来的暗底，看起来像两层卡片
-                        .let { m -> if (!isSlot && !isDragging) m.outerCardShadow(cornerDp.dp) else m }
+                        .let { m -> if (!isSlot && !isDragging) m.outerCardShadow(topCornerDp.dp, bottomCornerDp.dp) else m }
                         .clip(shape)
                         .background(skin.surface2.copy(alpha = cardOpacity / 100f))
                         // 内描边：玻璃板的"切割线"。**从主题文字色派生**而不是写死白色 ——
@@ -700,6 +728,8 @@ private fun RowScope.MiniPlayerBody(
     fracProvider: () -> Float,
     /** 封面大小倍数（设置里可调） */
     coverScale: Float = 1f,
+    /** 封面圆角 (dp) */
+    coverCornerDp: Int = 10,
     /** 播放键外圈套环形进度（悬浮玻璃卡片专用） */
     progressRing: Boolean = false,
     /** 在歌手行下方独立显示当前进度 / 总时长（悬浮卡片专用） */
@@ -714,7 +744,7 @@ private fun RowScope.MiniPlayerBody(
         albumId = state.albumId,
         seed = state.title + state.artist,
         modifier = Modifier.size(42.dp * coverScale),
-        cornerRadius = 7.dp * coverScale,
+        cornerRadius = coverCornerDp.dp,
         // 解码尺寸跟着放大，不然 2 倍下是拉糊的 200px
         sizePx = (200 * coverScale).toInt(),
         sourceUri = coverUri,
@@ -1075,6 +1105,7 @@ fun NowPlayingPanel(
     // 右侧是常驻预览，手机全屏播放页可能根本没打开；一旦共享，任一侧切层都会
     // 把另一侧的状态劫持走，而两边的宽度/排版又完全不同，恢复时还得追着改。
     var layer by remember { mutableIntStateOf(PANEL_LAYER_COVER) }
+    val currentLayer = rememberUpdatedState(layer)
     // 过渡方向：+1 新内容从右侧进（手指左滑），-1 从左侧进
     var slideDir by remember { mutableIntStateOf(1) }
 
@@ -1094,7 +1125,7 @@ fun NowPlayingPanel(
                     var dy = 0f
                     var aborted = false
 
-                    // 主轴判定：过 touch slop 才锁定方向；期间交给子级优先处理
+                    // 主轴判定：过 touch slop 才锁定方向；歌词页纵向滑动直接让给歌词列表滚动
                     while (axis == 0) {
                         val e = awaitPointerEvent()
                         val c = e.changes.firstOrNull { it.id == down.id }
@@ -1106,9 +1137,16 @@ fun NowPlayingPanel(
                         dx += d.x
                         dy += d.y
                         if (abs(dx) > slop || abs(dy) > slop) {
-                            axis = if (abs(dx) > abs(dy)) 1 else 2
-                            // 和原实现一致：阈值只算过 slop 之后的位移
-                            if (axis == 1) dx = 0f else dy = 0f
+                            if (abs(dx) > abs(dy)) {
+                                axis = 1
+                                dx = 0f
+                            } else if (currentLayer.value == PANEL_LAYER_LYRICS) {
+                                aborted = true
+                                break
+                            } else {
+                                axis = 2
+                                dy = 0f
+                            }
                         }
                     }
 
@@ -1207,6 +1245,7 @@ fun NowPlayingPanel(
                         positionMs = posProvider(),
                         prefs = prefs,
                         isPlaying = state.isPlaying,
+                        onSeek = onSeek,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {

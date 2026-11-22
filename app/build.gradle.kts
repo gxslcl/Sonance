@@ -15,9 +15,12 @@ android {
         applicationId = "com.sonance.player"
         minSdk = 24
         targetSdk = 35
-        versionCode = 17
-        versionName = "2.5.5"
+        versionCode = 18
+        versionName = "2.5.6"
         resourceConfigurations += listOf("zh", "en")
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     testOptions {
@@ -122,6 +125,7 @@ dependencies {
 
     implementation("androidx.media3:media3-exoplayer:1.5.0")
     implementation("androidx.media3:media3-session:1.5.0")
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
 
     // Shizuku：以 shell（uid 2000）身份读 Android/data 下的 B 站缓存目录。
     // Android 11+ 起普通应用（含 SAF、所有文件访问权限）都进不去那个目录，

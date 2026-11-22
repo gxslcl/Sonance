@@ -2815,8 +2815,59 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     fun changeMiniFloatCornerDp(value: Int) {
-        miniFloatCornerDp = value.coerceIn(0, 36)
+        miniFloatCornerDp = value.coerceIn(0, 40)
         prefs.miniFloatCornerDp = miniFloatCornerDp
+    }
+
+    /** 悬浮卡片是否启用上下圆角独立调节 */
+    var miniFloatCornerIndependent by mutableStateOf(prefs.miniFloatCornerIndependent)
+        private set
+
+    fun changeMiniFloatCornerIndependent(enabled: Boolean) {
+        if (enabled && !miniFloatCornerIndependent) {
+            miniFloatTopCornerDp = miniFloatCornerDp
+            miniFloatBottomCornerDp = miniFloatCornerDp
+            prefs.miniFloatTopCornerDp = miniFloatTopCornerDp
+            prefs.miniFloatBottomCornerDp = miniFloatBottomCornerDp
+        }
+        miniFloatCornerIndependent = enabled
+        prefs.miniFloatCornerIndependent = enabled
+    }
+
+    /** 悬浮卡片顶部圆角 (dp) */
+    var miniFloatTopCornerDp by mutableIntStateOf(prefs.miniFloatTopCornerDp)
+        private set
+
+    fun changeMiniFloatTopCornerDp(value: Int) {
+        miniFloatTopCornerDp = value.coerceIn(0, 40)
+        prefs.miniFloatTopCornerDp = miniFloatTopCornerDp
+    }
+
+    /** 悬浮卡片底部圆角 (dp) */
+    var miniFloatBottomCornerDp by mutableIntStateOf(prefs.miniFloatBottomCornerDp)
+        private set
+
+    fun changeMiniFloatBottomCornerDp(value: Int) {
+        miniFloatBottomCornerDp = value.coerceIn(0, 40)
+        prefs.miniFloatBottomCornerDp = miniFloatBottomCornerDp
+    }
+
+    /** 悬浮卡片内封面圆角 (dp) */
+    var miniCoverCornerDp by mutableIntStateOf(prefs.miniCoverCornerDp)
+        private set
+
+    fun changeMiniCoverCornerDp(value: Int) {
+        miniCoverCornerDp = value.coerceIn(0, 28)
+        prefs.miniCoverCornerDp = miniCoverCornerDp
+    }
+
+    /** 悬浮卡片左右边距 (dp) */
+    var miniFloatSideMarginDp by mutableIntStateOf(prefs.miniFloatSideMarginDp)
+        private set
+
+    fun changeMiniFloatSideMarginDp(value: Int) {
+        miniFloatSideMarginDp = value.coerceIn(4, 28)
+        prefs.miniFloatSideMarginDp = miniFloatSideMarginDp
     }
 
     /**
@@ -6039,11 +6090,29 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             lxRepo.rememberSongHint(song)
-        val url = src.resolveStream(rid, song.durationMs) ?: run {
-                // 轮到它还是取不到：给出具体原因，别让播放器报「找不到文件」
-                src.lastStreamError(rid)?.let { showToast(it) }
+            val url = src.resolveStream(rid, song.durationMs) ?: run {
+                val baseErr = src.lastStreamError(rid) ?: "「${song.title}」无法获取播放地址"
+                val queueSize = player.state.value.queueIds.size
+                onlineConsecutiveFailures++
+                val shouldSkip = player.state.value.mediaId == song.id &&
+                    queueSize > 1 &&
+                    onlineConsecutiveFailures < minOf(queueSize, 5)
+                showToast(if (shouldSkip) "$baseErr，3 秒后自动播放下一曲" else baseErr)
+                if (shouldSkip) {
+                    onlineAutoSkipJob?.cancel()
+                    onlineAutoSkipJob = viewModelScope.launch {
+                        kotlinx.coroutines.delay(3_000L)
+                        onlineAutoSkipJob = null
+                        if (player.state.value.mediaId == song.id) {
+                            dispatchNext(allowRandomFallback = true)
+                        }
+                    }
+                }
                 return@launch
             }
+            onlineConsecutiveFailures = 0
+            onlineAutoSkipJob?.cancel()
+            onlineAutoSkipJob = null
             if (player.state.value.mediaId == song.id) {
                 nowPlayingQuality = src.streamQualityLabel(rid)
             }
@@ -6052,6 +6121,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             player.patchQueueUri(song.id, resolvedUri)
         }
     }
+
+    private var onlineAutoSkipJob: Job? = null
+    private var onlineConsecutiveFailures = 0
 
     /**
      * 切到队列中某首在线歌时，提前把紧随其后的若干首真实流地址解析并写入 ExoPlayer，
@@ -8151,6 +8223,22 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     /** 最近随机到的专辑 key，窗口与封面墙一致（20），避免反复撞同一张 */
     private val randomRecentKeys = ArrayDeque<String>()
 
+    fun toggleAbLoop() {
+        showToast(player.toggleAbLoop())
+    }
+
+    fun playRandomSong(songsList: List<Song> = emptyList()) {
+        val pool = songsList.ifEmpty { visibleSongs() }
+        if (pool.isEmpty()) {
+            showToast("当前列表没有可播放的歌曲")
+            return
+        }
+        val currentId = player.state.value.mediaId
+        val candidates = if (pool.size > 1) pool.filter { it.id != currentId }.ifEmpty { pool } else pool
+        val picked = candidates.randomOrNull() ?: return
+        playOrdered(pool, picked)
+    }
+
     fun nextOrRandom() {
         if (player.state.value.queueIds.size <= 1) randomListenLikeWall() else player.next()
     }
@@ -8509,6 +8597,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dispatchPlayAt(index: Int, fadeMs: Long = 0L, toggleIfCurrent: Boolean = true) {
+        onlineAutoSkipJob?.cancel()
+        onlineAutoSkipJob = null
+        onlineConsecutiveFailures = 0
         if (dlnaActiveRenderer != null &&
             toggleIfCurrent &&
             index == player.state.value.queueIndex
@@ -8520,6 +8611,8 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dispatchNext(allowRandomFallback: Boolean = false) {
+        onlineAutoSkipJob?.cancel()
+        onlineAutoSkipJob = null
         if (!isCoverWallOpen && player.state.value.queueIds.size <= 1 && songs.size > 1) {
             switchSongWhenSingleQueue(isNext = true)
             return
@@ -8528,6 +8621,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dispatchPrevious(allowRandomFallback: Boolean = false) {
+        onlineAutoSkipJob?.cancel()
+        onlineAutoSkipJob = null
+        onlineConsecutiveFailures = 0
         if (!isCoverWallOpen && player.state.value.queueIds.size <= 1 && songs.size > 1) {
             switchSongWhenSingleQueue(isNext = false)
             return
@@ -8792,12 +8888,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         player.onShuffleRoundWrapped = { reshuffleQueueKeepingCurrent() }
+        player.onAutoSkipNext = { dispatchNext(allowRandomFallback = true) }
         player.onSongStarted = { id ->
             // 快速连滑切歌时，只保留最后落定的一首歌做 Toast、最近播放记账、队列持久化、
             // 通知栏封面替换与锁屏歌词读取；中间划过的曲目 360ms 内即被取消，避免连串 SP/IPC 抢占主线程。
             songStartedJob?.cancel()
             songStartedJob = viewModelScope.launch {
                 delay(750)
+                onlineConsecutiveFailures = 0
                 val startedSong = songById(id)
                 val isDlnaTrack = startedSong?.isDlna == true
                 // 播放提示：切歌/起播时告诉用户正在放哪首（设置里可关，默认开）。

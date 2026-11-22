@@ -42,6 +42,9 @@ import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.Extractor
+import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
@@ -174,6 +177,11 @@ class PlaybackService : MediaLibraryService() {
             .setAudioProcessors(arrayOf<AudioProcessor>(karaoke, fx, tap))
             .build()
 
+        val defaultExtractors = DefaultExtractorsFactory()
+        val extractorsFactory = ExtractorsFactory {
+            arrayOf<Extractor>(DsdExtractor()) + defaultExtractors.createExtractors()
+        }
+
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -185,7 +193,7 @@ class PlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setRenderersFactory(TapRenderersFactory(this, audioSink))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource()))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource(), extractorsFactory))
             .build()
 
         syncDspAndPlayerModesIfCold(player)
@@ -1999,6 +2007,11 @@ private class TapRenderersFactory(
     context: Context,
     private val audioSink: AudioSink
 ) : DefaultRenderersFactory(context) {
+
+    init {
+        // 优先系统硬解，遇到系统不支持的无损/多声道格式（ALAC/FLAC/TrueHD/MLP/DTS 等）自动回落内置 FFmpeg 软解
+        setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
+    }
 
     override fun buildAudioSink(
         context: Context,

@@ -42,22 +42,22 @@ object LockedFormat {
         "x3m" to "QQ 音乐",
     )
 
-    /** 平台原生解码器支持的格式（ExoPlayer / MediaCodec） */
+    /** 平台原生与内置无损扩展解码器支持的格式（ExoPlayer / MediaCodec / FFmpeg / DSD） */
     val supportedExtensions: List<String> = listOf(
-        "mp3", "m4a", "m4b", "aac", "flac", "ogg", "oga", "opus",
-        "wav", "amr", "3gp", "mp4", "mka", "weba"
+        "mp3", "m4a", "m4b", "aac", "flac", "alac", "dsf", "dff", "ogg", "oga", "opus",
+        "wav", "dts", "ac3", "eac3", "mlp", "truehd", "amr", "3gp", "mp4", "mka", "weba"
     )
 
     /** 兜底扫描（MediaStore.Files / 磁盘直扫）使用的纯音频扩展名，排除 mp4/3gp 等常见视频容器 */
     val strictAudioExtensions: Set<String> = setOf(
         "mp3", "m4a", "m4b", "aac", "flac", "ogg", "oga", "opus",
-        "wav", "amr", "mka", "weba",
-        "alac", "ac3", "eac3", "ec3", "dts", "mp1", "mp2", "adts", "spx", "caf", "awb"
+        "wav", "mka", "weba", "dsf", "dff",
+        "alac", "ac3", "eac3", "ec3", "dts", "mlp", "truehd", "mp1", "mp2", "adts", "spx", "caf", "awb", "amr"
     )
 
-    /** 没有加密、但系统解码器不认识的格式 */
+    /** 没有加密、但当前解码器尚未涵盖的格式 */
     val plainUnsupportedExtensions: List<String> = listOf(
-        "ape", "wma", "dsf", "dff", "aiff", "aif", "tak", "wv", "tta", "mpc", "ra", "mid", "midi"
+        "ape", "wma", "aiff", "aif", "tak", "wv", "tta", "mpc", "ra", "mid", "midi"
     )
 
     fun extensionOf(fileName: String): String =

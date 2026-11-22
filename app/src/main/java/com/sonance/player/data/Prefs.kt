@@ -323,10 +323,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_SHOW_ONLINE_ICON, true)
         set(v) = sp.edit().putBoolean(KEY_SHOW_ONLINE_ICON, v).apply()
 
-    /** 列表筛选行「随便听听」右边的播放模式切换图标是否显示（默认开）。显示时全部页签都保留。 */
+    /** 列表筛选行「封面墙」右边的随机播放图标是否显示（默认开）。 */
     var showPlayModeIcon: Boolean
         get() = sp.getBoolean(KEY_SHOW_PLAY_MODE_ICON, true)
         set(v) = sp.edit().putBoolean(KEY_SHOW_PLAY_MODE_ICON, v).apply()
+
+    /** 播放主界面封面下方双行歌词是否开启（持久化保存，打开即保持打开，关闭即保持关闭） */
+    var coverLyricsInline: Boolean
+        get() = sp.getBoolean(KEY_COVER_LYRICS_INLINE, false)
+        set(v) = sp.edit().putBoolean(KEY_COVER_LYRICS_INLINE, v).apply()
 
     var lastSongId: Long
         get() = sp.getLong(KEY_LAST_SONG, -1L)
@@ -826,10 +831,35 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_MINI_FLOAT_BOTTOM_DP, 10).coerceIn(0, 48)
         set(v) = sp.edit().putInt(KEY_MINI_FLOAT_BOTTOM_DP, v.coerceIn(0, 48)).apply()
 
-    /** 悬浮卡片圆角 (dp)，默认 20 */
+    /** 悬浮卡片圆角 (dp)，默认 22 */
     var miniFloatCornerDp: Int
-        get() = sp.getInt(KEY_MINI_FLOAT_CORNER_DP, 20).coerceIn(0, 36)
-        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_CORNER_DP, v.coerceIn(0, 36)).apply()
+        get() = sp.getInt(KEY_MINI_FLOAT_CORNER_DP, 22).coerceIn(0, 40)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_CORNER_DP, v.coerceIn(0, 40)).apply()
+
+    /** 悬浮卡片是否开启上下圆角独立调节 */
+    var miniFloatCornerIndependent: Boolean
+        get() = sp.getBoolean(KEY_MINI_FLOAT_CORNER_INDEPENDENT, false)
+        set(v) = sp.edit().putBoolean(KEY_MINI_FLOAT_CORNER_INDEPENDENT, v).apply()
+
+    /** 悬浮卡片顶部圆角 (dp)，开启独立调节时生效 */
+    var miniFloatTopCornerDp: Int
+        get() = sp.getInt(KEY_MINI_FLOAT_TOP_CORNER_DP, miniFloatCornerDp).coerceIn(0, 40)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_TOP_CORNER_DP, v.coerceIn(0, 40)).apply()
+
+    /** 悬浮卡片底部圆角 (dp)，开启独立调节时生效 */
+    var miniFloatBottomCornerDp: Int
+        get() = sp.getInt(KEY_MINI_FLOAT_BOTTOM_CORNER_DP, miniFloatCornerDp).coerceIn(0, 40)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_BOTTOM_CORNER_DP, v.coerceIn(0, 40)).apply()
+
+    /** 悬浮卡片内封面圆角 (dp)，默认 10 */
+    var miniCoverCornerDp: Int
+        get() = sp.getInt(KEY_MINI_COVER_CORNER_DP, 10).coerceIn(0, 28)
+        set(v) = sp.edit().putInt(KEY_MINI_COVER_CORNER_DP, v.coerceIn(0, 28)).apply()
+
+    /** 悬浮卡片左右边距 (dp)，默认 12 */
+    var miniFloatSideMarginDp: Int
+        get() = sp.getInt(KEY_MINI_FLOAT_SIDE_MARGIN_DP, 12).coerceIn(4, 28)
+        set(v) = sp.edit().putInt(KEY_MINI_FLOAT_SIDE_MARGIN_DP, v.coerceIn(4, 28)).apply()
 
     /**
      * 悬浮卡片上的进度怎么显示：[MiniProgressStyle] 的 ordinal。
@@ -1927,6 +1957,12 @@ class Prefs(context: Context) {
         private const val KEY_DESKTOP_LYRICS_TEXT_COLOR = "desktop_lyrics_text_color"
         private const val KEY_MINI_FLOAT_BOTTOM_DP = "mini_float_bottom_dp"
         private const val KEY_MINI_FLOAT_CORNER_DP = "mini_float_corner_dp"
+        private const val KEY_MINI_FLOAT_CORNER_INDEPENDENT = "mini_float_corner_independent"
+        private const val KEY_MINI_FLOAT_TOP_CORNER_DP = "mini_float_top_corner_dp"
+        private const val KEY_MINI_FLOAT_BOTTOM_CORNER_DP = "mini_float_bottom_corner_dp"
+        private const val KEY_MINI_COVER_CORNER_DP = "mini_cover_corner_dp"
+        private const val KEY_MINI_FLOAT_SIDE_MARGIN_DP = "mini_float_side_margin_dp"
+        private const val KEY_COVER_LYRICS_INLINE = "cover_lyrics_inline"
         private const val KEY_MINI_SWIPE_LEFT = "mini_swipe_left_pct"
         private const val KEY_MINI_SWIPE_RIGHT = "mini_swipe_right_pct"
         private const val KEY_MINI_HEIGHT = "mini_height_scale"

@@ -104,6 +104,8 @@ data class PlayerUiState(
     val userVolume: Float = 1f,
     val queueIds: List<Long> = emptyList(),
     val queueIndex: Int = -1,
+    val abLoopStartMs: Long = -1L,
+    val abLoopEndMs: Long = -1L,
     /** 最近一次播放失败的原因（已翻译成中文），由 UI 取走后清空 */
     val errorMessage: String? = null
 ) {
@@ -123,6 +125,12 @@ class PlayerController(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var controller: MediaController? = null
     private var ticker: Job? = null
+    private var abTicker: Job? = null
+    private var autoSkipJob: Job? = null
+    private var consecutiveErrors = 0
+    private var abLoopStartMs: Long = -1L
+    private var abLoopEndMs: Long = -1L
+    private var abLoopMediaId: Long = -1L
     private var uiVisible: Boolean = true
 
     private val _state = MutableStateFlow(PlayerUiState())
@@ -130,6 +138,9 @@ class PlayerController(private val context: Context) {
 
     /** 歌曲真正开始播放时回调（用于记录最近播放） */
     var onSongStarted: ((Long) -> Unit)? = null
+
+    /** 播放报错 3 秒后自动切下一曲回调 */
+    var onAutoSkipNext: (() -> Unit)? = null
 
     /**
      * 自然播放结束（STATE_ENDED）时回调。
@@ -251,14 +262,28 @@ class PlayerController(private val context: Context) {
                         ?.takeIf { it.isNotBlank() } ?: _state.value.title
                     val failedUri = controller?.currentMediaItem?.localConfiguration?.uri?.toString()
                         ?: _state.value.sourceUri
-                    val message = describeError(error, failedTitle)
+                    val baseMessage = describeError(error, failedTitle)
                     android.util.Log.e(
                         "Sonance",
                         "播放失败 code=${error.errorCode} name=${error.errorCodeName} " +
-                            "item=$failedTitle uri=$failedUri msg=$message",
+                            "item=$failedTitle uri=$failedUri msg=$baseMessage",
                         error
                     )
-                    _state.update { it.copy(errorMessage = message, isPlaying = false, playWhenReady = false) }
+                    val queueSize = controller?.mediaItemCount ?: _state.value.queueIds.size
+                    consecutiveErrors++
+                    val shouldAutoSkip = queueSize > 1 && consecutiveErrors < minOf(queueSize, 5)
+                    val displayMessage = if (shouldAutoSkip) "$baseMessage，3 秒后自动播放下一曲" else baseMessage
+                    _state.update { it.copy(errorMessage = displayMessage, isPlaying = false, playWhenReady = false) }
+                    autoSkipJob?.cancel()
+                    if (shouldAutoSkip) {
+                        autoSkipJob = scope.launch {
+                            delay(3_000L)
+                            autoSkipJob = null
+                            onAutoSkipNext?.invoke() ?: nextInternal(resetFailures = false)
+                        }
+                    } else {
+                        autoSkipJob = null
+                    }
                 }
             })
             _state.update { it.copy(connected = true) }
@@ -345,6 +370,17 @@ class PlayerController(private val context: Context) {
         lastSyncIndex = resolvedIndex
         lastSyncCount = pendingReorder?.first?.size ?: player.mediaItemCount
 
+        if (id != abLoopMediaId) {
+            abLoopStartMs = -1L
+            abLoopEndMs = -1L
+            abLoopMediaId = id
+        }
+        if (player.playbackState == Player.STATE_READY && player.isPlaying) {
+            consecutiveErrors = 0
+            autoSkipJob?.cancel()
+            autoSkipJob = null
+        }
+
         _state.update { old ->
             old.copy(
                 connected = true,
@@ -363,12 +399,15 @@ class PlayerController(private val context: Context) {
                 shuffle = shuffleState,
                 repeat = resolveSyncRepeat(player),
                 volume = player.volume,
-                queueIndex = resolvedIndex
+                queueIndex = resolvedIndex,
+                abLoopStartMs = abLoopStartMs,
+                abLoopEndMs = abLoopEndMs
             )
         }
 
         if (queueChanged) refreshQueue(player, pendingReorder)
         updateTickerState()
+        updateAbTickerState()
 
         // ⚠️ 判据是 `id != 0L`，**不能写 `id > 0`** ——
         // 在线歌的 mediaId 是负数（见 `data/remoteSongId`），写成 `> 0` 的话
@@ -733,6 +772,7 @@ class PlayerController(private val context: Context) {
         notifyStart: Boolean = true,
         isRestore: Boolean = false
     ) {
+        cancelAutoSkip(resetFailures = true)
         val req = PlayRequest(songs, index, autoplay, startPositionMs, notifyStart, isRestore)
         val c = controller
         if (c == null) {
@@ -750,6 +790,7 @@ class PlayerController(private val context: Context) {
     var blockAutoplayForCast: Boolean = false
 
     fun pause() {
+        cancelAutoSkip(resetFailures = true)
         cancelPendingSwitchFade()
         controller?.pause()
     }
@@ -850,9 +891,77 @@ class PlayerController(private val context: Context) {
 
     fun togglePlay() {
         val c = controller ?: return
+        cancelAutoSkip(resetFailures = true)
         cancelPendingSwitchFade()
         // 与桌面小组件共用同一套判定（见 PlaybackCommands）
         PlaybackCommands.execute(c, PlaybackCommands.PLAY_PAUSE)
+    }
+
+    fun cancelAutoSkip(resetFailures: Boolean = true) {
+        autoSkipJob?.cancel()
+        autoSkipJob = null
+        if (resetFailures) consecutiveErrors = 0
+    }
+
+    fun toggleAbLoop(): String {
+        val c = controller ?: return "尚未连接播放器"
+        val curId = _state.value.mediaId
+        val curPos = c.currentPosition.coerceAtLeast(0L)
+        val dur = if (c.duration > 0) c.duration else _state.value.durationMs
+        if (abLoopStartMs < 0L) {
+            abLoopStartMs = curPos
+            abLoopEndMs = -1L
+            abLoopMediaId = curId
+            _state.update { it.copy(abLoopStartMs = abLoopStartMs, abLoopEndMs = -1L) }
+            updateAbTickerState()
+            return "已设 A 点 ${com.sonance.player.data.formatDuration(abLoopStartMs)}"
+        }
+        if (abLoopEndMs < 0L) {
+            val rawEnd = maxOf(curPos, abLoopStartMs + 1_000L)
+            val end = if (dur > 0L) rawEnd.coerceAtMost(dur) else rawEnd
+            abLoopEndMs = end
+            abLoopMediaId = curId
+            c.seekTo(abLoopStartMs)
+            _state.update {
+                it.copy(
+                    positionMs = abLoopStartMs,
+                    abLoopStartMs = abLoopStartMs,
+                    abLoopEndMs = abLoopEndMs
+                )
+            }
+            updateAbTickerState()
+            return "已开启 A-B 循环 ${com.sonance.player.data.formatDuration(abLoopStartMs)} - ${com.sonance.player.data.formatDuration(end)}"
+        }
+        abLoopStartMs = -1L
+        abLoopEndMs = -1L
+        _state.update { it.copy(abLoopStartMs = -1L, abLoopEndMs = -1L) }
+        updateAbTickerState()
+        return "已关闭 A-B 循环"
+    }
+
+    private fun updateAbTickerState() {
+        val shouldRun = abLoopStartMs >= 0L && abLoopEndMs > abLoopStartMs && (controller?.isPlaying == true)
+        if (!shouldRun) {
+            abTicker?.cancel()
+            abTicker = null
+            return
+        }
+        if (abTicker?.isActive == true) return
+        abTicker = scope.launch {
+            try {
+                while (isActive) {
+                    val c = controller ?: break
+                    if (!c.isPlaying || abLoopStartMs < 0L || abLoopEndMs <= abLoopStartMs) break
+                    if (c.currentPosition >= abLoopEndMs) {
+                        c.seekTo(abLoopStartMs)
+                        _state.update { it.copy(positionMs = abLoopStartMs) }
+                    }
+                    delay(150L)
+                }
+            } finally {
+                abTicker = null
+            }
+        }
     }
 
     /** 兜底切歌音量淡出协程（服务尚未建立进程内引用时使用）；正常路径由 TransitionEffects 托管 */
@@ -882,6 +991,7 @@ class PlayerController(private val context: Context) {
     fun playAt(index: Int, fadeMs: Long = 0L, toggleIfCurrent: Boolean = true) {
         val c = controller ?: return
         if (index !in 0 until c.mediaItemCount) return
+        cancelAutoSkip(resetFailures = true)
         if (index == c.currentMediaItemIndex) {
             cancelPendingSwitchFade()
             if (blockAutoplayForCast) {
@@ -949,7 +1059,12 @@ class PlayerController(private val context: Context) {
      * 行为一致：永远往后走一首，最后一首回到第一首，不存在"切不动"的尽头。
      */
     fun next() {
+        nextInternal(resetFailures = true)
+    }
+
+    private fun nextInternal(resetFailures: Boolean) {
         val c = controller ?: return
+        cancelAutoSkip(resetFailures = resetFailures)
         cancelPendingSwitchFade()
         lastNotifiedId = -1L
         if (blockAutoplayForCast && c.mediaItemCount > 0) {
@@ -963,6 +1078,7 @@ class PlayerController(private val context: Context) {
 
     fun previous() {
         val c = controller ?: return
+        cancelAutoSkip(resetFailures = true)
         cancelPendingSwitchFade()
         lastNotifiedId = -1L
         if (blockAutoplayForCast && c.mediaItemCount > 0) {
@@ -989,6 +1105,7 @@ class PlayerController(private val context: Context) {
 
     fun seekTo(ms: Long) {
         val c = controller ?: return
+        cancelAutoSkip(resetFailures = true)
         c.seekTo(ms.coerceAtLeast(0L))
         _state.update { it.copy(positionMs = ms.coerceAtLeast(0L)) }
     }

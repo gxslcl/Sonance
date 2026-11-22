@@ -154,11 +154,12 @@ private enum class SettingsCategory(
     val subtitle: String,
     val icon: ImageVector
 ) {
-    APPEARANCE("外观界面", "外观", "主题皮肤、背景玻璃、列表播放条与桌面组件", SonanceIcons.Palette),
-    PLAYBACK("播放音效", "音效", "均衡器、音频输出、通知播控与播放外观", SonanceIcons.Equalizer),
-    LYRICS_COVER("歌词封面", "歌词", "歌词样式、锁屏歌词、在线歌词与封面补全", SonanceIcons.Lyrics),
-    LIBRARY_ONLINE("曲库在线", "曲库", "本地扫描、在线音源、曲库清理与格式检查", SonanceIcons.Folder),
-    ABOUT("关于支持", "关于", "版本信息、基线导出与支持作者", SonanceIcons.Info)
+    APPEARANCE("主题外观", "外观", "皮肤色板、主界面背景、流体动效、列表与顶栏", SonanceIcons.Palette),
+    PLAYER_UI("播放界面", "播放页", "全屏播放视觉、黑胶唱盘、播放按钮与迷你播放条", SonanceIcons.Album),
+    AUDIO_PLAYBACK("音频与播控", "音频", "均衡器、USB 独占、无缝淡化、定时手势与投屏", SonanceIcons.Equalizer),
+    LYRICS_COVER("歌词与封面", "歌词", "歌词样式、桌面锁屏歌词、在线歌词与封面补全", SonanceIcons.Lyrics),
+    LIBRARY_ONLINE("曲库与在线", "曲库", "本地扫描、去重清理、在线音源与格式检查", SonanceIcons.Folder),
+    SYSTEM_ABOUT("系统与关于", "系统", "通知灵动岛、桌面图标小组件、备份与关于", SonanceIcons.Info)
 }
 
 /**
@@ -209,6 +210,7 @@ private data class SettingsModule(
 }
 
 private val SETTINGS_MODULES = listOf(
+    // ---- 一、主题外观 ----
     SettingsModule("skin", SettingsCategory.APPEARANCE, "外观皮肤",
         "皮肤 主题 换肤 色板 跟随系统 深浅色 深色模式 浅色模式 亮色 暗色 自动切换 系统浅色 系统深色 " +
             "沉浸 沉浸式 封面铺底 透出 宣纸玻璃 浅色沉浸 玻璃主题 " +
@@ -221,31 +223,35 @@ private val SETTINGS_MODULES = listOf(
     SettingsModule("list", SettingsCategory.APPEARANCE, "列表外观与索引",
         "列表外观 行样式 封面尺寸 显示序号 显示时长 最近页听歌概览卡 听歌概览 概览卡 字母索引 右侧索引 " +
             "滚动条震动 紧凑 卡片 列表"),
-    SettingsModule("topBar", SettingsCategory.APPEARANCE, "顶栏与启动",
+    SettingsModule("topBar", SettingsCategory.APPEARANCE, "顶栏与导航",
         "顶栏 左上角 右上角 应用名称 改名 名称 logo 图标 无 隐藏名称 隐藏图标 三个图标 三点菜单 竖向三点 " +
-            "视图图标 在线图标 设置图标 启动 打开应用 直接进入播放 播放界面 冷启动 默认播放页"),
-    SettingsModule("mini", SettingsCategory.APPEARANCE, "底部播放条",
-        "底部播放条 迷你播放条 播放条 悬浮 贴底 液态玻璃 纯色 极简 进度 圆环进度 长条进度 环形 数字时间进度 " +
-            "显示时间 高度 封面大小 离底部 圆角 左滑 右滑 滑动切歌 整卡滑动 槽内滑动 不透明度 音量"),
+            "视图图标 在线图标 设置图标 随机播放图标 封面墙"),
     SettingsModule("iconSet", SettingsCategory.APPEARANCE, "应用内图标风格",
         "应用内图标 图标风格 图标 圆润 线性 填充 双色 图标家族"),
-    SettingsModule("appIcon", SettingsCategory.APPEARANCE, "桌面应用图标",
-        "桌面应用图标 桌面图标 启动器 图标款式 更换图标"),
-    SettingsModule("widget", SettingsCategory.APPEARANCE, "桌面小组件",
-        "桌面小组件 小组件 组件 尺寸 固定配色 封面 歌曲信息 两排"),
-    SettingsModule("play", SettingsCategory.PLAYBACK, "均衡器与睡眠定时",
-        "均衡器 EQ 音效工作室 音效 杜比 系统音效接入 系统音效控制面板 本机音效 睡眠定时 定时器 播完当前 定时停止"),
-    SettingsModule("output", SettingsCategory.PLAYBACK, "USB 独占 · 无缝 · 淡入淡出",
-        "USB独占 USB 独占输出 bit-perfect DAC 采样率 输出格式 实时输出 无缝播放 淡入淡出 淡化时长 播放提示 " +
-            "摇一摇切歌 摇一摇 息屏摇一摇 防口袋误触 DLNA D-LAN 无线投屏 投屏 共享 蓝牙"),
-    SettingsModule("system", SettingsCategory.PLAYBACK, "通知、播控与灵动岛",
-        "通知 锁屏 灵动岛 胶囊 歌词上岛 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知 播控"),
-    SettingsModule("control", SettingsCategory.PLAYBACK, "播放按钮与触感",
-        "播放按钮 形状 颜色 图标样式 图标大小 光晕 震动反馈 触感 随机 续播 队列 单曲循环 列表循环 播放模式"),
-    SettingsModule("visual", SettingsCategory.PLAYBACK, "播放页视觉与黑胶",
+
+    // ---- 二、播放界面 ----
+    SettingsModule("visual", SettingsCategory.PLAYER_UI, "播放页视觉与黑胶",
         "播放页视觉 封面颜色晕染 晕染 晕染强度 浓度 方向 换歌晕染过渡 渐变时长 黑碟播放器 黑胶模式 黑胶机械音效 " +
             "机械音效 炒豆 音效音量 Hi-Res 小金标 金标 金标大小 隐藏音量条 音量条 视觉"),
-    SettingsModule("lyric", SettingsCategory.LYRICS_COVER, "歌词显示与外观",
+    SettingsModule("control", SettingsCategory.PLAYER_UI, "播放按钮与触感",
+        "播放按钮 形状 颜色 图标样式 图标大小 光晕 震动反馈 触感 随机 续播 队列 单曲循环 列表循环 播放模式"),
+    SettingsModule("mini", SettingsCategory.PLAYER_UI, "底部迷你播放条",
+        "底部播放条 迷你播放条 播放条 悬浮 贴底 液态玻璃 纯色 极简 进度 圆环进度 长条进度 环形 数字时间进度 " +
+            "显示时间 高度 封面大小 离底部 圆角 顶部圆角 底部圆角 封面圆角 左右边距 独立圆角 左滑 右滑 滑动切歌 整卡滑动 槽内滑动 不透明度 音量"),
+
+    // ---- 三、音频与播控 ----
+    SettingsModule("eq", SettingsCategory.AUDIO_PLAYBACK, "均衡器与系统音效",
+        "均衡器 EQ 音效工作室 音效 杜比 系统音效接入 系统音效控制面板 本机音效"),
+    SettingsModule("output", SettingsCategory.AUDIO_PLAYBACK, "音频输出与衔接",
+        "USB独占 USB 独占输出 bit-perfect DAC 采样率 输出格式 实时输出 无缝播放 淡入淡出 淡化时长 播放提示"),
+    SettingsModule("behavior", SettingsCategory.AUDIO_PLAYBACK, "启动、定时与手势",
+        "启动 打开应用 直接进入播放 播放界面 冷启动 默认播放页 睡眠定时 定时器 播完当前 定时停止 " +
+            "摇一摇切歌 摇一摇 息屏摇一摇 防口袋误触"),
+    SettingsModule("dlna", SettingsCategory.AUDIO_PLAYBACK, "D-LAN 无线投屏与共享",
+        "DLNA D-LAN 无线投屏 投屏 共享 蓝牙 NAS 局域网 音箱 电视"),
+
+    // ---- 四、歌词与封面 ----
+    SettingsModule("lyric", SettingsCategory.LYRICS_COVER, "歌词显示与桌面/锁屏",
         "歌词 歌词字号 字号 字体 字体大小 歌词颜色 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 蓝牙车载歌词 车载 " +
             "状态栏歌词扩展 HyperLyric LyricGetter 歌词获取器 桌面歌词 悬浮歌词 桌面歌词背景 桌面歌词字号 " +
             "歌词页播放器 播放器样式 歌词适配背景 背景玻璃 文字可读性 对比度 歌词页背景玻璃"),
@@ -253,23 +259,33 @@ private val SETTINGS_MODULES = listOf(
         "在线歌词 LrcAPI 歌词服务地址 自动获取 清除歌词缓存 源 优先级"),
     SettingsModule("cover", SettingsCategory.LYRICS_COVER, "封面补全与缓存",
         "封面 在线补全封面 自动补全 iTunes 一键补齐全部封面 一键补齐 手动搜索封面 清除封面缓存"),
+
+    // ---- 五、曲库与在线 ----
     SettingsModule("scan", SettingsCategory.LIBRARY_ONLINE, "本地扫描与过滤规则",
         "本地扫描 扫描 重新扫描本地音乐 重新扫描 扫描范围 启动时自动刷新曲库 自动扫描 忽略短音频 排除加密文件 " +
             "排除系统不支持的格式 排除录音与系统提示音 排除录音 提示音 过滤规则 过滤"),
+    SettingsModule("cleanup", SettingsCategory.LIBRARY_ONLINE, "曲库清理与去重",
+        "曲库清理 隐藏 恢复被隐藏的曲目 恢复 检测重复与同名 重复 同名 清理重复文件 清理同名歌曲 清理 去重 " +
+            "已排除的文件夹 排除文件夹"),
     SettingsModule("online", SettingsCategory.LIBRARY_ONLINE, "在线音乐与音源",
         "在线音乐 在线搜索与播放 内置在线 洛雪 洛雪音源 音源 音源脚本 脚本 用网易云补全本地歌 网易云补全 " +
             "播放并下载 边听边存 只在Wi-Fi下下载 Wi-Fi下载 音质 登录 黑胶VIP 缓存 无感多音源兜底 无感 多音源 兜底 " +
             "自动切换 备用音源"),
-    SettingsModule("cleanup", SettingsCategory.LIBRARY_ONLINE, "曲库清理与去重",
-        "曲库清理 隐藏 恢复被隐藏的曲目 恢复 检测重复与同名 重复 同名 清理重复文件 清理同名歌曲 清理 去重 " +
-            "已排除的文件夹 排除文件夹"),
     SettingsModule("formatCompat", SettingsCategory.LIBRARY_ONLINE, "格式与兼容性检查",
         "格式 兼容性检查 兼容 解码 ape wma dsf 私有格式 加密容器 qmc ncm kgm 格式还原 缓存嗅探"),
     SettingsModule("overview", SettingsCategory.LIBRARY_ONLINE, "曲库统计概览",
         "曲库统计 统计 概览 歌曲数 专辑 艺术家 收藏 总时长 占用空间"),
-    SettingsModule("about", SettingsCategory.ABOUT, "关于应用",
+
+    // ---- 六、系统与关于 ----
+    SettingsModule("system", SettingsCategory.SYSTEM_ABOUT, "通知、播控与灵动岛",
+        "通知 锁屏 灵动岛 胶囊 歌词上岛 小米 超级岛 vivo 原子岛 OPPO 流体云 荣耀 通知设置 媒体通知 播控"),
+    SettingsModule("appIcon", SettingsCategory.SYSTEM_ABOUT, "桌面应用图标",
+        "桌面应用图标 桌面图标 启动器 图标款式 更换图标"),
+    SettingsModule("widget", SettingsCategory.SYSTEM_ABOUT, "桌面小组件",
+        "桌面小组件 小组件 组件 尺寸 固定配色 封面 歌曲信息 两排"),
+    SettingsModule("about", SettingsCategory.SYSTEM_ABOUT, "关于应用",
         "关于 版本 更新 检查更新 设置基线 基线 导出 备份 署名 作者 官网 网站 主页 链接 ssyinyue"),
-    SettingsModule("donate", SettingsCategory.ABOUT, "支持作者",
+    SettingsModule("donate", SettingsCategory.SYSTEM_ABOUT, "支持作者",
         "支持作者 赞赏 捐赠 微信 二维码 支持")
 )
 
@@ -428,7 +444,7 @@ private fun SettingsCategoryPage(
         // 默认隐藏。在「关于」里连点署名 10 次才会出现，且只保持一小时
         // （见 SonanceViewModel.tapAuthor / refreshConversionUnlock）
         if (vm.conversionUnlocked &&
-            (category == SettingsCategory.LIBRARY_ONLINE || category == SettingsCategory.ABOUT)) {
+            (category == SettingsCategory.LIBRARY_ONLINE || category == SettingsCategory.SYSTEM_ABOUT)) {
             SettingsCategoryHeader(
                 title = "格式还原与缓存嗅探",
                 subtitle = "已临时解锁隐藏工具 · 1 小时后自动收起",
@@ -519,8 +535,10 @@ private fun SettingsModuleContent(
             WidgetSettingsContent(vm = vm)
         }
 
-        "play" -> PlaybackSettingsSection(vm = vm, onOpenEqualizer = onOpenEqualizer)
-        "output" -> AudioOutputSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
+        "eq" -> PlaybackSettingsSection(vm = vm, onOpenEqualizer = onOpenEqualizer)
+        "output" -> AudioOutputSettingsSection(vm = vm)
+        "behavior" -> PlaybackBehaviorSection(vm = vm)
+        "dlna" -> DlnaSettingsSection(vm = vm, onOpenDlna = onOpenDlna)
         "system" -> SystemControlsSection()
         "control" -> PlayControlSettingsSection(vm = vm)
         "visual" -> PlayerVisualsSettingsSection(vm = vm)
@@ -1638,11 +1656,60 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 valueText = "${vm.miniFloatBottomDp} dp",
                 value = vm.miniFloatBottomDp / 48f
             ) { f -> vm.changeMiniFloatBottomDp((f * 48).roundToInt()) }
-            SliderLine(
-                label = "圆角",
-                valueText = "${vm.miniFloatCornerDp} dp",
-                value = vm.miniFloatCornerDp / 36f
-            ) { f -> vm.changeMiniFloatCornerDp((f * 36).roundToInt()) }
+
+            Spacer(Modifier.height(14.dp))
+            Text("圆角与边距精调", style = MaterialTheme.typography.titleSmall, color = skin.text)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "支持 ±1 dp 逐级微调；可单独设定顶部 / 底部卡片圆角、封面圆角与左右边距。",
+                style = MaterialTheme.typography.bodySmall,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(6.dp))
+            SettingsSwitchRow(
+                title = "上下圆角独立调整",
+                subtitle = "开启后可分别控制悬浮卡片顶部与底部的圆角弧度",
+                checked = vm.miniFloatCornerIndependent,
+                onCheckedChange = vm::changeMiniFloatCornerIndependent
+            )
+            if (vm.miniFloatCornerIndependent) {
+                FineDpStepSlider(
+                    label = "顶部圆角",
+                    value = vm.miniFloatTopCornerDp,
+                    min = 0,
+                    max = 40,
+                    onValueChange = vm::changeMiniFloatTopCornerDp
+                )
+                FineDpStepSlider(
+                    label = "底部圆角",
+                    value = vm.miniFloatBottomCornerDp,
+                    min = 0,
+                    max = 40,
+                    onValueChange = vm::changeMiniFloatBottomCornerDp
+                )
+            } else {
+                FineDpStepSlider(
+                    label = "卡片圆角",
+                    value = vm.miniFloatCornerDp,
+                    min = 0,
+                    max = 40,
+                    onValueChange = vm::changeMiniFloatCornerDp
+                )
+            }
+            FineDpStepSlider(
+                label = "封面圆角",
+                value = vm.miniCoverCornerDp,
+                min = 0,
+                max = 28,
+                onValueChange = vm::changeMiniCoverCornerDp
+            )
+            FineDpStepSlider(
+                label = "左右边距",
+                value = vm.miniFloatSideMarginDp,
+                min = 4,
+                max = 28,
+                onValueChange = vm::changeMiniFloatSideMarginDp
+            )
 
             // ---- 滑动切歌动效（整卡 / 槽内）----
             Spacer(Modifier.height(14.dp))
@@ -1704,6 +1771,51 @@ private fun MiniPlayerSettingsSection(vm: SonanceViewModel) {
                 value = (vm.miniSwipeRightPct - 5) / 55f
             ) { f -> vm.changeMiniSwipeRightPct((5 + f * 55).roundToInt()) }
         }
+    }
+}
+
+@Composable
+private fun FineDpStepSlider(
+    label: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    onValueChange: (Int) -> Unit
+) {
+    val skin = LocalSkin.current
+    val span = (max - min).coerceAtLeast(1).toFloat()
+    SliderLine(
+        label = label,
+        valueText = "$value dp",
+        value = ((value - min) / span).coerceIn(0f, 1f)
+    ) { f -> onValueChange((min + f * span).roundToInt()) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "-1 dp",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (value > min) skin.text else skin.textDim,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(skin.surface2)
+                .clickable(enabled = value > min) { onValueChange((value - 1).coerceIn(min, max)) }
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        )
+        Text(
+            text = "+1 dp",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (value < max) skin.text else skin.textDim,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(skin.surface2)
+                .clickable(enabled = value < max) { onValueChange((value + 1).coerceIn(min, max)) }
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        )
     }
 }
 
@@ -1923,21 +2035,13 @@ private fun TopBarAndLaunchSection(vm: SonanceViewModel) {
         append(if (vm.topBarLogoId == "none") "无图标" else "自定义图标")
     }
     SettingsSectionCard(
-        title = "顶栏与启动",
+        title = "顶栏与导航",
         summary = "$modeSummary · $brandSummary",
         icon = SonanceIcons.Layers
     ) {
-        // ---- 启动行为 ----
         SettingsSwitchRow(
-            title = "启动时直接打开播放界面",
-            subtitle = "默认开启：进入应用的第一帧就是播放页（无展开动作）；关闭则第一帧是曲库列表",
-            checked = vm.openPlayerOnLaunch,
-            onCheckedChange = vm::changeOpenPlayerOnLaunch
-        )
-        Spacer(Modifier.height(8.dp))
-        SettingsSwitchRow(
-            title = "显示播放模式切换图标",
-            subtitle = "列表页『随便听听』右边的模式图标；显示时全部页签都保留（空列表页也显示）",
+            title = "显示随机播放图标",
+            subtitle = "列表页『封面墙』右边的随机图标，点击随机播放当前列表中的一首歌；显示时全部页签都保留（空列表页也显示）",
             checked = vm.showPlayModeIcon,
             onCheckedChange = vm::changeShowPlayModeIcon
         )
@@ -2022,24 +2126,20 @@ private fun TopBarAndLaunchSection(vm: SonanceViewModel) {
 /** 设置页里可选的倒计时时长（分钟） */
 private val SETTINGS_SLEEP_MINUTES = listOf(15, 30, 45, 60, 90)
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () -> Unit) {
-    val skin = LocalSkin.current
     val context = LocalContext.current
-    val timerLabel = vm.sleepTimerLabel
     val eqSummary = when {
         vm.eqEnabled -> "均衡器：${vm.eqPreset.label}" + (if (vm.eqCustom) "（微调）" else "")
         vm.systemAudioEffectEnabled -> "系统音效接入中"
         else -> "均衡器关闭"
     }
-    val sleepSummary = timerLabel?.let { "睡眠定时：剩余 $it" } ?: "睡眠定时未开启"
 
     SettingsSectionCard(
-        title = "均衡器与睡眠定时",
-        summary = "$eqSummary · $sleepSummary",
+        title = "均衡器与系统音效",
+        summary = eqSummary,
         icon = SonanceIcons.Equalizer,
-        badge = timerLabel ?: if (vm.eqEnabled) "EQ" else null
+        badge = if (vm.eqEnabled) "EQ" else null
     ) {
         // ---- 均衡器 ----
         SettingsActionRow(
@@ -2078,55 +2178,6 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
             onClick = { vm.openSystemAudioEffectPanel(context) },
             actionLabel = "打开"
         )
-
-        Spacer(Modifier.height(16.dp))
-
-        // ---- 睡眠定时器 ----
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("睡眠定时器", style = MaterialTheme.typography.titleSmall, color = skin.text)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    timerLabel?.let { "计时中 · 剩余 $it，到点暂停并关闭应用" }
-                        ?: "到点暂停播放、释放音频焦点并关闭应用",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (timerLabel != null) skin.accent else skin.textMuted
-                )
-            }
-            if (timerLabel != null) {
-                PillButton(
-                    label = "取消",
-                    onClick = {
-                        vm.clearSleepTimer()
-                        vm.showToast("已取消睡眠定时器")
-                    },
-                    filled = false
-                )
-            }
-        }
-
-        Spacer(Modifier.height(10.dp))
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            SETTINGS_SLEEP_MINUTES.forEach { m ->
-                val active =
-                    vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.COUNTDOWN &&
-                        vm.sleepTimerTotalMinutes == m
-                SleepChip(
-                    label = sleepCountdownChipLabel(m),
-                    selected = active
-                ) { vm.setSleepTimer(m) }
-            }
-            SleepChip(
-                label = "播完当前",
-                selected = vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.AFTER_CURRENT
-            ) { vm.setSleepAfterCurrent() }
-        }
     }
 }
 
@@ -2134,10 +2185,7 @@ private fun PlaybackSettingsSection(vm: SonanceViewModel, onOpenEqualizer: () ->
  * 播放输出与衔接：USB 独占（bit-perfect）、无缝播放、淡入淡出、播放提示。
  */
 @Composable
-private fun AudioOutputSettingsSection(
-    vm: SonanceViewModel,
-    onOpenDlna: () -> Unit = {}
-) {
+private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
     val summary = buildString {
         append(if (vm.usbExclusiveEnabled) "USB 独占开" else "USB 独占关")
         append(if (vm.gaplessEnabled) " · 无缝" else " · 曲间停顿")
@@ -2145,7 +2193,7 @@ private fun AudioOutputSettingsSection(
         if (vm.playToastEnabled) append(" · 播放提示开")
     }
     SettingsSectionCard(
-        title = "USB 独占 · 无缝 · 淡入淡出",
+        title = "音频输出与衔接",
         summary = summary,
         icon = SonanceIcons.Volume,
         badge = when {
@@ -2242,6 +2290,84 @@ private fun AudioOutputSettingsSection(
             checked = vm.playToastEnabled,
             onCheckedChange = { vm.changePlayToast(it) }
         )
+    }
+}
+
+/**
+ * 启动、定时与手势：启动直进播放页、睡眠定时器、摇一摇切歌。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlaybackBehaviorSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    val timerLabel = vm.sleepTimerLabel
+    val summary = buildString {
+        append(if (vm.openPlayerOnLaunch) "启动直进播放页" else "启动进曲库")
+        append(timerLabel?.let { " · 定时 $it" } ?: " · 定时关")
+        append(if (vm.shakeNextEnabled) " · 摇一摇开" else " · 摇一摇关")
+    }
+    SettingsSectionCard(
+        title = "启动、定时与手势",
+        summary = summary,
+        icon = SonanceIcons.Clock,
+        badge = timerLabel
+    ) {
+        SettingsSwitchRow(
+            title = "启动时直接打开播放界面",
+            subtitle = "默认开启：进入应用的第一帧就是播放页（无展开动作）；关闭则第一帧是曲库列表",
+            checked = vm.openPlayerOnLaunch,
+            onCheckedChange = vm::changeOpenPlayerOnLaunch
+        )
+
+        Spacer(Modifier.height(14.dp))
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("睡眠定时器", style = MaterialTheme.typography.titleSmall, color = skin.text)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    timerLabel?.let { "计时中 · 剩余 $it，到点暂停并关闭应用" }
+                        ?: "到点暂停播放、释放音频焦点并关闭应用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (timerLabel != null) skin.accent else skin.textMuted
+                )
+            }
+            if (timerLabel != null) {
+                PillButton(
+                    label = "取消",
+                    onClick = {
+                        vm.clearSleepTimer()
+                        vm.showToast("已取消睡眠定时器")
+                    },
+                    filled = false
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SETTINGS_SLEEP_MINUTES.forEach { m ->
+                val active =
+                    vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.COUNTDOWN &&
+                        vm.sleepTimerTotalMinutes == m
+                SleepChip(
+                    label = sleepCountdownChipLabel(m),
+                    selected = active
+                ) { vm.setSleepTimer(m) }
+            }
+            SleepChip(
+                label = "播完当前",
+                selected = vm.sleepTimerMode == SonanceViewModel.SleepTimerMode.AFTER_CURRENT
+            ) { vm.setSleepAfterCurrent() }
+        }
+
+        Spacer(Modifier.height(14.dp))
 
         SettingsSwitchRow(
             title = "摇一摇切歌",
@@ -2250,7 +2376,6 @@ private fun AudioOutputSettingsSection(
             onCheckedChange = { vm.changeShakeNextEnabled(it) }
         )
         if (vm.shakeNextEnabled) {
-            val skin = LocalSkin.current
             Spacer(Modifier.height(6.dp))
             Text(
                 "摇一摇灵敏度",
@@ -2298,9 +2423,24 @@ private fun AudioOutputSettingsSection(
                 onCheckedChange = { vm.changeShakePocketGuardEnabled(it) }
             )
         }
+    }
+}
 
-        Spacer(Modifier.height(14.dp))
-
+/**
+ * D-LAN 无线投屏与局域网共享。
+ */
+@Composable
+private fun DlnaSettingsSection(
+    vm: SonanceViewModel,
+    onOpenDlna: () -> Unit
+) {
+    SettingsSectionCard(
+        title = "D-LAN 无线投屏与共享",
+        summary = vm.dlnaActiveRenderer?.let { "正在投屏至：${it.friendlyName}" }
+            ?: "浏览同一 Wi-Fi 下的 NAS/电脑曲库，或向音箱/电视无线投屏",
+        icon = SonanceIcons.Cloud,
+        badge = if (vm.dlnaActiveRenderer != null) "投屏中" else null
+    ) {
         SettingsActionRow(
             title = "D-LAN 无线投屏与共享",
             subtitle = vm.dlnaActiveRenderer?.let { "正在投屏至：${it.friendlyName}" }

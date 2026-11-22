@@ -73,7 +73,7 @@ fun FormatCompatContent(vm: SonanceViewModel) {
 
     Column(Modifier.fillMaxWidth()) {
         Text(
-            "本播放器直接调用系统解码器。下面这些格式能否播放，取决于文件和系统，而不是播放器本身。",
+            "本播放器已内置音频软解（FFmpeg + DSD 解复用），系统不支持的 FLAC / ALAC / DSD (.dsf/.dff) 等无损格式也会自动接管解码。",
             style = MaterialTheme.typography.bodySmall,
             color = skin.textMuted
         )
