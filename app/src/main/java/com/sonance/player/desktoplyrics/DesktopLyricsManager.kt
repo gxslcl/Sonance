@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
@@ -34,18 +35,25 @@ import kotlin.math.hypot
 
 /**
  * 桌面悬浮歌词管理器。
- *
- * 功能特性：
- * 1. 系统级悬浮窗口，支持三种背景选择：没有背景（纯透明立体字）、浅色半透明、深色半透明。
- * 2. 自由拖动定位并记忆坐标位置。
- * 3. 单击展开迷你快捷播控（上曲、播暂、下曲、背景样式循环、字号循环、手势完全穿透锁定、关闭）。
- * 4. 锁定后手势完全穿透（FLAG_NOT_TOUCHABLE），通知栏常驻一键解锁通知。
- * 5. 随媒体播放服务 250ms 实时同步逐行歌词与延迟偏移，毫秒级平滑切句。
  */
 object DesktopLyricsManager {
 
+    const val COLOR_AUTO = 0
+    const val COLOR_FOLLOW_COVER = -1
+
+    const val ALIGN_CENTER = 0
+    const val ALIGN_LEFT = 1
+    const val ALIGN_RIGHT = 2
+
+    val ALIGN_OPTIONS: List<Pair<Int, String>> = listOf(
+        ALIGN_CENTER to "居中",
+        ALIGN_LEFT to "居左",
+        ALIGN_RIGHT to "居右"
+    )
+
     val TEXT_COLOR_OPTIONS: List<Pair<Int, String>> = listOf(
-        0 to "自动",
+        COLOR_AUTO to "自动",
+        COLOR_FOLLOW_COVER to "跟随封面",
         0xFFFFFFFF.toInt() to "纯白",
         0xFFFFD98A.toInt() to "暖黄",
         0xFF9BE8C1.toInt() to "薄荷",
@@ -56,6 +64,9 @@ object DesktopLyricsManager {
 
     @Volatile
     var onTextColorChanged: ((Int) -> Unit)? = null
+
+    @Volatile
+    private var coverAccentArgb: Int = 0
 
     /** 悬浮窗字号加减按钮的步长：设置页滑杆仍可细调 12–120sp */
     private const val FONT_SIZE_STEP_SP = 4
@@ -94,6 +105,7 @@ object DesktopLyricsManager {
     private var layoutParams: WindowManager.LayoutParams? = null
 
     private var rootView: LinearLayout? = null
+    private var textContainer: LinearLayout? = null
     private var tvCurrent: TextView? = null
     private var tvNext: TextView? = null
     private var controlsBar: LinearLayout? = null
@@ -204,6 +216,72 @@ object DesktopLyricsManager {
         }
     }
 
+    /** 设置对齐方式：0=居中，1=居左，2=居右；切换时回落基准边距，保证面板展开不漂移 */
+    fun applyAlign(context: Context, resetOffset: Boolean = false) {
+        val app = context.applicationContext
+        val prefs = Prefs(app)
+        if (resetOffset) {
+            prefs.desktopLyricsOffsetX = 0
+        }
+        mainHandler.post {
+            applyAlignmentInternal(app, updateLayout = true)
+        }
+    }
+
+    /** 从专辑封面更新强调色；启用「跟随封面」时即时重刷颜色 */
+    fun updateCoverColor(context: Context, argb: Int) {
+        if (argb == 0) return
+        coverAccentArgb = argb
+        val app = context.applicationContext
+        if (floatingView == null) return
+        val prefs = Prefs(app)
+        if (prefs.desktopLyricsTextColor != COLOR_FOLLOW_COVER) return
+        mainHandler.post {
+            if (floatingView != null && Prefs(app).desktopLyricsTextColor == COLOR_FOLLOW_COVER) {
+                applyBgMode(app, DesktopLyricsBgMode.fromId(Prefs(app).desktopLyricsBgMode))
+            }
+        }
+    }
+
+    fun extractVibrantAccent(bmp: Bitmap): Int {
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return 0
+        val cols = 10
+        val rows = 10
+        val hsv = FloatArray(3)
+        var bestArgb = 0
+        var bestScore = -1f
+        var sumR = 0L
+        var sumG = 0L
+        var sumB = 0L
+        var count = 0L
+        for (ry in 0 until rows) {
+            val y = ((ry + 0.5f) * bmp.height / rows).toInt().coerceIn(0, bmp.height - 1)
+            for (rx in 0 until cols) {
+                val x = ((rx + 0.5f) * bmp.width / cols).toInt().coerceIn(0, bmp.width - 1)
+                val px = bmp.getPixel(x, y)
+                if (Color.alpha(px) < 128) continue
+                sumR += Color.red(px)
+                sumG += Color.green(px)
+                sumB += Color.blue(px)
+                count++
+                Color.colorToHSV(px, hsv)
+                val sat = hsv[1]
+                val valB = hsv[2]
+                // 偏好饱和度高且不过暗/过曝的鲜活主题色
+                val lumWeight = 1f - kotlin.math.abs(valB - 0.62f)
+                val score = sat * 2.4f + lumWeight * 0.45f
+                if (score > bestScore) {
+                    bestScore = score
+                    bestArgb = px or (0xFF shl 24)
+                }
+            }
+        }
+        if (bestArgb != 0 && bestScore > 0.45f) return bestArgb
+        return if (count > 0L) {
+            Color.rgb((sumR / count).toInt(), (sumG / count).toInt(), (sumB / count).toInt())
+        } else 0
+    }
+
     /** 在桌面控制栏直接循环切换桌面歌词字体颜色 */
     fun cycleTextColor(context: Context) {
         val app = context.applicationContext
@@ -218,6 +296,64 @@ object DesktopLyricsManager {
             applyBgMode(app, DesktopLyricsBgMode.fromId(prefs.desktopLyricsBgMode))
             Toast.makeText(app, "桌面歌词颜色: $label", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun windowGravityForAlign(align: Int): Int = when (align) {
+        ALIGN_LEFT -> Gravity.TOP or Gravity.START
+        ALIGN_RIGHT -> Gravity.TOP or Gravity.END
+        else -> Gravity.TOP or Gravity.CENTER_HORIZONTAL
+    }
+
+    private fun textGravityForAlign(align: Int): Int = when (align) {
+        ALIGN_LEFT -> Gravity.START
+        ALIGN_RIGHT -> Gravity.END
+        else -> Gravity.CENTER_HORIZONTAL
+    }
+
+    private fun applyAlignmentInternal(context: Context, updateLayout: Boolean) {
+        val align = Prefs(context).desktopLyricsAlign
+        val hGrav = textGravityForAlign(align)
+        textContainer?.gravity = hGrav
+        (textContainer?.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            if (lp.gravity != hGrav) {
+                lp.gravity = hGrav
+                textContainer?.layoutParams = lp
+            }
+        }
+        tvCurrent?.gravity = hGrav or Gravity.CENTER_VERTICAL
+        tvNext?.gravity = hGrav or Gravity.CENTER_VERTICAL
+        (controlsBar?.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            if (lp.gravity != hGrav) {
+                lp.gravity = hGrav
+                controlsBar?.layoutParams = lp
+            }
+        }
+        val params = layoutParams ?: return
+        val newGrav = windowGravityForAlign(align)
+        if (params.gravity != newGrav) {
+            params.gravity = newGrav
+            params.x = Prefs(context).desktopLyricsOffsetX
+        }
+        if (updateLayout) {
+            val view = floatingView
+            val wm = windowManager
+            if (view != null && wm != null) {
+                runCatching { wm.updateViewLayout(view, params) }
+            }
+        }
+    }
+
+    private fun tuneCoverColorForBg(baseArgb: Int, mode: DesktopLyricsBgMode): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(baseArgb, hsv)
+        if (mode == DesktopLyricsBgMode.LIGHT) {
+            hsv[1] = hsv[1].coerceIn(0.45f, 0.90f)
+            hsv[2] = hsv[2].coerceAtMost(0.42f)
+        } else {
+            hsv[1] = hsv[1].coerceIn(0.32f, 0.78f)
+            hsv[2] = hsv[2].coerceAtLeast(0.90f)
+        }
+        return Color.HSVToColor(0xFF, hsv)
     }
 
     /** 应用背景模式到当前悬浮窗 */
@@ -301,14 +437,19 @@ object DesktopLyricsManager {
         }
         btnClose?.setColorFilter(0xFFEF5350.toInt(), PorterDuff.Mode.SRC_IN)
 
-        // 用户自定义文字颜色覆盖背景模式自带的配色。下一句用同样的色相降透明度，
-        // 保留「当前 / 即将播放」的主次关系；没有背景时给阴影兜住对比度。
-        val custom = Prefs(context).desktopLyricsTextColor
-        if (custom != 0) {
-            curTv.setTextColor(custom)
-            val alpha = (Color.alpha(custom) * 0.68f).toInt().coerceIn(80, 255)
-            nextTv.setTextColor(Color.argb(alpha, Color.red(custom), Color.green(custom), Color.blue(custom)))
-            val tint = custom and 0x00FFFFFF or (0xD9 shl 24)
+        // 用户自定义文字颜色或跟随封面色彩覆盖背景模式自带配色；
+        // 「跟随封面」若暂未拿到封面强调色则平滑回退自动对比色。
+        val customPref = Prefs(context).desktopLyricsTextColor
+        val resolvedColor = when (customPref) {
+            COLOR_AUTO -> 0
+            COLOR_FOLLOW_COVER -> coverAccentArgb.takeIf { it != 0 }?.let { tuneCoverColorForBg(it, mode) } ?: 0
+            else -> customPref
+        }
+        if (resolvedColor != 0) {
+            curTv.setTextColor(resolvedColor)
+            val alpha = (Color.alpha(resolvedColor) * 0.72f).toInt().coerceIn(90, 255)
+            nextTv.setTextColor(Color.argb(alpha, Color.red(resolvedColor), Color.green(resolvedColor), Color.blue(resolvedColor)))
+            val tint = (resolvedColor and 0x00FFFFFF) or (0xE0 shl 24)
             listOf(btnPrev, btnPlayPause, btnNext, btnBgStyle, btnTextColor, btnFontMinus, btnFontPlus, btnLock)
                 .forEach { it?.setColorFilter(tint, PorterDuff.Mode.SRC_IN) }
         }
@@ -343,9 +484,9 @@ object DesktopLyricsManager {
             }
 
             val dm = app.resources.displayMetrics
-            val savedX = prefs.desktopLyricsX
+            val align = prefs.desktopLyricsAlign
+            val initX = prefs.desktopLyricsOffsetX
             val savedY = prefs.desktopLyricsY
-            val initX = if (savedX >= 0) savedX else ((dm.widthPixels - 640) / 2).coerceAtLeast(30)
             val initY = if (savedY >= 0) savedY else (dm.heightPixels * 0.16f).toInt()
 
             val params = WindowManager.LayoutParams(
@@ -355,7 +496,7 @@ object DesktopLyricsManager {
                 flags,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.START
+                gravity = windowGravityForAlign(align)
                 x = initX
                 y = initY
             }
@@ -365,6 +506,7 @@ object DesktopLyricsManager {
             floatingView = view
 
             rootView = view.findViewById(R.id.desktop_lyrics_root)
+            textContainer = view.findViewById(R.id.desktop_lyrics_text_container)
             tvCurrent = view.findViewById(R.id.tv_lyric_current)
             tvNext = view.findViewById(R.id.tv_lyric_next)
             controlsBar = view.findViewById(R.id.desktop_lyrics_controls)
@@ -382,6 +524,8 @@ object DesktopLyricsManager {
             val fontSize = prefs.desktopLyricsFontSizeSp
             tvCurrent?.textSize = fontSize.toFloat()
             tvNext?.textSize = (fontSize - 4).coerceAtLeast(12).toFloat()
+
+            applyAlignmentInternal(app, updateLayout = false)
 
             // 应用用户偏好的背景模式（默认没有背景）
             val bgMode = DesktopLyricsBgMode.fromId(prefs.desktopLyricsBgMode)
@@ -417,15 +561,20 @@ object DesktopLyricsManager {
                             hideControls()
                         }
                         if (isDragging) {
-                            params.x = (initialX + dx).toInt()
-                            params.y = (initialY + dy).toInt()
+                            val curAlign = Prefs(app).desktopLyricsAlign
+                            params.x = if (curAlign == ALIGN_RIGHT) {
+                                (initialX - dx).toInt()
+                            } else {
+                                (initialX + dx).toInt()
+                            }
+                            params.y = (initialY + dy).toInt().coerceIn(0, (dm.heightPixels - 80).coerceAtLeast(0))
                             runCatching { wm.updateViewLayout(view, params) }
                         }
                         true
                     }
                     MotionEvent.ACTION_UP -> {
                         if (isDragging) {
-                            prefs.desktopLyricsX = params.x
+                            prefs.desktopLyricsOffsetX = params.x
                             prefs.desktopLyricsY = params.y
                         } else {
                             toggleControls(app)
@@ -496,6 +645,7 @@ object DesktopLyricsManager {
             layoutParams = null
             windowManager = null
             rootView = null
+            textContainer = null
             tvCurrent = null
             tvNext = null
             controlsBar = null

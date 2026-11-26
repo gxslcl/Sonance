@@ -52,9 +52,10 @@ internal object Id3Writer {
         artist: String,
         album: String,
         cover: ByteArray? = null,
-        coverMime: String? = null
+        coverMime: String? = null,
+        lyrics: String? = null
     ): ByteArray {
-        val frames = ArrayList<ByteArray>(4)
+        val frames = ArrayList<ByteArray>(5)
         if (title.isNotBlank()) frames += textFrame("TIT2", title)
         if (artist.isNotBlank()) frames += textFrame("TPE1", artist)
         if (album.isNotBlank()) frames += textFrame("TALB", album)
@@ -62,6 +63,9 @@ internal object Id3Writer {
         // 上层会当成"有封面但解不出来"
         if (cover != null && cover.isNotEmpty()) {
             frames += apicFrame(cover, coverMime?.takeIf { it.isNotBlank() } ?: DEFAULT_MIME)
+        }
+        if (!lyrics.isNullOrBlank()) {
+            frames += usltFrame(lyrics)
         }
 
         return assemble(VERSION_MAJOR, frames)
@@ -275,6 +279,26 @@ internal object Id3Writer {
         payload[p++] = 0x00                       // 空描述的结束符
         cover.copyInto(payload, p)
         return frame("APIC", payload, version)
+    }
+
+    /**
+     * USLT 帧：
+     * `编码(1, UTF-16 BOM = 0x01) + 语言(3, "chi") + 内容描述(UTF-16 空终止 0x00,0x00) + BOM + UTF-16LE 正文`
+     */
+    private fun usltFrame(lyrics: String, version: Int = VERSION_MAJOR): ByteArray {
+        val body = lyrics.toByteArray(Charsets.UTF_16LE)
+        val payload = ByteArray(1 + 3 + 2 + 2 + body.size)
+        var p = 0
+        payload[p++] = ENC_UTF16_BOM
+        payload[p++] = 'c'.code.toByte()
+        payload[p++] = 'h'.code.toByte()
+        payload[p++] = 'i'.code.toByte()
+        payload[p++] = 0x00
+        payload[p++] = 0x00 // 空描述 UTF-16 结束符
+        payload[p++] = 0xFF.toByte() // BOM
+        payload[p++] = 0xFE.toByte()
+        body.copyInto(payload, p)
+        return frame("USLT", payload, version)
     }
 
     private fun utf16(text: String): ByteArray {

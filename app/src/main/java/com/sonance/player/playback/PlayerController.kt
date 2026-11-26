@@ -348,7 +348,7 @@ class PlayerController(private val context: Context) {
                             durationMs = if (c.duration > 0) c.duration else it.durationMs
                         )
                     }
-                    delay(500)
+                    delay(200)
                 }
             } finally {
                 ticker = null
@@ -390,7 +390,7 @@ class PlayerController(private val context: Context) {
                 playWhenReady = activePlaybackIntent(player.playWhenReady, player.playbackState, player.playerError != null),
                 mediaId = id,
                 title = meta?.extras?.getString(EXTRA_ORIG_TITLE) ?: meta?.title?.toString().orEmpty(),
-                artist = meta?.artist?.toString().orEmpty(),
+                artist = meta?.extras?.getString(EXTRA_ORIG_ARTIST) ?: meta?.artist?.toString().orEmpty(),
                 album = meta?.albumTitle?.toString().orEmpty(),
                 albumId = meta?.extras?.getLong(EXTRA_ALBUM_ID, -1L) ?: -1L,
                 sourceUri = meta?.extras?.getString(EXTRA_URI),
@@ -506,16 +506,23 @@ class PlayerController(private val context: Context) {
             if (current.mediaMetadata.artworkUri == wanted) return@updateCurrentMediaMetadata null
             // 只原地更新 metadata（封面与标签），保留当前 MediaItem 已经解析好的播放流地址，
             // 避免 onlineSongMap 里的兜底外链（outer/url 30s 试听）把正在播的无损流顶掉。
-            val extras = android.os.Bundle(current.mediaMetadata.extras ?: android.os.Bundle()).apply {
+            val curExtras = current.mediaMetadata.extras
+            val lyricTitleActive = curExtras?.containsKey(EXTRA_ORIG_TITLE) == true
+            val extras = android.os.Bundle(curExtras ?: android.os.Bundle()).apply {
                 putLong(EXTRA_ALBUM_ID, song.albumId)
+                if (lyricTitleActive) {
+                    putString(EXTRA_ORIG_TITLE, song.title)
+                    putString(EXTRA_ORIG_ARTIST, song.artist)
+                }
             }
-            current.mediaMetadata.buildUpon()
-                .setTitle(song.title)
-                .setArtist(song.artist)
+            val builder = current.mediaMetadata.buildUpon()
                 .setAlbumTitle(song.album)
                 .setArtworkUri(wanted)
                 .setExtras(extras)
-                .build()
+            if (!lyricTitleActive) {
+                builder.setTitle(song.title).setArtist(song.artist)
+            }
+            builder.build()
         }
     }
 
@@ -1331,6 +1338,7 @@ class PlayerController(private val context: Context) {
          * 所有内部读取标题的地方都必须优先取它，保证歌词匹配 / 小组件 / 应用内显示不受影响。
          */
         const val EXTRA_ORIG_TITLE = "sonance.orig_title"
+        const val EXTRA_ORIG_ARTIST = "sonance.orig_artist"
 
         /**
          * 连接服务端成功时判断是否应丢弃等待中的「恢复现场」请求：

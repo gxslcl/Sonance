@@ -426,6 +426,8 @@ private class LinearRamp(initial: Float) {
 @VisibleForTesting
 internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int) {
     private val bass = VirtualBass(sampleRate)
+    private val ultraBass = UltraBassEngine(sampleRate, min(channels, 2))
+    private val clarityExciter = ClarityExciter(sampleRate, min(channels, 2))
     private val speakerHpf = DoubleBiquad(min(channels, 2))
     private val crossfeed = BinauralCrossfeed(sampleRate)
     private val imager = StereoImager(sampleRate)
@@ -433,6 +435,8 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     private val limiter = SoftLimiter(sampleRate)
     private val rampFrames = (sampleRate * 0.03f).toInt().coerceAtLeast(1)
     private val bassAmount = LinearRamp(0f)
+    private val viperAmount = LinearRamp(0f)
+    private val clarityAmount = LinearRamp(0f)
     private val speakerHpfMix = LinearRamp(0f)
     private val crossfeedMix = LinearRamp(0f)
     private val wet = LinearRamp(0f)
@@ -443,7 +447,10 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     private val limiterThreshold = LinearRamp(10f.pow(-1f / 20f))
     private var target = SoundFxParams.NEUTRAL
     private var appliedHpfHz = -1f
+    private var appliedViperFreq = -1f
     private var bassRunning = false
+    private var viperRunning = false
+    private var clarityRunning = false
     private var hpfRunning = false
     private var crossfeedRunning = false
     private var imagerRunning = false
@@ -453,6 +460,8 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     val isNeutral: Boolean
         get() = target.isNeutral &&
             bassAmount.isSettledAt(0f) &&
+            viperAmount.isSettledAt(0f) &&
+            clarityAmount.isSettledAt(0f) &&
             speakerHpfMix.isSettledAt(0f) &&
             crossfeedMix.isSettledAt(0f) &&
             wet.isSettledAt(0f) &&
@@ -463,6 +472,12 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
     fun setTarget(p: SoundFxParams) {
         target = p.clamp()
         bassAmount.setTarget(target.virtualBass, rampFrames)
+        viperAmount.setTarget(target.viperBass, rampFrames)
+        clarityAmount.setTarget(target.clarity, rampFrames)
+        if (target.viperBass > 0f && target.viperBassFreqHz != appliedViperFreq) {
+            appliedViperFreq = target.viperBassFreqHz
+            ultraBass.configure(appliedViperFreq.toDouble())
+        }
         val hpfHz = target.speakerHpfHz
         speakerHpfMix.setTarget(if (hpfHz >= 20f) 1f else 0f, rampFrames)
         if (hpfHz >= 20f && hpfHz != appliedHpfHz) {
@@ -480,9 +495,12 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
 
     fun process(buf: FloatArray, frames: Int) {
         var index = 0
+        val vMode = target.viperBassMode
         repeat(frames) {
             val g = gain.next()
             val bassValue = bassAmount.next()
+            val viperValue = viperAmount.next()
+            val clarityValue = clarityAmount.next()
             val hpfMix = speakerHpfMix.next()
             val cfValue = crossfeedMix.next()
             val widthValue = width.next()
@@ -494,10 +512,15 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
 
             // 空间与谐波效果只处理单/双声道；多声道仍保留 EQ 与峰值保护。
             if (channels <= 2) {
-                // 关键顺序：先在高通保护之前抽取完整原始低频基波去合成 2f/3f 谐波，
-                // 再由 SpeakerHpf 切除小喇叭打底易破音的超低频，最后把高通以上频率区间内的
-                // 谐波温和叠回主通道 —— 外放既防破音又不丢低音轮廓。
                 val preHpfMono = if (channels == 2) (buf[index] + buf[index + 1]) * 0.5f else buf[index]
+                if (viperValue > 0f) {
+                    ultraBass.processFrame(buf, index, channels, viperValue, vMode)
+                    viperRunning = true
+                } else if (viperRunning) {
+                    ultraBass.reset()
+                    appliedViperFreq = -1f
+                    viperRunning = false
+                }
                 if (hpfMix > 0f) {
                     for (ch in 0 until channels) {
                         val dry = buf[index + ch]
@@ -518,6 +541,13 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
                 } else if (bassRunning) {
                     bass.reset()
                     bassRunning = false
+                }
+                if (clarityValue > 0f) {
+                    clarityExciter.processFrame(buf, index, channels, clarityValue)
+                    clarityRunning = true
+                } else if (clarityRunning) {
+                    clarityExciter.reset()
+                    clarityRunning = false
                 }
                 if (channels == 2) {
                     if (cfValue > 0f) {
@@ -556,12 +586,16 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
 
     fun reset() {
         bass.reset()
+        ultraBass.reset()
+        clarityExciter.reset()
         speakerHpf.reset()
         crossfeed.reset()
         imager.reset()
         reverb.reset()
         limiter.reset()
         bassAmount.reset(0f)
+        viperAmount.reset(0f)
+        clarityAmount.reset(0f)
         speakerHpfMix.reset(0f)
         crossfeedMix.reset(0f)
         wet.reset(0f)
@@ -572,12 +606,189 @@ internal class SoundFxDsp(private val sampleRate: Int, private val channels: Int
         limiterThreshold.reset(10f.pow(-1f / 20f))
         target = SoundFxParams.NEUTRAL
         appliedHpfHz = -1f
+        appliedViperFreq = -1f
         bassRunning = false
+        viperRunning = false
+        clarityRunning = false
         hpfRunning = false
         crossfeedRunning = false
         imagerRunning = false
         reverbRunning = false
         limiterRunning = false
+    }
+}
+
+/**
+ * 超重低音引擎（ViPER 级强化方案，全自研 64 位双精度 DSP）：
+ * 1. 22 Hz 超次声安全高通，防止振膜无效大振幅；
+ * 2. 单声道锁相低音带通 + 可调谐振峰（35~95 Hz）；
+ * 3. 双包络（2.5 ms 快起 + 180 ms 慢追）提取鼓点瞬态力度，实现拳拳到肉的弹性收放；
+ * 4. 三种风味：自然电子管饱和（0）、蝰蛇炮震（1）、真二分频 f/2 次谐波（2）；
+ * 5. 通道级 215 Hz 去浊凹口滤波，高量感低音下依然保有清澈贴耳的人声。
+ */
+@VisibleForTesting
+internal class UltraBassEngine(private val sampleRate: Int, private val channels: Int) {
+    private val subsonicHpf = DoubleBiquad(1).apply {
+        setCoeffs(BiquadDesign.highPass(22.0, sampleRate, 0.7071))
+    }
+    private val subBandLpf1 = DoubleBiquad(1)
+    private val subBandLpf2 = DoubleBiquad(1)
+    private val subFocusPeak = DoubleBiquad(1)
+    private val octDriverHpf = DoubleBiquad(1).apply {
+        setCoeffs(BiquadDesign.highPass(54.0, sampleRate, 0.7071))
+    }
+    private val octDriverLpf = DoubleBiquad(1).apply {
+        setCoeffs(BiquadDesign.lowPass(145.0, sampleRate, 0.85))
+    }
+    private val subOctLpf = DoubleBiquad(1).apply {
+        setCoeffs(BiquadDesign.lowPass(88.0, sampleRate, 0.7071))
+    }
+    private val subOctHpf = DoubleBiquad(1).apply {
+        setCoeffs(BiquadDesign.highPass(24.0, sampleRate, 0.7071))
+    }
+    private val antiMudEq = DoubleBiquad(channels.coerceIn(1, 2)).apply {
+        setCoeffs(BiquadDesign.peaking(220.0, -3.0, sampleRate, 1.15))
+    }
+
+    private val fastAttack = 1.0 - exp(-1.0 / (sampleRate * 0.0025).coerceAtLeast(1.0))
+    private val fastRelease = 1.0 - exp(-1.0 / (sampleRate * 0.065).coerceAtLeast(1.0))
+    private val slowRelease = 1.0 - exp(-1.0 / (sampleRate * 0.180).coerceAtLeast(1.0))
+    private var envFast = 0.0
+    private var envSlow = 0.0
+    private var octEnv = 0.0
+    private var prevOct = 0.0
+    private var octSign = 1.0
+
+    init {
+        configure(52.0)
+    }
+
+    fun configure(freqHz: Double) {
+        val f = freqHz.coerceIn(35.0, 95.0)
+        val cutoff = (f * 2.15).coerceIn(85.0, 195.0)
+        subBandLpf1.setCoeffs(BiquadDesign.lowPass(cutoff, sampleRate, 0.78))
+        subBandLpf2.setCoeffs(BiquadDesign.lowPass(cutoff, sampleRate, 0.78))
+        subFocusPeak.setCoeffs(BiquadDesign.peaking(f, 11.0, sampleRate, 1.15))
+    }
+
+    fun processFrame(buf: FloatArray, index: Int, frameChannels: Int, amount: Float, mode: Int) {
+        val amt = amount.coerceIn(0f, 1f).toDouble()
+        if (amt <= 0.0) return
+        val mono = if (frameChannels == 2) {
+            (buf[index].toDouble() + buf[index + 1].toDouble()) * 0.5
+        } else {
+            buf[index].toDouble()
+        }
+        val clean = subsonicHpf.processSample(mono, 0)
+        val lpStage1 = subBandLpf1.processSample(clean, 0)
+        val lpStage2 = subBandLpf2.processSample(lpStage1, 0)
+        val lowBand = subFocusPeak.processSample(lpStage2, 0)
+        val mag = abs(lowBand)
+        envFast += (mag - envFast) * (if (mag > envFast) fastAttack else fastRelease)
+        envSlow += (mag - envSlow) * (if (mag > envSlow) fastAttack else slowRelease)
+        val transientPunch = (envFast - envSlow).coerceAtLeast(0.0).coerceAtMost(0.6)
+        val dynScale = 1.0 / (1.0 + envSlow * 0.55)
+
+        val extra = when (mode) {
+            // 蝰蛇炮震：四阶隔离高能共振 + 猛烈瞬态冲击 + 防破饱和 + 动态响度平衡
+            1 -> {
+                val slammed = tanh(lowBand * (1.85 + amt * 1.15))
+                (lowBand * (1.08 + transientPunch * 2.35) + slammed * 0.88) * dynScale * amt
+            }
+            // 超潜次低音：零交点二分频真次谐波（f/2）叠加共振基波
+            2 -> {
+                val driver = octDriverLpf.processSample(octDriverHpf.processSample(clean, 0), 0)
+                val dMag = abs(driver)
+                octEnv += (dMag - octEnv) * (if (dMag > octEnv) fastAttack else fastRelease)
+                if (prevOct <= 0.0 && driver > 0.0) octSign = -octSign
+                prevOct = driver
+                val gate = (octEnv / (octEnv + 0.008)).let { it * it }
+                val rawSub = octSign * octEnv * gate * 1.35
+                val subHarmonic = subOctHpf.processSample(subOctLpf.processSample(rawSub, 0), 0)
+                (lowBand * (0.88 + transientPunch * 1.85) + subHarmonic * 1.15) * dynScale * amt
+            }
+            // 自然重低音：温暖偶次饱和 + 紧致鼓点
+            else -> {
+                val warm = tanh(lowBand * 2.45 + 0.14 * lowBand * lowBand) * 0.78
+                (lowBand * (0.85 + transientPunch * 1.75) + warm * 0.62) * dynScale * amt
+            }
+        }
+
+        val add = extra.toFloat()
+        val mudMix = (amt * 0.90).toFloat().coerceIn(0f, 1f)
+        for (ch in 0 until min(frameChannels, 2)) {
+            val dry = buf[index + ch]
+            val cleared = antiMudEq.processSample(dry.toDouble(), ch).toFloat()
+            buf[index + ch] = (dry + (cleared - dry) * mudMix) + add
+        }
+    }
+
+    fun reset() {
+        subsonicHpf.reset()
+        subBandLpf1.reset()
+        subBandLpf2.reset()
+        subFocusPeak.reset()
+        octDriverHpf.reset()
+        octDriverLpf.reset()
+        subOctLpf.reset()
+        subOctHpf.reset()
+        antiMudEq.reset()
+        envFast = 0.0
+        envSlow = 0.0
+        octEnv = 0.0
+        prevOct = 0.0
+        octSign = 1.0
+    }
+}
+
+/**
+ * 高频明晰度与微细节激励器（自研 64 位瞬态+泛音双路）：
+ * 1. 2.6 kHz 高通聚焦乐器质感与空气边界，并通过 7.8 kHz Q=2.4 凹口滤除入耳式耳道齿音刺峰；
+ * 2. 1.2 ms 快起瞬态微动态检测，把拨弦、唇齿与镲片击打细节温和提亮；
+ * 3. 奇/偶次微谐波励磁叠加直达清晰分量，绝不触碰 200~1500 Hz 人声主干。
+ */
+@VisibleForTesting
+internal class ClarityExciter(sampleRate: Int, channels: Int) {
+    private val chCount = channels.coerceIn(1, 2)
+    private val detailHpf = DoubleBiquad(chCount).apply {
+        setCoeffs(BiquadDesign.highPass(2600.0, sampleRate, 0.7071))
+    }
+    private val deEssNotch = DoubleBiquad(chCount).apply {
+        setCoeffs(BiquadDesign.peaking(7800.0, -3.6, sampleRate, 2.4))
+    }
+    private val airHpf = DoubleBiquad(chCount).apply {
+        setCoeffs(BiquadDesign.highPass(4200.0, sampleRate, 0.7071))
+    }
+    private val fastAttack = 1.0 - exp(-1.0 / (sampleRate * 0.0012).coerceAtLeast(1.0))
+    private val fastRelease = 1.0 - exp(-1.0 / (sampleRate * 0.028).coerceAtLeast(1.0))
+    private val slowRelease = 1.0 - exp(-1.0 / (sampleRate * 0.065).coerceAtLeast(1.0))
+    private val envFast = DoubleArray(chCount)
+    private val envSlow = DoubleArray(chCount)
+
+    fun processFrame(buf: FloatArray, index: Int, frameChannels: Int, amount: Float) {
+        val amt = amount.coerceIn(0f, 1f).toDouble()
+        if (amt <= 0.0) return
+        for (ch in 0 until min(frameChannels, chCount)) {
+            val dry = buf[index + ch]
+            val d = deEssNotch.processSample(detailHpf.processSample(dry.toDouble(), ch), ch)
+            val mag = abs(d)
+            envFast[ch] += (mag - envFast[ch]) * (if (mag > envFast[ch]) fastAttack else fastRelease)
+            envSlow[ch] += (mag - envSlow[ch]) * (if (mag > envSlow[ch]) fastAttack else slowRelease)
+            val microTransient = (envFast[ch] - envSlow[ch]).coerceIn(0.0, 0.35)
+            val driven = tanh(d * 2.25) - d * 0.55
+            val air = airHpf.processSample(driven, ch)
+            val microBoost = 1.0 + microTransient * 1.45
+            val add = (d * 0.28 + air * 0.26) * microBoost * amt
+            buf[index + ch] = dry + add.toFloat()
+        }
+    }
+
+    fun reset() {
+        detailHpf.reset()
+        deEssNotch.reset()
+        airHpf.reset()
+        envFast.fill(0.0)
+        envSlow.fill(0.0)
     }
 }
 

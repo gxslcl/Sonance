@@ -900,13 +900,21 @@ object ArtworkLoader {
         }
 
         if (bitmap == null && sourceUri != null && sourceMissKey != null && !isMissingKey(sourceMissKey)) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val skipSystemExtractor = isDsdUri(context, sourceUri)
+                if (!skipSystemExtractor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     bitmap = runCatching {
                         context.contentResolver.loadThumbnail(sourceUri, Size(size, size), null)
                     }.getOrNull()
                 }
                 if (bitmap == null) {
+                    bitmap = AudioTags.readCoverArt(context, sourceUri)?.let { decodeSampled(it, size) }
+                }
+                if (bitmap == null && !skipSystemExtractor) {
                     bitmap = readEmbeddedPicture(context, sourceUri, size)
+                }
+                if (bitmap == null && !sourceUri.isRemote()) {
+                    bitmap = SidecarAssetResolver.resolveCoverBytes(context, sourceUri)
+                        ?.let { decodeSampled(it, size) }
                 }
                 if (bitmap == null) ArtworkThumbCache.ifCurrent(generation) { markMissing(sourceMissKey) }
                 else {
@@ -1008,6 +1016,28 @@ object ArtworkLoader {
      * 吞掉不会崩，但**已经读到的封面会被丢弃**，等于内嵌封面兜底完全失效，
      * 而且 `release()` 永不执行，每次泄漏一个 native 实例。
      */
+    private fun isDsdUri(context: Context, uri: Uri): Boolean {
+        val raw = uri.toString().lowercase()
+        if (raw.endsWith(".dsf") || raw.endsWith(".dff")) return true
+        return runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val head = ByteArray(4)
+                var r = 0
+                while (r < 4) {
+                    val n = input.read(head, r, 4 - r)
+                    if (n < 0) break
+                    r += n
+                }
+                r == 4 && (
+                    (head[0] == 'D'.code.toByte() && head[1] == 'S'.code.toByte() &&
+                        head[2] == 'D'.code.toByte() && head[3] == ' '.code.toByte()) ||
+                        (head[0] == 'F'.code.toByte() && head[1] == 'R'.code.toByte() &&
+                            head[2] == 'M'.code.toByte() && head[3] == '8'.code.toByte())
+                    )
+            } ?: false
+        }.getOrDefault(false)
+    }
+
     private fun readEmbeddedPicture(context: Context, sourceUri: Uri, size: Int): Bitmap? {
         val mmr = MediaMetadataRetriever()
         return try {
@@ -1066,6 +1096,7 @@ object ArtworkLoader {
         artworkGoneVersion++
         cacheResetVersion++
         onlineCovers.clear()
+        SidecarAssetResolver.clear()
         val app = context.applicationContext
         workScope.launch { ArtworkThumbCache.clear(app, ticket) }
     }

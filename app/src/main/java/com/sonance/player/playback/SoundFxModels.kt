@@ -34,14 +34,23 @@ data class SoundFxParams(
     /** Poweramp 式宽低音搁架增益（90 Hz Low-Shelf，-9..+9 dB） */
     val bassBoostDb: Float = 0f,
     /** Poweramp 式空气高音搁架增益（9.5 kHz High-Shelf，-9..+9 dB） */
-    val trebleBoostDb: Float = 0f
+    val trebleBoostDb: Float = 0f,
+    /** 超重低音引擎强度 0..1（蝰蛇级低频谐振 + 瞬态冲击 + 可选次谐波八度下潜 + 215 Hz 去浊滤波） */
+    val viperBass: Float = 0f,
+    /** 超重低音谐振中心频率 35..95 Hz */
+    val viperBassFreqHz: Float = 52f,
+    /** 超重低音模式：0 = 自然重低音，1 = 蝰蛇炮震，2 = 超潜次低音 */
+    val viperBassMode: Int = 0,
+    /** 高频明晰度与微细节激励 0..1（带通空气谐波微激励 + 瞬态边缘强化 + 7.8 kHz 齿音抑制） */
+    val clarity: Float = 0f
 ) {
     /** 没有实际效果时可以整链旁路，省 CPU */
     val isNeutral: Boolean
         get() = virtualBass <= 0f && reverbWet <= 0f &&
             stereoWidth == 1f && preampDb == 0f && !limiter &&
             crossfeed <= 0f && speakerHpfHz <= 0f &&
-            bassBoostDb == 0f && trebleBoostDb == 0f
+            bassBoostDb == 0f && trebleBoostDb == 0f &&
+            viperBass <= 0f && clarity <= 0f
 
     /** 所有来自 UI / 持久化的数值都过这一关，脏参数不允许进音频线程 */
     fun clamp(): SoundFxParams = copy(
@@ -54,13 +63,17 @@ data class SoundFxParams(
         crossfeed = crossfeed.finiteOr(0f).coerceIn(0f, 1f),
         speakerHpfHz = speakerHpfHz.finiteOr(0f).let { if (it < 20f) 0f else it.coerceIn(30f, 160f) },
         bassBoostDb = bassBoostDb.finiteOr(0f).coerceIn(-TONE_MAX_DB, TONE_MAX_DB),
-        trebleBoostDb = trebleBoostDb.finiteOr(0f).coerceIn(-TONE_MAX_DB, TONE_MAX_DB)
+        trebleBoostDb = trebleBoostDb.finiteOr(0f).coerceIn(-TONE_MAX_DB, TONE_MAX_DB),
+        viperBass = viperBass.finiteOr(0f).coerceIn(0f, 1f),
+        viperBassFreqHz = viperBassFreqHz.finiteOr(52f).coerceIn(35f, 95f),
+        viperBassMode = viperBassMode.coerceIn(0, 2),
+        clarity = clarity.finiteOr(0f).coerceIn(0f, 1f)
     )
 
     companion object {
         val NEUTRAL = SoundFxParams()
 
-        /** 持久化用「逗号分隔」，兼容旧版 6~9 段与新版 11 段格式 */
+        /** 持久化用「逗号分隔」，兼容旧版 6~14 段与新版 15 段格式 */
         fun fromStore(raw: String?): SoundFxParams {
             if (raw.isNullOrBlank()) return NEUTRAL
             val p = raw.split(",")
@@ -76,7 +89,11 @@ data class SoundFxParams(
                 crossfeed = p.getOrNull(7)?.toFloatOrNull() ?: 0f,
                 speakerHpfHz = p.getOrNull(8)?.toFloatOrNull() ?: 0f,
                 bassBoostDb = p.getOrNull(9)?.toFloatOrNull() ?: 0f,
-                trebleBoostDb = p.getOrNull(10)?.toFloatOrNull() ?: 0f
+                trebleBoostDb = p.getOrNull(10)?.toFloatOrNull() ?: 0f,
+                viperBass = p.getOrNull(11)?.toFloatOrNull() ?: 0f,
+                viperBassFreqHz = p.getOrNull(12)?.toFloatOrNull() ?: 52f,
+                viperBassMode = p.getOrNull(13)?.toIntOrNull() ?: 0,
+                clarity = p.getOrNull(14)?.toFloatOrNull() ?: 0f
             ).clamp()
         }
 
@@ -84,7 +101,7 @@ data class SoundFxParams(
             listOf(
                 virtualBass, reverbWet, reverbDecay, stereoWidth, preampDb,
                 if (limiter) "1" else "0", limiterThresholdDb, crossfeed, speakerHpfHz,
-                bassBoostDb, trebleBoostDb
+                bassBoostDb, trebleBoostDb, viperBass, viperBassFreqHz, viperBassMode, clarity
             ).joinToString(",")
         }
     }
@@ -93,9 +110,6 @@ data class SoundFxParams(
 /**
  * 为后级效果计算动态峰值余量（dB），由 [SoundChainDsp]、[presetNetCurve] 与
  * [presetToneBands] 共用，保证运行时实际听感与预览图保持同一响度基准。
- *
- * 说明：正常音乐中 Side 分量通常比 Mid 弱 6~12 dB，因此按 `3.0 * log10(width)` 预留，
- * 既能避免宽声场边缘削顶，又不会像旧版 `12 * log10(width)` 那样误压掉 4~5 dB 中频响度。
  */
 internal fun effectPreampBudgetDb(params: SoundFxParams, channels: Int = 2): Float {
     if (channels > 2) return 0f
@@ -104,7 +118,8 @@ internal fun effectPreampBudgetDb(params: SoundFxParams, channels: Int = 2): Flo
     } else {
         0f
     }
-    return widthBudget + params.virtualBass * 0.25f + params.reverbWet * 0.25f
+    return widthBudget + params.virtualBass * 0.25f + params.reverbWet * 0.25f +
+        params.viperBass * 0.45f + params.clarity * 0.20f
 }
 
 private fun Float.finiteOr(fallback: Float): Float = if (isFinite()) this else fallback
@@ -165,7 +180,9 @@ data class SoundPreset(
             crossfeed = fx.crossfeed * intensity.fxScale,
             stereoWidth = 1f + (fx.stereoWidth - 1f) * intensity.fxScale,
             bassBoostDb = fx.bassBoostDb * intensity.eqScale,
-            trebleBoostDb = fx.trebleBoostDb * intensity.eqScale
+            trebleBoostDb = fx.trebleBoostDb * intensity.eqScale,
+            viperBass = fx.viperBass * intensity.fxScale,
+            clarity = fx.clarity * intensity.fxScale
         ).clamp()
         return scaledEq to scaledFx
     }
@@ -267,6 +284,32 @@ object SoundPresets {
         fx = SoundFxParams(
             virtualBass = 0.36f, stereoWidth = 1.22f, crossfeed = 0.12f,
             bassBoostDb = 2.4f, trebleBoostDb = 2.2f
+        )
+    )
+
+    /**
+     * 旗舰入耳监听调音（听感 + 微细节双向拉满）：
+     * - 250 Hz 深度去浊（-3.0 dB）释放封闭耳道内的乐器分离度与空气层次；
+     * - 2 kHz / 4 kHz 质感与泛音细节拉升 + 16 kHz 丝滑空气延伸，同时精准压低 8 kHz 耳道刺峰（-1.4 dB）做到高解析零齿音；
+     * - 搭配自然模式超重低音引擎（48 Hz 紧致弹跳 + 215 Hz 二次去浊）、柔和 BS2B 脱塞串扰与 128% 宽阔声场，零混响不糊瞬态。
+     */
+    val IEM_MASTER = SoundPreset(
+        id = "iem_master",
+        name = "入耳 · 臻境",
+        category = SoundPresetCategory.HEADPHONE,
+        description = "专为入耳式耳机打造的旗舰高解析调音：深度清理 250 Hz 封闭腔浊度并定向削弱 8 kHz 刺耳齿音峰，联动高频明晰度与微细节激励引擎放大 2~4 kHz 结像质感与空气层次，配合 46 Hz 弹性低频与脱塞声场",
+        character = "超解析细节 · 润泽脱塞",
+        eqDb = floatArrayOf(1.2f, 1.4f, -0.4f, -3.2f, 0.4f, 1.2f, 2.0f, 2.2f, -1.8f, 2.0f),
+        fx = SoundFxParams(
+            virtualBass = 0.18f,
+            stereoWidth = 1.32f,
+            crossfeed = 0.14f,
+            bassBoostDb = 1.4f,
+            trebleBoostDb = 1.8f,
+            viperBass = 0.42f,
+            viperBassFreqHz = 46f,
+            viperBassMode = 0,
+            clarity = 0.62f
         )
     )
 
@@ -378,10 +421,52 @@ object SoundPresets {
         )
     )
 
+    /** 蝰蛇超重低音：独立次低音共振与瞬态锤感引擎 + 215 Hz 去浊净声，低音震撼度超越经典蝰蛇且人声通透不浑浊。 */
+    val VIPER_BASS = SoundPreset(
+        id = "viper_bass",
+        name = "蝰蛇 · 超重低音",
+        category = SoundPresetCategory.SONANCE,
+        description = "超重低音炮震模式（50 Hz 高能四阶隔离共振 + 鼓点瞬态强化 + 220 Hz 浑浊抑制 + 明晰度解析），下潜拳拳到肉且人声通透贴耳",
+        character = "超潜炮震 · 人声零浑浊",
+        eqDb = floatArrayOf(1.6f, 2.2f, 0.4f, -3.6f, 0.0f, 1.0f, 1.6f, 2.0f, 1.0f, 1.2f),
+        fx = SoundFxParams(
+            virtualBass = 0.30f, stereoWidth = 1.22f, bassBoostDb = 2.0f, trebleBoostDb = 1.4f,
+            viperBass = 0.82f, viperBassFreqHz = 50f, viperBassMode = 1, clarity = 0.42f
+        )
+    )
+
+    /** 超潜次低音炮：追踪底鼓/贝斯零交点实时合成真二分频（f/2）次谐波极低频，小耳机也能涌出音箱般物理震感。 */
+    val SUB_CANNON = SoundPreset(
+        id = "sub_cannon",
+        name = "超潜 · 次低音炮",
+        category = SoundPresetCategory.SONANCE,
+        description = "实时二分频次谐波合成（42 Hz 极低频下潜 + 瞬态动感压限平衡），将鼓点基频延展至超低八度，呈现震撼低音炮体感",
+        character = "真次谐波 · 体感超潜",
+        eqDb = floatArrayOf(1.8f, 2.0f, 0.2f, -3.4f, 0.0f, 1.0f, 1.4f, 1.8f, 1.0f, 1.0f),
+        fx = SoundFxParams(
+            virtualBass = 0.32f, stereoWidth = 1.18f, bassBoostDb = 2.0f, trebleBoostDb = 1.2f,
+            viperBass = 0.88f, viperBassFreqHz = 42f, viperBassMode = 2, clarity = 0.38f
+        )
+    )
+
+    /** 清澈动感重低音：电子管温润饱和叠加瞬态弹性提升，耐听且富有张力。 */
+    val PUNCH_CLEAR_BASS = SoundPreset(
+        id = "punch_clear_bass",
+        name = "清澈 · 动感低音",
+        category = SoundPresetCategory.SONANCE,
+        description = "自然重低音模式（56 Hz 电子管温润染色 + 瞬态鼓点收紧 + 高频微细节激励），兼顾强劲弹跳低频与通透解析",
+        character = "紧实弹性 · 耐听有劲",
+        eqDb = floatArrayOf(1.2f, 1.8f, 0.4f, -3.4f, 0.2f, 1.2f, 1.8f, 2.0f, 1.0f, 1.4f),
+        fx = SoundFxParams(
+            virtualBass = 0.22f, stereoWidth = 1.24f, bassBoostDb = 1.6f, trebleBoostDb = 1.6f,
+            viperBass = 0.68f, viperBassFreqHz = 56f, viperBassMode = 0, clarity = 0.48f
+        )
+    )
+
     val ALL: List<SoundPreset> = listOf(
         OFF,
-        EXTREME_HIFI, CLEAR, VOCAL, BASS, NIGHT,
-        IN_EAR, OVER_EAR,
+        EXTREME_HIFI, CLEAR, VOCAL, BASS, VIPER_BASS, SUB_CANNON, PUNCH_CLEAR_BASS, NIGHT,
+        IN_EAR, IEM_MASTER, OVER_EAR,
         PHONE_SPEAKER, TABLET_SPEAKER, CAR_AUDIO,
         LIVE, PANORAMA, CINEMA
     )
@@ -508,6 +593,31 @@ object SoundPresets {
             SoundFxParams(
                 virtualBass = 0.48f, stereoWidth = 1.18f, limiter = true,
                 limiterThresholdDb = -0.5f, crossfeed = 0.10f, speakerHpfHz = 40f
+            )
+        ),
+        "viper_bass" to listOf(
+            SoundFxParams(
+                virtualBass = 0.24f, stereoWidth = 1.16f, bassBoostDb = 2.2f, trebleBoostDb = 1.6f,
+                viperBass = 0.72f, viperBassFreqHz = 52f, viperBassMode = 1
+            )
+        ),
+        "sub_cannon" to listOf(
+            SoundFxParams(
+                virtualBass = 0.28f, stereoWidth = 1.14f, bassBoostDb = 2.2f, trebleBoostDb = 1.2f,
+                viperBass = 0.82f, viperBassFreqHz = 44f, viperBassMode = 2
+            )
+        ),
+        "punch_clear_bass" to listOf(
+            SoundFxParams(
+                virtualBass = 0.18f, stereoWidth = 1.20f, bassBoostDb = 1.8f, trebleBoostDb = 1.8f,
+                viperBass = 0.56f, viperBassFreqHz = 58f, viperBassMode = 0
+            )
+        ),
+        "iem_master" to listOf(
+            SoundFxParams(
+                virtualBass = 0.14f, stereoWidth = 1.28f, crossfeed = 0.16f,
+                bassBoostDb = 1.6f, trebleBoostDb = 2.6f,
+                viperBass = 0.28f, viperBassFreqHz = 48f, viperBassMode = 0
             )
         )
     )

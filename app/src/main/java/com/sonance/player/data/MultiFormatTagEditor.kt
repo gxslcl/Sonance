@@ -36,7 +36,16 @@ internal object MultiFormatTagEditor {
      * FLAC：重写 metadata blocks，原样流式复制音频帧
      * ============================================================ */
 
-    fun editFlac(src: File, dst: File, title: String, artist: String, album: String): Boolean {
+    fun editFlac(
+        src: File,
+        dst: File,
+        title: String,
+        artist: String,
+        album: String,
+        lyrics: String? = null,
+        cover: ByteArray? = null,
+        includeMeta: Boolean = true
+    ): Boolean {
         return runCatching {
             src.inputStream().buffered().use { input ->
                 val magic = ByteArray(4)
@@ -65,12 +74,22 @@ internal object MultiFormatTagEditor {
                 }
                 if (blocks.isEmpty() || blocks[0].type != 0) return false
 
+                val writeComment = includeMeta || !lyrics.isNullOrBlank()
                 val existingVorbis = blocks.firstOrNull { it.type == 4 }?.data
-                val updatedVorbis = updateVorbisComment(existingVorbis, title, artist, album)
-                val outBlocks = ArrayList<Block>(blocks.size + 1)
+                val updatedVorbis = if (writeComment) {
+                    updateVorbisComment(
+                        existing = existingVorbis,
+                        title = if (includeMeta) title else "",
+                        artist = if (includeMeta) artist else "",
+                        album = if (includeMeta) album else "",
+                        lyrics = lyrics
+                    )
+                } else existingVorbis
+                val outBlocks = ArrayList<Block>(blocks.size + 2)
                 var inserted = false
                 for (b in blocks) {
-                    if (b.type == 4) {
+                    if (cover != null && cover.isNotEmpty() && b.type == 6) continue
+                    if (b.type == 4 && updatedVorbis != null) {
                         if (!inserted) {
                             outBlocks += Block(4, updatedVorbis)
                             inserted = true
@@ -79,20 +98,27 @@ internal object MultiFormatTagEditor {
                         outBlocks += b
                     }
                 }
-                if (!inserted) {
+                if (!inserted && updatedVorbis != null) {
                     outBlocks.add(1, Block(4, updatedVorbis))
+                }
+
+                val pictureBlockBytes = cover?.takeIf { it.isNotEmpty() }?.let {
+                    RestoreTagWriter.flacPictureBlock(it, RestoreTagWriter.mimeOf(it), isLast = true)
                 }
 
                 dst.outputStream().buffered().use { out ->
                     out.write(magic)
                     for (i in outBlocks.indices) {
                         val b = outBlocks[i]
-                        val isLast = i == outBlocks.lastIndex
+                        val isLast = pictureBlockBytes == null && i == outBlocks.lastIndex
                         out.write(((if (isLast) 0x80 else 0x00) or (b.type and 0x7F)))
                         out.write((b.data.size ushr 16) and 0xFF)
                         out.write((b.data.size ushr 8) and 0xFF)
                         out.write(b.data.size and 0xFF)
                         out.write(b.data)
+                    }
+                    if (pictureBlockBytes != null) {
+                        out.write(pictureBlockBytes)
                     }
                     input.copyTo(out, BUF_SIZE)
                 }
@@ -552,10 +578,14 @@ internal object MultiFormatTagEditor {
         existing: ByteArray?,
         title: String,
         artist: String,
-        album: String
+        album: String,
+        lyrics: String? = null
     ): ByteArray {
         var vendor = DEFAULT_VENDOR
         val kept = ArrayList<String>()
+        val replaceKeys = if (!lyrics.isNullOrBlank()) {
+            REPLACEABLE_VORBIS_KEYS + setOf("LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS")
+        } else REPLACEABLE_VORBIS_KEYS
         if (existing != null && existing.size >= 8) {
             var p = 0
             val vLen = le32(existing, p)
@@ -576,7 +606,7 @@ internal object MultiFormatTagEditor {
                         p += len
                         val eq = comment.indexOf('=')
                         val key = if (eq > 0) comment.substring(0, eq).uppercase() else ""
-                        if (key !in REPLACEABLE_VORBIS_KEYS) {
+                        if (key !in replaceKeys) {
                             kept += comment
                         }
                     }
@@ -584,10 +614,11 @@ internal object MultiFormatTagEditor {
             }
         }
 
-        val entries = ArrayList<String>(kept.size + 3)
+        val entries = ArrayList<String>(kept.size + 4)
         if (title.isNotBlank()) entries += "TITLE=$title"
         if (artist.isNotBlank()) entries += "ARTIST=$artist"
         if (album.isNotBlank()) entries += "ALBUM=$album"
+        if (!lyrics.isNullOrBlank()) entries += "LYRICS=$lyrics"
         entries += kept
 
         val vendorBytes = vendor.toByteArray(StandardCharsets.UTF_8)

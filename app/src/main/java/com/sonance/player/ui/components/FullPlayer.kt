@@ -77,6 +77,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -87,6 +88,8 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
@@ -154,6 +157,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.CustomBackdropStore
 import com.sonance.player.data.LaunchCoverSnapshot
 import com.sonance.player.data.CoverRequest
 import com.sonance.player.data.CoverTint
@@ -342,6 +346,10 @@ fun FullPlayer(
     streamQuality: String? = null,
     /** 被沉浸式黑胶完全遮住时暂停仅供本页面使用的动画与预取。 */
     coveredByVinyl: Boolean = false,
+    /** 播放队列弹窗覆盖在上方时暂停呼吸动画、延后分页器跳页，防止随机切歌掉帧。 */
+    coveredByQueue: Boolean = false,
+    /** 队列面板主动点歌的递增序号，用于区分「队列点歌」与「播完自动切歌」。 */
+    queuePickSeq: Long = 0L,
     /** 全局流体动效手感 */
     motionFeel: MotionFeel = MotionFeel.FLUID,
     /** 封面圆角大小 */
@@ -350,6 +358,10 @@ fun FullPlayer(
     onSheetDragStart: () -> Unit = {},
     onSheetDragDelta: (Float) -> Unit = {},
     onSheetDragEnd: (Float) -> Unit = {},
+    customPlayerBgEnabled: Boolean = false,
+    customPlayerBgRev: Long = 0L,
+    customPlayerBgBlurDp: Int = 8,
+    customPlayerBgDimPct: Int = 42,
     modifier: Modifier = Modifier
 ) {
     val skin = LocalSkin.current
@@ -454,6 +466,8 @@ fun FullPlayer(
     var pendingSwipeUntilMs by remember { mutableLongStateOf(0L) }
     var lastSyncedMediaId by remember { mutableLongStateOf(state.mediaId) }
     var lastSyncedQueueIds by remember { mutableStateOf(state.queueIds) }
+    var lastAnimatedSong by remember { mutableStateOf(queue.getOrNull(activeQueueIndex)) }
+    var lastAnimatedIndex by remember { mutableIntStateOf(activeQueueIndex) }
 
     var switchSeq by remember { mutableLongStateOf(0L) }
     var pendingButtonSwitch by remember { mutableStateOf<ButtonSwitchState?>(null) }
@@ -465,16 +479,21 @@ fun FullPlayer(
     val prevKick = remember { Animatable(0f) }
     val nextKick = remember { Animatable(0f) }
     var lastSwitchTriggeredMs by remember { mutableLongStateOf(0L) }
+    var lastSeenQueuePickSeq by remember { mutableLongStateOf(queuePickSeq) }
+    var lastHandledQueuePickSeq by remember { mutableLongStateOf(queuePickSeq) }
+    var lastQueuePickAtMs by remember { mutableLongStateOf(0L) }
+    var glowBakeTick by remember { mutableIntStateOf(0) }
+    if (queuePickSeq != lastSeenQueuePickSeq) {
+        lastSeenQueuePickSeq = queuePickSeq
+        lastQueuePickAtMs = android.os.SystemClock.uptimeMillis()
+    }
 
     val displayedQueueIndex = if (optimisticTargetIdx in queue.indices) {
         optimisticTargetIdx
     } else {
         activeQueueIndex
     }
-    val buttonLockActive = activeSwitch != null || optimisticTargetIdx in queue.indices
     val latestDisplayedIdx by rememberUpdatedState(displayedQueueIndex)
-    val latestButtonLock by rememberUpdatedState(buttonLockActive)
-    val latestActiveSwitch by rememberUpdatedState(activeSwitch)
 
     val curGlowColors = rememberGlowColors(queue.getOrNull(displayedQueueIndex), skin)
     LaunchedEffect(curGlowColors, displayedQueueIndex) {
@@ -497,7 +516,7 @@ fun FullPlayer(
     // 绘制阶段再跨两张缓存位图做 alpha 叠加，绝不在 120Hz 期间重烘位图。
     LaunchedEffect(curGlowColors, useSmoothGlow, displayedQueueIndex, glowFadeMs, skin.id) {
         if (!useSmoothGlow || curGlowColors.isEmpty()) return@LaunchedEffect
-        if (!buttonLockActive && activeSwitch == null) {
+        if (activeSwitch == null && optimisticTargetIdx !in queue.indices) {
             snapshotFlow {
                 !pagerState.isScrollInProgress && !userDraggedPager
             }.first { it }
@@ -505,18 +524,27 @@ fun FullPlayer(
         val normalized = SmoothGlowController.normalizeColors(curGlowColors, skin.bg)
         if (!smoothGlow.hasColors) {
             smoothGlow.snapTo(normalized, skin.bg)
-        } else if (smoothGlow.toColors != normalized) {
+        } else if (smoothGlow.toColors != normalized || smoothGlow.progress.value < 0.999f) {
             val startColors = smoothGlow.currentColors().ifEmpty { normalized }
             withContext(Dispatchers.Default) {
                 cachedGlowFrame(startColors, glowMode, glowBakeStrength)
                 cachedGlowFrame(normalized, glowMode, glowBakeStrength)
             }
+            glowBakeTick++
             smoothGlow.fromColors = startColors
             smoothGlow.toColors = normalized
             smoothGlow.progress.snapTo(0f)
+            val effectiveFadeMs = if (isSwipeGlow) {
+                glowFadeMs.coerceIn(520, 900)
+            } else {
+                glowFadeMs.coerceIn(GLOW_FADE_RANGE)
+            }
             smoothGlow.progress.animateTo(
                 targetValue = 1f,
-                animationSpec = tween(glowFadeMs.coerceIn(GLOW_FADE_RANGE))
+                animationSpec = tween(
+                    durationMillis = effectiveFadeMs,
+                    easing = FastOutSlowInEasing
+                )
             )
         }
         smoothGlow.fadeActive = false
@@ -527,9 +555,9 @@ fun FullPlayer(
     // 滑动中每帧只触发该小 Canvas 重绘，不触发任何组合与测量，FullPlayer 零重组。
 
     // 预取前后两首（支持首尾环绕）的高清封面、色卡并提前烘入 LRU 位图缓存；
-    // 避开切歌动画活跃期（650ms）再预热后续曲目，防止多路 900px 解码与 GC 抢占动画帧。
-    LaunchedEffect(displayedQueueIndex, queue.size, coveredByVinyl, glowMode, glowBakeStrength, skin.id) {
-        if (queue.isEmpty() || coveredByVinyl) return@LaunchedEffect
+    // 避开切歌动画活跃期（650ms）与队列弹窗操作期再预热后续曲目，防止多路 900px 解码与 GC 抢占动画帧。
+    LaunchedEffect(displayedQueueIndex, queue.size, coveredByVinyl, coveredByQueue, glowMode, glowBakeStrength, skin.id) {
+        if (queue.isEmpty() || coveredByVinyl || coveredByQueue) return@LaunchedEffect
         delay(650L)
         val n = queue.size
         val idx = displayedQueueIndex.coerceIn(0, n - 1)
@@ -645,6 +673,7 @@ fun FullPlayer(
     fun peekCoverBitmapSync(s: Song): ImageBitmap? {
         val coverKey = OnlineCover.keyOf(s.title, s.artist)
         return ArtworkLoader.peekSelected(s.albumId, 900, s.uri, s.id)
+            ?: ArtworkLoader.peekSelected(s.albumId, 256, s.uri, s.id)
             ?: ArtworkLoader.online(s.id)
             ?: ArtworkLoader.peekAny(s.albumId, 900, s.uri, coverKey)
             // 冷启动内存缓存为空：回落到上次播放封面落盘快照，首帧不空白
@@ -675,16 +704,19 @@ fun FullPlayer(
                 fromIndex = curIdx,
                 fromBitmap = fromBmp,
                 toBitmap = toBmp,
-                carryFrac = carry
+                carryFrac = carry,
+                trigger = SwitchTrigger.MANUAL_STEP
             )
             if (hasMulti) {
                 // 手动切歌在四种播放模式下始终沿当前队列环绕推进，直接在第 0ms 乐观切过去，
                 // 并把 ExoPlayer/MediaSession 切歌延后到动画落定时刻，避免音频解码与通知构建阻塞动画帧。
                 optimisticTargetIdx = targetIdx
                 optimisticUntilMs = android.os.SystemClock.uptimeMillis() + 1100L
+                lastAnimatedSong = targetSong
+                lastAnimatedIndex = targetIdx
                 skipNextFadeOnSync = true
-                if (isSwipeGlow && smoothGlow.fadeActive) {
-                    smoothGlow.fadeActive = false
+                if (isSwipeGlow) {
+                    smoothGlow.primeFromIfInactive(resolveGlowColors(from, skin, context), skin.bg)
                 }
                 pendingButtonSwitch = null
                 activeSwitch = sw
@@ -733,6 +765,70 @@ fun FullPlayer(
         activeSwitch = pendingBtnNow
     }
 
+    val queueIdsChanged = state.queueIds != lastSyncedQueueIds
+    val hasPendingSwipe = pendingSwipeTarget >= 0 && !queueIdsChanged
+    val optimisticLockActive = optimisticTargetIdx in queue.indices || pendingButtonSwitch != null
+    val curSongForSwitch = queue.getOrNull(activeQueueIndex)
+    val prevSongForSwitch = lastAnimatedSong
+    val externalSongChanged = !coveredByVinyl &&
+        layer == PlayerLayer.COVER &&
+        !pagerState.isScrollInProgress &&
+        !userDraggedPager &&
+        !hasPendingSwipe &&
+        !optimisticLockActive &&
+        prevSongForSwitch != null &&
+        curSongForSwitch != null &&
+        (prevSongForSwitch.id != curSongForSwitch.id || (!queueIdsChanged && lastAnimatedIndex != activeQueueIndex))
+
+    if (externalSongChanged) {
+        val prev = prevSongForSwitch!!
+        val nextSong = curSongForSwitch!!
+        val dir = if (!queueIdsChanged && queue.size > 1 && lastAnimatedIndex in queue.indices && activeQueueIndex in queue.indices) {
+            when {
+                lastAnimatedIndex == queue.lastIndex && activeQueueIndex == 0 -> 1
+                lastAnimatedIndex == 0 && activeQueueIndex == queue.lastIndex -> -1
+                activeQueueIndex < lastAnimatedIndex -> -1
+                else -> 1
+            }
+        } else {
+            1
+        }
+        val nowMs = android.os.SystemClock.uptimeMillis()
+        val trigger = classifyExternalSwitchTrigger(
+            coveredByQueue = coveredByQueue,
+            hasUnconsumedQueuePick = queuePickSeq != lastHandledQueuePickSeq,
+            recentQueuePick = lastQueuePickAtMs > 0L && (nowMs - lastQueuePickAtMs) <= 1_500L
+        )
+        val fromBmp = if (!vinylMode) peekCoverBitmapSync(prev) else null
+        val toBmp = if (!vinylMode) peekCoverBitmapSync(nextSong) else null
+        activeSwitch = ButtonSwitchState(
+            seq = ++switchSeq,
+            dir = dir,
+            fromSong = prev,
+            fromIndex = lastAnimatedIndex,
+            fromBitmap = fromBmp,
+            toBitmap = toBmp,
+            carryFrac = 0f,
+            trigger = trigger
+        )
+        skipNextFadeOnSync = true
+        if (isSwipeGlow) {
+            smoothGlow.primeFromIfInactive(resolveGlowColors(prev, skin, context), skin.bg)
+        }
+        lastAnimatedSong = nextSong
+        lastAnimatedIndex = activeQueueIndex
+        if (trigger == SwitchTrigger.QUEUE_PICK) {
+            lastHandledQueuePickSeq = queuePickSeq
+        }
+    } else if (!optimisticLockActive && curSongForSwitch != null) {
+        lastAnimatedSong = curSongForSwitch
+        lastAnimatedIndex = activeQueueIndex
+    }
+
+    val pagerLockActive = activeSwitch != null || optimisticTargetIdx in queue.indices || coveredByQueue
+    val latestPagerLock by rememberUpdatedState(pagerLockActive)
+    val latestActiveSwitch by rememberUpdatedState(activeSwitch)
+
     LaunchedEffect(pendingButtonSwitch?.seq) {
         val pending = pendingButtonSwitch ?: return@LaunchedEffect
         delay(450L)
@@ -759,25 +855,42 @@ fun FullPlayer(
         val isRapid = (now - lastSwitchTriggeredMs) < 380L
         lastSwitchTriggeredMs = now
         if (Build.VERSION.SDK_INT >= 35) {
-            hostView.frameContentVelocity = 4000f
+            hostView.frameContentVelocity = when (sw.trigger) {
+                SwitchTrigger.AUTO_ADVANCE -> 1200f
+                SwitchTrigger.QUEUE_PICK -> 1800f
+                SwitchTrigger.MANUAL_STEP -> 4000f
+            }
         }
-        val baseMs = when (switchMotion) {
-            PlayerSwitchMotion.POWERAMP_SLIDE -> 400
-            PlayerSwitchMotion.DEPTH_SLIDE -> 420
-            PlayerSwitchMotion.TILT_3D -> 440
-            PlayerSwitchMotion.OPTICAL_DISSOLVE -> 450
+        val animMs = resolveSwitchDurationMs(sw.trigger, switchMotion, motionFeel, isRapid)
+        val easing = when (sw.trigger) {
+            SwitchTrigger.AUTO_ADVANCE -> CubicBezierEasing(0.22f, 0.61f, 0.36f, 1f)
+            SwitchTrigger.QUEUE_PICK -> CubicBezierEasing(0.20f, 0.88f, 0.26f, 1f)
+            SwitchTrigger.MANUAL_STEP -> CubicBezierEasing(0.24f, 0.84f, 0.28f, 1f)
         }
-        val scaledBase = scaleMotionDuration(baseMs, motionFeel)
-        val animMs = if (isRapid) (scaledBase * 0.72f).toInt().coerceAtLeast(80) else scaledBase
         sw.progress.animateTo(
             targetValue = 1f,
             animationSpec = tween(
                 durationMillis = animMs,
-                easing = CubicBezierEasing(0.24f, 0.84f, 0.28f, 1f)
+                easing = easing
             )
         )
         if (activeSwitch?.seq == sw.seq) {
             activeSwitch = null
+        }
+    }
+
+    LaunchedEffect(activeSwitchRef?.seq, curGlowColors, glowMode, glowBakeStrength, skin.id) {
+        val sw = activeSwitchRef ?: return@LaunchedEffect
+        val fromColors = resolveGlowColors(sw.fromSong, skin)
+        val toColors = curGlowColors
+        val needFrom = fromColors.isNotEmpty() && peekCachedGlowFrame(fromColors, glowMode, glowBakeStrength) == null
+        val needTo = toColors.isNotEmpty() && peekCachedGlowFrame(toColors, glowMode, glowBakeStrength) == null
+        if (needFrom || needTo) {
+            withContext(Dispatchers.Default) {
+                if (needFrom) cachedGlowFrame(fromColors, glowMode, glowBakeStrength)
+                if (needTo) cachedGlowFrame(toColors, glowMode, glowBakeStrength)
+            }
+            glowBakeTick++
         }
     }
 
@@ -799,8 +912,8 @@ fun FullPlayer(
     }
 
     // 预探测前后曲目的 Hi-Res 标签，切歌第 0 帧即命中缓存，避免异步探测回落引起小金标延迟闪现
-    LaunchedEffect(displayedQueueIndex, queue) {
-        if (queue.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(displayedQueueIndex, queue, coveredByQueue) {
+        if (queue.isEmpty() || coveredByQueue) return@LaunchedEffect
         val n = queue.size
         val neighbors = (-2..2).mapNotNull { delta ->
             val idx = ((displayedQueueIndex + delta) % n + n) % n
@@ -815,26 +928,24 @@ fun FullPlayer(
         }
     }
 
-    val queueIdsChanged = state.queueIds != lastSyncedQueueIds
-    val hasPendingSwipe = pendingSwipeTarget >= 0 && !queueIdsChanged
     val stalePagerPage = pagerState.currentPage
     val externalDesync = !coveredByVinyl &&
         !pagerState.isScrollInProgress &&
         !userDraggedPager &&
         !hasPendingSwipe &&
-        !buttonLockActive &&
+        !pagerLockActive &&
         activeQueueIndex in queue.indices &&
         stalePagerPage != activeQueueIndex
 
-    // 同步对齐：在组合提交后的 SideEffect 立即请求 requestScrollToPage，
-    // 避免等到 LaunchedEffect 在下一帧之后才 scrollToPage 造成一帧以上的错位封面/晕染闪屏。
     SideEffect {
         if (queueIdsChanged) {
             lastSyncedQueueIds = state.queueIds
             if (pendingSwipeTarget >= 0) pendingSwipeTarget = -1
             if (optimisticTargetIdx >= 0) optimisticTargetIdx = -1
             pendingButtonSwitch = null
-            activeSwitch = null
+            if (!externalSongChanged) {
+                activeSwitch = null
+            }
             skipNextFadeOnSync = false
         }
         if (externalDesync) {
@@ -870,6 +981,8 @@ fun FullPlayer(
                     if (pageSong != null) {
                         pendingSwipeTarget = settledPage
                         pendingSwipeUntilMs = android.os.SystemClock.uptimeMillis() + 600L
+                        lastAnimatedSong = pageSong
+                        lastAnimatedIndex = settledPage
                         onPlayAt(settledPage)
                     }
                 }
@@ -878,9 +991,9 @@ fun FullPlayer(
         }
     }
 
-    // 播放器 → 分页器：按钮切歌动效与乐观锁定期内保持分页器原地钉住，结束后再静默对齐页码。
-    LaunchedEffect(activeQueueIndex, state.mediaId, queue, coveredByVinyl, pendingSwipeTarget, buttonLockActive) {
-        if (queue.isEmpty() || coveredByVinyl || buttonLockActive) return@LaunchedEffect
+    // 播放器 → 分页器：按钮/队列/自动切歌动效与乐观锁定期内保持分页器原地钉住，结束后再静默对齐页码。
+    LaunchedEffect(activeQueueIndex, state.mediaId, queue, coveredByVinyl, pendingSwipeTarget, pagerLockActive) {
+        if (queue.isEmpty() || coveredByVinyl || pagerLockActive) return@LaunchedEffect
         val target = activeQueueIndex.coerceIn(0, queue.lastIndex)
         if (pendingSwipeTarget >= 0) {
             if (target == pendingSwipeTarget) {
@@ -933,7 +1046,7 @@ fun FullPlayer(
 
     // 「页面可见」= 停在封面层。切到歌词 / 律动柱层后不再推进；
     // 暂停后仍然继续跑 600ms 把包络收回去，收干净立即 break，不留空转。
-    val breathActive = state.isPlaybackActive && layer == PlayerLayer.COVER && !coveredByVinyl
+    val breathActive = state.isPlaybackActive && layer == PlayerLayer.COVER && !coveredByVinyl && !coveredByQueue
     val needCoverEnergy = layer == PlayerLayer.COVER && !coveredByVinyl
     val coverLifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(needCoverEnergy, coverLifecycleOwner) {
@@ -1022,15 +1135,62 @@ fun FullPlayer(
         }
     }
 
+    val customPlayerRaw by produceState<Bitmap?>(
+        initialValue = null,
+        customPlayerBgEnabled,
+        customPlayerBgRev
+    ) {
+        value = if (customPlayerBgEnabled) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                CustomBackdropStore.loadBitmap(context, CustomBackdropStore.Slot.PLAYER)
+            }
+        } else null
+    }
+    val customPlayerImage by produceState<ImageBitmap?>(
+        initialValue = null,
+        customPlayerRaw,
+        customPlayerBgBlurDp
+    ) {
+        val raw = customPlayerRaw
+        value = if (raw == null) {
+            null
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S || customPlayerBgBlurDp <= 0) {
+            raw.asImageBitmap()
+        } else {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                CustomBackdropStore.softBlur(raw, customPlayerBgBlurDp).asImageBitmap()
+            }
+        }
+    }
+    val playerUiSkin = if (customPlayerImage != null) {
+        val dimAlpha = customPlayerBgDimPct / 100f
+        val rep = Color(
+            red = 0.45f * (1f - dimAlpha),
+            green = 0.45f * (1f - dimAlpha),
+            blue = 0.45f * (1f - dimAlpha)
+        )
+        val accent = ensureReadable(skin.accent, rep, 3.2f, true)
+        skin.copy(
+            text = ensureReadable(skin.text, rep, 4.5f, true),
+            textDim = ensureReadable(skin.textDim, rep, 3.8f, true),
+            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, true),
+            accent = accent,
+            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, true),
+            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false)
+        )
+    } else skin
+
+    androidx.compose.runtime.CompositionLocalProvider(LocalSkin provides playerUiSkin) {
     Box(
         modifier
             .fillMaxSize()
-            .background(skin.bg)
+            .then(if (customPlayerImage == null) Modifier.background(skin.bg) else Modifier)
             // 记下自己在 root 里的位置，用来把封面的 root 坐标换算成本页坐标
             .onGloballyPositioned { rootTopLeft = it.positionInRoot() }
             // 晕染画在**整页背景层**：这一层天然包含顶栏和状态栏，颜色能一路覆盖上去。
             // （之前画在封面那一层，被分页器裁掉了顶栏部分，所以顶部一直缺一块。）
             .drawBehind {
+                if (customPlayerImage != null) return@drawBehind
                 val cover = coverBounds ?: return@drawBehind
                 if (cover.width <= 0f || cover.height <= 0f) return@drawBehind
                 // 必须裁到本 Box 的范围内。
@@ -1064,46 +1224,61 @@ fun FullPlayer(
                     }
 
                     if (useSmoothGlow) {
+                        @Suppress("UNUSED_VARIABLE")
+                        val bakeTick = glowBakeTick
                         val p = smoothGlow.progress.value.coerceIn(0f, 1f)
-                        val fromFrame = cachedGlowFrame(smoothGlow.fromColors, glowMode, glowBakeStrength)
-                        val toFrame = cachedGlowFrame(smoothGlow.toColors, glowMode, glowBakeStrength)
+                        val fromFrame = peekCachedGlowFrame(smoothGlow.fromColors, glowMode, glowBakeStrength)
+                        val toFrame = peekCachedGlowFrame(smoothGlow.toColors, glowMode, glowBakeStrength)
                         if (p >= 0.999f || smoothGlow.fromColors == smoothGlow.toColors) {
-                            drawGlow(toFrame, cover, glowMode, strengthArg, alpha = alphaScale)
+                            val settled = toFrame ?: cachedGlowFrame(smoothGlow.toColors, glowMode, glowBakeStrength)
+                            drawGlow(settled, cover, glowMode, strengthArg, alpha = alphaScale)
                         } else {
-                            if (fromFrame.colors.isNotEmpty()) {
-                                drawGlow(fromFrame, cover, glowMode, strengthArg, alpha = (1f - p) * alphaScale)
-                            }
-                            if (toFrame.colors.isNotEmpty()) {
-                                drawGlow(toFrame, cover, glowMode, strengthArg, alpha = p * alphaScale)
+                            val fromReady = fromFrame != null && fromFrame.colors.isNotEmpty()
+                            val toReady = toFrame != null && toFrame.colors.isNotEmpty()
+                            when {
+                                fromReady && toReady -> {
+                                    drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = (1f - p) * alphaScale)
+                                    if (p > 0f) {
+                                        drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = p * alphaScale)
+                                    }
+                                }
+                                fromReady -> drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                                toReady -> drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                                else -> {
+                                    val fallbackTo = cachedGlowFrame(smoothGlow.toColors, glowMode, glowBakeStrength)
+                                    drawGlow(fallbackTo, cover, glowMode, strengthArg, alpha = alphaScale)
+                                }
                             }
                         }
                     } else if (activeSwitch != null) {
                         val sw = activeSwitch!!
                         val p = sw.progress.value.coerceIn(0f, 1f)
+                        @Suppress("UNUSED_VARIABLE")
+                        val bakeTick = glowBakeTick
                         val curQueue = latestQueue
                         val targetSong = curQueue.getOrNull(latestDisplayedIdx)
                             ?: curQueue.getOrNull(latestActiveIdx)
-                        val fromFrame = cachedGlowFrame(
+                        val fromFrame = peekCachedGlowFrame(
                             resolveGlowColors(sw.fromSong, skin),
                             glowMode,
                             glowBakeStrength
                         )
-                        val toFrame = cachedGlowFrame(
+                        val toFrame = peekCachedGlowFrame(
                             resolveGlowColors(targetSong, skin),
                             glowMode,
                             glowBakeStrength
                         )
-                        val fromReady = fromFrame.colors.isNotEmpty()
-                        val toReady = toFrame.colors.isNotEmpty()
+                        val fromReady = fromFrame != null && fromFrame.colors.isNotEmpty()
+                        val toReady = toFrame != null && toFrame.colors.isNotEmpty()
                         when {
                             fromReady && toReady -> {
-                                drawGlow(fromFrame, cover, glowMode, strengthArg, alpha = (1f - p) * alphaScale)
+                                drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = (1f - p) * alphaScale)
                                 if (p > 0f) {
-                                    drawGlow(toFrame, cover, glowMode, strengthArg, alpha = p * alphaScale)
+                                    drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = p * alphaScale)
                                 }
                             }
-                            fromReady -> drawGlow(fromFrame, cover, glowMode, strengthArg, alpha = alphaScale)
-                            toReady -> drawGlow(toFrame, cover, glowMode, strengthArg, alpha = alphaScale)
+                            fromReady -> drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                            toReady -> drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
                         }
                     } else {
                         // 跟手模式滑动中：按分页器的滚动位置在相邻两页之间混合。
@@ -1115,7 +1290,7 @@ fun FullPlayer(
                         val curQueue = latestQueue
                         val activeIdx = latestActiveIdx
                         val targetIdx = latestDisplayedIdx
-                        val extAnchor = latestButtonLock || (
+                        val extAnchor = latestPagerLock || (
                             !pagerState.isScrollInProgress &&
                                 !userDraggedPager &&
                                 pendingSwipeTarget < 0 &&
@@ -1161,6 +1336,26 @@ fun FullPlayer(
             }
     ) {
         val currentSong = queue.getOrNull(activeQueueIndex)
+        customPlayerImage?.let { bgImg ->
+            Box(Modifier.matchParentSize().clipToBounds()) {
+                val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && customPlayerBgBlurDp > 0) {
+                    Modifier.blur(customPlayerBgBlurDp.dp, BlurredEdgeTreatment.Rectangle)
+                } else Modifier
+                Image(
+                    bitmap = bgImg,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().then(blurMod)
+                )
+                if (customPlayerBgDimPct > 0) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(Color.Black.copy(alpha = customPlayerBgDimPct / 100f))
+                    )
+                }
+            }
+        }
 
         // 三层横向轮播。这里用 HorizontalPager 而不是 AnimatedContent：
         // 内容会**跟着手指走**、松手回弹到最近一层，这才是轮播该有的手感；
@@ -1346,7 +1541,7 @@ fun FullPlayer(
                             queueProvider = { latestQueue },
                             activeIndexProvider = { latestDisplayedIdx },
                             anchorActiveProvider = {
-                                latestButtonLock || (!pagerState.isScrollInProgress && !userDraggedPager && pendingSwipeTarget < 0)
+                                latestPagerLock || (!pagerState.isScrollInProgress && !userDraggedPager && pendingSwipeTarget < 0)
                             },
                             activeSwitchProvider = { latestActiveSwitch },
                             smoothGlowColorsProvider = { smoothGlow.currentColors() },
@@ -1425,7 +1620,7 @@ fun FullPlayer(
                         .blockSongSwipeInBottomBand(bottomSafePx)
                 ) { page ->
                     val displayIdx = when {
-                        buttonLockActive && page == stalePagerPage -> displayedQueueIndex
+                        pagerLockActive && page == stalePagerPage -> displayedQueueIndex
                         externalDesync && page == stalePagerPage -> activeQueueIndex
                         else -> page
                     }
@@ -1479,7 +1674,7 @@ fun FullPlayer(
                             triggerButtonSwitch(1, onNext)
                         },
                         switchMotion = switchMotion,
-                        activeSwitch = if (isCurrent && page == stalePagerPage) activeSwitch else null,
+                        activeSwitch = if (isCurrent) activeSwitch else null,
                         switchProgress = { activeSwitch?.progress?.value ?: 1f },
                         prevKickPx = { prevKick.value },
                         nextKickPx = { nextKick.value },
@@ -1537,7 +1732,7 @@ fun FullPlayer(
                             // - rect.width > 1f && rect.height > 1f：拒绝退化空矩形。
                             if (isCurrent &&
                                 !externalDesync &&
-                                !buttonLockActive &&
+                                !pagerLockActive &&
                                 page == pagerState.currentPage &&
                                 pagerState.settledPage == page &&
                                 !pagerState.isScrollInProgress &&
@@ -1642,6 +1837,7 @@ fun FullPlayer(
             },
             onDismiss = { showTopMoreSheet = false }
         )
+    }
     }
 }
 
@@ -1918,6 +2114,20 @@ private fun resolveGlowColors(
     }
 }
 
+private fun peekCachedGlowFrame(colors: List<Color>, mode: GlowMode, strength: Float): GlowFrame? {
+    if (colors.isEmpty()) return null
+    if (mode == GlowMode.AROUND) return GlowFrame(colors, null)
+    val key = GlowFrameKey(
+        c0 = colors.getOrElse(0) { Color.Transparent }.toArgb(),
+        c1 = colors.getOrElse(1) { Color.Transparent }.toArgb(),
+        c2 = colors.getOrElse(2) { Color.Transparent }.toArgb(),
+        count = colors.size,
+        mode = mode,
+        strengthBits = strength.toBits()
+    )
+    return glowFrameCache.get(key)
+}
+
 private fun cachedGlowFrame(colors: List<Color>, mode: GlowMode, strength: Float): GlowFrame {
     if (colors.isEmpty()) return GlowFrame(emptyList(), null)
     val key = GlowFrameKey(
@@ -1987,6 +2197,17 @@ private class SmoothGlowController(
     var hasColors by mutableStateOf(initial.isNotEmpty())
     var fadeActive by mutableStateOf(false)
     val fallbackColor = fallback
+
+    fun primeFromIfInactive(colors: List<Color>, fallback: Color = fallbackColor) {
+        if (fadeActive && hasColors) return
+        if (colors.isNotEmpty()) {
+            val normalized = normalizeColors(colors, fallback)
+            hasColors = true
+            fromColors = normalized
+            toColors = normalized
+        }
+        fadeActive = true
+    }
 
     suspend fun snapTo(colors: List<Color>, fallback: Color = fallbackColor) {
         if (colors.isEmpty()) return
@@ -3131,6 +3352,117 @@ private fun Modifier.swipeExitFade(pager: PagerState, page: Int): Modifier =
         }
     }
 
+internal enum class SwitchTrigger {
+    MANUAL_STEP,
+    AUTO_ADVANCE,
+    QUEUE_PICK
+}
+
+internal data class CoverLayerTransform(
+    val alpha: Float,
+    val scale: Float,
+    val translationX: Float,
+    val translationY: Float,
+    val rotationY: Float = 0f
+)
+
+internal fun classifyExternalSwitchTrigger(
+    coveredByQueue: Boolean,
+    hasUnconsumedQueuePick: Boolean,
+    recentQueuePick: Boolean
+): SwitchTrigger = if (coveredByQueue || (hasUnconsumedQueuePick && recentQueuePick)) {
+    SwitchTrigger.QUEUE_PICK
+} else {
+    SwitchTrigger.AUTO_ADVANCE
+}
+
+internal fun resolveSwitchDurationMs(
+    trigger: SwitchTrigger,
+    switchMotion: PlayerSwitchMotion,
+    motionFeel: MotionFeel,
+    isRapid: Boolean
+): Int {
+    val baseMs = when (trigger) {
+        SwitchTrigger.MANUAL_STEP -> when (switchMotion) {
+            PlayerSwitchMotion.POWERAMP_SLIDE -> 400
+            PlayerSwitchMotion.DEPTH_SLIDE -> 420
+            PlayerSwitchMotion.TILT_3D -> 440
+            PlayerSwitchMotion.OPTICAL_DISSOLVE -> 450
+        }
+        SwitchTrigger.AUTO_ADVANCE -> 540
+        SwitchTrigger.QUEUE_PICK -> 310
+    }
+    val scaledBase = scaleMotionDuration(baseMs, motionFeel)
+    if (!isRapid) return scaledBase
+    return when (trigger) {
+        SwitchTrigger.MANUAL_STEP -> (scaledBase * 0.72f).toInt().coerceAtLeast(80)
+        SwitchTrigger.AUTO_ADVANCE -> (scaledBase * 0.75f).toInt().coerceAtLeast(180)
+        SwitchTrigger.QUEUE_PICK -> (scaledBase * 0.68f).toInt().coerceAtLeast(140)
+    }
+}
+
+internal fun evalAutoAdvanceOut(
+    progress: Float,
+    baseScale: Float,
+    baseTranslationY: Float
+): CoverLayerTransform {
+    val p = progress.coerceIn(0f, 1f)
+    val t = (p / 0.80f).coerceIn(0f, 1f)
+    val smooth = t * t * (3f - 2f * t)
+    return CoverLayerTransform(
+        alpha = 1f - smooth,
+        scale = baseScale * (1f - 0.045f * p),
+        translationX = 0f,
+        translationY = baseTranslationY
+    )
+}
+
+internal fun evalAutoAdvanceIn(
+    progress: Float,
+    baseScale: Float,
+    baseTranslationY: Float
+): CoverLayerTransform {
+    val p = progress.coerceIn(0f, 1f)
+    val t = ((p - 0.06f) / 0.82f).coerceIn(0f, 1f)
+    val smooth = t * t * (3f - 2f * t)
+    return CoverLayerTransform(
+        alpha = smooth,
+        scale = baseScale * (0.968f + 0.032f * p),
+        translationX = 0f,
+        translationY = baseTranslationY
+    )
+}
+
+internal fun evalQueuePickOut(
+    progress: Float,
+    baseScale: Float,
+    baseTranslationY: Float,
+    density: Float
+): CoverLayerTransform {
+    val p = progress.coerceIn(0f, 1f)
+    return CoverLayerTransform(
+        alpha = 1f - (p / 0.64f).coerceIn(0f, 1f),
+        scale = baseScale * (1f - 0.055f * p),
+        translationX = 0f,
+        translationY = baseTranslationY - 6f * density * p
+    )
+}
+
+internal fun evalQueuePickIn(
+    progress: Float,
+    baseScale: Float,
+    baseTranslationY: Float,
+    density: Float
+): CoverLayerTransform {
+    val p = progress.coerceIn(0f, 1f)
+    return CoverLayerTransform(
+        alpha = (p / 0.58f).coerceIn(0f, 1f),
+        scale = baseScale * (0.955f + 0.045f * p),
+        translationX = 0f,
+        translationY = baseTranslationY + 14f * density * (1f - p)
+    )
+}
+
 private data class ButtonSwitchState(
     val seq: Long,
     val dir: Int,
@@ -3139,6 +3471,7 @@ private data class ButtonSwitchState(
     val fromBitmap: ImageBitmap? = null,
     val toBitmap: ImageBitmap? = null,
     val carryFrac: Float = 0f,
+    val trigger: SwitchTrigger = SwitchTrigger.MANUAL_STEP,
     val progress: Animatable<Float, AnimationVector1D> = Animatable(0f)
 )
 
@@ -3160,19 +3493,29 @@ private fun SwitchCoverSlot(
     val skin = LocalSkin.current
     val density = LocalDensity.current.density
     val hostView = LocalView.current
+    val triggerNow = activeSwitch?.trigger ?: SwitchTrigger.MANUAL_STEP
+    val showHalo = activeSwitch != null && (
+        triggerNow == SwitchTrigger.AUTO_ADVANCE ||
+            (triggerNow == SwitchTrigger.MANUAL_STEP && switchMotion == PlayerSwitchMotion.OPTICAL_DISSOLVE)
+        )
     if (Build.VERSION.SDK_INT >= 35 && activeSwitch != null) {
         SideEffect {
-            hostView.frameContentVelocity = 4000f
+            hostView.frameContentVelocity = when (activeSwitch.trigger) {
+                SwitchTrigger.AUTO_ADVANCE -> 1200f
+                SwitchTrigger.QUEUE_PICK -> 1800f
+                SwitchTrigger.MANUAL_STEP -> 4000f
+            }
         }
     }
 
     Box(
         contentAlignment = Alignment.Center,
-        modifier = if (switchMotion == PlayerSwitchMotion.OPTICAL_DISSOLVE && activeSwitch != null) {
+        modifier = if (showHalo) {
             Modifier.drawBehind {
                 val p = switchProgress().coerceIn(0f, 1f)
                 if (p < 1f) {
-                    val pulse = sin(p * PI).toFloat() * 0.42f
+                    val peak = if (triggerNow == SwitchTrigger.AUTO_ADVANCE) 0.26f else 0.42f
+                    val pulse = sin(p * PI).toFloat() * peak
                     val radius = size.maxDimension * (0.62f + 0.08f * pulse)
                     drawCircle(
                         brush = Brush.radialGradient(
@@ -3198,43 +3541,61 @@ private fun SwitchCoverSlot(
                     val carry = activeSwitch.carryFrac
                     val s = coverScale.value
                     transformOrigin = TransformOrigin.Center
-                    when (switchMotion) {
-                        PlayerSwitchMotion.POWERAMP_SLIDE -> {
-                            val travel = size.width + 28.dp.toPx()
-                            alpha = 1f - 0.65f * p
-                            val sc = s * (1f - 0.08f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * travel * (carry - (1f + carry) * p)
-                            translationY = baseTranslationY
+                    when (activeSwitch.trigger) {
+                        SwitchTrigger.AUTO_ADVANCE -> {
+                            val tf = evalAutoAdvanceOut(p, s, baseTranslationY)
+                            alpha = tf.alpha
+                            scaleX = tf.scale
+                            scaleY = tf.scale
+                            translationX = tf.translationX
+                            translationY = tf.translationY
                         }
-                        PlayerSwitchMotion.DEPTH_SLIDE -> {
-                            val dist = 150.dp.toPx()
-                            alpha = (1f - (p / 0.68f).coerceIn(0f, 1f))
-                            val sc = s * (1f - 0.16f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * dist * (carry - (1f + carry) * p)
-                            translationY = baseTranslationY
+                        SwitchTrigger.QUEUE_PICK -> {
+                            val tf = evalQueuePickOut(p, s, baseTranslationY, density)
+                            alpha = tf.alpha
+                            scaleX = tf.scale
+                            scaleY = tf.scale
+                            translationX = tf.translationX
+                            translationY = tf.translationY
                         }
-                        PlayerSwitchMotion.TILT_3D -> {
-                            val dist = 155.dp.toPx()
-                            alpha = (1f - (p / 0.70f).coerceIn(0f, 1f))
-                            val sc = s * (1f - 0.18f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * dist * (carry - (1f + carry) * p)
-                            translationY = baseTranslationY
-                            rotationY = -d * 22f * p
-                            cameraDistance = 12f * density
-                        }
-                        PlayerSwitchMotion.OPTICAL_DISSOLVE -> {
-                            alpha = (1f - (p / 0.76f).coerceIn(0f, 1f))
-                            val sc = s * (1f - 0.12f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = -d * 44.dp.toPx() * p
-                            translationY = baseTranslationY
+                        SwitchTrigger.MANUAL_STEP -> when (switchMotion) {
+                            PlayerSwitchMotion.POWERAMP_SLIDE -> {
+                                val travel = size.width + 28.dp.toPx()
+                                alpha = 1f - 0.65f * p
+                                val sc = s * (1f - 0.08f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * travel * (carry - (1f + carry) * p)
+                                translationY = baseTranslationY
+                            }
+                            PlayerSwitchMotion.DEPTH_SLIDE -> {
+                                val dist = 150.dp.toPx()
+                                alpha = (1f - (p / 0.68f).coerceIn(0f, 1f))
+                                val sc = s * (1f - 0.16f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * dist * (carry - (1f + carry) * p)
+                                translationY = baseTranslationY
+                            }
+                            PlayerSwitchMotion.TILT_3D -> {
+                                val dist = 155.dp.toPx()
+                                alpha = (1f - (p / 0.70f).coerceIn(0f, 1f))
+                                val sc = s * (1f - 0.18f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * dist * (carry - (1f + carry) * p)
+                                translationY = baseTranslationY
+                                rotationY = -d * 22f * p
+                                cameraDistance = 12f * density
+                            }
+                            PlayerSwitchMotion.OPTICAL_DISSOLVE -> {
+                                alpha = (1f - (p / 0.76f).coerceIn(0f, 1f))
+                                val sc = s * (1f - 0.12f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = -d * 44.dp.toPx() * p
+                                translationY = baseTranslationY
+                            }
                         }
                     }
                 }
@@ -3266,7 +3627,10 @@ private fun SwitchCoverSlot(
             }
         }
 
-        val sheenMod = if (switchMotion == PlayerSwitchMotion.TILT_3D && activeSwitch != null) {
+        val sheenMod = if (activeSwitch != null &&
+            activeSwitch.trigger == SwitchTrigger.MANUAL_STEP &&
+            switchMotion == PlayerSwitchMotion.TILT_3D
+        ) {
             Modifier
                 .clip(if (vinylMode) CircleShape else RoundedCornerShape(coverCornerDp))
                 .drawWithContent {
@@ -3308,43 +3672,61 @@ private fun SwitchCoverSlot(
                     val p = rawP.coerceIn(0f, 1f)
                     val d = activeSwitch.dir.toFloat()
                     val carry = activeSwitch.carryFrac
-                    when (switchMotion) {
-                        PlayerSwitchMotion.POWERAMP_SLIDE -> {
-                            val travel = size.width + 28.dp.toPx()
-                            alpha = 0.35f + 0.65f * p
-                            val sc = s * (0.92f + 0.08f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * travel * (1f + carry) * (1f - p)
-                            translationY = baseTranslationY
+                    when (activeSwitch.trigger) {
+                        SwitchTrigger.AUTO_ADVANCE -> {
+                            val tf = evalAutoAdvanceIn(p, s, baseTranslationY)
+                            alpha = tf.alpha
+                            scaleX = tf.scale
+                            scaleY = tf.scale
+                            translationX = tf.translationX
+                            translationY = tf.translationY
                         }
-                        PlayerSwitchMotion.DEPTH_SLIDE -> {
-                            val dist = 150.dp.toPx()
-                            alpha = (p / 0.52f).coerceIn(0f, 1f)
-                            val sc = s * (0.88f + 0.12f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * dist * (1f + carry) * (1f - p)
-                            translationY = baseTranslationY
+                        SwitchTrigger.QUEUE_PICK -> {
+                            val tf = evalQueuePickIn(p, s, baseTranslationY, density)
+                            alpha = tf.alpha
+                            scaleX = tf.scale
+                            scaleY = tf.scale
+                            translationX = tf.translationX
+                            translationY = tf.translationY
                         }
-                        PlayerSwitchMotion.TILT_3D -> {
-                            val dist = 155.dp.toPx()
-                            alpha = (p / 0.54f).coerceIn(0f, 1f)
-                            val sc = s * (0.86f + 0.14f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * dist * (1f + carry) * (1f - p)
-                            translationY = baseTranslationY
-                            rotationY = d * 22f * (1f - p)
-                            cameraDistance = 12f * density
-                        }
-                        PlayerSwitchMotion.OPTICAL_DISSOLVE -> {
-                            alpha = (p / 0.64f).coerceIn(0f, 1f)
-                            val sc = s * (1.10f - 0.10f * p)
-                            scaleX = sc
-                            scaleY = sc
-                            translationX = d * 48.dp.toPx() * (1f - p)
-                            translationY = baseTranslationY
+                        SwitchTrigger.MANUAL_STEP -> when (switchMotion) {
+                            PlayerSwitchMotion.POWERAMP_SLIDE -> {
+                                val travel = size.width + 28.dp.toPx()
+                                alpha = 0.35f + 0.65f * p
+                                val sc = s * (0.92f + 0.08f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * travel * (1f + carry) * (1f - p)
+                                translationY = baseTranslationY
+                            }
+                            PlayerSwitchMotion.DEPTH_SLIDE -> {
+                                val dist = 150.dp.toPx()
+                                alpha = (p / 0.52f).coerceIn(0f, 1f)
+                                val sc = s * (0.88f + 0.12f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * dist * (1f + carry) * (1f - p)
+                                translationY = baseTranslationY
+                            }
+                            PlayerSwitchMotion.TILT_3D -> {
+                                val dist = 155.dp.toPx()
+                                alpha = (p / 0.54f).coerceIn(0f, 1f)
+                                val sc = s * (0.86f + 0.14f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * dist * (1f + carry) * (1f - p)
+                                translationY = baseTranslationY
+                                rotationY = d * 22f * (1f - p)
+                                cameraDistance = 12f * density
+                            }
+                            PlayerSwitchMotion.OPTICAL_DISSOLVE -> {
+                                alpha = (p / 0.64f).coerceIn(0f, 1f)
+                                val sc = s * (1.10f - 0.10f * p)
+                                scaleX = sc
+                                scaleY = sc
+                                translationX = d * 48.dp.toPx() * (1f - p)
+                                translationY = baseTranslationY
+                            }
                         }
                     }
                 }

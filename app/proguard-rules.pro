@@ -49,3 +49,7 @@
 -keep class rikka.shizuku.ShizukuProvider { *; }
 -keep interface rikka.shizuku.Shizuku$OnRequestPermissionResultListener { *; }
 -keep class rikka.shizuku.ShizukuRemoteProcess { *; }
+
+# Jellyfin FFmpeg 软解扩展与 FLAC JNI 桥：避免 R8 发布包裁剪反射加载的解码器
+-keep class androidx.media3.decoder.ffmpeg.** { *; }
+-keep class androidx.media3.decoder.flac.** { *; }

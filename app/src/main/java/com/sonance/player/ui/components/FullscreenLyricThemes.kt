@@ -152,26 +152,34 @@ internal fun FullscreenThemedLyrics(
             }
         }
 
-        /** 点击某句 / 松手惯性：把舞台平滑停到目标行号 */
-        fun settleTo(target: Float) {
-            lastTouch[0] = android.os.SystemClock.uptimeMillis()
+        var pendingSeek by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+        val effectiveCurrent = pendingSeek?.let { (idx, at) ->
+            if (idx != current && android.os.SystemClock.uptimeMillis() - at < 1_500L) idx else current
+        } ?: current
+        LaunchedEffect(current) {
+            if (pendingSeek?.first == current) pendingSeek = null
+        }
+
+        /** 点击某句 / 松手惯性：把舞台平滑停到目标行号；点句跳转不挂 5 秒防打扰锁 */
+        fun settleTo(target: Float, fromClick: Boolean = false) {
+            lastTouch[0] = if (fromClick) 0L else android.os.SystemClock.uptimeMillis()
             returnJob[0]?.cancel()
             settleJob[0]?.cancel()
             settleJob[0] = scope.launch {
-                animateStage(target, tween(320, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
+                animateStage(target, tween(220, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
             }
         }
 
-        LaunchedEffect(current, dragging) {
+        LaunchedEffect(effectiveCurrent, dragging) {
             if (dragging) return@LaunchedEffect   // 手指在屏幕上时让位给拖动
             // 刚摸过屏幕的 5 秒内不跟随：否则用户刚滑走就会被拽回当前句
             if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < SCROLL_HOLD_MS) return@LaunchedEffect
-            val target = current.coerceAtLeast(0).toFloat()
+            val target = effectiveCurrent.coerceAtLeast(0).toFloat()
             if (abs(target - stage.floatValue) < 0.001f) return@LaunchedEffect
             if (abs(target - stage.floatValue) > 3f) {
                 stage.floatValue = target // Seeking must not fly through hundreds of old lines.
             } else if (style == LyricStyle.SPATIAL) {
-                animateStage(target, tween(900, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
+                animateStage(target, tween(600, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)))
             } else {
                 animateStage(target, spring(dampingRatio = 0.85f, stiffness = 140f))
             }
@@ -356,8 +364,8 @@ internal fun FullscreenThemedLyrics(
                 key(index) {
                     val line = lines[index]
                     val pose = lyricStagePose(style, index - a, centers[index] - anchorCenter, unit, index)
-                    val isCurrent = index == current
-                    val emphasis = if (current >= 0) pose.emphasis else 0f
+                    val isCurrent = index == effectiveCurrent
+                    val emphasis = if (effectiveCurrent >= 0) pose.emphasis else 0f
                     val base = lerp(skin.textDim, skin.accent, emphasis)
                     val y = h * (if (isLandscape) 0.42f else (if (style == LyricStyle.FLUID) 0.44f else 0.5f)) + pose.y
                     val color = if (bgProfile != null && shouldAdapt(isCurrent, adaptMode)) {
@@ -390,10 +398,9 @@ internal fun FullscreenThemedLyrics(
                             .then(if (pose.opacity > 0.05f) Modifier.clickable(
                                 interactionSource = remember { MutableInteractionSource() }, indication = null
                             ) {
+                                pendingSeek = index to android.os.SystemClock.uptimeMillis()
                                 onSeek(line.timeMs)
-                                // 点击后让这一句回到舞台中心；同时进入 5 秒"不自动跟随"窗口，
-                                // 避免跳转触发的换句和手指位置互相拉扯
-                                settleTo(index.toFloat())
+                                settleTo(index.toFloat(), fromClick = true)
                             } else Modifier)
                             .padding(vertical = 4.dp)
                     ) {

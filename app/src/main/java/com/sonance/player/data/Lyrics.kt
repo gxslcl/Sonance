@@ -190,21 +190,27 @@ object LyricsRepository {
             LyricsCache.Override.None -> Unit
         }
 
-        // ---- 1) 内嵌（免费且权威）----
+        // ---- 1) 内嵌与同目录侧车歌词（免费且权威）----
         if (source == null) {
             val embedded = runCatching { AudioTags.readLyrics(context, uri) }.getOrNull()
             if (!embedded.isNullOrBlank()) {
                 text = embedded
                 source = LyricsSource.EMBEDDED
+            } else if (!isRemoteUri(uri)) {
+                val sidecar = runCatching {
+                    SidecarAssetResolver.resolveLyrics(context, uri, title)
+                }.getOrNull()
+                if (!sidecar.isNullOrBlank()) {
+                    text = sidecar
+                    source = LyricsSource.EMBEDDED
+                }
             }
         }
 
         // ---- 2) 本地在线缓存 ----
+        var upgradedFromLegacyCache = false
         if (source == null) {
             val primary = LyricsCache.lookup(context, cacheKey)
-            // 元数据键没命中时再试 songId 别名：用户手动搜索歌词时可能填了
-            // 另一个写法（改了错别字 / 补了后缀），那份缓存挂在别名下。
-            // 没有这一步，重启后内存 LRU 一清，歌名对不上就"歌词又没了"。
             val aliasKey = "id:$songId"
             val alias = if (cacheKey != aliasKey) LyricsCache.lookup(context, aliasKey) else null
             when {
@@ -215,10 +221,8 @@ object LyricsRepository {
                 alias is LyricsCache.Lookup.Hit -> {
                     text = alias.text
                     source = LyricsSource.ONLINE
-                    // 顺手把结果挪到主键下，下次直接命中
                     LyricsCache.store(context, cacheKey, alias.text)
                 }
-                // 之前查过、确认没有：直接返回"没有"，不再打接口
                 primary is LyricsCache.Lookup.KnownMiss -> {
                     val r = LyricsResult(null, null)
                     cache.put(scopedKey, r)
@@ -226,14 +230,39 @@ object LyricsRepository {
                 }
                 else -> Unit
             }
+            // 旧缓存只有逐行 LRC 且未含 `<mm:ss.xxx>` 逐字时间轴时，按需尝试一次升级网易云 yrc 逐字歌词
+            val curText = text
+            if (source == LyricsSource.ONLINE &&
+                curText != null &&
+                !hasWordTimingTag(curText) &&
+                onlineEnabled &&
+                neteaseEnabled &&
+                yrcUpgradeAttempted.add(cacheKey)
+            ) {
+                val upgraded = fetchFromNeteaseDirectOrSearch(remoteSource, remoteId, title, artist, durationMs)
+                if (!upgraded.isNullOrBlank() &&
+                    (hasWordTimingTag(upgraded) || (!curText.contains(TRANSLATION_SEP) && upgraded.contains(TRANSLATION_SEP)))
+                ) {
+                    text = upgraded
+                    upgradedFromLegacyCache = true
+                }
+            }
+        }
+
+        if (upgradedFromLegacyCache && !text.isNullOrBlank()) {
+            LyricsCache.store(context, cacheKey, text)
+            if (cacheKey != "id:$songId") LyricsCache.store(context, "id:$songId", text)
         }
 
         // ---- 3) 在线（用户开启时才走，一次只请求这一首）----
         val canFetchLx = onlineEnabled && lxPlatform != null && !remoteId.isNullOrBlank()
-        if (source == null && onlineEnabled && (apiBase.isNotBlank() || canFetchLx)) {
+        if (source == null && onlineEnabled && (apiBase.isNotBlank() || canFetchLx || (neteaseEnabled && remoteSource == NeteaseSource.id && !remoteId.isNullOrBlank()))) {
             authoritativeMiss = true
             var online: String? = null
-            if (canFetchLx) {
+            if (remoteSource == NeteaseSource.id && !remoteId.isNullOrBlank()) {
+                online = NeteaseSource.lyrics(remoteId)
+            }
+            if (online.isNullOrBlank() && canFetchLx) {
                 online = com.sonance.player.data.lx.LxCatalogProvider.fetchLyric(
                     platform = lxPlatform!!,
                     remoteId = remoteId!!,
@@ -247,20 +276,13 @@ object LyricsRepository {
                 online = OnlineLyrics.fetch(apiBase, title, artist, album)
             }
 
-            // 没拿到就用网易云兜底（用户开了「网易云补全」时）。
-            // 两个源互补：实测 LrcAPI 偶发没有的歌，网易云那边是有的。
-            //
-            // 匹配带**时长校验**很关键 —— 网易云搜"晴天"第一条是「晴天(深情版)」，
-            // 直接取第一条会拿到完全不同版本的歌词、时间轴整体错位。
-            //
-            // LrcAPI 是纯 LRC 文本、永远没有翻译；拿到了歌词但**不含译文**
-            // 时也要再问一次网易云 —— 它的歌词接口带 tlyric（逐行中文翻译），
-            // 拿得到带翻译的版本就整体替换。否则外文歌永远只有原文。
-            if (neteaseEnabled && (online.isNullOrBlank() || !online.contains(TRANSLATION_SEP))) {
-                val withTr = NeteaseSource.findTrackFor(title, artist, durationMs)
-                    ?.let { NeteaseSource.lyrics(it.remoteId) }
+            // 没拿到、缺译文或缺少逐字时间轴时，走网易云 yrc/tlyric 补全
+            if (neteaseEnabled && (online.isNullOrBlank() || !hasWordTimingTag(online) || !online.contains(TRANSLATION_SEP))) {
+                val withTr = fetchFromNeteaseDirectOrSearch(remoteSource, remoteId, title, artist, durationMs)
                 if (!withTr.isNullOrBlank() &&
-                    (online.isNullOrBlank() || withTr.contains(TRANSLATION_SEP))
+                    (online.isNullOrBlank() ||
+                        hasWordTimingTag(withTr) ||
+                        (!online.contains(TRANSLATION_SEP) && withTr.contains(TRANSLATION_SEP)))
                 ) {
                     online = withTr
                 }
@@ -270,12 +292,7 @@ object LyricsRepository {
                 text = online
                 source = LyricsSource.ONLINE
             }
-            // 不管有没有拿到都落盘：拿到存歌词，没拿到存空文件当哨兵，
-            // 下次同一首歌直接走第 2 步，不会反复打接口（避免被限流）。
-            // ⚠️ 必须**两个源都试完**才写哨兵 —— 提前写会把网易云那条路也短路掉。
             LyricsCache.store(context, cacheKey, text)
-            // 有歌词时再按 songId 存一份别名：歌名/歌手之后被编辑过，
-            // 也能靠 id 把这来之不易的网络结果找回来。
             if (!text.isNullOrBlank() && cacheKey != "id:$songId") {
                 LyricsCache.store(context, "id:$songId", text)
             }
@@ -451,24 +468,41 @@ object LyricsRepository {
         LyricsCache.remove(context, key)
     }
 
-    fun clear() = cache.evictAll()
+    private val yrcUpgradeAttempted = ConcurrentHashMap.newKeySet<String>()
 
-    /**
-     * 解析歌词文本。
-     *
-     * 优先按 LRC 解析（内嵌歌词里塞 LRC 非常常见）；一行都没有时间轴就退化成纯文本。
-     * 支持：
-     * - `[mm:ss.xx]` / `[mm:ss]` / `[mm:ss.xxx]`
-     * - 一行多个时间标签 `[00:12.34][01:20.00]词`
-     * - `[offset:+/-毫秒]` 全局偏移
-     * - 忽略 `[ti:]` `[ar:]` `[al:]` `[by:]` 等元信息标签
-     */
+    private fun hasWordTimingTag(text: String): Boolean =
+        INLINE_TIME_TAG.containsMatchIn(text) || looksLikeYrc(text)
+
+    private suspend fun fetchFromNeteaseDirectOrSearch(
+        remoteSource: String,
+        remoteId: String?,
+        title: String,
+        artist: String,
+        durationMs: Long
+    ): String? {
+        if (remoteSource == NeteaseSource.id && !remoteId.isNullOrBlank()) {
+            NeteaseSource.lyrics(remoteId)?.let { return it }
+        }
+        return NeteaseSource.findTrackFor(title, artist, durationMs)?.let {
+            NeteaseSource.lyrics(it.remoteId)
+        }
+    }
+
+    fun clear() {
+        cache.evictAll()
+        yrcUpgradeAttempted.clear()
+        SidecarAssetResolver.clear()
+    }
+
     fun parse(text: String): Lyrics? {
-        // 有些歌词文件（以及我们自己的缓存）带 UTF-8 BOM；不清掉会让行首 `[..]` 标签
-        // 认不出来，时间戳就漏进正文了。
-        val normalized = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
-        if (looksLikeTtml(normalized)) {
-            parseTtml(normalized, text)?.let { return it }
+        val trimmedBom = text.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
+        if (looksLikeTtml(trimmedBom)) {
+            parseTtml(trimmedBom, text)?.let { return it }
+        }
+        val normalized = if (looksLikeYrc(trimmedBom)) {
+            convertYrcToEnhancedLrc(trimmedBom) ?: trimmedBom
+        } else {
+            trimmedBom
         }
         val rawLines = normalized.split('\n')
         val out = ArrayList<LyricLine>(rawLines.size)

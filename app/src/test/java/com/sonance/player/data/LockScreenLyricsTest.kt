@@ -48,4 +48,20 @@ class LockScreenLyricsTest {
         )
         assertTrue(noLyricJson.contains("\"noLyric\":true"))
     }
+
+    @Test
+    fun formatSessionLyricArtist_putsAuthorFirstAndCombinesSongTitle() {
+        assertEquals(
+            "周杰伦 - 晴天",
+            com.sonance.player.playback.PlaybackService.formatSessionLyricArtist("晴天", "周杰伦")
+        )
+        assertEquals(
+            "周杰伦",
+            com.sonance.player.playback.PlaybackService.formatSessionLyricArtist("", "周杰伦")
+        )
+        assertEquals(
+            "纯音乐",
+            com.sonance.player.playback.PlaybackService.formatSessionLyricArtist("纯音乐", "")
+        )
+    }
 }

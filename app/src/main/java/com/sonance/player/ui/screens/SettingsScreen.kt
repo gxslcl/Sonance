@@ -70,6 +70,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -79,8 +80,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
@@ -97,6 +100,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.sonance.player.R
 import com.sonance.player.SonanceViewModel
+import com.sonance.player.data.CustomBackdropStore
 import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.LyricPlaybarStyle
@@ -243,16 +247,16 @@ private val SETTINGS_MODULES = listOf(
     SettingsModule("eq", SettingsCategory.AUDIO_PLAYBACK, "均衡器与系统音效",
         "均衡器 EQ 音效工作室 音效 杜比 系统音效接入 系统音效控制面板 本机音效"),
     SettingsModule("output", SettingsCategory.AUDIO_PLAYBACK, "音频输出与衔接",
-        "USB独占 USB 独占输出 bit-perfect DAC 采样率 输出格式 实时输出 无缝播放 淡入淡出 淡化时长 播放提示"),
+        "USB独占 USB 独占输出 bit-perfect DAC 采样率 输出格式 实时输出 无缝播放 淡入淡出 淡化时长 播放提示 同时播放 混音 音频焦点 不暂停 视频"),
     SettingsModule("behavior", SettingsCategory.AUDIO_PLAYBACK, "启动、定时与手势",
-        "启动 打开应用 直接进入播放 播放界面 冷启动 默认播放页 睡眠定时 定时器 播完当前 定时停止 " +
+        "启动 打开应用 直接进入播放 播放界面 冷启动 默认播放页 自动播放 打开后自动播放 启动自动播放 蓝牙自动播放 连接蓝牙 断开蓝牙 蓝牙暂停 睡眠定时 定时器 播完当前 定时停止 " +
             "摇一摇切歌 摇一摇 息屏摇一摇 防口袋误触"),
     SettingsModule("dlna", SettingsCategory.AUDIO_PLAYBACK, "D-LAN 无线投屏与共享",
         "DLNA D-LAN 无线投屏 投屏 共享 蓝牙 NAS 局域网 音箱 电视"),
 
     // ---- 四、歌词与封面 ----
     SettingsModule("lyric", SettingsCategory.LYRICS_COVER, "歌词显示与桌面/锁屏",
-        "歌词 歌词字号 字号 字体 字体大小 歌词颜色 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 蓝牙车载歌词 车载 " +
+        "歌词 歌词字号 字号 字体 字体大小 歌词颜色 玻璃 逐字 卡拉OK 繁体转简体 锁屏歌词 蓝牙车载歌词 原子岛 ColorOS 16 兼容模式 车载 " +
             "状态栏歌词扩展 HyperLyric LyricGetter 歌词获取器 桌面歌词 悬浮歌词 桌面歌词背景 桌面歌词字号 " +
             "歌词页播放器 播放器样式 歌词适配背景 背景玻璃 文字可读性 对比度 歌词页背景玻璃"),
     SettingsModule("lyOnline", SettingsCategory.LYRICS_COVER, "在线歌词与缓存",
@@ -1341,6 +1345,147 @@ private fun ShellBackgroundSection(vm: SonanceViewModel) {
                 color = skin.textDim
             )
         }
+
+        Spacer(Modifier.height(18.dp))
+        CustomBackdropCard(
+            title = "自定义列表页背景图片",
+            subtitle = "上传相册照片作为歌曲列表与主界面壁纸，支持模糊与遮罩压暗调节",
+            slot = CustomBackdropStore.Slot.SHELL,
+            available = vm.customShellBgAvailable,
+            enabled = vm.customShellBgEnabled,
+            rev = vm.customShellBgRev,
+            blurDp = vm.customShellBgBlurDp,
+            dimPct = vm.customShellBgDimPct,
+            onToggleEnabled = vm::changeCustomShellBgEnabled,
+            onPickImage = vm::importCustomShellBg,
+            onClearImage = vm::clearCustomShellBg,
+            onBlurChange = vm::changeCustomShellBgBlur,
+            onDimChange = vm::changeCustomShellBgDim
+        )
+    }
+}
+
+@Composable
+private fun CustomBackdropCard(
+    title: String,
+    subtitle: String,
+    slot: CustomBackdropStore.Slot,
+    available: Boolean,
+    enabled: Boolean,
+    rev: Long,
+    blurDp: Int,
+    dimPct: Int,
+    onToggleEnabled: (Boolean) -> Unit,
+    onPickImage: (Uri) -> Unit,
+    onClearImage: () -> Unit,
+    onBlurChange: (Int) -> Unit,
+    onDimChange: (Int) -> Unit
+) {
+    val skin = LocalSkin.current
+    val context = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) onPickImage(uri)
+    }
+    val thumb by produceState<android.graphics.Bitmap?>(initialValue = null, available, rev) {
+        value = if (available) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                CustomBackdropStore.loadThumbnail(context, slot)
+            }
+        } else null
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(skin.surface2)
+            .border(1.dp, skin.border, RoundedCornerShape(14.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        SettingsSwitchRow(
+            title = title,
+            subtitle = subtitle,
+            checked = enabled && available,
+            onCheckedChange = { wantOn ->
+                if (wantOn && !available) {
+                    picker.launch("image/*")
+                } else {
+                    onToggleEnabled(wantOn)
+                }
+            }
+        )
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(skin.surface3)
+                    .border(1.dp, skin.border, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bmp = thumb
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = SonanceIcons.Album,
+                        contentDescription = null,
+                        tint = skin.textDim,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TagChip(
+                        label = if (available) "更换图片" else "上传图片",
+                        selected = true,
+                        onClick = { picker.launch("image/*") }
+                    )
+                    if (available) {
+                        TagChip(
+                            label = "清除图片",
+                            selected = false,
+                            onClick = onClearImage
+                        )
+                    }
+                }
+            }
+        }
+
+        if (available && enabled) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("背景模糊度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text("${blurDp}dp", style = MaterialTheme.typography.labelMedium, color = skin.accent)
+            }
+            Slider(
+                value = blurDp.toFloat(),
+                onValueChange = { onBlurChange(it.roundToInt()) },
+                valueRange = 0f..32f,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("遮罩压暗深度", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
+                Text("$dimPct%", style = MaterialTheme.typography.labelMedium, color = skin.accent)
+            }
+            Slider(
+                value = dimPct.toFloat(),
+                onValueChange = { onDimChange(it.roundToInt()) },
+                valueRange = 0f..85f,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 
@@ -2191,6 +2336,7 @@ private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
         append(if (vm.gaplessEnabled) " · 无缝" else " · 曲间停顿")
         if (vm.crossfadeEnabled) append(" · 淡化 ${vm.crossfadeSec} 秒")
         if (vm.playToastEnabled) append(" · 播放提示开")
+        if (vm.allowMixWithOthers) append(" · 允许混音")
     }
     SettingsSectionCard(
         title = "音频输出与衔接",
@@ -2290,6 +2436,12 @@ private fun AudioOutputSettingsSection(vm: SonanceViewModel) {
             checked = vm.playToastEnabled,
             onCheckedChange = { vm.changePlayToast(it) }
         )
+        SettingsSwitchRow(
+            title = "允许与其他应用同时播放",
+            subtitle = "开启后切换到视频软件、短视频或游戏发声时音乐不会自动暂停（不抢占系统音频焦点）",
+            checked = vm.allowMixWithOthers,
+            onCheckedChange = vm::changeAllowMixWithOthers
+        )
     }
 }
 
@@ -2303,6 +2455,8 @@ private fun PlaybackBehaviorSection(vm: SonanceViewModel) {
     val timerLabel = vm.sleepTimerLabel
     val summary = buildString {
         append(if (vm.openPlayerOnLaunch) "启动直进播放页" else "启动进曲库")
+        if (vm.autoPlayOnLaunch) append(" · 启动自播")
+        if (vm.bluetoothAutoPlay) append(" · 蓝牙自播")
         append(timerLabel?.let { " · 定时 $it" } ?: " · 定时关")
         append(if (vm.shakeNextEnabled) " · 摇一摇开" else " · 摇一摇关")
     }
@@ -2317,6 +2471,18 @@ private fun PlaybackBehaviorSection(vm: SonanceViewModel) {
             subtitle = "默认开启：进入应用的第一帧就是播放页（无展开动作）；关闭则第一帧是曲库列表",
             checked = vm.openPlayerOnLaunch,
             onCheckedChange = vm::changeOpenPlayerOnLaunch
+        )
+        SettingsSwitchRow(
+            title = "打开应用后自动播放",
+            subtitle = "冷启动恢复上次播放列表后自动开始播放；关闭则保持暂停等待手动点击",
+            checked = vm.autoPlayOnLaunch,
+            onCheckedChange = vm::changeAutoPlayOnLaunch
+        )
+        SettingsSwitchRow(
+            title = "连接蓝牙自动播放 · 断开暂停",
+            subtitle = "连接蓝牙耳机或车载蓝牙后自动开始播放，断开蓝牙音频连接时自动暂停",
+            checked = vm.bluetoothAutoPlay,
+            onCheckedChange = vm::changeBluetoothAutoPlay
         )
 
         Spacer(Modifier.height(14.dp))
@@ -2668,6 +2834,22 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
             checked = vm.playerHideVolumeBar,
             onCheckedChange = vm::changePlayerHideVolumeBar
         )
+        Spacer(Modifier.height(14.dp))
+        CustomBackdropCard(
+            title = "自定义播放主界面背景图片",
+            subtitle = "上传照片铺作播放页主背景，不影响歌词与黑胶操作手感",
+            slot = CustomBackdropStore.Slot.PLAYER,
+            available = vm.customPlayerBgAvailable,
+            enabled = vm.customPlayerBgEnabled,
+            rev = vm.customPlayerBgRev,
+            blurDp = vm.customPlayerBgBlurDp,
+            dimPct = vm.customPlayerBgDimPct,
+            onToggleEnabled = vm::changeCustomPlayerBgEnabled,
+            onPickImage = vm::importCustomPlayerBg,
+            onClearImage = vm::clearCustomPlayerBg,
+            onBlurChange = vm::changeCustomPlayerBgBlur,
+            onDimChange = vm::changeCustomPlayerBgDim
+        )
         Spacer(Modifier.height(16.dp))
 
         // ---- 播放页的颜色晕染 ----
@@ -3014,8 +3196,8 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
 
         Spacer(Modifier.height(8.dp))
         SettingsSwitchRow(
-            title = "蓝牙车载歌词",
-            subtitle = "连接车机 / 蓝牙音箱播放时，把当前歌词行逐行显示在车机屏幕上（借道蓝牙歌名通道，QQ音乐同款方案）。注意：开启后车机与手机通知的「歌名」会变为歌词行，暂停或断开蓝牙自动还原",
+            title = "蓝牙 / 锁屏与原子岛歌词（兼容模式）",
+            subtitle = "参考洛雪等播放器方案，将当前歌词与歌手实时同步至系统媒体标题与副标题，支持 ColorOS 16 锁屏/流体云、vivo 原子岛（显示歌词+作者）、车载蓝牙及耳机屏显；暂停或关闭后自动还原原歌名与歌手",
             checked = vm.carBtLyricsEnabled,
             onCheckedChange = vm::changeCarBtLyrics
         )
@@ -3090,49 +3272,103 @@ private fun LyricsDisplaySettingsSection(vm: SonanceViewModel) {
                 }
             }
 
+            // ---- 歌词对齐方式 ----
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "桌面歌词对齐方式",
+                style = MaterialTheme.typography.labelMedium,
+                color = skin.textMuted
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DesktopLyricsManager.ALIGN_OPTIONS.forEach { (alignId, alignLabel) ->
+                    val selected = vm.desktopLyricsAlign == alignId
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) skin.accentGlow else skin.surface2)
+                            .border(
+                                1.dp,
+                                if (selected) skin.accent else Color.Transparent,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable { vm.changeDesktopLyricsAlign(alignId) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = alignLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) skin.accent else skin.textMuted
+                        )
+                    }
+                }
+            }
+
             // ---- 歌词颜色 ----
             Spacer(Modifier.height(12.dp))
             Text("歌词颜色", style = MaterialTheme.typography.labelMedium, color = skin.textMuted)
             Spacer(Modifier.height(8.dp))
             val colorChoices = DesktopLyricsManager.TEXT_COLOR_OPTIONS
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                colorChoices.forEach { (argb, label) ->
-                    val selected = vm.desktopLyricsTextColor == argb
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { vm.changeDesktopLyricsTextColor(argb) }
-                            .padding(vertical = 4.dp)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                colorChoices.chunked(4).forEach { rowItems ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(if (argb == 0) skin.surface3 else Color(argb))
-                                .border(
-                                    if (selected) 2.dp else 1.dp,
-                                    if (selected) skin.accent else skin.border,
-                                    CircleShape
+                        rowItems.forEach { (argb, label) ->
+                            val selected = vm.desktopLyricsTextColor == argb
+                            val chipBrush = when (argb) {
+                                DesktopLyricsManager.COLOR_AUTO -> SolidColor(skin.surface3)
+                                DesktopLyricsManager.COLOR_FOLLOW_COVER -> Brush.linearGradient(
+                                    listOf(
+                                        Color(0xFFFF8A80),
+                                        Color(0xFFFFD180),
+                                        Color(0xFF80D8FF),
+                                        Color(0xFFEA80FC)
+                                    )
                                 )
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (selected) skin.accent else skin.textDim,
-                            maxLines = 1
-                        )
+                                else -> SolidColor(Color(argb))
+                            }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { vm.changeDesktopLyricsTextColor(argb) }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(chipBrush)
+                                        .border(
+                                            if (selected) 2.dp else 1.dp,
+                                            if (selected) skin.accent else skin.border,
+                                            CircleShape
+                                        )
+                                )
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (selected) skin.accent else skin.textDim,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        repeat(4 - rowItems.size) {
+                            Spacer(Modifier.weight(1f))
+                        }
                     }
                 }
             }
             Text(
-                "「自动」跟随上面选的背景样式；选固定色后正在唱的那句用这个色，下一句自动降一档透明度。",
+                "「自动」跟随背景样式；「跟随封面」自动提取当前专辑封面主色并优化对比度；选固定色后正在唱的那句用该色，下一句自动降一档透明度。",
                 style = MaterialTheme.typography.labelSmall,
                 color = skin.textDim,
                 modifier = Modifier.padding(top = 6.dp)
@@ -3837,6 +4073,8 @@ private fun BuiltinOnlineSettingsContent(
         if (vm.onlineDownloadEnabled) {
             OnlineDownloadExtraRows(vm)
         }
+        Spacer(Modifier.height(6.dp))
+        DownloadContentPrefsSection(vm)
 
         if (vm.onlineMusicEnabled) {
             Spacer(Modifier.height(14.dp))
@@ -4092,6 +4330,8 @@ private fun LxSettingsContent(
         if (vm.lxDownloadEnabled) {
             OnlineDownloadExtraRows(vm)
         }
+        Spacer(Modifier.height(6.dp))
+        DownloadContentPrefsSection(vm)
 
         if (vm.onlineMusicEnabled) {
             Spacer(Modifier.height(14.dp))
@@ -4127,6 +4367,44 @@ private fun OnlineDownloadExtraRows(vm: SonanceViewModel) {
             "文件在系统音乐目录的「${OnlineDownloader.FOLDER_NAME}」里，本应用不会删除它们。",
             style = MaterialTheme.typography.labelSmall,
             color = skin.textDim
+        )
+    }
+}
+
+@Composable
+private fun DownloadContentPrefsSection(vm: SonanceViewModel) {
+    val skin = LocalSkin.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(skin.surface2)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(
+            "下载附加数据（同时作用于手动下载与边听边存）",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = skin.text
+        )
+        Spacer(Modifier.height(4.dp))
+        SettingsSwitchRow(
+            title = "下载同时保存封面",
+            subtitle = "默认开启：下载音乐时拉取封面并嵌入音频内嵌标签",
+            checked = vm.downloadWithCover,
+            onCheckedChange = vm::changeDownloadWithCover
+        )
+        SettingsSwitchRow(
+            title = "下载同时保存歌词",
+            subtitle = "默认开启：拉取逐字/同步歌词写入音频标签，并同目录生成 .lrc 歌词文件",
+            checked = vm.downloadWithLyrics,
+            onCheckedChange = vm::changeDownloadWithLyrics
+        )
+        SettingsSwitchRow(
+            title = "下载同时写入曲目元数据",
+            subtitle = "默认开启：把歌名、歌手、专辑等标签写入下载文件",
+            checked = vm.downloadWithMetadata,
+            onCheckedChange = vm::changeDownloadWithMetadata
         )
     }
 }

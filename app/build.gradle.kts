@@ -15,8 +15,8 @@ android {
         applicationId = "com.sonance.player"
         minSdk = 24
         targetSdk = 35
-        versionCode = 18
-        versionName = "2.5.6"
+        versionCode = 19
+        versionName = "2.5.7"
         resourceConfigurations += listOf("zh", "en")
         ndk {
             abiFilters += listOf("arm64-v8a")

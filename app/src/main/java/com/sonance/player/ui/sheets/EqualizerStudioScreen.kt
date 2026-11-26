@@ -1816,6 +1816,62 @@ private fun EffectsTabContent(vm: SonanceViewModel) {
         )
     }
 
+    // 模块一B：超重低音引擎（ViPER 级多模式次低音强化）
+    FxModuleCard(title = "超重低音引擎", subtitle = "可调谐振下潜 · 瞬态鼓点增强 · 215 Hz 去浊净声") {
+        Text(
+            text = "重低音模式",
+            style = MaterialTheme.typography.labelLarge,
+            color = StudioText
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(
+                0 to "自然重低音",
+                1 to "蝰蛇炮震",
+                2 to "超潜次低音"
+            ).forEach { (modeId, title) ->
+                StudioMiniFilterChip(
+                    label = title,
+                    selected = fx.viperBassMode == modeId,
+                    onClick = { vm.updateSoundFx(fx.copy(viperBassMode = modeId)) }
+                )
+            }
+        }
+        FxSliderControl(
+            label = "超重低音强度",
+            hint = when (fx.viperBassMode) {
+                1 -> "高能共振 + 瞬态冲击增强并自动抑浑，低音澎湃不遮人声"
+                2 -> "实时合成二分频次谐波（f/2），拉满极低频物理震感"
+                else -> "电子管温润染色 + 紧致鼓点下潜，清晰耐听"
+            },
+            value = fx.viperBass,
+            min = 0f,
+            max = 1f,
+            valueLabel = percent(fx.viperBass),
+            onValue = { vm.updateSoundFx(fx.copy(viperBass = it)) }
+        )
+        FxSliderControl(
+            label = "下潜谐振频率",
+            hint = "较低频率侧重胸腔潜震（35~50 Hz），较高侧重鼓点敲击感（55~95 Hz）",
+            value = fx.viperBassFreqHz,
+            min = 35f,
+            max = 95f,
+            valueLabel = "${fx.viperBassFreqHz.roundToInt()} Hz",
+            onValue = { vm.updateSoundFx(fx.copy(viperBassFreqHz = it)) }
+        )
+        FxSliderControl(
+            label = "高频明晰度与微细节",
+            hint = "高通空气谐波 + 瞬态边缘强化并抑制 7.8 kHz 齿音，提升乐器分离度与解析力",
+            value = fx.clarity,
+            min = 0f,
+            max = 1f,
+            valueLabel = percent(fx.clarity),
+            onValue = { vm.updateSoundFx(fx.copy(clarity = it)) }
+        )
+    }
+
     // 模块二：双耳声场与空间
     FxModuleCard(title = "声场定位与空间反射", subtitle = "低音锁相展宽 · BS2B 串扰 · 立体空间反射") {
         FxSliderControl(

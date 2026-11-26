@@ -252,24 +252,116 @@ internal fun mergeTranslation(lrc: String, translation: String): String {
     }
     if (translations.isEmpty()) return lrc
 
+    val sortedTimes = translations.keys.sorted()
     val out = StringBuilder(lrc.length * 2)
     for (raw in lrc.split('\n')) {
         val line = raw.trim()
         if (line.isEmpty()) continue
         val parsed = splitTaggedLine(line)
         if (parsed == null) {
-            // 元信息行（`[ti:]` / `[ar:]` …）原样保留
             out.append(line).append('\n')
             continue
         }
         val (ms, text) = parsed
         out.append(line)
-        val tr = translations[ms]
-        // 译文和原文一模一样就不重复贴（有些歌的"翻译"其实是原文）
-        if (tr != null && tr != text) out.append(TRANSLATION_SEP).append(tr)
+        val tr = translations[ms] ?: findNearestTranslation(sortedTimes, translations, ms)
+        // 译文和原文一模一样就不重复贴；增强型 LRC 原文包含 `<..>` 时去掉时间标签比较
+        val cleanPlain = INLINE_WORD_TIME_STRIP.replace(text, "").trim()
+        if (tr != null && tr != text && tr != cleanPlain) {
+            out.append(TRANSLATION_SEP).append(tr)
+        }
         out.append('\n')
     }
     return out.toString().trimEnd()
+}
+
+private fun findNearestTranslation(
+    sortedTimes: List<Int>,
+    translations: Map<Int, String>,
+    targetMs: Int,
+    toleranceMs: Int = 350
+): String? {
+    if (sortedTimes.isEmpty()) return null
+    var lo = 0
+    var hi = sortedTimes.lastIndex
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        val v = sortedTimes[mid]
+        when {
+            v < targetMs -> lo = mid + 1
+            v > targetMs -> hi = mid - 1
+            else -> return translations[v]
+        }
+    }
+    var bestKey: Int? = null
+    var bestDiff = toleranceMs + 1
+    for (candIdx in listOf(hi, lo)) {
+        if (candIdx in sortedTimes.indices) {
+            val k = sortedTimes[candIdx]
+            val diff = kotlin.math.abs(k - targetMs)
+            if (diff < bestDiff) {
+                bestDiff = diff
+                bestKey = k
+            }
+        }
+    }
+    return bestKey?.let(translations::get)
+}
+
+private val INLINE_WORD_TIME_STRIP = Regex("""<\d{1,4}:\d{1,2}(?:\.\d{1,3})?>""")
+private val YRC_LINE_REGEX = Regex("""^\[(\d+),(\d+)](.*)$""")
+private val YRC_WORD_REGEX = Regex("""\((\d+),(\d+)(?:,\d+)?\)([^(]*)""")
+
+internal fun looksLikeYrc(text: String): Boolean =
+    text.lineSequence().any { line ->
+        val t = line.trim()
+        YRC_LINE_REGEX.matches(t) && YRC_WORD_REGEX.containsMatchIn(t)
+    }
+
+/**
+ * 将网易云逐字 `yrc`（`[lineMs,dur](wMs,wDur,0)字...`）转换为增强型 LRC
+ * （`[mm:ss.xxx]<mm:ss.xxx>字...`），并滤掉开头的 JSON/制作人员名单行。
+ */
+internal fun convertYrcToEnhancedLrc(yrc: String): String? {
+    if (yrc.isBlank()) return null
+    val lines = ArrayList<String>()
+    var headerDone = false
+    for (raw in yrc.replace("\r\n", "\n").split('\n')) {
+        val t = raw.trim()
+        if (t.isEmpty() || t.startsWith("{")) continue
+        val m = YRC_LINE_REGEX.matchEntire(t) ?: continue
+        val lineStartMs = m.groupValues[1].toLongOrNull() ?: continue
+        val body = m.groupValues[3]
+        val words = YRC_WORD_REGEX.findAll(body).toList()
+        if (words.isEmpty()) continue
+        val plain = words.joinToString("") { it.groupValues[3] }.trim()
+        if (plain.isEmpty()) continue
+        if (!headerDone) {
+            val head = plain.substringBefore(':').substringBefore('：').trim()
+            if (head in CREDIT_KEYWORDS && (plain.contains(':') || plain.contains('：'))) {
+                continue
+            }
+            headerDone = true
+        }
+        val sb = StringBuilder(body.length + 32)
+        sb.append('[').append(formatEnhancedLrcTime(lineStartMs)).append(']')
+        for (w in words) {
+            val wText = w.groupValues[3]
+            if (wText.isEmpty()) continue
+            val wStartMs = (w.groupValues[1].toLongOrNull() ?: lineStartMs).coerceAtLeast(0L)
+            sb.append('<').append(formatEnhancedLrcTime(wStartMs)).append('>').append(wText)
+        }
+        lines += sb.toString()
+    }
+    return if (lines.isEmpty()) null else lines.joinToString("\n")
+}
+
+private fun formatEnhancedLrcTime(ms: Long): String {
+    val safe = ms.coerceAtLeast(0L)
+    val min = safe / 60_000L
+    val sec = (safe % 60_000L) / 1_000L
+    val milli = safe % 1_000L
+    return "%02d:%02d.%03d".format(min, sec, milli)
 }
 
 /**

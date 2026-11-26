@@ -414,6 +414,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.openPlayerOnLaunch = value
     }
 
+    /** 打开应用恢复播放队列后自动开始播放。默认关闭。 */
+    var autoPlayOnLaunch by mutableStateOf(prefs.autoPlayOnLaunch)
+        private set
+
+    fun changeAutoPlayOnLaunch(value: Boolean) {
+        autoPlayOnLaunch = value
+        prefs.autoPlayOnLaunch = value
+    }
+
     /** 最近一次扫描的排除明细，供「曲库清理」区块展示 */
     var lastScanOutcome by mutableStateOf<ScanOutcome?>(null)
         private set
@@ -1013,6 +1022,15 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var lxDownloadEnabled by mutableStateOf(prefs.lxDownloadEnabled)
         private set
 
+    var downloadWithCover by mutableStateOf(prefs.downloadWithCover)
+        private set
+
+    var downloadWithLyrics by mutableStateOf(prefs.downloadWithLyrics)
+        private set
+
+    var downloadWithMetadata by mutableStateOf(prefs.downloadWithMetadata)
+        private set
+
     /**
      * 恢复完成、等播放器报出 mediaId 后要请求一次列表定位。
      *
@@ -1080,7 +1098,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         player.play(
             songs = restoredQueue,
             index = restoredIndex,
-            autoplay = false,
+            autoplay = prefs.autoPlayOnLaunch,
             // 上次停在哪就摆回哪（配合 persistPlayback 对在线歌存进度）。
             // 地址是当场重新取的（带签名会过期）；流不支持 Range 时最坏退化为从头播。
             startPositionMs = prefs.playPositionMs.coerceAtLeast(0L),
@@ -1128,19 +1146,25 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             // 查不到时会去翻 `onlineSongMap` —— 那个 map 声明在类的后半部分，
             // ViewModel 构造期间（init 里就会走到这儿）它**还没初始化**，
             // 一访问就是 NPE，表现是应用一启动就崩、直接退到桌面。
-            val last = map[prefs.lastSongId] ?: return
-            listOf(last)
+            val last = map[prefs.lastSongId]
+            if (last != null) {
+                listOf(last)
+            } else if (prefs.autoPlayOnLaunch) {
+                songs
+            } else {
+                return
+            }
         }
         val index = resolved?.second ?: 0
 
         playbackRestored = true
         armStartupScroll()
-        // autoplay = false：冷启动就出声很吓人。摆成「暂停在这首歌上」，按播放键才继续。
+        // autoplay 由设置项 prefs.autoPlayOnLaunch 控制：默认关闭停在暂停态，开启后恢复即起播。
         // notifyStart = false：这只是把上次的歌摆回来，不该给播放次数 +1。
         player.play(
             songs = queue,
             index = index,
-            autoplay = false,
+            autoplay = prefs.autoPlayOnLaunch,
             startPositionMs = position,
             notifyStart = false,
             isRestore = true
@@ -2567,6 +2591,168 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.shellGlassVisibility = shellGlassVisibility
     }
 
+    // ===== 自定义列表页与播放页上传背景图 =====
+
+    var customShellBgEnabled by mutableStateOf(prefs.customShellBgEnabled)
+        private set
+    var customShellBgRev by mutableLongStateOf(prefs.customShellBgRev)
+        private set
+    var customShellBgBlurDp by mutableIntStateOf(prefs.customShellBgBlurDp)
+        private set
+    var customShellBgDimPct by mutableIntStateOf(prefs.customShellBgDimPct)
+        private set
+    var customShellBgAvailable by mutableStateOf(
+        com.sonance.player.data.CustomBackdropStore.exists(
+            getApplication(),
+            com.sonance.player.data.CustomBackdropStore.Slot.SHELL
+        )
+    )
+        private set
+
+    var customPlayerBgEnabled by mutableStateOf(prefs.customPlayerBgEnabled)
+        private set
+    var customPlayerBgRev by mutableLongStateOf(prefs.customPlayerBgRev)
+        private set
+    var customPlayerBgBlurDp by mutableIntStateOf(prefs.customPlayerBgBlurDp)
+        private set
+    var customPlayerBgDimPct by mutableIntStateOf(prefs.customPlayerBgDimPct)
+        private set
+    var customPlayerBgAvailable by mutableStateOf(
+        com.sonance.player.data.CustomBackdropStore.exists(
+            getApplication(),
+            com.sonance.player.data.CustomBackdropStore.Slot.PLAYER
+        )
+    )
+        private set
+
+    fun changeCustomShellBgEnabled(enabled: Boolean) {
+        if (enabled && !customShellBgAvailable) {
+            showToast("请先上传列表背景图片")
+            return
+        }
+        customShellBgEnabled = enabled
+        prefs.customShellBgEnabled = enabled
+    }
+
+    fun changeCustomShellBgBlur(blurDp: Int) {
+        val v = blurDp.coerceIn(0, 32)
+        customShellBgBlurDp = v
+        prefs.customShellBgBlurDp = v
+    }
+
+    fun changeCustomShellBgDim(dimPct: Int) {
+        val v = dimPct.coerceIn(0, 85)
+        customShellBgDimPct = v
+        prefs.customShellBgDimPct = v
+    }
+
+    fun importCustomShellBg(uri: Uri) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val ok = withContext(Dispatchers.IO) {
+                com.sonance.player.data.CustomBackdropStore.save(
+                    app,
+                    com.sonance.player.data.CustomBackdropStore.Slot.SHELL,
+                    uri
+                )
+            }
+            if (ok) {
+                customShellBgAvailable = true
+                customShellBgEnabled = true
+                prefs.customShellBgEnabled = true
+                val rev = System.currentTimeMillis()
+                customShellBgRev = rev
+                prefs.customShellBgRev = rev
+                showToast("列表/主界面背景图已更新")
+            } else {
+                showToast("无法读取所选图片")
+            }
+        }
+    }
+
+    fun clearCustomShellBg() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            withContext(Dispatchers.IO) {
+                com.sonance.player.data.CustomBackdropStore.clear(
+                    app,
+                    com.sonance.player.data.CustomBackdropStore.Slot.SHELL
+                )
+            }
+            customShellBgAvailable = false
+            customShellBgEnabled = false
+            prefs.customShellBgEnabled = false
+            val rev = System.currentTimeMillis()
+            customShellBgRev = rev
+            prefs.customShellBgRev = rev
+            showToast("已恢复默认列表背景")
+        }
+    }
+
+    fun changeCustomPlayerBgEnabled(enabled: Boolean) {
+        if (enabled && !customPlayerBgAvailable) {
+            showToast("请先上传播放页背景图片")
+            return
+        }
+        customPlayerBgEnabled = enabled
+        prefs.customPlayerBgEnabled = enabled
+    }
+
+    fun changeCustomPlayerBgBlur(blurDp: Int) {
+        val v = blurDp.coerceIn(0, 32)
+        customPlayerBgBlurDp = v
+        prefs.customPlayerBgBlurDp = v
+    }
+
+    fun changeCustomPlayerBgDim(dimPct: Int) {
+        val v = dimPct.coerceIn(0, 85)
+        customPlayerBgDimPct = v
+        prefs.customPlayerBgDimPct = v
+    }
+
+    fun importCustomPlayerBg(uri: Uri) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val ok = withContext(Dispatchers.IO) {
+                com.sonance.player.data.CustomBackdropStore.save(
+                    app,
+                    com.sonance.player.data.CustomBackdropStore.Slot.PLAYER,
+                    uri
+                )
+            }
+            if (ok) {
+                customPlayerBgAvailable = true
+                customPlayerBgEnabled = true
+                prefs.customPlayerBgEnabled = true
+                val rev = System.currentTimeMillis()
+                customPlayerBgRev = rev
+                prefs.customPlayerBgRev = rev
+                showToast("播放主界面背景图已更新")
+            } else {
+                showToast("无法读取所选图片")
+            }
+        }
+    }
+
+    fun clearCustomPlayerBg() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            withContext(Dispatchers.IO) {
+                com.sonance.player.data.CustomBackdropStore.clear(
+                    app,
+                    com.sonance.player.data.CustomBackdropStore.Slot.PLAYER
+                )
+            }
+            customPlayerBgAvailable = false
+            customPlayerBgEnabled = false
+            prefs.customPlayerBgEnabled = false
+            val rev = System.currentTimeMillis()
+            customPlayerBgRev = rev
+            prefs.customPlayerBgRev = rev
+            showToast("已恢复默认播放页背景")
+        }
+    }
+
     // ===== 迷你播放条（列表页底部那个「正在播放」）=====
 
     var miniPlayerStyle by mutableStateOf(MiniPlayerStyle.of(prefs.miniPlayerStyle))
@@ -2889,7 +3075,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.desktopLyricsEnabled = value
     }
 
-    /** 桌面歌词文字颜色（0 = 跟随背景模式） */
+    /** 桌面歌词文字颜色（0 = 跟随背景模式，-1 = 跟随专辑封面） */
     var desktopLyricsTextColor by mutableIntStateOf(prefs.desktopLyricsTextColor)
         private set
 
@@ -2897,6 +3083,17 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         desktopLyricsTextColor = value
         prefs.desktopLyricsTextColor = value
         DesktopLyricsManager.applyTextColor(getApplication())
+    }
+
+    /** 桌面歌词对齐方式（0=居中，1=居左，2=居右） */
+    var desktopLyricsAlign by mutableIntStateOf(prefs.desktopLyricsAlign)
+        private set
+
+    fun changeDesktopLyricsAlign(align: Int) {
+        val clamped = align.coerceIn(0, 2)
+        desktopLyricsAlign = clamped
+        prefs.desktopLyricsAlign = clamped
+        DesktopLyricsManager.applyAlign(getApplication(), resetOffset = true)
     }
 
     /** 状态栏歌词扩展（HyperLyric / LyricGetter 标准广播） */
@@ -2951,6 +3148,24 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         shakeSensitivity = clamped
         prefs.shakeSensitivity = clamped
         com.sonance.player.playback.PlaybackService.refreshExternalAndShakeState()
+    }
+
+    var allowMixWithOthers by mutableStateOf(prefs.allowMixWithOthers)
+        private set
+
+    fun changeAllowMixWithOthers(value: Boolean) {
+        allowMixWithOthers = value
+        prefs.allowMixWithOthers = value
+        com.sonance.player.playback.PlaybackService.syncAudioFocusPolicy(value)
+    }
+
+    /** 连接蓝牙音频设备后自动开始播放，断开蓝牙自动暂停。默认关闭。 */
+    var bluetoothAutoPlay by mutableStateOf(prefs.bluetoothAutoPlay)
+        private set
+
+    fun changeBluetoothAutoPlay(value: Boolean) {
+        bluetoothAutoPlay = value
+        prefs.bluetoothAutoPlay = value
     }
 
     var carBtLyricsEnabled by mutableStateOf(prefs.carBluetoothLyrics)
@@ -4706,6 +4921,21 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         prefs.onlineDownloadWifiOnly = wifiOnly
     }
 
+    fun changeDownloadWithCover(enabled: Boolean) {
+        downloadWithCover = enabled
+        prefs.downloadWithCover = enabled
+    }
+
+    fun changeDownloadWithLyrics(enabled: Boolean) {
+        downloadWithLyrics = enabled
+        prefs.downloadWithLyrics = enabled
+    }
+
+    fun changeDownloadWithMetadata(enabled: Boolean) {
+        downloadWithMetadata = enabled
+        prefs.downloadWithMetadata = enabled
+    }
+
     /**
      * 清掉下载记录（**不删文件**）。
      *
@@ -4843,6 +5073,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 if (notifyUser) showToast("「${song.title}」当前仅获取到试听片段，无法完整下载")
                 return false
             }
+            val dlCover = prefs.downloadWithCover
+            val dlLyrics = prefs.downloadWithLyrics
+            val dlMeta = prefs.downloadWithMetadata
             val outcome = OnlineDownloader.download(
                 context = app,
                 source = song.source,
@@ -4851,8 +5084,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 artist = song.artist,
                 album = song.album,
                 streamUrl = url,
-                coverBytes = coverBytesForTag(song),
-                format = src.downloadStreamFormat(remoteId) ?: src.streamFormat(remoteId) ?: "mp3"
+                coverBytes = if (dlCover) coverBytesForTag(song) else null,
+                format = src.downloadStreamFormat(remoteId) ?: src.streamFormat(remoteId) ?: "mp3",
+                includeCover = dlCover,
+                lyricsText = if (dlLyrics) lyricsTextForDownload(src, remoteId, song.title, song.artist, song.album, song.durationMs) else null,
+                includeMetadata = dlMeta
             )
             return when (outcome) {
                 is OnlineDownloader.Outcome.Saved -> {
@@ -4910,6 +5146,39 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    private suspend fun lyricsTextForDownload(
+        src: OnlineSource,
+        remoteId: String,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Long
+    ): String? = withContext(Dispatchers.IO) {
+        val app = getApplication<Application>()
+        val apiBase = prefs.lyricsApiBase
+        val lxPlatform = com.sonance.player.data.lx.LxPlatform.platformIdFromSource(src.id)
+        var text: String? = null
+        if (src.id == NeteaseSource.id && remoteId.isNotBlank()) {
+            text = NeteaseSource.lyrics(remoteId)
+        } else if (lxPlatform != null && remoteId.isNotBlank()) {
+            text = com.sonance.player.data.lx.LxCatalogProvider.fetchLyric(
+                lxPlatform, remoteId, title, artist, durationMs
+            )
+        }
+        if (text.isNullOrBlank() && apiBase.isNotBlank()) {
+            text = com.sonance.player.data.OnlineLyrics.fetch(apiBase, title, artist, album)
+        }
+        if (text.isNullOrBlank() && prefs.neteaseFillEnabled) {
+            text = NeteaseSource.findTrackFor(title, artist, durationMs)
+                ?.let { NeteaseSource.lyrics(it.remoteId) }
+        }
+        val cacheKey = com.sonance.player.data.LyricsCache.keyOf(title, artist, apiBase)
+        if (!text.isNullOrBlank() && cacheKey != null) {
+            com.sonance.player.data.LyricsCache.store(app, cacheKey, text)
+        }
+        text?.takeIf { it.isNotBlank() }
     }
 
     /** 当前音源。内置模式固定使用网易云，兜底取清单首项 */
@@ -5983,7 +6252,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         onlineSongs: List<Song>,
         at: Int,
         title: String,
+        fromPersonalFm: Boolean = false
     ): Boolean {
+        personalFmActive = fromPersonalFm
+        if (!fromPersonalFm) personalFmSeenRemoteIds.clear()
         val target = onlineSongs.getOrNull(at) ?: return false
         val rid = target.remoteId.orEmpty()
 
@@ -6505,16 +6777,74 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    @Volatile
+    private var personalFmActive: Boolean = false
+
+    @Volatile
+    private var personalFmLoadingMore: Boolean = false
+
+    private val personalFmSeenRemoteIds = LinkedHashSet<String>()
+
     fun playPersonalFm() {
         val acc = neteaseAccount ?: return
         if (!onlineMusicEnabled) return
         viewModelScope.launch {
+            personalFmSeenRemoteIds.clear()
             val tracks = withContext(Dispatchers.IO) { NeteaseExplore.fetchPersonalFm(acc) }
             if (tracks == null) {
                 showToast("私人 FM 获取失败，检查网络后重试")
                 return@launch
             }
-            playRemoteTrackBatch(tracks, emptyMessage = "私人 FM 暂无可播曲目")
+            tracks.forEach { personalFmSeenRemoteIds += it.remoteId }
+            val started = playRemoteTrackBatch(tracks, emptyMessage = "私人 FM 暂无可播曲目", fromPersonalFm = true)
+            if (started) {
+                loadMorePersonalFmIfNeeded(force = true)
+            }
+        }
+    }
+
+    private fun loadMorePersonalFmIfNeeded(force: Boolean = false) {
+        if (!personalFmActive || personalFmLoadingMore || !onlineMusicEnabled) return
+        val acc = neteaseAccount ?: return
+        val st = player.state.value
+        val remaining = st.queueIds.size - 1 - st.queueIndex
+        if (!force && remaining > 2) return
+        personalFmLoadingMore = true
+        viewModelScope.launch {
+            try {
+                val batch = withContext(Dispatchers.IO) {
+                    val collected = ArrayList<RemoteTrack>()
+                    repeat(2) {
+                        val fetched = NeteaseExplore.fetchPersonalFm(acc).orEmpty()
+                        for (t in fetched) {
+                            if (t.playable && personalFmSeenRemoteIds.add(t.remoteId)) {
+                                collected += t
+                            }
+                        }
+                        if (collected.size >= 3) return@withContext collected
+                    }
+                    collected
+                }
+                if (!personalFmActive || batch.isEmpty()) return@launch
+                commitOnlinePage(NeteaseSource, batch)
+                val newSongs = batch.mapNotNull { onlineSongMap[remoteSongId(NeteaseSource.id, it.remoteId)] }
+                    .map { localCopyOf(it) ?: it }
+                if (newSongs.isEmpty()) return@launch
+                player.appendToQueue(newSongs)
+                for (s in newSongs.take(2)) {
+                    val rid = s.remoteId ?: continue
+                    if (!NeteaseSource.hasFreshStream(rid) && localCopyOf(s) == null) {
+                        val url = NeteaseSource.resolveStream(rid, s.durationMs)
+                        if (url != null) {
+                            val u = android.net.Uri.parse(url)
+                            onlineSongMap[s.id]?.let { onlineSongMap[s.id] = it.copy(uri = u) }
+                            player.patchQueueUri(s.id, u)
+                        }
+                    }
+                }
+            } finally {
+                personalFmLoadingMore = false
+            }
         }
     }
 
@@ -6569,7 +6899,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun playRemoteTrackBatch(tracks: List<RemoteTrack>, emptyMessage: String): Boolean {
+    private suspend fun playRemoteTrackBatch(
+        tracks: List<RemoteTrack>,
+        emptyMessage: String,
+        fromPersonalFm: Boolean = false
+    ): Boolean {
         if (tracks.isEmpty()) {
             showToast(emptyMessage)
             return false
@@ -6585,7 +6919,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
             showToast(emptyMessage)
             return false
         }
-        return playOnlineQueue(NeteaseSource, onlineSongs, 0, onlineSongs.first().title)
+        return playOnlineQueue(NeteaseSource, onlineSongs, 0, onlineSongs.first().title, fromPersonalFm = fromPersonalFm)
     }
 
     // ---- 歌单详情 ----
@@ -6993,6 +7327,9 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         playlistDownloadDone++
                         continue
                     }
+                    val dlCover = prefs.downloadWithCover
+                    val dlLyrics = prefs.downloadWithLyrics
+                    val dlMeta = prefs.downloadWithMetadata
                     val outcome = OnlineDownloader.download(
                         context = app,
                         source = src.id,
@@ -7001,8 +7338,11 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                         artist = track.artist,
                         album = track.album,
                         streamUrl = url,
-                        coverBytes = coverBytesForTag(track.title, track.artist, track.coverUrl),
-                        format = src.downloadStreamFormat(track.remoteId) ?: src.streamFormat(track.remoteId) ?: "mp3"
+                        coverBytes = if (dlCover) coverBytesForTag(track.title, track.artist, track.coverUrl) else null,
+                        format = src.downloadStreamFormat(track.remoteId) ?: src.streamFormat(track.remoteId) ?: "mp3",
+                        includeCover = dlCover,
+                        lyricsText = if (dlLyrics) lyricsTextForDownload(src, track.remoteId, track.title, track.artist, track.album, track.durationMs) else null,
+                        includeMetadata = dlMeta
                     )
                     when (outcome) {
                         is OnlineDownloader.Outcome.Saved -> {
@@ -8098,12 +8438,10 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playFrom(list: List<Song>, song: Song) {
+        personalFmActive = false
         val idx = list.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
-        // 随机开着的时候，点一首歌也要按"洗牌袋"来排 ——
-        // 否则队列回到曲库顺序，而模式按钮还亮着"随机"，两边说的不是一回事。
         val on = player.state.value.shuffle
         val ordered = if (on) buildShuffledOrder(list, idx) else list
-        // 换了播放列表，之前记的原顺序就换成这一份（随机开着时它才是"还原"的基准）
         preShuffleOrder = if (on) list else null
         player.play(ordered, idx)
     }
@@ -8115,6 +8453,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun playOrdered(list: List<Song>, song: Song) {
         if (list.isEmpty()) return
+        personalFmActive = false
         val idx = list.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
         preShuffleOrder = null
         player.setRepeat(RepeatMode.OFF)
@@ -8123,7 +8462,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
 
     fun playAll(list: List<Song>, shuffled: Boolean = false) {
         if (list.isEmpty()) return
-        // 同上：只要最终是随机序，就用洗牌袋而不是 `shuffled()`（后者会重复）
+        personalFmActive = false
         val on = shuffled || player.state.value.shuffle
         val ordered = if (on) buildShuffledOrder(list, 0) else list
         preShuffleOrder = if (on) list else null
@@ -8228,6 +8567,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playRandomSong(songsList: List<Song> = emptyList()) {
+        personalFmActive = false
         val pool = songsList.ifEmpty { visibleSongs() }
         if (pool.isEmpty()) {
             showToast("当前列表没有可播放的歌曲")
@@ -8883,8 +9223,22 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
         // 单曲队列自然播完 → 自动随机续播，与手动下一曲（nextOrRandom）同规则。
         // 封面墙点播专辑里的单曲时队列只有一首，播完不该停在原地。
         player.onPlaybackEnded = {
-            if (dlnaActiveRenderer == null && player.state.value.queueIds.size <= 1) {
-                randomListenLikeWall()
+            if (dlnaActiveRenderer == null) {
+                if (personalFmActive) {
+                    val acc = neteaseAccount
+                    if (acc != null && onlineMusicEnabled) {
+                        viewModelScope.launch {
+                            val tracks = withContext(Dispatchers.IO) { NeteaseExplore.fetchPersonalFm(acc) }.orEmpty()
+                            if (tracks.isNotEmpty() && personalFmActive) {
+                                tracks.forEach { personalFmSeenRemoteIds += it.remoteId }
+                                playRemoteTrackBatch(tracks, emptyMessage = "私人 FM 暂无可播曲目", fromPersonalFm = true)
+                                loadMorePersonalFmIfNeeded(force = true)
+                            }
+                        }
+                    }
+                } else if (player.state.value.queueIds.size <= 1) {
+                    randomListenLikeWall()
+                }
             }
         }
         player.onShuffleRoundWrapped = { reshuffleQueueKeepingCurrent() }
@@ -8964,6 +9318,7 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
                     resolveStreamIfMissing(song)
                     // 顺带预取队列后续曲目的真实流地址，避免切歌时 ExoPlayer 预加载兜底 30s 外链
                     prefetchNextOnlineStreams(song)
+                    if (personalFmActive) loadMorePersonalFmIfNeeded()
                     // 锁屏歌词：ColorOS / OPlus 的锁屏歌词页读的是 mediaMetadata["lyricInfo"]
                     publishLockScreenLyrics(song)
                     // 若正处于 D-LAN 远端投屏会话，自动把当前曲目推到远端设备并保持本机静音

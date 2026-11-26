@@ -210,6 +210,15 @@ fun EqualizerSheet(vm: SonanceViewModel, onDismiss: () -> Unit) {
                     FxSliderRow("虚拟低音", "无直流抽吸谐波增强，外放时在高通截止前提取基波", vm.soundFxParams.virtualBass, 0f, 1f, percent(vm.soundFxParams.virtualBass)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(virtualBass = it))
                     }
+                    FxSliderRow("超重低音", "蝰蛇级共振下潜 + 瞬态拳感 + 215 Hz 去浊净声", vm.soundFxParams.viperBass, 0f, 1f, percent(vm.soundFxParams.viperBass)) {
+                        vm.updateSoundFx(vm.soundFxParams.copy(viperBass = it))
+                    }
+                    FxSliderRow("超重低音频率", "谐振与下潜中心（35~95 Hz）", vm.soundFxParams.viperBassFreqHz, 35f, 95f, "${vm.soundFxParams.viperBassFreqHz.roundToInt()} Hz") {
+                        vm.updateSoundFx(vm.soundFxParams.copy(viperBassFreqHz = it))
+                    }
+                    FxSliderRow("高频明晰度", "空气微细节与瞬态强化 + 7.8 kHz 齿音抑制", vm.soundFxParams.clarity, 0f, 1f, percent(vm.soundFxParams.clarity)) {
+                        vm.updateSoundFx(vm.soundFxParams.copy(clarity = it))
+                    }
                     FxSliderRow("双耳交叉馈送", "BS2B 头影串扰模型：减弱耳机头中压迫，贴近音箱听感；外放建议关闭", vm.soundFxParams.crossfeed, 0f, 1f, percent(vm.soundFxParams.crossfeed)) {
                         vm.updateSoundFx(vm.soundFxParams.copy(crossfeed = it))
                     }

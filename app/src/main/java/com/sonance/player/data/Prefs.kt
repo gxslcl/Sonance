@@ -101,6 +101,21 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_CAR_BT_LYRICS, false)
         set(v) = sp.edit().putBoolean(KEY_CAR_BT_LYRICS, v).apply()
 
+    /** 允许与其他应用（视频/游戏等）同时发声，不抢占或响应系统音频焦点暂停。默认关闭。 */
+    var allowMixWithOthers: Boolean
+        get() = sp.getBoolean(KEY_ALLOW_MIX_WITH_OTHERS, false)
+        set(v) = sp.edit().putBoolean(KEY_ALLOW_MIX_WITH_OTHERS, v).apply()
+
+    /** 打开应用恢复播放现场后自动开始播放。默认关闭。 */
+    var autoPlayOnLaunch: Boolean
+        get() = sp.getBoolean(KEY_AUTO_PLAY_ON_LAUNCH, false)
+        set(v) = sp.edit().putBoolean(KEY_AUTO_PLAY_ON_LAUNCH, v).apply()
+
+    /** 连接蓝牙音频设备后自动开始播放，断开蓝牙后自动暂停。默认关闭。 */
+    var bluetoothAutoPlay: Boolean
+        get() = sp.getBoolean(KEY_BLUETOOTH_AUTO_PLAY, false)
+        set(v) = sp.edit().putBoolean(KEY_BLUETOOTH_AUTO_PLAY, v).apply()
+
     /** 无缝播放（gapless）。默认开启：曲目之间无间隙衔接；关闭后曲间插入短暂停顿。 */
     var gaplessEnabled: Boolean
         get() = sp.getBoolean(KEY_GAPLESS, true)
@@ -699,6 +714,40 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_SHELL_GLASS_VIS, 100).coerceIn(0, 100)
         set(v) = sp.edit().putInt(KEY_SHELL_GLASS_VIS, v.coerceIn(0, 100)).apply()
 
+    /** 列表/主界面自定义上传背景图片 */
+    var customShellBgEnabled: Boolean
+        get() = sp.getBoolean(KEY_CUSTOM_SHELL_BG_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_CUSTOM_SHELL_BG_ENABLED, v).apply()
+
+    var customShellBgRev: Long
+        get() = sp.getLong(KEY_CUSTOM_SHELL_BG_REV, 0L)
+        set(v) = sp.edit().putLong(KEY_CUSTOM_SHELL_BG_REV, v).apply()
+
+    var customShellBgBlurDp: Int
+        get() = sp.getInt(KEY_CUSTOM_SHELL_BG_BLUR, 6).coerceIn(0, 32)
+        set(v) = sp.edit().putInt(KEY_CUSTOM_SHELL_BG_BLUR, v.coerceIn(0, 32)).apply()
+
+    var customShellBgDimPct: Int
+        get() = sp.getInt(KEY_CUSTOM_SHELL_BG_DIM, 38).coerceIn(0, 85)
+        set(v) = sp.edit().putInt(KEY_CUSTOM_SHELL_BG_DIM, v.coerceIn(0, 85)).apply()
+
+    /** 播放主界面自定义上传背景图片 */
+    var customPlayerBgEnabled: Boolean
+        get() = sp.getBoolean(KEY_CUSTOM_PLAYER_BG_ENABLED, false)
+        set(v) = sp.edit().putBoolean(KEY_CUSTOM_PLAYER_BG_ENABLED, v).apply()
+
+    var customPlayerBgRev: Long
+        get() = sp.getLong(KEY_CUSTOM_PLAYER_BG_REV, 0L)
+        set(v) = sp.edit().putLong(KEY_CUSTOM_PLAYER_BG_REV, v).apply()
+
+    var customPlayerBgBlurDp: Int
+        get() = sp.getInt(KEY_CUSTOM_PLAYER_BG_BLUR, 8).coerceIn(0, 32)
+        set(v) = sp.edit().putInt(KEY_CUSTOM_PLAYER_BG_BLUR, v.coerceIn(0, 32)).apply()
+
+    var customPlayerBgDimPct: Int
+        get() = sp.getInt(KEY_CUSTOM_PLAYER_BG_DIM, 42).coerceIn(0, 85)
+        set(v) = sp.edit().putInt(KEY_CUSTOM_PLAYER_BG_DIM, v.coerceIn(0, 85)).apply()
+
     // ===== 律动柱页背景（与歌词页同一套玻璃参数，但各自独立可调）=====
 
     /**
@@ -781,22 +830,32 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_DESKTOP_LYRICS_FONT_SIZE, 18).coerceIn(12, 120)
         set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_FONT_SIZE, v.coerceIn(12, 120)).apply()
 
-    /** 桌面歌词保存的 X 轴坐标（px） */
+    /** 桌面歌词保存的 X 轴坐标（px，旧版 START 坐标保留兼容） */
     var desktopLyricsX: Int
         get() = sp.getInt(KEY_DESKTOP_LYRICS_X, -1)
         set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_X, v).apply()
+
+    /** 桌面歌词相对对齐基准边的水平偏移（px，默认 0 严格居中） */
+    var desktopLyricsOffsetX: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_OFFSET_X, 0)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_OFFSET_X, v).apply()
 
     /** 桌面歌词保存的 Y 轴坐标（px） */
     var desktopLyricsY: Int
         get() = sp.getInt(KEY_DESKTOP_LYRICS_Y, -1)
         set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_Y, v).apply()
 
+    /** 桌面歌词对齐方式：0 = 居中，1 = 居左，2 = 居右 */
+    var desktopLyricsAlign: Int
+        get() = sp.getInt(KEY_DESKTOP_LYRICS_ALIGN, 0).coerceIn(0, 2)
+        set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_ALIGN, v.coerceIn(0, 2)).apply()
+
     /** 桌面歌词背景模式：NONE("none", 无背景), LIGHT("light", 浅色半透明), DARK("dark", 深色半透明) */
     var desktopLyricsBgMode: String
         get() = sp.getString(KEY_DESKTOP_LYRICS_BG_MODE, "none") ?: "none"
         set(v) = sp.edit().putString(KEY_DESKTOP_LYRICS_BG_MODE, v).apply()
 
-    /** 桌面歌词文字颜色（ARGB）；0 = 跟随背景模式自带的配色 */
+    /** 桌面歌词文字颜色（ARGB）；0 = 跟随背景模式自带配色；-1 = 跟随专辑封面色彩 */
     var desktopLyricsTextColor: Int
         get() = sp.getInt(KEY_DESKTOP_LYRICS_TEXT_COLOR, 0)
         set(v) = sp.edit().putInt(KEY_DESKTOP_LYRICS_TEXT_COLOR, v).apply()
@@ -1287,6 +1346,21 @@ class Prefs(context: Context) {
     var onlineDownloadWifiOnly: Boolean
         get() = sp.getBoolean(KEY_DL_WIFI_ONLY, true)
         set(v) = sp.edit().putBoolean(KEY_DL_WIFI_ONLY, v).apply()
+
+    /** 下载音乐时同时下载封面（默认开启） */
+    var downloadWithCover: Boolean
+        get() = sp.getBoolean(KEY_DL_WITH_COVER, true)
+        set(v) = sp.edit().putBoolean(KEY_DL_WITH_COVER, v).apply()
+
+    /** 下载音乐时同时下载歌词（默认开启） */
+    var downloadWithLyrics: Boolean
+        get() = sp.getBoolean(KEY_DL_WITH_LYRICS, true)
+        set(v) = sp.edit().putBoolean(KEY_DL_WITH_LYRICS, v).apply()
+
+    /** 下载音乐时写入歌名/歌手/专辑等元数据标签（默认开启） */
+    var downloadWithMetadata: Boolean
+        get() = sp.getBoolean(KEY_DL_WITH_METADATA, true)
+        set(v) = sp.edit().putBoolean(KEY_DL_WITH_METADATA, v).apply()
 
     /**
      * 已下载过的歌，键是 `音源:远端id`（见 `downloadKeyOf`）。
@@ -1915,6 +1989,9 @@ class Prefs(context: Context) {
         private const val KEY_DL_ENABLED = "online_download_enabled"
         private const val KEY_LOGGED_IN_DL_RESET = "logged_in_auto_dl_reset"
         private const val KEY_DL_WIFI_ONLY = "online_download_wifi_only"
+        private const val KEY_DL_WITH_COVER = "online_download_with_cover"
+        private const val KEY_DL_WITH_LYRICS = "online_download_with_lyrics"
+        private const val KEY_DL_WITH_METADATA = "online_download_with_metadata"
         private const val KEY_DL_KEYS = "online_download_keys"
         private const val KEY_LYRICS_T2S = "lyrics_t2s"
         private const val KEY_LYRICS_FONT = "lyrics_font_sp"
@@ -1952,7 +2029,9 @@ class Prefs(context: Context) {
         private const val KEY_DESKTOP_LYRICS_LOCKED = "desktop_lyrics_locked"
         private const val KEY_DESKTOP_LYRICS_FONT_SIZE = "desktop_lyrics_font_size"
         private const val KEY_DESKTOP_LYRICS_X = "desktop_lyrics_x"
+        private const val KEY_DESKTOP_LYRICS_OFFSET_X = "desktop_lyrics_offset_x"
         private const val KEY_DESKTOP_LYRICS_Y = "desktop_lyrics_y"
+        private const val KEY_DESKTOP_LYRICS_ALIGN = "desktop_lyrics_align"
         private const val KEY_DESKTOP_LYRICS_BG_MODE = "desktop_lyrics_bg_mode"
         private const val KEY_DESKTOP_LYRICS_TEXT_COLOR = "desktop_lyrics_text_color"
         private const val KEY_MINI_FLOAT_BOTTOM_DP = "mini_float_bottom_dp"
@@ -2040,6 +2119,17 @@ class Prefs(context: Context) {
         private const val KEY_SHAKE_SCREEN_OFF_ENABLED = "shake_screen_off_enabled"
         private const val KEY_SHAKE_POCKET_GUARD_ENABLED = "shake_pocket_guard_enabled"
         private const val KEY_SHAKE_SENSITIVITY = "shake_sensitivity"
+        private const val KEY_CUSTOM_SHELL_BG_ENABLED = "custom_shell_bg_enabled"
+        private const val KEY_CUSTOM_SHELL_BG_REV = "custom_shell_bg_rev"
+        private const val KEY_CUSTOM_SHELL_BG_BLUR = "custom_shell_bg_blur"
+        private const val KEY_CUSTOM_SHELL_BG_DIM = "custom_shell_bg_dim"
+        private const val KEY_CUSTOM_PLAYER_BG_ENABLED = "custom_player_bg_enabled"
+        private const val KEY_CUSTOM_PLAYER_BG_REV = "custom_player_bg_rev"
+        private const val KEY_CUSTOM_PLAYER_BG_BLUR = "custom_player_bg_blur"
+        private const val KEY_CUSTOM_PLAYER_BG_DIM = "custom_player_bg_dim"
+        private const val KEY_ALLOW_MIX_WITH_OTHERS = "allow_mix_with_others"
+        private const val KEY_AUTO_PLAY_ON_LAUNCH = "auto_play_on_launch"
+        private const val KEY_BLUETOOTH_AUTO_PLAY = "bluetooth_auto_play"
 
         fun isPlayButtonPrefKey(key: String?): Boolean = key == KEY_PLAY_BTN_GLOW ||
             key == KEY_PLAY_BTN_SHAPE ||

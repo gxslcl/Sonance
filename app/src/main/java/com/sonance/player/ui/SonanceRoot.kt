@@ -31,6 +31,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.CoroutineStart
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -76,6 +77,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -83,13 +85,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalConfiguration
@@ -113,6 +120,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sonance.player.ScanState
 import com.sonance.player.SonanceViewModel
 import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.CustomBackdropStore
 import com.sonance.player.data.LaunchCoverSnapshot
 import com.sonance.player.data.LibraryTab
 import com.sonance.player.data.OnlineCover
@@ -709,6 +717,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     }
     val suppressHomeUnderlay = fullPlayerCovered || suppressVinylUnderlay
     var queueOpen by rememberSaveable { mutableStateOf(false) }
+    var queuePickSeq by remember { mutableLongStateOf(0L) }
     // 均衡器 / 睡眠定时器面板。不用 rememberSaveable：这两个是"当场调完就走"的
     // 临时面板，旋转屏幕后自动收起比留着一个半开的 sheet 更自然。
     var eqOpen by remember { mutableStateOf(false) }
@@ -918,6 +927,42 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         }
     }
 
+    LaunchedEffect(
+        vm.desktopLyricsEnabled,
+        vm.desktopLyricsTextColor,
+        currentSong?.id,
+        currentSong?.albumId,
+        currentSong?.uri,
+        shellArt
+    ) {
+        if (!vm.desktopLyricsEnabled ||
+            vm.desktopLyricsTextColor != com.sonance.player.desktoplyrics.DesktopLyricsManager.COLOR_FOLLOW_COVER
+        ) {
+            return@LaunchedEffect
+        }
+        val s = currentSong ?: return@LaunchedEffect
+        val img = shellArt ?: ArtworkLoader.load(
+            context = context,
+            albumId = s.albumId,
+            sizePx = 128,
+            sourceUri = s.uri,
+            coverKey = OnlineCover.keyOf(s.title, s.artist)
+        ) ?: ArtworkLoader.online(s.id)
+        if (img != null) {
+            val argb = withContext(Dispatchers.Default) {
+                com.sonance.player.desktoplyrics.DesktopLyricsManager.extractVibrantAccent(img.asAndroidBitmap())
+            }
+            if (argb != 0) {
+                com.sonance.player.desktoplyrics.DesktopLyricsManager.updateCoverColor(context, argb)
+            }
+        } else {
+            val tint = ArtworkLoader.tintOf(s.albumId, s.uri, OnlineCover.keyOf(s.title, s.artist))
+            if (tint != null && tint.center != 0) {
+                com.sonance.player.desktoplyrics.DesktopLyricsManager.updateCoverColor(context, tint.center)
+            }
+        }
+    }
+
     // 切歌方向：下一首新图从右滑入（+1）、上一首从左滑入（-1），对齐播放页轮播
     var artSlideDir by remember { mutableStateOf(1) }
     var lastQueueIndex by remember { mutableStateOf(Int.MIN_VALUE) }
@@ -979,7 +1024,55 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 没压 / 抬到位（无封面 / 极暗封面遮罩趋零）或强调色与封面色相撞时，把字色
     // 朝达标方向推到刚好够 —— 背景亮度钉死，推出来的颜色逐歌几乎不变。
     // 方向按皮肤明暗：深色底往亮推、取最亮带做基准；浅色底往暗推、取最暗带。
-    val adaptedSkin = if (skin.immersive && bgProfile != null) {
+    val customShellRaw by produceState<android.graphics.Bitmap?>(
+        initialValue = null,
+        vm.customShellBgEnabled,
+        vm.customShellBgRev
+    ) {
+        value = if (vm.customShellBgEnabled) {
+            withContext(Dispatchers.IO) {
+                CustomBackdropStore.loadBitmap(context, CustomBackdropStore.Slot.SHELL)
+            }
+        } else null
+    }
+    val customShellRendered by produceState<ImageBitmap?>(
+        initialValue = null,
+        customShellRaw,
+        vm.customShellBgBlurDp
+    ) {
+        val raw = customShellRaw
+        value = if (raw == null) {
+            null
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S || vm.customShellBgBlurDp <= 0) {
+            raw.asImageBitmap()
+        } else {
+            withContext(Dispatchers.Default) {
+                CustomBackdropStore.softBlur(raw, vm.customShellBgBlurDp).asImageBitmap()
+            }
+        }
+    }
+
+    val adaptedSkin = if (customShellRaw != null) {
+        val dimAlpha = vm.customShellBgDimPct / 100f
+        val rep = Color.Black.copy(alpha = dimAlpha).let { scrim ->
+            Color(
+                red = 0.45f * (1f - dimAlpha),
+                green = 0.45f * (1f - dimAlpha),
+                blue = 0.45f * (1f - dimAlpha)
+            )
+        }
+        val lighten = true
+        val accent = ensureReadable(skin.accent, rep, 3.2f, lighten)
+        skin.copy(
+            text = ensureReadable(skin.text, rep, 4.5f, lighten),
+            textDim = ensureReadable(skin.textDim, rep, 3.8f, lighten),
+            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, lighten),
+            accent = accent,
+            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, lighten),
+            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false),
+            danger = ensureReadable(skin.danger, rep, 3.0f, lighten)
+        )
+    } else if (skin.immersive && bgProfile != null) {
         val lighten = !skin.isLight
         val samples = listOf(bgProfile.at(0.10f), bgProfile.at(0.5f), bgProfile.at(0.85f))
         val rep = if (lighten) samples.maxBy { it.luminance() } else samples.minBy { it.luminance() }
@@ -1112,7 +1205,32 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         // 由设置页「主界面背景」区块控制（默认 = 原写死的液态玻璃 40 / 100）。
         // 画在根上 —— 列表 / 详情页 / 设置页都叠在它上面；下面那层 skin.bg 实底
         // 在沉浸模式下跳过，否则会把封面盖死。没有封面时只剩遮罩，仍然成立
-        if (skin.immersive) {
+        val shellCustomImg = customShellRendered
+        if (shellCustomImg != null) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .graphicsLayer { alpha = if (suppressHomeUnderlay) 0f else 1f }
+                    .clipToBounds()
+            ) {
+                val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && vm.customShellBgBlurDp > 0) {
+                    Modifier.blur(vm.customShellBgBlurDp.dp, BlurredEdgeTreatment.Rectangle)
+                } else Modifier
+                Image(
+                    bitmap = shellCustomImg,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().then(blurMod)
+                )
+                if (vm.customShellBgDimPct > 0) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(Color.Black.copy(alpha = vm.customShellBgDimPct / 100f))
+                    )
+                }
+            }
+        } else if (skin.immersive) {
             GlassBackdrop(
                 art = shellArt,
                 style = vm.shellGlassStyle,
@@ -1140,9 +1258,14 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 scrimAlphas = equalScrims
             )
         }
-        // 沉浸模式下封面玻璃负责整页背景；玻璃「关闭」档没有这层，
-        // 退回 skin.bg 实底（深色，和不铺背景时的观感一致）
-        Box(Modifier.fillMaxSize().then(if (!skin.immersive || vm.shellGlassStyle == GlassStyle.OFF) Modifier.background(skin.bg) else Modifier)) {
+        // 沉浸模式下封面玻璃负责整页背景，自定义列表图启用时跳过实底以露出自定义图片
+        Box(
+            Modifier.fillMaxSize().then(
+                if (shellCustomImg == null && (!skin.immersive || vm.shellGlassStyle == GlassStyle.OFF)) {
+                    Modifier.background(skin.bg)
+                } else Modifier
+            )
+        ) {
 
         // 沉浸皮肤的字色随封面明暗逐歌重算 —— 只包住主界面子树；
         // 全屏播放页有自己的晕染背景与调色逻辑，维持原皮肤
@@ -1318,6 +1441,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onAddToPlaylist = { playerAddToPlaylistTarget = it },
                 onOpenVinyl = { vinylOpen = true },
                 coveredByVinyl = suppressVinylUnderlay,
+                coveredByQueue = queueOpen,
+                queuePickSeq = queuePickSeq,
                 sleepTimerActive = vm.sleepTimerLabel != null,
                 eqEnabled = vm.eqEnabled,
                 playbackSpeed = vm.playbackSpeed,
@@ -1346,7 +1471,11 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 vinylMode = vm.vinylMode,
                 onVinylModeChange = { vm.changeVinylMode(it) },
                 hiResBadgeEnabled = vm.hiResBadgeEnabled,
-                hiResBadgeSize = vm.hiResBadgeSize
+                hiResBadgeSize = vm.hiResBadgeSize,
+                customPlayerBgEnabled = vm.customPlayerBgEnabled,
+                customPlayerBgRev = vm.customPlayerBgRev,
+                customPlayerBgBlurDp = vm.customPlayerBgBlurDp,
+                customPlayerBgDimPct = vm.customPlayerBgDimPct
             )
             }
         }
@@ -1463,7 +1592,10 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             queue = queue,
             state = playerState,
             onDismiss = { queueOpen = false },
-            onPlayAt = { vm.dispatchPlayAt(it) },
+            onPlayAt = {
+                queuePickSeq++
+                vm.dispatchPlayAt(it)
+            },
             onRemoveAt = { vm.player.removeAt(it) },
             onShuffle = { vm.toggleShuffle() },
             onClear = {

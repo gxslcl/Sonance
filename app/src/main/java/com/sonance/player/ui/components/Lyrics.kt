@@ -1313,9 +1313,8 @@ internal fun rememberSmoothPosition(
     LaunchedEffect(positionMs, isPlaying, enabled, smooth) {
         val prev = smooth.longValue
         val jump = positionMs - prev
-        // 正常 500ms 刷新之间：保持单调（进度采样偶尔晚几十毫秒，不能回跳）；
-        // 明显的前跳/后跳（seek、拖进度条）直接采用新值，高亮立刻重算。
-        smooth.longValue = if (isPlaying && jump in -600L..899L) {
+        // 正常 200ms 刷新之间保持单调；点击跳行或手动 seek（即使只差几百毫秒）立即生效
+        smooth.longValue = if (isPlaying && jump in -180L..320L) {
             maxOf(prev, positionMs)
         } else {
             positionMs
@@ -1693,27 +1692,26 @@ internal fun SyncedLyrics(
         alignmentKey = timelineOffsetMs
     )
 
-    // 用户最近一次触摸屏幕的时间。
-    //
-    // 为什么需要它：`positionMs` 每 500ms 变一次，当前行一变就 animateScrollToItem，
-    // 用户根本没法手动翻到别处 —— 刚滑走就被拽回来。
-    // 这里记录触摸时刻，触摸后 5 秒内不自动跟随；之后就自然恢复（当前行还在继续变）。
-    //
-    // 用数组而不是 Compose state：它每帧都可能被写，但没有任何 composable 读它，
-    // 走快照系统纯属浪费。
-    val lastTouch = remember { longArrayOf(0L) }
+    val scope = rememberCoroutineScope()
+    var pendingSeek by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+    val effectiveCurrent = pendingSeek?.let { (idx, at) ->
+        if (idx != current && android.os.SystemClock.uptimeMillis() - at < 1_500L) idx else current
+    } ?: current
 
-    // 触摸后需要「到点自动回位」：用户可能停在翻到的那一屏不再动（暂停时分外明显）。
-    // 用普通数组而不是 state —— 只有下面的定时循环读它，重绘没有意义。
+    LaunchedEffect(current) {
+        if (pendingSeek?.first == current) pendingSeek = null
+    }
+
+    val lastTouch = remember { longArrayOf(0L) }
     val needsReturn = remember { booleanArrayOf(false) }
-    val latestCurrent by rememberUpdatedState(current)
+    val latestCurrent by rememberUpdatedState(effectiveCurrent)
     val latestScrollHaptic by rememberUpdatedState(scrollHaptic)
 
     // 当前行变化时滚到中间（contentPadding 让首尾也能居中），但用户正在浏览时不打扰
-    LaunchedEffect(current) {
-        if (current < 0) return@LaunchedEffect
+    LaunchedEffect(effectiveCurrent) {
+        if (effectiveCurrent < 0) return@LaunchedEffect
         if (android.os.SystemClock.uptimeMillis() - lastTouch[0] < LYRIC_SCROLL_HOLD_MS) return@LaunchedEffect
-        runCatching { listState.animateScrollToItem(current) }
+        runCatching { listState.animateScrollToItem(effectiveCurrent) }
     }
 
     // 5 秒到点自动回位。只靠 LaunchedEffect(current) 的话，暂停或当前句很长时
@@ -1798,13 +1796,13 @@ internal fun SyncedLyrics(
             userScrollEnabled = userScrollEnabled
         ) {
             itemsIndexed(lines) { index, line ->
-                val isCurrent = index == current
+                val isCurrent = index == effectiveCurrent
                 // 有时间轴的行才可点：点了把播放进度跳到那一句。
                 // 只读展示（平板面板）时不挂 clickable，避免看起来能编辑却只是翻页。
                 val seekable = seekEnabled && line.timeMs >= 0
                 val baseColor = when {
                     isCurrent -> skin.accent
-                    index < current -> skin.textMuted
+                    index < effectiveCurrent -> skin.textMuted
                     else -> skin.textDim
                 }
                 val adaptActive = binaryPalette == null && bgProfile != null && shouldAdapt(isCurrent, adaptMode)
@@ -1815,14 +1813,11 @@ internal fun SyncedLyrics(
                 } else {
                     lyricColor(
                         base = baseColor,
-                        screenFraction = (anchorPx + (index - current) * linePx) / containerPx,
+                        screenFraction = (anchorPx + (index - effectiveCurrent) * linePx) / containerPx,
                         isCurrent = isCurrent,
                         profile = bgProfile!!
                     )
                 }
-                // 封面晕染背景上给文字垫一层柔影：调色只能保证「整块背景」的平均
-                // 对比度，字笔画压到封面亮斑上时仍会糊掉；阴影提供逐像素的局部反差。
-                // 往亮调的字配黑影、往暗调的字配白影，纯色皮肤背景不加（保持干净）。
                 val lineStyle = if (adaptActive) {
                     TextStyle(
                         shadow = Shadow(
@@ -1843,7 +1838,13 @@ internal fun SyncedLyrics(
                             if (seekable) {
                                 Modifier
                                     .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onSeek(line.timeMs) }
+                                    .clickable {
+                                        lastTouch[0] = 0L
+                                        needsReturn[0] = false
+                                        pendingSeek = index to android.os.SystemClock.uptimeMillis()
+                                        onSeek(line.timeMs)
+                                        scope.launch { runCatching { listState.animateScrollToItem(index) } }
+                                    }
                             } else {
                                 Modifier
                             }

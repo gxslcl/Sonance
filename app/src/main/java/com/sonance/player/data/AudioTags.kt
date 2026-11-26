@@ -2,6 +2,8 @@ package com.sonance.player.data
 
 import android.content.Context
 import android.net.Uri
+import java.io.ByteArrayInputStream
+import java.io.FileInputStream
 import java.io.InputStream
 
 /**
@@ -34,16 +36,51 @@ object AudioTags {
      * ============================================================ */
 
     fun readCoverArt(context: Context, uri: Uri): ByteArray? = runCatching {
-        context.contentResolver.openInputStream(uri)?.use {
-            scan(it, wantCover = true, wantLyrics = false).cover
-        }
+        scanUri(context, uri, wantCover = true, wantLyrics = false).cover
     }.getOrNull()
 
     fun readLyrics(context: Context, uri: Uri): String? = runCatching {
-        context.contentResolver.openInputStream(uri)?.use {
-            scan(it, wantCover = false, wantLyrics = true).lyrics
-        }
+        scanUri(context, uri, wantCover = false, wantLyrics = true).lyrics
     }.getOrNull()
+
+    private fun scanUri(
+        context: Context,
+        uri: Uri,
+        wantCover: Boolean,
+        wantLyrics: Boolean
+    ): Found {
+        val header = ByteArray(28)
+        var n = 0
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            while (n < 4) {
+                val r = input.read(header, n, 4 - n)
+                if (r < 0) break
+                n += r
+            }
+            if (n < 4) return Found()
+            val isDsf = header[0] == 'D'.code.toByte() && header[1] == 'S'.code.toByte() &&
+                header[2] == 'D'.code.toByte() && header[3] == ' '.code.toByte()
+            if (!isDsf) {
+                val combined = java.io.SequenceInputStream(ByteArrayInputStream(header, 0, n), input)
+                return scan(combined, wantCover, wantLyrics)
+            }
+            while (n < 28) {
+                val r = input.read(header, n, 28 - n)
+                if (r < 0) break
+                n += r
+            }
+            if (n < 28) return Found()
+        } ?: return Found()
+
+        val metadataOffset = leLong(header, 20)
+        if (metadataOffset <= 28L) return Found()
+        return context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            FileInputStream(pfd.fileDescriptor).use { fis ->
+                fis.channel.position(metadataOffset)
+                scan(fis, wantCover, wantLyrics)
+            }
+        } ?: Found()
+    }
 
     /**
      * 纯流版本的入口，**只给单元测试用**。
@@ -94,15 +131,53 @@ object AudioTags {
                 scanFlac(input, more, found, wantCover, wantLyrics)
             }
 
-            // MP4 家族：magic 是第一个 atom 的 size，还差 type(4) + 4 字节
+            // "DSD "：DSF 文件尾部的 ID3v2 由 metadataOffset 指向（避免误走 scanMp4 跳 1.1GB）
+            magic[0] == 'D'.code.toByte() && magic[1] == 'S'.code.toByte() &&
+                magic[2] == 'D'.code.toByte() && magic[3] == ' '.code.toByte() -> {
+                val dsdRest = ByteArray(24)
+                if (!readFully(input, dsdRest, 24)) return found
+                val metadataOffset = leLong(dsdRest, 16)
+                if (metadataOffset > 28L && input is FileInputStream) {
+                    input.channel.position(metadataOffset)
+                    return scan(input, wantCover, wantLyrics)
+                }
+                if (metadataOffset in 29L..(64L * 1024L * 1024L) && input is ByteArrayInputStream) {
+                    if (skipFully(input, metadataOffset - 28L)) {
+                        return scan(input, wantCover, wantLyrics)
+                    }
+                }
+            }
+
+            // 已知非 MP4 无损/流式容器（DFF/WAV/OGG/APE/AIFF）：避免误当 MP4 box size 跳过整首百兆文件
+            (magic[0] == 'F'.code.toByte() && magic[1] == 'R'.code.toByte() &&
+                magic[2] == 'M'.code.toByte() && magic[3] == '8'.code.toByte()) ||
+                (magic[0] == 'R'.code.toByte() && magic[1] == 'I'.code.toByte() &&
+                    magic[2] == 'F'.code.toByte() && magic[3] == 'F'.code.toByte()) ||
+                (magic[0] == 'O'.code.toByte() && magic[1] == 'g'.code.toByte() &&
+                    magic[2] == 'g'.code.toByte() && magic[3] == 'S'.code.toByte()) ||
+                (magic[0] == 'M'.code.toByte() && magic[1] == 'A'.code.toByte() &&
+                    magic[2] == 'C'.code.toByte() && magic[3] == ' '.code.toByte()) ||
+                (magic[0] == 'F'.code.toByte() && magic[1] == 'O'.code.toByte() &&
+                    magic[2] == 'R'.code.toByte() && magic[3] == 'M'.code.toByte()) -> {
+                return found
+            }
+
+            // MP4 家族：magic 是第一个 atom 的 size，还差 type(4) + 4 字节；仅放行已知 BMFF top-level box
             else -> {
                 val more = ByteArray(8)
                 if (!readFully(input, more, 8)) return found
-                scanMp4(input, magic, more, found, wantCover, wantLyrics)
+                val boxType = String(more, 0, 4, Charsets.ISO_8859_1)
+                if (boxType in MP4_ROOT_BOXES) {
+                    scanMp4(input, magic, more, found, wantCover, wantLyrics)
+                }
             }
         }
         return found
     }
+
+    private val MP4_ROOT_BOXES = setOf(
+        "ftyp", "moov", "mdat", "free", "skip", "wide", "pnot", "uuid"
+    )
 
     /* ============================================================
      * ID3v2 (MP3)
@@ -576,6 +651,16 @@ object AudioTags {
             ((b[off + 1].toInt() and 0xFF) shl 8) or
             ((b[off + 2].toInt() and 0xFF) shl 16) or
             ((b[off + 3].toInt() and 0xFF) shl 24)
+
+    private fun leLong(b: ByteArray, off: Int): Long =
+        (b[off].toLong() and 0xFF) or
+            ((b[off + 1].toLong() and 0xFF) shl 8) or
+            ((b[off + 2].toLong() and 0xFF) shl 16) or
+            ((b[off + 3].toLong() and 0xFF) shl 24) or
+            ((b[off + 4].toLong() and 0xFF) shl 32) or
+            ((b[off + 5].toLong() and 0xFF) shl 40) or
+            ((b[off + 6].toLong() and 0xFF) shl 48) or
+            ((b[off + 7].toLong() and 0xFF) shl 56)
 
     private fun beLong(b: ByteArray, off: Int): Long =
         ((b[off].toLong() and 0xFF) shl 56) or

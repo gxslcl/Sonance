@@ -37,6 +37,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
@@ -53,8 +54,10 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
+import androidx.compose.ui.graphics.asAndroidBitmap
 import com.sonance.player.MainActivity
 import com.sonance.player.R
+import com.sonance.player.data.ArtworkLoader
 import com.sonance.player.data.AudioTags
 import com.sonance.player.data.LockScreenLyrics
 import com.sonance.player.data.LyricLine
@@ -125,6 +128,7 @@ class PlaybackService : MediaLibraryService() {
     private var sessionLyricsGeneration = 0
     private var lastPublishedLyricsSig: String? = null
     private var lastPublishedLyricsTrackKey: String? = null
+    private var lastDesktopCoverSyncKey: String? = null
 
     private var shakeController: ShakeTrackController? = null
     private val headsetButtonCounter = HeadsetButtonClickCounter(380L)
@@ -177,7 +181,7 @@ class PlaybackService : MediaLibraryService() {
             .setAudioProcessors(arrayOf<AudioProcessor>(karaoke, fx, tap))
             .build()
 
-        val defaultExtractors = DefaultExtractorsFactory()
+        val defaultExtractors = DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)
         val extractorsFactory = ExtractorsFactory {
             arrayOf<Extractor>(DsdExtractor()) + defaultExtractors.createExtractors()
         }
@@ -188,13 +192,15 @@ class PlaybackService : MediaLibraryService() {
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .setUsage(C.USAGE_MEDIA)
                     .build(),
-                /* handleAudioFocus = */ true
+                /* handleAudioFocus = */ !Prefs(this).allowMixWithOthers
             )
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setRenderersFactory(TapRenderersFactory(this, audioSink))
             .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource(), extractorsFactory))
-            .build()
+            .build().apply {
+                setSeekParameters(SeekParameters(100_000L, 100_000L))
+            }
 
         syncDspAndPlayerModesIfCold(player)
 
@@ -456,20 +462,32 @@ class PlaybackService : MediaLibraryService() {
         var lastRoute = OutputAudioRouter.detectCurrentRoute(this)
         var lastBtIds = bluetoothMediaDeviceIds(am)
 
-        val scheduleRebuild = {
+        val scheduleRebuild = { autoPlayOnReady: Boolean ->
             pendingBtRecovery?.let { mainHandler.removeCallbacks(it) }
             val task = Runnable {
                 pendingBtRecovery = null
                 if (liveService != this) return@Runnable
                 player.setPreferredAudioDevice(null)
                 transitions?.ensureActiveVolume()
-                if (OutputAudioRouter.detectCurrentRoute(this) == AudioOutputRoute.BLUETOOTH &&
-                    player.playbackState != Player.STATE_IDLE &&
-                    player.playbackState != Player.STATE_ENDED &&
-                    player.isCurrentMediaItemSeekable &&
-                    transitions?.isSwitchFadingNow() != true
-                ) {
-                    player.seekTo(player.currentPosition.coerceAtLeast(0L))
+                if (OutputAudioRouter.detectCurrentRoute(this) == AudioOutputRoute.BLUETOOTH) {
+                    if (autoPlayOnReady &&
+                        Prefs(this).bluetoothAutoPlay &&
+                        player.mediaItemCount > 0 &&
+                        !player.playWhenReady
+                    ) {
+                        if (player.playbackState == Player.STATE_IDLE) {
+                            player.prepare()
+                        } else if (player.playbackState == Player.STATE_ENDED) {
+                            player.seekTo(0L)
+                        }
+                        player.play()
+                    } else if (player.playbackState != Player.STATE_IDLE &&
+                        player.playbackState != Player.STATE_ENDED &&
+                        player.isCurrentMediaItemSeekable &&
+                        transitions?.isSwitchFadingNow() != true
+                    ) {
+                        player.seekTo(player.currentPosition.coerceAtLeast(0L))
+                    }
                 }
             }
             pendingBtRecovery = task
@@ -487,7 +505,7 @@ class PlaybackService : MediaLibraryService() {
                 lastRoute = newRoute
                 lastBtIds = newBtIds
                 if (enteredBt) {
-                    scheduleRebuild()
+                    scheduleRebuild(Prefs(this@PlaybackService).bluetoothAutoPlay)
                 } else {
                     player.setPreferredAudioDevice(null)
                     transitions?.ensureActiveVolume()
@@ -500,12 +518,18 @@ class PlaybackService : MediaLibraryService() {
                 val newRoute = OutputAudioRouter.detectCurrentRoute(this@PlaybackService)
                 val newBtIds = bluetoothMediaDeviceIds(am)
                 val hadBt = removedDevices.any { isBluetoothMediaOutput(it) }
+                val leftAllBt = hadBt && newRoute != AudioOutputRoute.BLUETOOTH && newBtIds.isEmpty()
                 lastRoute = newRoute
                 lastBtIds = newBtIds
                 player.setPreferredAudioDevice(null)
                 transitions?.ensureActiveVolume()
-                if (hadBt && newRoute == AudioOutputRoute.BLUETOOTH && newBtIds.isNotEmpty()) {
-                    scheduleRebuild()
+                if (leftAllBt) {
+                    pendingBtRecovery?.let { mainHandler.removeCallbacks(it); pendingBtRecovery = null }
+                    if (Prefs(this@PlaybackService).bluetoothAutoPlay && (player.isPlaying || player.playWhenReady)) {
+                        player.pause()
+                    }
+                } else if (hadBt && newRoute == AudioOutputRoute.BLUETOOTH && newBtIds.isNotEmpty()) {
+                    scheduleRebuild(false)
                 }
             }
         }
@@ -630,6 +654,10 @@ class PlaybackService : MediaLibraryService() {
             return exo?.audioSessionId?.takeIf { it > 0 } ?: SystemAudioEffects.latestPlayerSessionId
         }
 
+        internal fun syncAudioFocusPolicy(allowMixWithOthers: Boolean) {
+            liveService?.syncAudioFocusPolicy(allowMixWithOthers)
+        }
+
         internal fun syncSystemAudioEffects() {
             val svc = liveService ?: return
             val exo = svc.playerOrNull() as? ExoPlayer ?: return
@@ -659,10 +687,23 @@ class PlaybackService : MediaLibraryService() {
             syncLiveLyrics(0L, title, artist, lines)
         }
 
-        /** 车载歌词 / 锁屏歌词开关变化后立即重估：关闭时马上还原歌名、撤掉岛歌词。 */
+        /** 车载/锁屏/原子岛歌词开关变化后立即重估：关闭时马上还原歌名、开启时立即启动定时推送。 */
         internal fun syncLyricOutputs() {
             val svc = liveService ?: return
-            svc.runOnMain { svc.tickLive() }
+            svc.runOnMain {
+                svc.tickLive()
+                svc.mediaSession?.player?.let { svc.scheduleNextPlaybackTick(it) }
+            }
+        }
+
+        internal fun formatSessionLyricArtist(origTitle: String, origArtist: String): String {
+            val a = origArtist.trim()
+            val t = origTitle.trim()
+            return when {
+                a.isNotEmpty() && t.isNotEmpty() -> "$a - $t"
+                a.isNotEmpty() -> a
+                else -> t
+            }
         }
 
         internal fun syncLiveLyrics(
@@ -680,7 +721,8 @@ class PlaybackService : MediaLibraryService() {
                 val curMeta = item?.mediaMetadata
                 val curTitle = curMeta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
                     ?: curMeta?.title?.toString().orEmpty()
-                val curArtist = curMeta?.artist?.toString().orEmpty()
+                val curArtist = curMeta?.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+                    ?: curMeta?.artist?.toString().orEmpty()
                 val hasActiveItem = item != null && (curId != -1L || curTitle.isNotBlank())
                 val matchesCurrent = !hasActiveItem || when {
                     curId != 0L && curId != -1L && songId != 0L && songId != -1L -> curId == songId
@@ -864,29 +906,41 @@ class PlaybackService : MediaLibraryService() {
         widgetExecutor.execute { drainWidgetSync() }
     }
 
+    private fun needsOffscreenLyricTick(): Boolean {
+        val prefs = Prefs(applicationContext)
+        return prefs.carBluetoothLyrics ||
+            (prefs.lockScreenLyrics && XiaomiLyricIsland.isSupported(applicationContext))
+    }
+
     private val playbackTicker = object : Runnable {
         override fun run() {
             val player = mediaSession?.player ?: return
-            if (player.isPlaying && isScreenInteractive) {
+            if (player.isPlaying && (isScreenInteractive || needsOffscreenLyricTick())) {
                 tickLive()
                 scheduleNextPlaybackTick(player)
             }
         }
     }
 
-    /** 仅在亮屏且存在桌面小组件、悬浮歌词或外部状态栏歌词时调度下一次刷新；息屏或无消费者时 0 唤醒。 */
+    /** 仅在亮屏且存在消费者，或熄屏下存在蓝牙/锁屏/原子岛等息屏歌词消费者时调度，零唤醒浪费。 */
     private fun scheduleNextPlaybackTick(player: Player) {
         mainHandler.removeCallbacks(playbackTicker)
-        if (!player.isPlaying || !isScreenInteractive) return
-        val hasDesktopLyrics = DesktopLyricsManager.isShowing()
-        val hasExternalLyrics = Prefs(applicationContext).externalLyricsEnabled
-        val hasWidgets = SonanceWidgets.hasAnyWidgets(applicationContext)
-        if (!hasDesktopLyrics && !hasExternalLyrics && !hasWidgets) return
-        val delayMs = if (hasDesktopLyrics || hasExternalLyrics) {
-            250L
-        } else {
-            val posMs = player.currentPosition.coerceAtLeast(0L)
-            (1_000L - (posMs % 1_000L)).coerceIn(250L, 1_000L)
+        if (!player.isPlaying) return
+        val prefs = Prefs(applicationContext)
+        val hasSessionTitleLyrics = prefs.carBluetoothLyrics
+        val hasXiaomiIsland = prefs.lockScreenLyrics && XiaomiLyricIsland.isSupported(applicationContext)
+        if (!isScreenInteractive && !hasSessionTitleLyrics && !hasXiaomiIsland) return
+        val hasDesktopLyrics = isScreenInteractive && DesktopLyricsManager.isShowing()
+        val hasExternalLyrics = isScreenInteractive && prefs.externalLyricsEnabled
+        val hasWidgets = isScreenInteractive && SonanceWidgets.hasAnyWidgets(applicationContext)
+        if (!hasDesktopLyrics && !hasExternalLyrics && !hasWidgets && !hasSessionTitleLyrics && !hasXiaomiIsland) return
+        val delayMs = when {
+            hasDesktopLyrics || hasExternalLyrics -> 250L
+            hasSessionTitleLyrics || hasXiaomiIsland -> 300L
+            else -> {
+                val posMs = player.currentPosition.coerceAtLeast(0L)
+                (1_000L - (posMs % 1_000L)).coerceIn(250L, 1_000L)
+            }
         }
         mainHandler.postDelayed(playbackTicker, delayMs)
     }
@@ -912,7 +966,12 @@ class PlaybackService : MediaLibraryService() {
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         isScreenInteractive = false
-                        mainHandler.removeCallbacks(playbackTicker)
+                        val p = mediaSession?.player
+                        if (p != null && p.isPlaying && needsOffscreenLyricTick()) {
+                            scheduleNextPlaybackTick(p)
+                        } else {
+                            mainHandler.removeCallbacks(playbackTicker)
+                        }
                         syncShakeListener()
                     }
                     Intent.ACTION_SCREEN_ON -> {
@@ -946,7 +1005,8 @@ class PlaybackService : MediaLibraryService() {
         val meta = item?.mediaMetadata
         val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
             ?: meta?.title?.toString().orEmpty()
-        val artist = meta?.artist?.toString().orEmpty()
+        val artist = meta?.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+            ?: meta?.artist?.toString().orEmpty()
         val album = meta?.albumTitle?.toString().orEmpty()
         val extras = meta?.extras
         val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
@@ -1063,7 +1123,8 @@ class PlaybackService : MediaLibraryService() {
             val meta = item?.mediaMetadata
             val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
                 ?: meta?.title?.toString().orEmpty()
-            val artist = meta?.artist?.toString().orEmpty()
+            val artist = meta?.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+                ?: meta?.artist?.toString().orEmpty()
             val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
             val extras = meta?.extras
             val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
@@ -1156,6 +1217,34 @@ class PlaybackService : MediaLibraryService() {
                     coverKey = s.coverKey,
                     refreshUi = interactive
                 )
+
+                val desktopKey = "${s.mediaId}|${s.coverKey.orEmpty()}"
+                if (Prefs(applicationContext).desktopLyricsEnabled &&
+                    Prefs(applicationContext).desktopLyricsTextColor == DesktopLyricsManager.COLOR_FOLLOW_COVER &&
+                    desktopKey != lastDesktopCoverSyncKey
+                ) {
+                    lastDesktopCoverSyncKey = desktopKey
+                    lyricScope.launch {
+                        val parsedUri = s.sourceUri?.let(Uri::parse)
+                        val img = ArtworkLoader.load(
+                            context = applicationContext,
+                            albumId = s.albumId,
+                            sizePx = 128,
+                            sourceUri = parsedUri,
+                            coverKey = s.coverKey
+                        ) ?: ArtworkLoader.online(s.mediaId)
+                        if (img != null) {
+                            val argb = DesktopLyricsManager.extractVibrantAccent(img.asAndroidBitmap())
+                            if (argb != 0) {
+                                DesktopLyricsManager.updateCoverColor(applicationContext, argb)
+                                return@launch
+                            }
+                        }
+                        ArtworkLoader.tintOf(s.albumId, parsedUri, s.coverKey)?.center?.let { c ->
+                            if (c != 0) DesktopLyricsManager.updateCoverColor(applicationContext, c)
+                        }
+                    }
+                }
 
                 val query = TrackLyricQuery(
                     lyricKey = canonicalLyricKey(s.mediaId, s.title, s.artist),
@@ -1262,6 +1351,7 @@ class PlaybackService : MediaLibraryService() {
                 val shouldFetchOnline = query.title.isNotBlank() &&
                     prefs.onlineLyricsEnabled &&
                     (prefs.lockScreenLyrics ||
+                        prefs.carBluetoothLyrics ||
                         DesktopLyricsManager.isShowing() || prefs.desktopLyricsEnabled || SonanceWidgets.hasAnyWidgets(applicationContext))
 
                 if (applyLoadedLyricsIfStillCurrent(query, emptyList())) {
@@ -1462,13 +1552,7 @@ class PlaybackService : MediaLibraryService() {
             carLyricMediaId = null
             lastCarLyricLine = null
         }
-        val active = Prefs(applicationContext).carBluetoothLyrics &&
-            player.isPlaying &&
-            runCatching {
-                getSystemService(AudioManager::class.java)
-                    ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                    ?.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
-            }.getOrDefault(false) == true
+        val active = Prefs(applicationContext).carBluetoothLyrics && player.isPlaying
         if (!active || item == null) {
             if (carLyricMediaId != null) {
                 restoreCarLyricTitle(player, carLyricMediaId!!)
@@ -1479,16 +1563,30 @@ class PlaybackService : MediaLibraryService() {
         }
         val line = triplet.cur.trim()
         if (line.isEmpty()) return
-        if (carLyricMediaId == mediaId && line == lastCarLyricLine) return
         val meta = item.mediaMetadata
-        val orig = meta.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
+        val origTitle = meta.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
             ?: meta.title?.toString().orEmpty()
-        if (orig.isBlank() || orig == line) return
+        val origArtist = meta.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+            ?: meta.artist?.toString().orEmpty()
+        if (origTitle.isBlank()) return
+        if (carLyricMediaId == mediaId && line == lastCarLyricLine &&
+            meta.title?.toString() == line && meta.displayTitle?.toString() == line
+        ) return
+        val artistLine = formatSessionLyricArtist(origTitle, origArtist)
         val extras = Bundle(meta.extras ?: Bundle()).apply {
-            putString(PlayerController.EXTRA_ORIG_TITLE, orig)
+            putString(PlayerController.EXTRA_ORIG_TITLE, origTitle)
+            putString(PlayerController.EXTRA_ORIG_ARTIST, origArtist)
         }
         val updated = item.buildUpon()
-            .setMediaMetadata(meta.buildUpon().setTitle(line).setExtras(extras).build())
+            .setMediaMetadata(
+                meta.buildUpon()
+                    .setTitle(line)
+                    .setDisplayTitle(line)
+                    .setArtist(artistLine)
+                    .setSubtitle(artistLine)
+                    .setExtras(extras)
+                    .build()
+            )
             .build()
         runCatching {
             PlayerController.replaceQueueItemSafely(
@@ -1507,13 +1605,22 @@ class PlaybackService : MediaLibraryService() {
         for (i in 0 until count) {
             val item = runCatching { player.getMediaItemAt(i) }.getOrNull() ?: continue
             if (item.mediaId != mediaId) continue
-            val orig = item.mediaMetadata.extras?.getString(PlayerController.EXTRA_ORIG_TITLE) ?: return
+            val origTitle = item.mediaMetadata.extras?.getString(PlayerController.EXTRA_ORIG_TITLE) ?: return
+            val origArtist = item.mediaMetadata.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+                ?: item.mediaMetadata.artist?.toString().orEmpty()
             val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
                 remove(PlayerController.EXTRA_ORIG_TITLE)
+                remove(PlayerController.EXTRA_ORIG_ARTIST)
             }
             val updated = item.buildUpon()
                 .setMediaMetadata(
-                    item.mediaMetadata.buildUpon().setTitle(orig).setExtras(extras).build()
+                    item.mediaMetadata.buildUpon()
+                        .setTitle(origTitle)
+                        .setDisplayTitle(null)
+                        .setArtist(origArtist)
+                        .setSubtitle(null)
+                        .setExtras(extras)
+                        .build()
                 )
                 .build()
             runCatching {
@@ -1808,7 +1915,8 @@ class PlaybackService : MediaLibraryService() {
         val curMeta = current.mediaMetadata
         val curTitle = curMeta.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
             ?: curMeta.title?.toString().orEmpty()
-        val curArtist = curMeta.artist?.toString().orEmpty()
+        val curArtist = curMeta.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
+            ?: curMeta.artist?.toString().orEmpty()
         val matches = if (curId != -1L && expectedSongId != 0L && expectedSongId != -1L) {
             curId == expectedSongId
         } else {
@@ -1939,6 +2047,17 @@ class PlaybackService : MediaLibraryService() {
         val fx = transitions ?: return false
         runOnMain { fx.cancelSwitchFade(restoreVolume = true) }
         return true
+    }
+
+    internal fun syncAudioFocusPolicy(allowMixWithOthers: Boolean) {
+        runOnMain {
+            val exo = mediaSession?.player as? ExoPlayer ?: return@runOnMain
+            val attrs = AudioAttributes.Builder()
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .setUsage(C.USAGE_MEDIA)
+                .build()
+            exo.setAudioAttributes(attrs, /* handleAudioFocus = */ !allowMixWithOthers)
+        }
     }
 
     internal fun syncUserVolume(volume: Float): Boolean {

@@ -246,8 +246,99 @@ object HiResQuality {
                 pos += step.toInt()
             }
         }
+        // 3) DSF: "DSD "(4) + dsdSize(8) + totalSize(8) + metaOffset(8) + "fmt "(4) + fmtSize(8) + ver(4) + id(4) + chType(4) + chNum(4) + sr(4)
+        if (offset == 0 && bytes.size >= 64 &&
+            bytes[0] == 'D'.code.toByte() &&
+            bytes[1] == 'S'.code.toByte() &&
+            bytes[2] == 'D'.code.toByte() &&
+            bytes[3] == ' '.code.toByte()
+        ) {
+            val dsdSize = leLong(bytes, 4).coerceIn(28L, 256L).toInt()
+            val fmtOff = dsdSize
+            if (fmtOff + 32 <= bytes.size &&
+                bytes[fmtOff] == 'f'.code.toByte() &&
+                bytes[fmtOff + 1] == 'm'.code.toByte() &&
+                bytes[fmtOff + 2] == 't'.code.toByte() &&
+                bytes[fmtOff + 3] == ' '.code.toByte()
+            ) {
+                val channels = leInt(bytes, fmtOff + 24).coerceIn(1, 8)
+                val sampleRate = leInt(bytes, fmtOff + 28)
+                if (sampleRate > 0) {
+                    return HeaderPcmInfo(sampleRate, 1, channels)
+                }
+            }
+        }
+
+        // 4) DFF (DSDIFF): "FRM8"(4) + size(8) + "DSD "(4) ... PROP -> FS / CHNL
+        if (offset == 0 && bytes.size >= 64 &&
+            bytes[0] == 'F'.code.toByte() &&
+            bytes[1] == 'R'.code.toByte() &&
+            bytes[2] == 'M'.code.toByte() &&
+            bytes[3] == '8'.code.toByte() &&
+            bytes[12] == 'D'.code.toByte() &&
+            bytes[13] == 'S'.code.toByte() &&
+            bytes[14] == 'D'.code.toByte() &&
+            bytes[15] == ' '.code.toByte()
+        ) {
+            var pos = 16
+            var sr = 0
+            var ch = 2
+            while (pos + 12 <= bytes.size) {
+                val id = String(bytes, pos, 4, Charsets.US_ASCII)
+                val sz = beLong(bytes, pos + 4)
+                if (id == "PROP" && pos + 16 <= bytes.size) {
+                    var sub = pos + 16
+                    while (sub + 12 <= bytes.size) {
+                        val sid = String(bytes, sub, 4, Charsets.US_ASCII)
+                        val ssz = beLong(bytes, sub + 4).toInt().coerceAtLeast(0)
+                        val dpos = sub + 12
+                        if (dpos > bytes.size) break
+                        if (sid == "FS  " && dpos + 4 <= bytes.size) {
+                            sr = beInt(bytes, dpos)
+                        } else if (sid == "CHNL" && dpos + 2 <= bytes.size) {
+                            ch = (((bytes[dpos].toInt() and 0xFF) shl 8) or (bytes[dpos + 1].toInt() and 0xFF)).coerceIn(1, 8)
+                        }
+                        if (sr > 0) return HeaderPcmInfo(sr, 1, ch)
+                        val step = 12 + ssz + (ssz and 1)
+                        if (step <= 12) break
+                        sub += step
+                    }
+                    break
+                }
+                if (sz < 0) break
+                val step = 12L + sz + (sz and 1L)
+                if (pos + step > bytes.size) break
+                pos += step.toInt()
+            }
+        }
         return null
     }
+
+    private fun leLong(b: ByteArray, i: Int): Long =
+        (b[i].toLong() and 0xFF) or
+            ((b[i + 1].toLong() and 0xFF) shl 8) or
+            ((b[i + 2].toLong() and 0xFF) shl 16) or
+            ((b[i + 3].toLong() and 0xFF) shl 24) or
+            ((b[i + 4].toLong() and 0xFF) shl 32) or
+            ((b[i + 5].toLong() and 0xFF) shl 40) or
+            ((b[i + 6].toLong() and 0xFF) shl 48) or
+            ((b[i + 7].toLong() and 0xFF) shl 56)
+
+    private fun beInt(b: ByteArray, i: Int): Int =
+        ((b[i].toInt() and 0xFF) shl 24) or
+            ((b[i + 1].toInt() and 0xFF) shl 16) or
+            ((b[i + 2].toInt() and 0xFF) shl 8) or
+            (b[i + 3].toInt() and 0xFF)
+
+    private fun beLong(b: ByteArray, i: Int): Long =
+        ((b[i].toLong() and 0xFF) shl 56) or
+            ((b[i + 1].toLong() and 0xFF) shl 48) or
+            ((b[i + 2].toLong() and 0xFF) shl 40) or
+            ((b[i + 3].toLong() and 0xFF) shl 32) or
+            ((b[i + 4].toLong() and 0xFF) shl 24) or
+            ((b[i + 5].toLong() and 0xFF) shl 16) or
+            ((b[i + 6].toLong() and 0xFF) shl 8) or
+            (b[i + 7].toLong() and 0xFF)
 
     private fun leShort(b: ByteArray, i: Int): Int {
         return (b[i].toInt() and 0xFF) or ((b[i + 1].toInt() and 0xFF) shl 8)
@@ -309,70 +400,76 @@ object HiResQuality {
             var bitDepth = 0
             var channels = 0
 
-            val extractor = MediaExtractor()
-            try {
-                extractor.setDataSource(context, song.uri, null)
-                for (i in 0 until extractor.trackCount) {
-                    val fmt = extractor.getTrackFormat(i)
-                    val trackMime = fmt.getString(MediaFormat.KEY_MIME)
-                    if (trackMime?.startsWith("audio/") == true) {
-                        mime = trackMime
-                        if (fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                            sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                        }
-                        if (fmt.containsKey(MediaFormat.KEY_BIT_RATE)) {
-                            bitrate = fmt.getInteger(MediaFormat.KEY_BIT_RATE)
-                        }
-                        if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                            channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
-                            fmt.containsKey(MediaFormat.KEY_PCM_ENCODING)
-                        ) {
-                            bitDepth = pcmEncodingToBitDepth(fmt.getInteger(MediaFormat.KEY_PCM_ENCODING))
-                        }
-                        if (bitDepth <= 0 && fmt.containsKey("bits-per-sample")) {
-                            bitDepth = fmt.getInteger("bits-per-sample")
-                        }
-                        break
-                    }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                runCatching { extractor.release() }
-            }
-
-            if (bitrate <= 0 || bitDepth <= 0 || mime == null || sampleRate <= 0) {
-                val retriever = MediaMetadataRetriever()
+            val isDsd = song.displayName.endsWith(".dsf", ignoreCase = true) ||
+                song.displayName.endsWith(".dff", ignoreCase = true)
+            if (!isDsd) {
+                val extractor = MediaExtractor()
                 try {
-                    retriever.setDataSource(context, song.uri)
-                    if (mime == null) {
-                        mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
-                    }
-                    if (bitrate <= 0) {
-                        val br = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()
-                        if (br != null && br > 0) bitrate = br
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        if (sampleRate <= 0) {
-                            sampleRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)
-                                ?.toIntOrNull() ?: 0
-                        }
-                        if (bitDepth <= 0) {
-                            bitDepth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITS_PER_SAMPLE)
-                                ?.toIntOrNull() ?: 0
+                    extractor.setDataSource(context, song.uri, null)
+                    for (i in 0 until extractor.trackCount) {
+                        val fmt = extractor.getTrackFormat(i)
+                        val trackMime = fmt.getString(MediaFormat.KEY_MIME)
+                        if (trackMime?.startsWith("audio/") == true) {
+                            mime = trackMime
+                            if (fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                                sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                            }
+                            if (fmt.containsKey(MediaFormat.KEY_BIT_RATE)) {
+                                bitrate = fmt.getInteger(MediaFormat.KEY_BIT_RATE)
+                            }
+                            if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                                channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                                fmt.containsKey(MediaFormat.KEY_PCM_ENCODING)
+                            ) {
+                                bitDepth = pcmEncodingToBitDepth(fmt.getInteger(MediaFormat.KEY_PCM_ENCODING))
+                            }
+                            if (bitDepth <= 0 && fmt.containsKey("bits-per-sample")) {
+                                bitDepth = fmt.getInteger("bits-per-sample")
+                            }
+                            break
                         }
                     }
                 } catch (_: Throwable) {
                 } finally {
-                    runCatching { retriever.release() }
+                    runCatching { extractor.release() }
                 }
+
+                if (bitrate <= 0 || bitDepth <= 0 || mime == null || sampleRate <= 0) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(context, song.uri)
+                        if (mime == null) {
+                            mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                        }
+                        if (bitrate <= 0) {
+                            val br = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()
+                            if (br != null && br > 0) bitrate = br
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            if (sampleRate <= 0) {
+                                sampleRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)
+                                    ?.toIntOrNull() ?: 0
+                            }
+                            if (bitDepth <= 0) {
+                                bitDepth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITS_PER_SAMPLE)
+                                    ?.toIntOrNull() ?: 0
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        runCatching { retriever.release() }
+                    }
+                }
+            } else {
+                mime = "audio/dsd"
             }
 
             val lossless = isLosslessExtension(song.displayName) || isLosslessMime(mime)
             if ((bitDepth <= 0 || sampleRate <= 0) && lossless) {
                 val header = runCatching {
-                    context.contentResolver.openInputStream(song.uri)?.use { readPrefix(it, 256) }
+                    context.contentResolver.openInputStream(song.uri)?.use { readPrefix(it, if (isDsd) 1024 else 256) }
                 }.getOrNull()
                 val pcm = header?.let(::parseLosslessHeader)
                 if (pcm != null) {

@@ -3,6 +3,7 @@ package com.sonance.player.data
 import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import com.sonance.player.data.netease.NeteaseAuth
 import com.sonance.player.data.netease.NeteaseQuality
@@ -617,7 +618,9 @@ object NeteaseSource : OnlineSource {
     private const val BASE = "https://music.163.com"
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 12_000
+    private const val PLAYLIST_READ_TIMEOUT_MS = 20_000
     private const val MAX_BODY_CHARS = 512 * 1024
+    private const val MAX_PLAYLIST_BODY_CHARS = 8 * 1024 * 1024
 
     /** 搜索接口的 `type`：1 = 单曲，1000 = 歌单 */
     private const val TYPE_PLAYLIST = 1000
@@ -629,6 +632,8 @@ object NeteaseSource : OnlineSource {
      * 偶发被截断，而截断在解析层只表现为"少了几首"，很难发现。
      */
     private const val DETAIL_BATCH = 100
+    private const val V3_DETAIL_BATCH = 200
+    private const val LEGACY_DETAIL_FALLBACK_BATCH = 50
 
     /**
      * 带一个像浏览器的 UA。
@@ -851,33 +856,140 @@ object NeteaseSource : OnlineSource {
     override suspend fun playlistTracks(playlistId: String): List<RemoteTrack>? =
         playlistDetailWithName(playlistId)?.second
 
-    /** 拉取网易云歌单标题与完整曲目列表。 */
+    /** 拉取网易云歌单标题与完整曲目列表（兼容 1000+ 首大歌单：突破 512 KB 限制、v3 批量接口 + 失败重试与分片降级）。 */
     internal suspend fun playlistDetailWithName(playlistId: String): Pair<String, List<RemoteTrack>>? =
         withContext(Dispatchers.IO) {
-            val body = get("$BASE/api/v6/playlist/detail?id=$playlistId&n=1")
+            val body = getWithRetry(
+                url = "$BASE/api/v6/playlist/detail?id=$playlistId&n=1",
+                maxBodyChars = MAX_PLAYLIST_BODY_CHARS,
+                readTimeoutMs = PLAYLIST_READ_TIMEOUT_MS
+            ) ?: getWithRetry(
+                url = "$BASE/api/playlist/detail?id=$playlistId",
+                maxBodyChars = MAX_PLAYLIST_BODY_CHARS,
+                readTimeoutMs = PLAYLIST_READ_TIMEOUT_MS
+            ) ?: return@withContext null
+            val root = runCatching { JSONObject(body) }.getOrNull() ?: return@withContext null
+            val playlist = root.optJSONObject("playlist")
+                ?: root.optJSONObject("result")
                 ?: return@withContext null
-            val playlist = runCatching {
-                JSONObject(body).optJSONObject("playlist")
-            }.getOrNull() ?: return@withContext null
             val name = playlist.optString("name").trim()
             val idsArr = playlist.optJSONArray("trackIds") ?: return@withContext (name to emptyList())
 
-            val ids = ArrayList<String>(idsArr.length())
+            val seen = LinkedHashSet<String>(idsArr.length())
             for (i in 0 until idsArr.length()) {
                 val id = idsArr.optJSONObject(i)?.optLong("id") ?: continue
-                if (id > 0L) ids += id.toString()
+                if (id > 0L) seen.add(id.toString())
             }
+            val ids = seen.toList()
             if (ids.isEmpty()) return@withContext (name to emptyList())
 
-            val out = ArrayList<RemoteTrack>(ids.size)
-            for (chunk in ids.chunked(DETAIL_BATCH)) {
-                // 某一批失败就整体按失败处理 —— 返回"半个歌单"比报错更让人困惑：
-                // 用户会以为歌单本来就这么短，然后去下一半
-                val part = fetchTrackDetails(chunk) ?: return@withContext null
-                out += part
+            val trackById = HashMap<String, RemoteTrack>(ids.size)
+            for (chunk in ids.chunked(V3_DETAIL_BATCH)) {
+                val part = fetchTrackDetailsV3(chunk)
+                if (part != null) {
+                    for (t in part) {
+                        trackById[t.remoteId] = t
+                    }
+                }
             }
-            name to out
+            val ordered = ids.mapNotNull { trackById[it] }
+            if (ordered.isEmpty()) return@withContext null
+            name to ordered
         }
+
+    private suspend fun getWithRetry(
+        url: String,
+        maxBodyChars: Int,
+        readTimeoutMs: Int
+    ): String? {
+        get(url, maxBodyChars = maxBodyChars, readTimeoutMs = readTimeoutMs)?.let { return it }
+        delay(350L)
+        return get(url, maxBodyChars = maxBodyChars, readTimeoutMs = readTimeoutMs)
+    }
+
+    private suspend fun fetchTrackDetailsV3(ids: List<String>): List<RemoteTrack>? {
+        if (ids.isEmpty()) return emptyList()
+        val cArray = JSONArray()
+        for (id in ids) {
+            val numericId = id.toLongOrNull() ?: continue
+            cArray.put(JSONObject().put("id", numericId))
+        }
+        if (cArray.length() == 0) return emptyList()
+        val formBody = "c=${enc(cArray.toString())}"
+        val isVip = NeteaseAuth.account?.isVip == true
+        for (attempt in 0 until 2) {
+            if (attempt > 0) delay(350L)
+            val body = postForm(
+                url = "$BASE/api/v3/song/detail",
+                formBody = formBody,
+                maxBodyChars = MAX_PLAYLIST_BODY_CHARS,
+                readTimeoutMs = PLAYLIST_READ_TIMEOUT_MS
+            ) ?: continue
+            val parsed = parseV3SongDetailsJson(body, isVip)
+            if (!parsed.isNullOrEmpty()) return parsed
+        }
+        // 若 v3 接口被风控或暂不可用，降级为小分片旧版 /api/song/detail
+        val fallbackOut = ArrayList<RemoteTrack>(ids.size)
+        for (sub in ids.chunked(LEGACY_DETAIL_FALLBACK_BATCH)) {
+            val subPart = fetchTrackDetails(
+                ids = sub,
+                maxBodyChars = MAX_PLAYLIST_BODY_CHARS,
+                readTimeoutMs = PLAYLIST_READ_TIMEOUT_MS
+            ) ?: run {
+                delay(350L)
+                fetchTrackDetails(
+                    ids = sub,
+                    maxBodyChars = MAX_PLAYLIST_BODY_CHARS,
+                    readTimeoutMs = PLAYLIST_READ_TIMEOUT_MS
+                )
+            }
+            if (subPart != null) fallbackOut += subPart
+        }
+        return fallbackOut.takeIf { it.isNotEmpty() }
+    }
+
+    internal fun parseV3SongDetailsJson(body: String, isVip: Boolean): List<RemoteTrack>? =
+        runCatching {
+            val root = JSONObject(body)
+            val arr = root.optJSONArray("songs") ?: return@runCatching null
+            val privileges = root.optJSONArray("privileges")
+            val privFeeById = HashMap<Long, Int>()
+            val privStById = HashMap<Long, Int>()
+            if (privileges != null) {
+                for (i in 0 until privileges.length()) {
+                    val p = privileges.optJSONObject(i) ?: continue
+                    val pid = p.optLong("id")
+                    if (pid > 0L) {
+                        if (p.has("fee")) privFeeById[pid] = p.optInt("fee", -1)
+                        if (p.has("st")) privStById[pid] = p.optInt("st", 0)
+                    }
+                }
+            }
+            buildList<RemoteTrack> {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val sid = o.optLong("id")
+                    if (sid <= 0L) continue
+                    val fee = privFeeById[sid]?.takeIf { it >= 0 } ?: o.optInt("fee", 0)
+                    val st = privStById[sid] ?: 0
+                    val album = o.optJSONObject("al") ?: o.optJSONObject("album")
+                    val artistsArr = o.optJSONArray("ar") ?: o.optJSONArray("artists")
+                    val durationMs = if (o.has("dt")) o.optLong("dt") else o.optLong("duration")
+                    add(
+                        RemoteTrack(
+                            remoteId = sid.toString(),
+                            title = o.optString("name"),
+                            artist = joinNames(artistsArr),
+                            album = album?.optString("name").orEmpty(),
+                            durationMs = durationMs,
+                            coverUrl = album?.optString("picUrl")?.takeIf { it.isNotBlank() },
+                            playable = st >= 0 && neteasePlayable(fee, isVip),
+                            vip = neteaseVip(fee)
+                        )
+                    )
+                }
+            }
+        }.getOrNull()
 
     /**
      * `/api/song/detail` 批量取完整元数据。
@@ -885,14 +997,16 @@ object NeteaseSource : OnlineSource {
      * 失败返回 null（**不是**空列表）：这里缺数据就拼不出可用的曲目列表，
      * 必须让调用方知道是"请求失败"而不是"歌单是空的"。
      */
-    private suspend fun fetchTrackDetails(ids: List<String>): List<RemoteTrack>? {
+    private suspend fun fetchTrackDetails(
+        ids: List<String>,
+        maxBodyChars: Int = MAX_BODY_CHARS,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
+    ): List<RemoteTrack>? {
         if (ids.isEmpty()) return emptyList()
         val url = "$BASE/api/song/detail?ids=%5B${ids.joinToString(",")}%5D"
-        val body = get(url) ?: return null
+        val body = get(url, maxBodyChars = maxBodyChars, readTimeoutMs = readTimeoutMs) ?: return null
         return runCatching {
             val arr = JSONObject(body).optJSONArray("songs") ?: return@runCatching null
-            // 显式给 buildList 类型参数：runCatching 的 R 同时被 `null` 和这里推，
-            // 新推理器会先定成 `List<RemoteTrack>?`，导致 add() 的实参对不上 E
             buildList<RemoteTrack> {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
@@ -908,7 +1022,6 @@ object NeteaseSource : OnlineSource {
                             album = album?.optString("name").orEmpty(),
                             durationMs = o.optLong("duration"),
                             coverUrl = album?.optString("picUrl")?.takeIf { it.isNotBlank() },
-                            // 和搜索接口同一套 fee 判据（见 neteasePlayable 的说明）
                             playable = neteasePlayable(fee, NeteaseAuth.account?.isVip == true),
                             vip = neteaseVip(fee)
                         )
@@ -978,14 +1091,24 @@ object NeteaseSource : OnlineSource {
     suspend fun lyrics(remoteId: String, withTranslation: Boolean = true): String? =
         withContext(Dispatchers.IO) {
             val tv = if (withTranslation) -1 else 0
-            val body = get("$BASE/api/song/lyric?id=$remoteId&lv=-1&kv=1&tv=$tv")
+            val v1Url = "$BASE/api/song/lyric/v1?id=$remoteId&cp=false&tv=$tv&lv=-1&rv=0&kv=0&yv=1&ytv=$tv&yrv=0"
+            val body = get(v1Url)
+                ?: get("$BASE/api/song/lyric?id=$remoteId&lv=-1&kv=1&tv=$tv")
                 ?: return@withContext null
             val json = runCatching { JSONObject(body) }.getOrNull() ?: return@withContext null
 
-            // 没有歌词时接口返回的是 `"lrc":{"version":1,"lyric":""}` ——
-            // 空字符串就是"确认没有"，据此返回 null，调用方好写 KnownMiss 哨兵
+            val yrcRaw = json.optJSONObject("yrc")?.optString("lyric").orEmpty()
+            val yrcLrc = convertYrcToEnhancedLrc(yrcRaw)
+            if (!yrcLrc.isNullOrBlank()) {
+                if (!withTranslation) return@withContext yrcLrc
+                val ytlrc = json.optJSONObject("ytlrc")?.optString("lyric").orEmpty()
+                val tlrc = json.optJSONObject("tlyric")?.optString("lyric").orEmpty()
+                val chosenTr = ytlrc.ifBlank { tlrc }
+                return@withContext if (chosenTr.isBlank()) yrcLrc else mergeTranslation(yrcLrc, chosenTr)
+            }
+
+            // 没有逐字 yrc 时回退行级 LRC
             val raw = json.optJSONObject("lrc")?.optString("lyric").orEmpty()
-            // 先摘掉制作人员名单，再合并翻译（名单行没有对应译文，留着只会占头几行）
             val lrc = stripCreditLines(raw)
             if (lrc.isBlank()) return@withContext null
             if (!withTranslation) return@withContext lrc
@@ -1018,13 +1141,17 @@ object NeteaseSource : OnlineSource {
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
     /** 简单 GET。任何异常都返回 null（含超时、非 2xx、响应过大） */
-    private fun get(url: String): String? {
+    private fun get(
+        url: String,
+        maxBodyChars: Int = MAX_BODY_CHARS,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
+    ): String? {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
+                readTimeout = readTimeoutMs
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", UA)
                 setRequestProperty("Accept", "application/json, text/plain, */*")
@@ -1039,7 +1166,7 @@ object NeteaseSource : OnlineSource {
                 return null
             }
             val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
-            if (body.length > MAX_BODY_CHARS) {
+            if (body.length > maxBodyChars) {
                 Log.w(TAG, "网易云响应过大（${body.length} 字符），丢弃")
                 null
             } else {
@@ -1047,6 +1174,49 @@ object NeteaseSource : OnlineSource {
             }
         } catch (t: Throwable) {
             Log.w(TAG, "网易云请求失败: ${t.javaClass.simpleName}: ${t.message}")
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+    }
+
+    private fun postForm(
+        url: String,
+        formBody: String,
+        maxBodyChars: Int = MAX_PLAYLIST_BODY_CHARS,
+        readTimeoutMs: Int = PLAYLIST_READ_TIMEOUT_MS
+    ): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = readTimeoutMs
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", UA)
+                setRequestProperty("Accept", "application/json, text/plain, */*")
+                setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                setRequestProperty("Referer", "$BASE/")
+                NeteaseAuth.account?.cookie?.takeIf { it.isNotBlank() }?.let {
+                    setRequestProperty("Cookie", it)
+                }
+            }
+            conn.outputStream.use { it.write(formBody.toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                Log.w(TAG, "网易云 POST 接口 HTTP $code  url=$url")
+                return null
+            }
+            val body = conn.inputStream.bufferedReader().use(BufferedReader::readText)
+            if (body.length > maxBodyChars) {
+                Log.w(TAG, "网易云 POST 响应过大（${body.length} 字符），丢弃")
+                null
+            } else {
+                body
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "网易云 POST 请求失败: ${t.javaClass.simpleName}: ${t.message}")
             null
         } finally {
             runCatching { conn?.disconnect() }

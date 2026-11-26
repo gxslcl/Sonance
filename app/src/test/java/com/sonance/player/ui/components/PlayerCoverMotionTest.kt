@@ -1,5 +1,7 @@
 package com.sonance.player.ui.components
 
+import com.sonance.player.data.MotionFeel
+import com.sonance.player.data.PlayerSwitchMotion
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -56,5 +58,74 @@ class PlayerCoverMotionTest {
         repeat(10) { i ->
             assertEquals(0.96f, motion.advance(16f, false, true, i.toLong()), 0f)
         }
+    }
+
+    @Test
+    fun `external switch trigger separates queue picks from auto advance`() {
+        assertEquals(
+            SwitchTrigger.QUEUE_PICK,
+            classifyExternalSwitchTrigger(coveredByQueue = true, hasUnconsumedQueuePick = false, recentQueuePick = false)
+        )
+        assertEquals(
+            SwitchTrigger.QUEUE_PICK,
+            classifyExternalSwitchTrigger(coveredByQueue = false, hasUnconsumedQueuePick = true, recentQueuePick = true)
+        )
+        assertEquals(
+            SwitchTrigger.AUTO_ADVANCE,
+            classifyExternalSwitchTrigger(coveredByQueue = false, hasUnconsumedQueuePick = true, recentQueuePick = false)
+        )
+        assertEquals(
+            SwitchTrigger.AUTO_ADVANCE,
+            classifyExternalSwitchTrigger(coveredByQueue = false, hasUnconsumedQueuePick = false, recentQueuePick = true)
+        )
+    }
+
+    @Test
+    fun `switch durations are ordered cleanly and shorten on rapid triggers`() {
+        val autoMs = resolveSwitchDurationMs(SwitchTrigger.AUTO_ADVANCE, PlayerSwitchMotion.POWERAMP_SLIDE, MotionFeel.FLUID, isRapid = false)
+        val manualMs = resolveSwitchDurationMs(SwitchTrigger.MANUAL_STEP, PlayerSwitchMotion.POWERAMP_SLIDE, MotionFeel.FLUID, isRapid = false)
+        val queueMs = resolveSwitchDurationMs(SwitchTrigger.QUEUE_PICK, PlayerSwitchMotion.POWERAMP_SLIDE, MotionFeel.FLUID, isRapid = false)
+        assertTrue(autoMs > manualMs)
+        assertTrue(manualMs > queueMs)
+        assertTrue(resolveSwitchDurationMs(SwitchTrigger.QUEUE_PICK, PlayerSwitchMotion.POWERAMP_SLIDE, MotionFeel.FLUID, isRapid = true) < queueMs)
+    }
+
+    @Test
+    fun `auto advance ambient cross-dissolve stays centered with smooth non-black midpoints`() {
+        val outStart = evalAutoAdvanceOut(0f, baseScale = 1f, baseTranslationY = -12f)
+        val inStart = evalAutoAdvanceIn(0f, baseScale = 1f, baseTranslationY = -12f)
+        assertEquals(1f, outStart.alpha, 0.0001f)
+        assertEquals(0f, inStart.alpha, 0.0001f)
+        assertEquals(0f, outStart.translationX, 0f)
+        assertEquals(-12f, outStart.translationY, 0f)
+
+        val outMid = evalAutoAdvanceOut(0.45f, baseScale = 1f, baseTranslationY = -12f)
+        val inMid = evalAutoAdvanceIn(0.45f, baseScale = 1f, baseTranslationY = -12f)
+        assertEquals(0f, outMid.translationX, 0f)
+        assertEquals(0f, inMid.translationX, 0f)
+        assertTrue("Expected non-dim cross-dissolve midpoint, got ${outMid.alpha + inMid.alpha}", outMid.alpha + inMid.alpha >= 0.75f)
+
+        val outEnd = evalAutoAdvanceOut(1f, baseScale = 1f, baseTranslationY = -12f)
+        val inEnd = evalAutoAdvanceIn(1f, baseScale = 1f, baseTranslationY = -12f)
+        assertEquals(0f, outEnd.alpha, 0.0001f)
+        assertEquals(1f, inEnd.alpha, 0.0001f)
+        assertEquals(1f, inEnd.scale, 0.0001f)
+    }
+
+    @Test
+    fun `queue pick focus rise glides vertically without horizontal shift`() {
+        val density = 3f
+        val inStart = evalQueuePickIn(0f, baseScale = 1f, baseTranslationY = 10f, density = density)
+        val inEnd = evalQueuePickIn(1f, baseScale = 1f, baseTranslationY = 10f, density = density)
+        val outEnd = evalQueuePickOut(1f, baseScale = 1f, baseTranslationY = 10f, density = density)
+
+        assertEquals(0f, inStart.translationX, 0f)
+        assertTrue(inStart.translationY > 10f)
+        assertTrue(inStart.scale < 1f)
+        assertEquals(1f, inEnd.alpha, 0.0001f)
+        assertEquals(1f, inEnd.scale, 0.0001f)
+        assertEquals(10f, inEnd.translationY, 0.0001f)
+        assertEquals(0f, outEnd.alpha, 0.0001f)
+        assertEquals(0f, outEnd.translationX, 0f)
     }
 }

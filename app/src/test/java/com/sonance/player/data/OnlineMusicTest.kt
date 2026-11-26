@@ -447,4 +447,24 @@ class OnlineMusicTest {
         assertEquals(listOf("netease"), OnlineSources.all.map { it.id })
         assertEquals(null, OnlineSources.byId("plugin:kg"))
     }
+
+    @Test
+    fun `parseV3SongDetailsJson 解析 v3 曲目字段与 privileges 并支持千首以上规模`() {
+        val songsJson = (1..1250).joinToString(",") { i ->
+            val fee = if (i % 5 == 0) 1 else 0
+            """{"id":$i,"name":"曲目$i","ar":[{"name":"歌手$i"}],"al":{"name":"专辑$i","picUrl":"https://p1.music.126.net/$i.jpg"},"dt":${180000 + i},"fee":$fee}"""
+        }
+        val privJson = """{"id":5,"fee":0,"st":0},{"id":1,"fee":0,"st":-200}"""
+        val payload = """{"songs":[$songsJson],"privileges":[$privJson]}"""
+
+        val tracks = NeteaseSource.parseV3SongDetailsJson(payload, isVip = false)!!
+        assertEquals(1250, tracks.size)
+        assertEquals("1", tracks[0].remoteId)
+        assertEquals("曲目1", tracks[0].title)
+        assertEquals("歌手1", tracks[0].artist)
+        assertEquals("专辑1", tracks[0].album)
+        assertEquals(180001L, tracks[0].durationMs)
+        assertFalse("st=-200 应判为不可播", tracks[0].playable)
+        assertTrue("privilege fee=0 st=0 应判为可播", tracks[4].playable)
+    }
 }

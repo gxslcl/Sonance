@@ -147,12 +147,17 @@ object OnlineDownloader {
         album: String,
         streamUrl: String,
         coverBytes: ByteArray?,
-        /** 容器（`mp3` / `flac`）。决定扩展名、MIME，以及要不要写 ID3 */
-        format: String = "mp3"
+        /** 容器（`mp3` / `flac`）。决定扩展名、MIME，以及要不要写标签 */
+        format: String = "mp3",
+        includeCover: Boolean = true,
+        lyricsText: String? = null,
+        includeMetadata: Boolean = true
     ): Outcome = withContext(Dispatchers.IO) {
         val isFlac = format.equals("flac", true) || format.equals("flac24bit", true)
         val fileName = fileNameFor(title, artist, extensionFor(format))
+        val baseName = fileName.substringBeforeLast('.')
         val temp = File(context.cacheDir, "dl-${System.nanoTime()}.part")
+        val taggedFlacTemp = if (isFlac) File(context.cacheDir, "dl-flac-${System.nanoTime()}.part") else null
 
         try {
             // ---- 1) 下载到缓存目录的临时文件 ----
@@ -163,8 +168,6 @@ object OnlineDownloader {
                     Log.w(TAG, "取流 HTTP $code（多半是会员歌）")
                     return@withContext Outcome.Unavailable
                 }
-                // ★ 会员歌的重定向目标是**一张 HTML 下载页**（200 + text/html），
-                // 不是 403。只看状态码会把它当成功，存下来一个"能播但全是噪音"的文件
                 val type = conn.contentType.orEmpty().lowercase()
                 if (!type.startsWith("audio/")) {
                     Log.w(TAG, "取流返回的不是音频（$type），按不可用处理")
@@ -183,8 +186,6 @@ object OnlineDownloader {
                         }
                     }
                 }
-                // 长度对不上就是下载被截断了（连接断了、或服务端提前关流）。
-                // 存一个半首歌比不存更糟 —— 用户以为下好了，播到一半没了
                 if (expected > 0 && written != expected) {
                     Log.w(TAG, "下载不完整：$written / $expected 字节")
                     return@withContext Outcome.Failed
@@ -194,20 +195,43 @@ object OnlineDownloader {
                 runCatching { conn.disconnect() }
             }
 
-            // ---- 2) 落盘（流式，不把整首歌读进内存）----
+            val effCover = if (includeCover) coverBytes?.takeIf { it.isNotEmpty() } else null
+            val effLyrics = lyricsText?.takeIf { it.isNotBlank() }
+
+            // ---- 2) 落盘（按勾选写入内嵌元数据 / 封面 / 歌词）----
+            val flacTaggedReady = if (isFlac && taggedFlacTemp != null && (includeMetadata || effCover != null || effLyrics != null)) {
+                MultiFormatTagEditor.editFlac(
+                    src = temp,
+                    dst = taggedFlacTemp,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    lyrics = effLyrics,
+                    cover = effCover,
+                    includeMeta = includeMetadata
+                ) && taggedFlacTemp.length() > 0L
+            } else false
+
             val opened = openTarget(context, fileName, mimeFor(format))
                 ?: return@withContext Outcome.Failed
             try {
-                temp.inputStream().use { input ->
+                val sourceFile = if (flacTaggedReady && taggedFlacTemp != null) taggedFlacTemp else temp
+                sourceFile.inputStream().use { input ->
                     opened.stream.use { out ->
                         if (isFlac) {
-                            // FLAC 不能套 ID3 头：写进去就是一个损坏的 flac。
-                            // 原样拷贝，元数据靠 MediaStore 与在线封面缓存
                             input.copyTo(out, 64 * 1024)
-                        } else {
-                            Id3Writer.copyWithTag(
-                                input, out, Id3Writer.buildTag(title, artist, album, coverBytes)
+                        } else if (includeMetadata || effCover != null || effLyrics != null) {
+                            val tag = Id3Writer.buildTag(
+                                title = if (includeMetadata) title else "",
+                                artist = if (includeMetadata) artist else "",
+                                album = if (includeMetadata) album else "",
+                                cover = effCover,
+                                coverMime = effCover?.let(RestoreTagWriter::mimeOf),
+                                lyrics = effLyrics
                             )
+                            Id3Writer.copyWithTag(input, out, tag)
+                        } else {
+                            input.copyTo(out, 64 * 1024)
                         }
                     }
                 }
@@ -217,6 +241,18 @@ object OnlineDownloader {
             }
             opened.onSuccess(context, fileName)
 
+            // 同步保存同名独立 .lrc 歌词文件，方便文件夹识别与其他播放器读取
+            if (effLyrics != null) {
+                runCatching {
+                    saveCompanionFile(
+                        context = context,
+                        fileName = "$baseName.lrc",
+                        mime = "application/octet-stream",
+                        bytes = effLyrics.toByteArray(Charsets.UTF_8)
+                    )
+                }
+            }
+
             Log.i(TAG, "已保存：$fileName")
             Outcome.Saved(fileName)
         } catch (t: Throwable) {
@@ -224,6 +260,49 @@ object OnlineDownloader {
             Outcome.Failed
         } finally {
             runCatching { temp.delete() }
+            runCatching { taggedFlacTemp?.delete() }
+        }
+    }
+
+    private fun saveCompanionFile(
+        context: Context,
+        fileName: String,
+        mime: String,
+        bytes: ByteArray
+    ) {
+        if (bytes.isEmpty()) return
+        val dir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+            FOLDER_NAME
+        )
+        val directWritten = runCatching {
+            if (!dir.exists()) dir.mkdirs()
+            if (dir.exists() && dir.canWrite()) {
+                File(dir, fileName).writeBytes(bytes)
+                true
+            } else false
+        }.getOrDefault(false)
+        if (directWritten) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val filesUri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/$FOLDER_NAME")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = runCatching { resolver.insert(filesUri, values) }.getOrNull() ?: return
+            val ok = runCatching {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) } != null
+            }.getOrDefault(false)
+            if (ok) {
+                val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                runCatching { resolver.update(uri, done, null, null) }
+            } else {
+                runCatching { resolver.delete(uri, null, null) }
+            }
         }
     }
 

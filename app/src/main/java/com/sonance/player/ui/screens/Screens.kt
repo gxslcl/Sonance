@@ -498,6 +498,54 @@ fun SongList(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SongAudioSpecCard(song = target)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(editSkin.surface2)
+                            .border(1.dp, editSkin.border, RoundedCornerShape(12.dp))
+                            .clickable {
+                                editTarget = null
+                                vm.openCoverPicker(target.id)
+                            }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CoverArt(
+                            albumId = target.albumId,
+                            seed = target.title,
+                            modifier = Modifier.size(44.dp),
+                            cornerRadius = 8.dp,
+                            sizePx = 200,
+                            sourceUri = target.uri,
+                            songId = target.id,
+                            coverKey = OnlineCover.keyOf(target.title, target.artist)
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "歌曲封面",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = editSkin.text
+                            )
+                            Text(
+                                "自定义相册图片或在线搜索封面",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = editSkin.textMuted
+                            )
+                        }
+                        Text(
+                            "更换 / 搜索",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = editSkin.accent,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(editSkin.accentGlow)
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
                     Text(
                         "修改会写入音频文件的标签，并将文件改名为「歌名 - 歌手」。",
                         style = MaterialTheme.typography.bodySmall,

@@ -752,6 +752,13 @@ class MediaRepository(private val context: Context) {
                 return fromPath
             }
         }
+        val lowerPath = rawPath?.lowercase().orEmpty()
+        val lowerUri = uri.toString().lowercase()
+        if (lowerPath.endsWith(".dsf") || lowerPath.endsWith(".dff") ||
+            lowerUri.endsWith(".dsf") || lowerUri.endsWith(".dff")
+        ) {
+            return ExternalAudioResolver.AudioMetadata()
+        }
         val mmr = MediaMetadataRetriever()
         return try {
             val ok = runCatching {
