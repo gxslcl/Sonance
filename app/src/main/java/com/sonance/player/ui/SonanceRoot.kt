@@ -1458,6 +1458,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 glowTransition = vm.glowTransition,
                 glowFadeMs = vm.glowFadeMs,
                 switchMotion = vm.playerSwitchMotion,
+                layoutStyle = vm.playerLayoutStyle,
+                coverWallUseRealCover = vm.coverWallUseRealCover,
                 motionFeel = vm.motionFeel,
                 coverCornerDp = vm.playerCoverCornerDp.dp,
                 onSheetDragStart = onSheetDragStart,
@@ -1468,6 +1470,8 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onGlowTransitionChange = { vm.changeGlowTransition(it) },
                 onGlowFadeMsChange = { vm.changeGlowFadeMs(it) },
                 onSwitchMotionChange = { vm.changePlayerSwitchMotion(it) },
+                onLayoutStyleChange = { vm.changePlayerLayoutStyle(it) },
+                onCoverWallUseRealCoverChange = { vm.changeCoverWallUseRealCover(it) },
                 vinylMode = vm.vinylMode,
                 onVinylModeChange = { vm.changeVinylMode(it) },
                 hiResBadgeEnabled = vm.hiResBadgeEnabled,
@@ -1534,7 +1538,9 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                 onTogglePlay = { vm.dispatchPlayPause() },
                 onPrev = { vm.dispatchPrevious() },
                 onNext = { vm.dispatchNext() },
-                onSeek = { vm.dispatchSeekTo(it) }
+                onSeek = { vm.dispatchSeekTo(it) },
+                coverWallUseRealCover = vm.coverWallUseRealCover,
+                onCoverWallUseRealCoverChange = { vm.changeCoverWallUseRealCover(it) }
             )
         }
 

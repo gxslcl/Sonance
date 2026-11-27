@@ -40,6 +40,7 @@ import com.sonance.player.data.GlowMode
 import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.MotionFeel
 import com.sonance.player.data.PageTransitionStyle
+import com.sonance.player.data.PlayerLayoutStyle
 import com.sonance.player.data.PlayerSheetStyle
 import com.sonance.player.data.PlayerSwitchMotion
 import com.sonance.player.data.MediaFileDeleter
@@ -3442,6 +3443,14 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     var playerSwitchMotion by mutableStateOf(PlayerSwitchMotion.fromId(prefs.playerSwitchMotion))
         private set
 
+    /** 普通播放主界面样式（经典样式 / 封面墙样式） */
+    var playerLayoutStyle by mutableStateOf(PlayerLayoutStyle.fromId(prefs.playerLayoutStyle))
+        private set
+
+    /** 封面墙样式是否启用歌曲真实封面（背景与唱片中心色同步重算） */
+    var coverWallUseRealCover by mutableStateOf(prefs.coverWallUseRealCover)
+        private set
+
     /** 全局流体动效手感（灵动极速 / 丝滑自然 / 舒缓优雅） */
     var motionFeel by mutableStateOf(MotionFeel.fromId(prefs.motionFeel))
         private set
@@ -3539,6 +3548,16 @@ class SonanceViewModel(app: Application) : AndroidViewModel(app) {
     fun changePlayerSwitchMotion(motion: PlayerSwitchMotion) {
         playerSwitchMotion = motion
         prefs.playerSwitchMotion = motion.id
+    }
+
+    fun changePlayerLayoutStyle(style: PlayerLayoutStyle) {
+        playerLayoutStyle = style
+        prefs.playerLayoutStyle = style.id
+    }
+
+    fun changeCoverWallUseRealCover(enabled: Boolean) {
+        coverWallUseRealCover = enabled
+        prefs.coverWallUseRealCover = enabled
     }
 
     fun changeGlowFadeMs(ms: Int) {

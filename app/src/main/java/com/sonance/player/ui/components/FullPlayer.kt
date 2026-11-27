@@ -166,6 +166,7 @@ import com.sonance.player.data.GlowTransition
 import com.sonance.player.data.HiResQuality
 import com.sonance.player.data.MotionFeel
 import com.sonance.player.data.OnlineCover
+import com.sonance.player.data.PlayerLayoutStyle
 import com.sonance.player.data.PlayerSwitchMotion
 import com.sonance.player.desktoplyrics.DesktopLyricsManager
 import com.sonance.player.data.Prefs
@@ -319,6 +320,10 @@ fun FullPlayer(
     glowFadeMs: Int = Prefs.DEFAULT_GLOW_FADE_MS,
     /** 点击上一曲 / 下一曲按钮的切歌动效 */
     switchMotion: PlayerSwitchMotion = PlayerSwitchMotion.POWERAMP_SLIDE,
+    /** 普通播放主界面样式（经典样式 / 封面墙样式） */
+    layoutStyle: PlayerLayoutStyle = PlayerLayoutStyle.CLASSIC,
+    /** 封面墙样式是否用歌曲真实封面替换程序艺术替代封面 */
+    coverWallUseRealCover: Boolean = false,
     /** 双击封面那个面板改了包裹方式 */
     onGlowModeChange: (GlowMode) -> Unit = {},
     /** 双击封面那个面板改了浓度 */
@@ -329,6 +334,10 @@ fun FullPlayer(
     onGlowFadeMsChange: (Int) -> Unit = {},
     /** 右上角菜单切换「切歌动效」 */
     onSwitchMotionChange: (PlayerSwitchMotion) -> Unit = {},
+    /** 右上角菜单切换「播放页样式」 */
+    onLayoutStyleChange: (PlayerLayoutStyle) -> Unit = {},
+    /** 切换「封面墙样式」下的真实/替代封面 */
+    onCoverWallUseRealCoverChange: (Boolean) -> Unit = {},
     /** 封面是否用「黑碟播放器」样式（黑胶圆盘，播放时缓慢旋转） */
     vinylMode: Boolean = false,
     /** 双击封面那个面板切黑碟模式 */
@@ -510,6 +519,7 @@ fun FullPlayer(
         }
         SmoothGlowController(initial, skin.bg)
     }
+    val drawGlowFade = remember(skin.id, glowMode) { DrawGlowCrossfade() }
     val useSmoothGlow = !isSwipeGlow || smoothGlow.fadeActive
 
     // 零重组驱动晕染颜色过渡：只在离散曲目变化时启动 0->1 进度补间，
@@ -550,13 +560,50 @@ fun FullPlayer(
         smoothGlow.fadeActive = false
     }
 
+    // 跟手模式下的零重组背景渐变补全：仅当随机/异曲的异步封面主色在动画结束之后才就绪时，
+    // 在绘制阶段将 lastDrawnFrame -> nextFrame 平滑交叉溶解，不触发 FullPlayer 任何重组。
+    LaunchedEffect(displayedQueueIndex, curGlowColors, glowMode, glowBakeStrength, skin.id, isSwipeGlow, layoutStyle) {
+        if (!isSwipeGlow || layoutStyle != PlayerLayoutStyle.CLASSIC || curGlowColors.isEmpty()) return@LaunchedEffect
+        snapshotFlow {
+            activeSwitch == null && optimisticTargetIdx !in queue.indices &&
+                !pagerState.isScrollInProgress && !userDraggedPager
+        }.first { it }
+        val normalized = SmoothGlowController.normalizeColors(curGlowColors, skin.bg)
+        val prevFrame = drawGlowFade.lastDrawnFrame
+        if (prevFrame != null && prevFrame.colors.isNotEmpty() && prevFrame.colors != normalized) {
+            val nextFrame = withContext(Dispatchers.Default) {
+                cachedGlowFrame(normalized, glowMode, glowBakeStrength)
+            }
+            drawGlowFade.fromFrame = prevFrame
+            drawGlowFade.toFrame = nextFrame
+            drawGlowFade.active = true
+            drawGlowFade.progress.snapTo(0f)
+            try {
+                drawGlowFade.progress.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(durationMillis = 440, easing = FastOutSlowInEasing)
+                )
+                drawGlowFade.lastDrawnFrame = nextFrame
+            } finally {
+                drawGlowFade.active = false
+            }
+        } else {
+            peekCachedGlowFrame(normalized, glowMode, glowBakeStrength)?.let {
+                drawGlowFade.lastDrawnFrame = it
+            }
+        }
+    }
+
     val buttonPaletteProvider = rememberPlayerControlPaletteProvider(state, queue.getOrNull(displayedQueueIndex))
     // 顶栏律动指示器的混色放在叶子组件 [HeaderPlayingIndicator] 的 Canvas 绘制阶段里算：
     // 滑动中每帧只触发该小 Canvas 重绘，不触发任何组合与测量，FullPlayer 零重组。
 
     // 预取前后两首（支持首尾环绕）的高清封面、色卡并提前烘入 LRU 位图缓存；
     // 避开切歌动画活跃期（650ms）与队列弹窗操作期再预热后续曲目，防止多路 900px 解码与 GC 抢占动画帧。
-    LaunchedEffect(displayedQueueIndex, queue.size, coveredByVinyl, coveredByQueue, glowMode, glowBakeStrength, skin.id) {
+    LaunchedEffect(
+        displayedQueueIndex, queue.size, coveredByVinyl, coveredByQueue,
+        glowMode, glowBakeStrength, skin.id, layoutStyle, coverWallUseRealCover
+    ) {
         if (queue.isEmpty() || coveredByVinyl || coveredByQueue) return@LaunchedEffect
         delay(650L)
         val n = queue.size
@@ -567,6 +614,14 @@ fun FullPlayer(
             seenIdx.add(((idx + off) % n + n) % n)
         }
         val candidates = seenIdx.mapNotNull { queue.getOrNull(it) }
+        if (layoutStyle == PlayerLayoutStyle.COVER_WALL && !coverWallUseRealCover) {
+            coroutineScope {
+                candidates.forEach { s ->
+                    launch(Dispatchers.Default) { warmProceduralCoverBitmap(s) }
+                }
+            }
+            return@LaunchedEffect
+        }
         ArtworkLoader.prefetch(
             context = context,
             requests = candidates.map { s ->
@@ -582,6 +637,7 @@ fun FullPlayer(
                 }
             }
         }
+        if (layoutStyle == PlayerLayoutStyle.COVER_WALL) return@LaunchedEffect
         snapshotFlow {
             candidates.map { s -> resolveGlowColors(s, skin) }
         }.first { colorLists ->
@@ -715,17 +771,22 @@ fun FullPlayer(
                 lastAnimatedSong = targetSong
                 lastAnimatedIndex = targetIdx
                 skipNextFadeOnSync = true
-                if (isSwipeGlow) {
-                    smoothGlow.primeFromIfInactive(resolveGlowColors(from, skin, context), skin.bg)
+                if (isSwipeGlow && smoothGlow.fadeActive) {
+                    smoothGlow.fadeActive = false
                 }
+                drawGlowFade.active = false
                 pendingButtonSwitch = null
                 activeSwitch = sw
                 audioDispatchJob?.cancel()
-                val baseMs = when (switchMotion) {
-                    PlayerSwitchMotion.POWERAMP_SLIDE -> 400L
-                    PlayerSwitchMotion.DEPTH_SLIDE -> 420L
-                    PlayerSwitchMotion.TILT_3D -> 440L
-                    PlayerSwitchMotion.OPTICAL_DISSOLVE -> 450L
+                val baseMs = if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+                    420L
+                } else {
+                    when (switchMotion) {
+                        PlayerSwitchMotion.POWERAMP_SLIDE -> 400L
+                        PlayerSwitchMotion.DEPTH_SLIDE -> 420L
+                        PlayerSwitchMotion.TILT_3D -> 440L
+                        PlayerSwitchMotion.OPTICAL_DISSOLVE -> 450L
+                    }
                 }
                 val scaledMs = scaleMotionDuration(baseMs.toInt(), motionFeel).toLong()
                 audioDispatchJob = scope.launch {
@@ -812,9 +873,10 @@ fun FullPlayer(
             trigger = trigger
         )
         skipNextFadeOnSync = true
-        if (isSwipeGlow) {
-            smoothGlow.primeFromIfInactive(resolveGlowColors(prev, skin, context), skin.bg)
+        if (isSwipeGlow && smoothGlow.fadeActive) {
+            smoothGlow.fadeActive = false
         }
+        drawGlowFade.active = false
         lastAnimatedSong = nextSong
         lastAnimatedIndex = activeQueueIndex
         if (trigger == SwitchTrigger.QUEUE_PICK) {
@@ -861,11 +923,25 @@ fun FullPlayer(
                 SwitchTrigger.MANUAL_STEP -> 4000f
             }
         }
-        val animMs = resolveSwitchDurationMs(sw.trigger, switchMotion, motionFeel, isRapid)
-        val easing = when (sw.trigger) {
-            SwitchTrigger.AUTO_ADVANCE -> CubicBezierEasing(0.22f, 0.61f, 0.36f, 1f)
-            SwitchTrigger.QUEUE_PICK -> CubicBezierEasing(0.20f, 0.88f, 0.26f, 1f)
-            SwitchTrigger.MANUAL_STEP -> CubicBezierEasing(0.24f, 0.84f, 0.28f, 1f)
+        val animMs = if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+            val wallBase = when (sw.trigger) {
+                SwitchTrigger.AUTO_ADVANCE -> 560
+                SwitchTrigger.QUEUE_PICK -> 380
+                SwitchTrigger.MANUAL_STEP -> 480
+            }
+            val scaledWall = scaleMotionDuration(wallBase, motionFeel)
+            if (isRapid) (scaledWall * 0.64f).toInt().coerceAtLeast(160) else scaledWall
+        } else {
+            resolveSwitchDurationMs(sw.trigger, switchMotion, motionFeel, isRapid)
+        }
+        val easing = if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+            CubicBezierEasing(0.22f, 0.72f, 0.24f, 1f)
+        } else {
+            when (sw.trigger) {
+                SwitchTrigger.AUTO_ADVANCE -> CubicBezierEasing(0.22f, 0.61f, 0.36f, 1f)
+                SwitchTrigger.QUEUE_PICK -> CubicBezierEasing(0.20f, 0.88f, 0.26f, 1f)
+                SwitchTrigger.MANUAL_STEP -> CubicBezierEasing(0.24f, 0.84f, 0.28f, 1f)
+            }
         }
         sw.progress.animateTo(
             targetValue = 1f,
@@ -879,7 +955,8 @@ fun FullPlayer(
         }
     }
 
-    LaunchedEffect(activeSwitchRef?.seq, curGlowColors, glowMode, glowBakeStrength, skin.id) {
+    LaunchedEffect(activeSwitchRef?.seq, curGlowColors, glowMode, glowBakeStrength, skin.id, layoutStyle) {
+        if (layoutStyle == PlayerLayoutStyle.COVER_WALL) return@LaunchedEffect
         val sw = activeSwitchRef ?: return@LaunchedEffect
         val fromColors = resolveGlowColors(sw.fromSong, skin)
         val toColors = curGlowColors
@@ -965,6 +1042,7 @@ fun FullPlayer(
             if (scrolling && !progScroll) {
                 userDraggedPager = true
                 smoothGlow.fadeActive = false
+                drawGlowFade.active = false
                 pendingButtonSwitch = null
                 activeSwitch = null
                 optimisticTargetIdx = -1
@@ -1162,35 +1240,96 @@ fun FullPlayer(
             }
         }
     }
-    val playerUiSkin = if (customPlayerImage != null) {
-        val dimAlpha = customPlayerBgDimPct / 100f
-        val rep = Color(
-            red = 0.45f * (1f - dimAlpha),
-            green = 0.45f * (1f - dimAlpha),
-            blue = 0.45f * (1f - dimAlpha)
+    val resolvedWallColor = if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+        rememberCoverWallAccentColor(queue.getOrNull(displayedQueueIndex), coverWallUseRealCover)
+    } else Color.Unspecified
+    var stableWallColor by remember {
+        mutableStateOf(
+            if (resolvedWallColor != Color.Unspecified) resolvedWallColor else Color(0xFF282E42)
         )
-        val accent = ensureReadable(skin.accent, rep, 3.2f, true)
-        skin.copy(
-            text = ensureReadable(skin.text, rep, 4.5f, true),
-            textDim = ensureReadable(skin.textDim, rep, 3.8f, true),
-            textMuted = ensureReadable(skin.textMuted, rep, 3.4f, true),
-            accent = accent,
-            accentDim = ensureReadable(skin.accentDim, rep, 2.8f, true),
-            onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false)
-        )
-    } else skin
+    }
+    if (resolvedWallColor != Color.Unspecified) {
+        stableWallColor = resolvedWallColor
+    }
+    val animatedWallColorState = animateColorAsState(
+        targetValue = stableWallColor,
+        animationSpec = tween(durationMillis = 560, easing = FastOutSlowInEasing),
+        label = "coverWallBgColor"
+    )
+    val isCoverWallDarkBg = layoutStyle == PlayerLayoutStyle.COVER_WALL && customPlayerImage == null
+    val hasCustomBg = customPlayerImage != null
+    val customBgDimPct = customPlayerBgDimPct
+    val playerUiSkin = remember(skin, hasCustomBg, customBgDimPct, isCoverWallDarkBg, stableWallColor) {
+        if (hasCustomBg) {
+            val dimAlpha = customBgDimPct / 100f
+            val rep = Color(
+                red = 0.45f * (1f - dimAlpha),
+                green = 0.45f * (1f - dimAlpha),
+                blue = 0.45f * (1f - dimAlpha)
+            )
+            val accent = ensureReadable(skin.accent, rep, 3.2f, true)
+            skin.copy(
+                text = ensureReadable(skin.text, rep, 4.5f, true),
+                textDim = ensureReadable(skin.textDim, rep, 3.8f, true),
+                textMuted = ensureReadable(skin.textMuted, rep, 3.4f, true),
+                accent = accent,
+                accentDim = ensureReadable(skin.accentDim, rep, 2.8f, true),
+                onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false)
+            )
+        } else if (isCoverWallDarkBg) {
+            val coverWallBackdrop = Color(0xFF0A0A0F)
+            val accent = ensureReadable(stableWallColor, coverWallBackdrop, 3.4f, true)
+            skin.copy(
+                isLight = false,
+                bg = Color(0xFF050507),
+                surface = Color(0xFF14141A),
+                surface2 = Color(0xFF1E1E26),
+                surface3 = Color(0xFF2A2A34),
+                text = Color(0xFFF3F3F7),
+                textDim = Color(0xB3FFFFFF),
+                textMuted = Color(0x88FFFFFF),
+                accent = accent,
+                accentDim = ensureReadable(accent.copy(alpha = 0.72f), coverWallBackdrop, 2.8f, true),
+                onAccent = ensureReadable(skin.onAccent, accent, 4.5f, false)
+            )
+        } else skin
+    }
 
     androidx.compose.runtime.CompositionLocalProvider(LocalSkin provides playerUiSkin) {
     Box(
         modifier
             .fillMaxSize()
-            .then(if (customPlayerImage == null) Modifier.background(skin.bg) else Modifier)
+            .then(
+                if (customPlayerImage == null) {
+                    Modifier.background(if (isCoverWallDarkBg) Color(0xFF050507) else skin.bg)
+                } else Modifier
+            )
             // 记下自己在 root 里的位置，用来把封面的 root 坐标换算成本页坐标
             .onGloballyPositioned { rootTopLeft = it.positionInRoot() }
             // 晕染画在**整页背景层**：这一层天然包含顶栏和状态栏，颜色能一路覆盖上去。
             // （之前画在封面那一层，被分页器裁掉了顶栏部分，所以顶部一直缺一块。）
             .drawBehind {
                 if (customPlayerImage != null) return@drawBehind
+                if (isCoverWallDarkBg) {
+                    val glowColor = animatedWallColorState.value
+                    drawRect(
+                        Brush.verticalGradient(
+                            listOf(
+                                glowColor.copy(alpha = 0.62f),
+                                Color.Black.copy(alpha = 0.72f),
+                                Color(0xFF050507)
+                            )
+                        )
+                    )
+                    drawRect(
+                        Brush.radialGradient(
+                            colors = listOf(glowColor.copy(alpha = 0.28f), Color.Transparent),
+                            center = Offset(size.width * 0.5f, size.height * 0.24f),
+                            radius = maxOf(size.width, size.height) * 0.62f
+                        )
+                    )
+                    return@drawBehind
+                }
                 val cover = coverBounds ?: return@drawBehind
                 if (cover.width <= 0f || cover.height <= 0f) return@drawBehind
                 // 必须裁到本 Box 的范围内。
@@ -1276,9 +1415,27 @@ fun FullPlayer(
                                 if (p > 0f) {
                                     drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = p * alphaScale)
                                 }
+                                drawGlowFade.lastDrawnFrame = if (p >= 0.99f) toFrame else fromFrame
                             }
-                            fromReady -> drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
-                            toReady -> drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                            fromReady -> {
+                                drawGlow(fromFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                                drawGlowFade.lastDrawnFrame = fromFrame
+                            }
+                            toReady -> {
+                                drawGlow(toFrame!!, cover, glowMode, strengthArg, alpha = alphaScale)
+                                drawGlowFade.lastDrawnFrame = toFrame
+                            }
+                        }
+                    } else if (drawGlowFade.active &&
+                        drawGlowFade.fromFrame != null &&
+                        drawGlowFade.toFrame != null &&
+                        !pagerState.isScrollInProgress &&
+                        !userDraggedPager
+                    ) {
+                        val fp = drawGlowFade.progress.value.coerceIn(0f, 1f)
+                        drawGlow(drawGlowFade.fromFrame!!, cover, glowMode, strengthArg, alpha = (1f - fp) * alphaScale)
+                        if (fp > 0f) {
+                            drawGlow(drawGlowFade.toFrame!!, cover, glowMode, strengthArg, alpha = fp * alphaScale)
                         }
                     } else {
                         // 跟手模式滑动中：按分页器的滚动位置在相邻两页之间混合。
@@ -1322,7 +1479,10 @@ fun FullPlayer(
                         val secondReady = second.colors.isNotEmpty()
                         when {
                             !firstReady && !secondReady -> Unit
-                            firstReady && !secondReady -> drawGlow(first, cover, glowMode, strengthArg, alpha = alphaScale)
+                            firstReady && !secondReady -> {
+                                drawGlow(first, cover, glowMode, strengthArg, alpha = alphaScale)
+                                if (t <= 0.001f) drawGlowFade.lastDrawnFrame = first
+                            }
                             !firstReady && secondReady -> drawGlow(second, cover, glowMode, strengthArg, alpha = alphaScale)
                             else -> {
                                 drawGlow(first, cover, glowMode, strengthArg, alpha = (1f - t) * alphaScale)
@@ -1638,6 +1798,70 @@ fun FullPlayer(
                     Box(Modifier.fillMaxSize().clipToBounds()) {
                     val downloadBusy = isDownloadBusy(song)
                     val downloaded = isDownloaded(song)
+                    if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+                        CoverWallPlayerPage(
+                            song = song,
+                            isFavorite = isSongFavorite?.invoke(song) ?: (song.id in favorites),
+                            showDownloadButton = !song.isLocal && !song.isDlna && (downloadBusy || !downloaded),
+                            isDownloading = downloadBusy,
+                            isDownloaded = downloaded,
+                            onDownload = { onDownloadSong(song) },
+                            positionMs = if (songMatchesState) state.positionMs else 0L,
+                            durationMs = if (songMatchesState && state.durationMs > 0) state.durationMs else song.durationMs,
+                            isPlaying = isCurrent && (if (activeSwitch != null) true else state.isPlaying) && !coveredByVinyl,
+                            controlsPlaying = if (isCurrent && activeSwitch != null) true else pagerPlayButtonActive(isCurrent, state),
+                            coverScale = coverScaleState,
+                            useRealCover = coverWallUseRealCover,
+                            stableWallColor = stableWallColor,
+                            activeWallColor = { animatedWallColorState.value },
+                            playMode = if (isCurrent) PlayMode.of(state.shuffle, state.repeat) else PlayMode.REPEAT_ALL,
+                            onToggleFavorite = { onToggleFavorite(song.id) },
+                            onCyclePlayMode = onCyclePlayMode,
+                            onPrev = {
+                                pendingSwipeTarget = -1
+                                triggerButtonSwitch(-1, onPrev)
+                            },
+                            onPlayPause = onPlayPause,
+                            onNext = {
+                                pendingSwipeTarget = -1
+                                triggerButtonSwitch(1, onNext)
+                            },
+                            onSeek = onSeek,
+                            onOpenQueue = onOpenQueue,
+                            onOpenCover = onOpenCover,
+                            playbackSpeed = playbackSpeed,
+                            onSetSpeed = onSetSpeed,
+                            abLoopStartMs = if (songMatchesState) state.abLoopStartMs else -1L,
+                            abLoopEndMs = if (songMatchesState) state.abLoopEndMs else -1L,
+                            onToggleAbLoop = onToggleAbLoop,
+                            prefs = prefs,
+                            swipePager = pagerState,
+                            swipePage = page,
+                            streamQuality = if (songMatchesState) streamQuality else null,
+                            hiResBadgeEnabled = hiResBadgeEnabled,
+                            hiResBadgeSize = hiResBadgeSize,
+                            switchMotion = switchMotion,
+                            activeSwitch = if (isCurrent) activeSwitch else null,
+                            switchProgress = { activeSwitch?.progress?.value ?: 1f },
+                            prevKickPx = { prevKick.value },
+                            nextKickPx = { nextKick.value },
+                            coveredByQueue = coveredByQueue,
+                            coveredByVinyl = coveredByVinyl,
+                            onCoverBounds = { rect ->
+                                if (isCurrent &&
+                                    !externalDesync &&
+                                    !pagerLockActive &&
+                                    page == pagerState.currentPage &&
+                                    pagerState.settledPage == page &&
+                                    !pagerState.isScrollInProgress &&
+                                    rect.width > 1f &&
+                                    rect.height > 1f
+                                ) {
+                                    coverBounds = rect.translate(-rootTopLeft.x, -rootTopLeft.y)
+                                }
+                            }
+                        )
+                    } else {
                     PlayerPage(
                         song = song,
                         isFavorite = isSongFavorite?.invoke(song) ?: (song.id in favorites),
@@ -1744,6 +1968,7 @@ fun FullPlayer(
                         }
                     )
                     }
+                    }
                 }
                 }   // Box(weight(1f).clipToBounds()) —— 分页器的视口裁剪
             }
@@ -1812,7 +2037,11 @@ fun FullPlayer(
             dlnaActive = dlnaActive,
             switchMotion = switchMotion,
             onSwitchMotionChange = onSwitchMotionChange,
-            showEqualizerEntry = prefs.playerHideVolumeBar,
+            layoutStyle = layoutStyle,
+            onLayoutStyleChange = onLayoutStyleChange,
+            coverWallUseRealCover = coverWallUseRealCover,
+            onCoverWallUseRealCoverChange = onCoverWallUseRealCoverChange,
+            showEqualizerEntry = prefs.playerHideVolumeBar || layoutStyle == PlayerLayoutStyle.COVER_WALL,
             onOpenEqualizer = {
                 showTopMoreSheet = false
                 onOpenEqualizer()
@@ -2187,6 +2416,14 @@ private fun rememberGlowColors(song: Song?, skin: Skin): List<Color> {
  * - 目标色卡就绪后用 [Animatable] 从当前正在渲染的颜色平滑补间过去，不发生跳变；
  * - 手势滑动落定后直接对齐到已落定页的当前色，保证滑动切歌回交时零接缝。
  */
+private class DrawGlowCrossfade {
+    var lastDrawnFrame: GlowFrame? = null
+    var fromFrame: GlowFrame? = null
+    var toFrame: GlowFrame? = null
+    var active: Boolean = false
+    val progress = Animatable(1f)
+}
+
 private class SmoothGlowController(
     initial: List<Color>,
     fallback: Color
@@ -2342,7 +2579,7 @@ private fun HeaderPlayingIndicator(
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun Modifier.onCoverGesture(
+internal fun Modifier.onCoverGesture(
     onLongPress: () -> Unit,
     onTap: () -> Unit = {}
 ): Modifier = this.combinedClickable(
@@ -2764,6 +3001,10 @@ private fun PlayerMoreActionsSheet(
     dlnaActive: Boolean,
     switchMotion: PlayerSwitchMotion,
     onSwitchMotionChange: (PlayerSwitchMotion) -> Unit,
+    layoutStyle: PlayerLayoutStyle,
+    onLayoutStyleChange: (PlayerLayoutStyle) -> Unit,
+    coverWallUseRealCover: Boolean,
+    onCoverWallUseRealCoverChange: (Boolean) -> Unit,
     showEqualizerEntry: Boolean = false,
     onOpenEqualizer: () -> Unit = {},
     onOpenSleepTimer: () -> Unit,
@@ -2800,6 +3041,7 @@ private fun PlayerMoreActionsSheet(
         Column(
             Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp)
@@ -3160,16 +3402,17 @@ private fun PlayerMoreActionsSheet(
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            // 切歌动效切换卡片：仅经典样式使用（封面墙样式自带实体黑胶封套切歌动效）
+            if (layoutStyle == PlayerLayoutStyle.CLASSIC) {
+                Spacer(Modifier.height(10.dp))
 
-            // 切歌动效切换卡片（点击上一曲 / 下一曲时的封面与歌名过渡）
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(skin.surface2)
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(skin.surface2)
+                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
@@ -3240,6 +3483,127 @@ private fun PlayerMoreActionsSheet(
                                         maxLines = 1
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // 播放主界面样式切换卡片：经典样式 vs 封面墙样式（含真实封面切换）
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(skin.surface2)
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(skin.surface3),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = SonanceIcons.Album,
+                            contentDescription = null,
+                            tint = skin.accent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "播放页样式",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            color = skin.text
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = layoutStyle.hint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PlayerLayoutStyle.entries.forEach { option ->
+                        val selected = option == layoutStyle
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) skin.accentGlow else skin.surface3)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (selected) skin.accent else Color.Transparent,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    hapticTick(context)
+                                    onLayoutStyleChange(option)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (selected) skin.accent else skin.textDim,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+                if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val coverOptions = listOf(
+                            false to "替代艺术封面",
+                            true to "歌曲真实封面"
+                        )
+                        coverOptions.forEach { (useReal, label) ->
+                            val selected = coverWallUseRealCover == useReal
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(34.dp)
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(if (selected) skin.accentGlow else skin.surface3)
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (selected) skin.accent else Color.Transparent,
+                                        shape = RoundedCornerShape(9.dp)
+                                    )
+                                    .clickable {
+                                        hapticTick(context)
+                                        onCoverWallUseRealCoverChange(useReal)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (selected) skin.accent else skin.textDim,
+                                    maxLines = 1
+                                )
                             }
                         }
                     }
@@ -3339,7 +3703,7 @@ private val SWIPE_EXIT_SINK = 28.dp
  * 静止时 offset 为 0 走不进分支；alpha 保持 1 时 Compose 不做离屏合成，
  * 等于零开销。
  */
-private fun Modifier.swipeExitFade(pager: PagerState, page: Int): Modifier =
+internal fun Modifier.swipeExitFade(pager: PagerState, page: Int): Modifier =
     graphicsLayer {
         compositingStrategy = CompositingStrategy.ModulateAlpha
         // 视口中心对应的连续页位置；本页与它的差就是"离中心多远"（负 = 已向上离开）
@@ -3463,7 +3827,7 @@ internal fun evalQueuePickIn(
     )
 }
 
-private data class ButtonSwitchState(
+internal data class ButtonSwitchState(
     val seq: Long,
     val dir: Int,
     val fromSong: Song,
@@ -4823,13 +5187,13 @@ private val SPEED_STEPS = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
  * 当前值不在档位里（旧版本可能存过 1.1× 之类的任意值）时回到 1×，
  * 而不是从"最近的一档"接着往后跳，避免用户点一下就莫名变成 1.5×。
  */
-private fun nextSpeed(current: Float): Float {
+internal fun nextSpeed(current: Float): Float {
     val i = SPEED_STEPS.indexOfFirst { abs(it - current) < 0.005f }
     return if (i < 0) 1f else SPEED_STEPS[(i + 1) % SPEED_STEPS.size]
 }
 
 /** "1.0×" / "0.75×" 这种统一两位小数位的写法，菜单与胶囊都用它 */
-private fun formatSpeed(v: Float): String =
+internal fun formatSpeed(v: Float): String =
     (if (v % 1f == 0f) "${v.toInt()}.0" else "$v") + "×"
 
 /**

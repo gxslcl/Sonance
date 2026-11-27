@@ -45,6 +45,7 @@ internal class WallCardPainter(private val density: Float) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val rect = RectF()
     private val shadowRect = RectF()
+    private val vinylRect = RectF()
     private val path = Path()
     private val source = FloatArray(8)
     private val projected = FloatArray(8)
@@ -61,12 +62,31 @@ internal class WallCardPainter(private val density: Float) {
         intArrayOf(0x80FFFFFF.toInt(), 0x0AFFFFFF, 0x46000000), null, Shader.TileMode.CLAMP)
     private val vinylSheen = SweepGradient(0f, 0f,
         intArrayOf(0xFF101013.toInt(), 0xFF34343A.toInt(), 0xFF111114.toInt(), 0xFF26262D.toInt(), 0xFF101013.toInt()), null)
+    // 预烘焙黑胶盘体与 34 道音轨同心圆，每帧旋转一次位图绘制即可，避免每帧 35 次独立 Shader/Path 绘制开销。
+    private val vinylDisc = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888).also { bmp ->
+        val c = Canvas(bmp)
+        val cx = 256f
+        val cy = 256f
+        val radius = 252f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val m = Matrix().apply { setScale(radius, radius); postTranslate(cx, cy) }
+        vinylSheen.setLocalMatrix(m)
+        p.shader = vinylSheen
+        p.style = Paint.Style.FILL
+        c.drawCircle(cx, cy, radius, p)
+        p.shader = null
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 0.8f
+        p.color = 0xFF606067.toInt()
+        p.alpha = 64
+        for (i in 15..48) c.drawCircle(cx, cy, radius * i / 49f, p)
+    }
     private val shadow = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888).also {
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             setShadowLayer(12f, 0f, 4f, 0xD9000000.toInt())
         }
-        Canvas(it).drawRoundRect(24f, 22f, 104f, 102f, 6f, 6f, p)
+        Canvas(it).drawRoundRect(24f, 22f, 104f, 102f, 10f, 10f, p)
     }
 
     fun project(p: WallPose, rotateZ: Float = 0f) {
@@ -93,26 +113,28 @@ internal class WallCardPainter(private val density: Float) {
 
     fun draw(canvas: Canvas, bitmap: Bitmap?, spec: CoverSpec, pose: WallPose,
              corner: Float, gx: Float, gy: Float, glow: Float = 0f,
-             elevation: Float = 1f, vinyl: Float = 0f, discAngle: Float = 0f) {
+             elevation: Float = 1f, vinyl: Float = 0f, discAngle: Float = 0f,
+             labelColorOverride: Int? = null) {
         if (pose.alpha <= 0f) return
         val a = (pose.alpha * 255).toInt().coerceIn(0, 255)
         val s = pose.size
+        val accentInt = labelColorOverride ?: spec.mainColor
         rect.set(pose.x, pose.y, pose.x + s, pose.y + s)
         canvas.save()
         canvas.concat(pose.matrix)
-        paint.shader = null; paint.style = Paint.Style.FILL
-        paint.alpha = (a * 0.75f * elevation.coerceIn(0f, 1.5f)).toInt().coerceIn(0, 255)
-        val margin = s * 0.3f
-        shadowRect.set(rect.left - margin, rect.top - margin + 4f * density * elevation,
-            rect.right + margin, rect.bottom + margin + 4f * density * elevation)
-        canvas.drawBitmap(shadow, null, shadowRect, paint)
-        if (vinyl > 0f) drawVinyl(canvas, spec, rect.centerX() + s * 0.26f * vinyl,
+        if (vinyl > 0f) drawVinyl(canvas, accentInt, rect.centerX() + s * 0.26f * vinyl,
             rect.centerY(), s * 0.47f, discAngle, a)
         canvas.save()
         canvas.translate(-s * 0.16f * vinyl, 0f)
+        paint.shader = null; paint.style = Paint.Style.FILL
+        paint.alpha = (a * 0.54f * elevation.coerceIn(0f, 1.5f)).toInt().coerceIn(0, 255)
+        val margin = s * 0.22f
+        shadowRect.set(rect.left - margin, rect.top - margin + 4f * density * elevation,
+            rect.right + margin, rect.bottom + margin + 4f * density * elevation)
+        canvas.drawBitmap(shadow, null, shadowRect, paint)
         path.reset(); path.addRoundRect(rect, corner, corner, Path.Direction.CW)
         canvas.clipPath(path)
-        paint.shader = null; paint.color = spec.mainColor; paint.alpha = a
+        paint.shader = null; paint.color = accentInt; paint.alpha = a
         if (bitmap != null) canvas.drawBitmap(bitmap, null, rect, paint) else canvas.drawRect(rect, paint)
         shaderMatrix.setScale(s, s); shaderMatrix.postTranslate(rect.left, rect.top)
         glaze.setLocalMatrix(shaderMatrix); paint.shader = glaze; paint.alpha = a
@@ -134,7 +156,7 @@ internal class WallCardPainter(private val density: Float) {
             // 「正在播放」高亮：专辑主色向白提亮 40% —— 深色封面在暗墙上
             // 原色几乎看不见；内环加宽到 3dp 且按满强度画，外圈光晕透明度
             // 从 9% 提到 22%，选中状态一眼可辨。
-            val mc = spec.mainColor
+            val mc = accentInt
             paint.color = Color.rgb(
                 (Color.red(mc) + (255 - Color.red(mc)) * 0.4f).toInt(),
                 (Color.green(mc) + (255 - Color.green(mc)) * 0.4f).toInt(),
@@ -152,21 +174,26 @@ internal class WallCardPainter(private val density: Float) {
         canvas.restore()
     }
 
-    private fun drawVinyl(canvas: Canvas, spec: CoverSpec, x: Float, y: Float, radius: Float, angle: Float, alpha: Int) {
+    private fun drawVinyl(canvas: Canvas, labelColor: Int, x: Float, y: Float, radius: Float, angle: Float, alpha: Int) {
+        vinylRect.set(x - radius, y - radius, x + radius, y + radius)
+        canvas.save()
+        canvas.rotate(angle, x, y)
+        paint.shader = null
         paint.style = Paint.Style.FILL
-        shaderMatrix.setScale(radius, radius); shaderMatrix.postRotate(angle); shaderMatrix.postTranslate(x, y)
-        vinylSheen.setLocalMatrix(shaderMatrix); paint.shader = vinylSheen; paint.alpha = alpha
-        canvas.drawCircle(x, y, radius, paint)
-        paint.shader = null; paint.style = Paint.Style.STROKE; paint.strokeWidth = density * 0.5f
-        paint.color = 0xFF606067.toInt(); paint.alpha = alpha / 4
-        for (i in 15..48) canvas.drawCircle(x, y, radius * i / 49f, paint)
-        paint.style = Paint.Style.FILL; paint.color = spec.mainColor; paint.alpha = alpha
+        paint.alpha = alpha
+        canvas.drawBitmap(vinylDisc, null, vinylRect, paint)
+        paint.color = labelColor
+        paint.alpha = alpha
         canvas.drawCircle(x, y, radius * 0.28f, paint)
-        canvas.save(); canvas.rotate(angle, x, y)
-        paint.color = 0xD9FFFFFF.toInt(); paint.textAlign = Paint.Align.CENTER; paint.textSize = radius * 0.065f
+        paint.color = 0xD9FFFFFF.toInt()
+        paint.alpha = (0xD9 * alpha) / 255
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize = radius * 0.065f
         canvas.drawText("SONANCE • STEREO", x, y - radius * 0.11f, paint)
         canvas.drawText("SIDE A", x, y + radius * 0.16f, paint)
         canvas.restore()
-        paint.color = 0xFF08080A.toInt(); canvas.drawCircle(x, y, radius * 0.043f, paint)
+        paint.color = 0xFF08080A.toInt()
+        paint.alpha = alpha
+        canvas.drawCircle(x, y, radius * 0.043f, paint)
     }
 }

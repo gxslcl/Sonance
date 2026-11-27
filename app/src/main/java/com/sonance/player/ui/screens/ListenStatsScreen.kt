@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,6 +57,8 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
     val skin = LocalSkin.current
     var range by remember { mutableStateOf(StatsRange.WEEK) }
     val summary = remember(vm.statsRevision, range) { vm.listenStatsSummary(range) }
+    var artistsExpanded by remember(range) { mutableStateOf(false) }
+    var songsExpanded by remember(range) { mutableStateOf(false) }
     val cardBg = skin.glassCardBg()
     val cardBorder = skin.glassCardBorder()
 
@@ -165,8 +168,9 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
             StatsBarChart(summary = summary)
         }
 
-        // ---- 歌手偏好玻璃卡 ----
+        // ---- 歌手偏好玻璃卡（最多 Top 20，默认展示前 8 位并支持展开） ----
         if (summary.topArtists.isNotEmpty()) {
+            val visibleArtists = if (artistsExpanded) summary.topArtists else summary.topArtists.take(8)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -176,9 +180,19 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                SectionTitle("歌手偏好")
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SectionTitle("歌手偏好", modifier = Modifier.weight(1f))
+                    Text(
+                        text = "Top ${summary.topArtists.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = skin.textMuted
+                    )
+                }
                 val maxPlays = summary.topArtists.first().second.coerceAtLeast(1)
-                summary.topArtists.forEachIndexed { idx, (artist, plays) ->
+                visibleArtists.forEachIndexed { idx, (artist, plays) ->
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -187,8 +201,9 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                             text = "${idx + 1}.",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (idx == 0) skin.accent else skin.textMuted,
-                            modifier = Modifier.width(18.dp)
+                            color = if (idx < 3) skin.accent else skin.textMuted,
+                            maxLines = 1,
+                            modifier = Modifier.width(26.dp)
                         )
                         Text(
                             text = artist,
@@ -229,11 +244,35 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                         )
                     }
                 }
+                if (summary.topArtists.size > 8) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(skin.softPillBg())
+                                .clickable { artistsExpanded = !artistsExpanded }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = if (artistsExpanded) "收起" else "展开全部 Top ${summary.topArtists.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = skin.accent,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
             }
         }
 
-        // ---- 单曲 Top 5 玻璃卡 ----
+        // ---- 单曲排行玻璃卡（最多 Top 50，默认展示前 10 首并支持展开） ----
         if (summary.topSongs.isNotEmpty()) {
+            val visibleSongs = if (songsExpanded) summary.topSongs else summary.topSongs.take(10)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -246,14 +285,14 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                     Modifier.fillMaxWidth().padding(bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    SectionTitle("单曲 Top 5", modifier = Modifier.weight(1f))
+                    SectionTitle("单曲 Top ${summary.topSongs.size}", modifier = Modifier.weight(1f))
                     Text(
                         text = "点击即播",
                         style = MaterialTheme.typography.labelSmall,
                         color = skin.textMuted
                     )
                 }
-                summary.topSongs.forEachIndexed { index, stat ->
+                visibleSongs.forEachIndexed { index, stat ->
                     val topRank = index < 3
                     Row(
                         Modifier
@@ -261,8 +300,14 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                             .clip(RoundedCornerShape(12.dp))
                             .clickable {
                                 val song = vm.songById(stat.songId)
-                                if (song != null) vm.playFrom(listOf(song), song)
-                                else vm.showToast("这首歌已不在曲库")
+                                if (song != null) {
+                                    val queue = summary.topSongs
+                                        .mapNotNull { vm.songById(it.songId) }
+                                        .ifEmpty { listOf(song) }
+                                    vm.playFrom(queue, song)
+                                } else {
+                                    vm.showToast("这首歌已不在曲库")
+                                }
                             }
                             .padding(horizontal = 4.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -270,15 +315,18 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                     ) {
                         Box(
                             Modifier
-                                .size(24.dp)
+                                .widthIn(min = 26.dp)
+                                .height(24.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (index == 0) skin.accentGlow else skin.softPillBg()),
+                                .background(if (index == 0) skin.accentGlow else skin.softPillBg())
+                                .padding(horizontal = 4.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = "${index + 1}",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
+                                maxLines = 1,
                                 color = if (topRank) skin.accent else skin.textMuted
                             )
                         }
@@ -308,6 +356,29 @@ fun ListenStatsScreen(vm: SonanceViewModel, modifier: Modifier = Modifier) {
                                 .background(skin.softPillBg())
                                 .padding(horizontal = 8.dp, vertical = 3.dp)
                         )
+                    }
+                }
+                if (summary.topSongs.size > 10) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(skin.softPillBg())
+                                .clickable { songsExpanded = !songsExpanded }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = if (songsExpanded) "收起" else "展开全部 Top ${summary.topSongs.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = skin.accent,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }

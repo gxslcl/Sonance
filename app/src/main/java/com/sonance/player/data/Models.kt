@@ -239,6 +239,19 @@ enum class PlayerSwitchMotion(val id: String, val label: String, val hint: Strin
 }
 
 /**
+ * 普通播放主界面布局样式：经典样式 vs 封面墙样式。
+ */
+enum class PlayerLayoutStyle(val id: String, val label: String, val hint: String) {
+    CLASSIC("classic", "经典样式", "大封面居中 · 完整三行歌名与底部音量条"),
+    COVER_WALL("cover_wall", "封面墙样式", "黑胶封套封面 · 常驻滚动歌词 · 极简通透播控");
+
+    companion object {
+        fun fromId(id: String?): PlayerLayoutStyle =
+            entries.firstOrNull { it.id == id } ?: CLASSIC
+    }
+}
+
+/**
  * 全局流体动效手感档位。
  * 控制全屏播放页展开/收起、切页转场与按钮切歌的弹簧阻尼与时长倍率。
  */

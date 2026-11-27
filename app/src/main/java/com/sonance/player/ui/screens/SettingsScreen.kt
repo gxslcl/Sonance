@@ -108,6 +108,7 @@ import com.sonance.player.data.MotionFeel
 import com.sonance.player.data.OnlineDownloader
 import com.sonance.player.data.OnlineMode
 import com.sonance.player.data.PageTransitionStyle
+import com.sonance.player.data.PlayerLayoutStyle
 import com.sonance.player.data.PlayerSheetStyle
 import com.sonance.player.data.lx.LxQuality
 import com.sonance.player.data.netease.NeteaseLevel
@@ -235,7 +236,7 @@ private val SETTINGS_MODULES = listOf(
 
     // ---- 二、播放界面 ----
     SettingsModule("visual", SettingsCategory.PLAYER_UI, "播放页视觉与黑胶",
-        "播放页视觉 封面颜色晕染 晕染 晕染强度 浓度 方向 换歌晕染过渡 渐变时长 黑碟播放器 黑胶模式 黑胶机械音效 " +
+        "播放页视觉 播放页样式 封面墙样式 经典样式 真实封面 替代封面 艺术封面 封面颜色晕染 晕染 晕染强度 浓度 方向 换歌晕染过渡 渐变时长 黑碟播放器 黑胶模式 黑胶机械音效 " +
             "机械音效 炒豆 音效音量 Hi-Res 小金标 金标 金标大小 隐藏音量条 音量条 视觉"),
     SettingsModule("control", SettingsCategory.PLAYER_UI, "播放按钮与触感",
         "播放按钮 形状 颜色 图标样式 图标大小 光晕 震动反馈 触感 随机 续播 队列 单曲循环 列表循环 播放模式"),
@@ -2828,6 +2829,46 @@ private fun PlayerVisualsSettingsSection(vm: SonanceViewModel) {
         summary = summary,
         icon = SonanceIcons.Album
     ) {
+        SettingsGroupLabel("播放主界面样式")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlayerLayoutStyle.entries.forEach { style ->
+                val selected = style == vm.playerLayoutStyle
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) skin.accentGlow else skin.surface2)
+                        .border(
+                            width = if (selected) 1.dp else 0.dp,
+                            color = if (selected) skin.accent else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                        .clickable { vm.changePlayerLayoutStyle(style) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = style.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selected) skin.accent else skin.textDim
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = vm.playerLayoutStyle.hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.textDim
+        )
+        Spacer(Modifier.height(8.dp))
+        SettingsSwitchRow(
+            title = "封面墙使用真实封面",
+            subtitle = "关闭时显示程序生成的艺术替代封面；开启后替换为歌曲真实专辑封面，背景与唱片中心色同步重算",
+            checked = vm.coverWallUseRealCover,
+            onCheckedChange = vm::changeCoverWallUseRealCover
+        )
+        Spacer(Modifier.height(8.dp))
         SettingsSwitchRow(
             title = "隐藏音量条",
             subtitle = "隐藏播放页底部音量条与音效按钮；音效工作室入口移入右上角「更多」菜单",

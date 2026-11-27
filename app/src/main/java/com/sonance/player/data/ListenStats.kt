@@ -163,16 +163,21 @@ object ListenStatsAggregator {
 
         val fromMillis = LocalDate.ofEpochDay(fromEpoch).atStartOfDay(zone).toInstant().toEpochMilli()
         val periodSongs = songs.filter { it.lastAt >= fromMillis && it.plays > 0 }
-        val topSongs = periodSongs.sortedByDescending { it.plays }.take(5)
+        val topSongs = periodSongs
+            .sortedWith(compareByDescending<SongListenStat> { it.plays }.thenByDescending { it.lastAt })
+            .take(MAX_TOP_SONGS)
         val topArtists = periodSongs
             .filter { it.artist.isNotBlank() }
             .groupBy { it.artist }
             .map { (artist, list) -> artist to list.sumOf { it.plays } }
-            .sortedByDescending { it.second }
-            .take(4)
+            .sortedWith(compareByDescending<Pair<String, Int>> { it.second }.thenBy { it.first })
+            .take(MAX_TOP_ARTISTS)
 
         return StatsSummary(totalSeconds, totalPlays, streak, bars, topSongs, topArtists)
     }
+
+    const val MAX_TOP_SONGS = 50
+    const val MAX_TOP_ARTISTS = 20
 }
 
 /**
@@ -246,7 +251,7 @@ class SessionListenClock(private val maxSegmentMs: Long = 12L * 3600_000L) {
     }
 }
 
-/** 听歌统计持久化（JSON-in-SP）。天数保留 400 天、单曲保留 600 条，防止无限膨胀。 */
+/** 听歌统计持久化（JSON-in-SP）。天数保留 400 天、单曲保留 1000 条，防止无限膨胀。 */
 class ListenStatsStore(private val sp: SharedPreferences) {
 
     fun days(): List<ListenDay> = ListenStatsCodec.decodeDays(sp.getString(KEY_DAYS, null))
@@ -301,6 +306,6 @@ class ListenStatsStore(private val sp: SharedPreferences) {
         private const val KEY_DAYS = "listen_days"
         private const val KEY_SONGS = "listen_song_stats"
         private const val MAX_DAYS = 400
-        private const val MAX_SONGS = 600
+        private const val MAX_SONGS = 1000
     }
 }

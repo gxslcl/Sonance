@@ -519,7 +519,14 @@ internal fun WallTrackFace(
 // ===== 调参面板：13 个滑杆、5 个开关、1 组震动强度，完整保留 =====
 /** onReset/onShuffle 负责修改参数；每次修改后统一调用 onChanged，由 screen 保存并唤醒渲染。 */
 @Composable
-internal fun TuneSheet(tune: WallTune, onReset: () -> Unit, onShuffle: () -> Unit, onChanged: () -> Unit) {
+internal fun TuneSheet(
+    tune: WallTune,
+    useRealCover: Boolean,
+    onUseRealCoverChange: (Boolean) -> Unit,
+    onReset: () -> Unit,
+    onShuffle: () -> Unit,
+    onChanged: () -> Unit
+) {
     val accent = Color(0xFF7C7CF0)
     Column(
         Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState())
@@ -527,6 +534,32 @@ internal fun TuneSheet(tune: WallTune, onReset: () -> Unit, onShuffle: () -> Uni
     ) {
         Text("调参 · 原生封面墙", color = ControlsText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Text("所有参数即时生效，自动保存", color = Color(0xFF8A8A98), fontSize = 12.sp)
+        TuneSection("封面显示")
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("封面样式", color = Color(0xFFDCDCE4), fontSize = 13.sp)
+            Row(Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xFF2A2A34)).padding(3.dp)) {
+                listOf(true to "真实封面", false to "替代封面").forEach { (enabled, label) ->
+                    val active = useRealCover == enabled
+                    Box(
+                        Modifier.clip(RoundedCornerShape(8.dp)).background(if (active) accent else Color.Transparent)
+                            .semantics { selected = active }
+                            .clickable(role = Role.RadioButton) {
+                                if (useRealCover != enabled) onUseRealCoverChange(enabled)
+                            }.padding(horizontal = 14.dp, vertical = 5.dp)
+                    ) { Text(label, color = if (active) Color.White else Color(0xFFAAAAAA), fontSize = 12.sp) }
+                }
+            }
+        }
+        Text(
+            "真实封面将加载曲库内嵌或已匹配的专辑图，无图时自动回退替代封面",
+            color = Color(0xFF8A8A98),
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
         TuneSection("弧面墙")
         TuneSlider("最大弯曲角", tune.maxAngle, 0f, 50f, "°") { tune.maxAngle = it; onChanged() }
         TuneSlider("静止弯曲度", tune.rest, 0f, 1f, "") { tune.rest = it; onChanged() }

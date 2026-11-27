@@ -12,6 +12,7 @@ import android.util.LruCache
 import android.view.Surface
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -59,10 +60,12 @@ import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
@@ -81,19 +84,29 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sonance.player.data.Album
+import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.OnlineCover
 import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.InlineLyrics
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -123,10 +136,18 @@ fun NativeCoverWallScreen(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
+    coverWallUseRealCover: Boolean? = null,
+    onCoverWallUseRealCoverChange: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val prefs = remember { Prefs(context) }
+    var useRealCover by remember { mutableStateOf(coverWallUseRealCover ?: prefs.coverWallUseRealCover) }
+    LaunchedEffect(coverWallUseRealCover) {
+        if (coverWallUseRealCover != null && useRealCover != coverWallUseRealCover) {
+            useRealCover = coverWallUseRealCover
+        }
+    }
     val density = LocalDensity.current
     val d = density.density
     val view = LocalView.current
@@ -197,6 +218,9 @@ fun NativeCoverWallScreen(
     val heroPose = remember { WallPose() }
     val focusJob = remember { arrayOfNulls<Job>(1) }
     val spinJob = remember { arrayOfNulls<Job>(1) }
+    val spinPreloadJob = remember { arrayOfNulls<Job>(1) }
+    val inFlight = remember { ConcurrentHashMap<String, Deferred<Bitmap>>() }
+    val decodeSem = remember { Semaphore(6) }
     val recent = remember { ArrayDeque<String>() }
     val lastHaptic = remember { LongArray(5) }
     val heavyUntil = remember { longArrayOf(0L) }
@@ -221,16 +245,55 @@ fun NativeCoverWallScreen(
     val hapticRef = rememberUpdatedState(::haptic)
 
     fun cacheKey(t: WallTile): String =
-        "${t.album.key}|${t.spec.title.length}:${t.spec.title}|${t.spec.artist.length}:${t.spec.artist}|${t.spec.style}|${if (t.size * d > 280f) 512 else 256}"
+        "${t.album.key}|${t.spec.title.length}:${t.spec.title}|${t.spec.artist.length}:${t.spec.artist}|${t.spec.style}|real=$useRealCover|${if (t.size * d > 280f) 512 else 256}"
 
-    suspend fun texture(t: WallTile): Bitmap {
-        val key = cacheKey(t)
+    fun previewCacheKey(t: WallTile): String =
+        "${t.album.key}|${t.spec.title.length}:${t.spec.title}|${t.spec.artist.length}:${t.spec.artist}|${t.spec.style}|real=$useRealCover|160"
+
+    suspend fun loadTexture(t: WallTile, previewOnly: Boolean = false): Bitmap {
+        val key = if (previewOnly) previewCacheKey(t) else cacheKey(t)
         cache.get(key)?.let { return it }
-        return withContext(Dispatchers.Default) {
-            ensureActive()
-            renderCoverBitmap(t.spec, if (t.size * d > 280f) 512 else 256, 0f)
-        }.also { cache.put(key, it) }
+        inFlight[key]?.let { return it.await() }
+        val res = if (previewOnly) 160 else if (t.size * d > 280f) 512 else 256
+        val s = if (useRealCover) t.album.tracks.firstOrNull() else null
+        val coverKey = if (s != null) OnlineCover.keyOf(s.title, s.artist) else null
+        if (s != null && coverKey != null) {
+            val fastMem = ArtworkLoader.peekSelected(s.albumId, res, s.uri, s.id)
+                ?: ArtworkLoader.online(s.id)
+                ?: ArtworkLoader.peekAny(s.albumId, res, s.uri, coverKey)
+            if (fastMem != null) {
+                return fastMem.asAndroidBitmap().also { cache.put(key, it) }
+            }
+        }
+        val deferred = scope.async(Dispatchers.Default, start = CoroutineStart.LAZY) {
+            decodeSem.withPermit {
+                cache.get(key)?.let { return@withPermit it }
+                if (useRealCover && s != null) {
+                    val legacyPinned = s.id > 0L && !prefs.pinnedCoverUrl(s.id).isNullOrBlank()
+                    val realImg = ArtworkLoader.loadSelected(context, s.albumId, res, s.uri, s.id, coverKey, legacyPinned)
+                        ?: ArtworkLoader.online(s.id)
+                        ?: ArtworkLoader.load(context, s.albumId, res, s.uri, coverKey)
+                    if (realImg != null) {
+                        return@withPermit realImg.asAndroidBitmap().also { cache.put(key, it) }
+                    }
+                }
+                ensureActive()
+                renderCoverBitmap(t.spec, res, 0f).also { cache.put(key, it) }
+            }
+        }
+        val existing = inFlight.putIfAbsent(key, deferred)
+        if (existing != null) {
+            deferred.cancel()
+            return existing.await()
+        }
+        return try {
+            deferred.await()
+        } finally {
+            inFlight.remove(key, deferred)
+        }
     }
+
+    suspend fun texture(t: WallTile): Bitmap = loadTexture(t, previewOnly = false)
 
     fun resetPull() {
         pullJob[0]?.cancel()
@@ -355,6 +418,7 @@ fun NativeCoverWallScreen(
 
     fun cancelSpin() {
         spinJob[0]?.cancel()
+        spinPreloadJob[0]?.cancel()
         engine.anim = null
         engine.vel = 0f
         engine.forceCurve = 0f
@@ -399,34 +463,120 @@ fun NativeCoverWallScreen(
         spinning = true
         haptic(4, "启动滚筒")
         textures.trySend(Unit)
-        val duration = clamp(700f + abs(to - from) * 0.12f, 800f, 1250f)
-        engine.anim = ScrollAnim(from, to, wallNow(), duration) {
-            engine.dimT = 0.62f
-            engine.dimExcept = target
-            target.pst = 1.08f
-            if (!target.active) {
-                target.active = true
-                engine.activeTiles.add(target)
+
+        // 先行并发预加载整个滚动走廊的快速缩略图（160px）与落点高清图，防止高速滚筒经过时出现纯色占位块
+        val hCss = engine.heightCss.coerceAtLeast(360f)
+        val corridorTop = min(from, to) - 140f
+        val corridorBottom = max(from, to) + hCss + 140f
+        val corridorTiles = tiles
+            .filter { it.y + it.size >= corridorTop && it.y <= corridorBottom }
+            .sortedWith(compareBy<WallTile> { t ->
+                val inOpening = t.y + t.size >= from - 60f && t.y <= from + hCss + 60f
+                val inLanding = t.y + t.size >= to - 100f && t.y <= to + hCss + 100f
+                when {
+                    t.album.key == target.album.key -> 0f
+                    inOpening -> 1000f + abs((t.y + t.size * 0.5f) - (from + hCss * 0.5f))
+                    inLanding -> 4000f + abs((t.y + t.size * 0.5f) - (to + hCss * 0.5f))
+                    else -> 8000f + abs((t.y + t.size * 0.5f) - from)
+                }
+            })
+        val openingTiles = corridorTiles.filter { t ->
+            t.y + t.size >= from - 40f && t.y <= from + hCss + 40f &&
+                cache.get(cacheKey(t)) == null && cache.get(previewCacheKey(t)) == null
+        }
+
+        spinPreloadJob[0]?.cancel()
+        spinPreloadJob[0] = scope.launch {
+            if (openingTiles.isNotEmpty()) {
+                coroutineScope {
+                    openingTiles.map { t ->
+                        async {
+                            loadTexture(t, previewOnly = true)
+                            wakeUp()
+                        }
+                    }.awaitAll()
+                }
             }
-            engine.lockPending = true
-            haptic(3, "锁定")
-            spinJob[0] = scope.launch {
-                delay(320)
-                engine.lockPending = false
-                spinning = false
-                openFocusRef.value(
-                    target,
-                    false,
-                    if (target.album.tracks.isEmpty()) 0 else Random.nextInt(target.album.tracks.size)
-                )
+            val restCorridor = corridorTiles.filter { t ->
+                cache.get(cacheKey(t)) == null && cache.get(previewCacheKey(t)) == null
+            }
+            if (restCorridor.isNotEmpty()) {
+                coroutineScope {
+                    restCorridor.map { t ->
+                        async {
+                            loadTexture(t, previewOnly = true)
+                            wakeUp()
+                        }
+                    }.awaitAll()
+                }
+            }
+            if (cache.get(cacheKey(target)) == null) {
+                loadTexture(target, previewOnly = false)
+                wakeUp()
+            }
+            val landingHiRes = corridorTiles.filter { t ->
+                t.y + t.size >= to - 80f && t.y <= to + hCss + 80f && cache.get(cacheKey(t)) == null
+            }
+            if (landingHiRes.isNotEmpty()) {
+                coroutineScope {
+                    landingHiRes.map { t ->
+                        async {
+                            loadTexture(t, previewOnly = false)
+                            wakeUp()
+                        }
+                    }.awaitAll()
+                }
             }
         }
-        spinJob[0] = scope.launch {
-            delay(220)
-            engine.forceCurve = 0f
+
+        fun launchSpinScroll() {
+            val duration = clamp(700f + abs(to - from) * 0.12f, 800f, 1250f)
+            engine.anim = ScrollAnim(from, to, wallNow(), duration) {
+                engine.dimT = 0.62f
+                engine.dimExcept = target
+                target.pst = 1.08f
+                if (!target.active) {
+                    target.active = true
+                    engine.activeTiles.add(target)
+                }
+                engine.lockPending = true
+                haptic(3, "锁定")
+                spinJob[0] = scope.launch {
+                    delay(320)
+                    engine.lockPending = false
+                    spinning = false
+                    openFocusRef.value(
+                        target,
+                        false,
+                        if (target.album.tracks.isEmpty()) 0 else Random.nextInt(target.album.tracks.size)
+                    )
+                }
+            }
+            spinJob[0]?.cancel()
+            spinJob[0] = scope.launch {
+                delay(220)
+                engine.forceCurve = 0f
+                wakeUp()
+            }
             wakeUp()
         }
-        wakeUp()
+
+        if (openingTiles.isEmpty()) {
+            launchSpinScroll()
+        } else {
+            // 若起点屏仍有未命中缓存的图，最多让并发缩略图抢跑 95ms 再启动滚筒动画
+            scope.launch {
+                val spinJobPre = spinPreloadJob[0]
+                withTimeoutOrNull(95L) {
+                    while (isActive && spinJobPre?.isActive == true &&
+                        openingTiles.any { cache.get(previewCacheKey(it)) == null && cache.get(cacheKey(it)) == null }
+                    ) {
+                        delay(12L)
+                    }
+                }
+                if (spinning) launchSpinScroll()
+            }
+        }
     }
 
     // 队列耗尽（手动下一曲 / 自动播完末首）→ 收起聚焦，回到「随便听听」随机切歌。
@@ -599,19 +749,83 @@ fun NativeCoverWallScreen(
         textures.trySend(Unit)
     }
 
-    LaunchedEffect(layout, resumed) {
+    LaunchedEffect(layout, resumed, useRealCover) {
+        if (coverWallUseRealCover == null) {
+            val saved = prefs.coverWallUseRealCover
+            if (useRealCover != saved) useRealCover = saved
+        }
         if (!resumed) return@LaunchedEffect
+        focus?.let { tile ->
+            focusBitmap = texture(tile)
+            wakeUp()
+        }
+        textures.trySend(Unit)
         while (isActive) {
             textures.receive()
             val l = layout ?: continue
             val y = engine.scrollY
-            val h = engine.heightCss
-            for (t in l.tiles) {
-                if (t.y + t.size < y - h || t.y > y + h * 2) continue
-                if (cache.get(cacheKey(t)) == null) {
-                    texture(t)
-                    wakeUp()
+            val h = engine.heightCss.coerceAtLeast(360f)
+            val center = y + h * 0.5f
+            val fastScroll = spinning || abs(engine.vel) > 900f
+            val lookAheadTop = if (engine.vel < -200f) y - h * 1.4f else y - h * 0.5f
+            val lookAheadBottom = if (engine.vel > 200f) y + h * 2.4f else y + h * 1.6f
+            val need = l.tiles
+                .filter { it.y + it.size >= lookAheadTop && it.y <= lookAheadBottom }
+                .sortedBy { abs((it.y + it.size * 0.5f) - center) }
+            val missingPreview = need.filter {
+                cache.get(cacheKey(it)) == null && cache.get(previewCacheKey(it)) == null
+            }
+            if (missingPreview.isNotEmpty()) {
+                coroutineScope {
+                    missingPreview.map { t ->
+                        async {
+                            loadTexture(t, previewOnly = true)
+                            wakeUp()
+                        }
+                    }.awaitAll()
                 }
+            }
+            if (!fastScroll) {
+                val missingFull = need.filter { cache.get(cacheKey(it)) == null }
+                if (missingFull.isNotEmpty()) {
+                    coroutineScope {
+                        missingFull.map { t ->
+                            async {
+                                loadTexture(t, previewOnly = false)
+                                wakeUp()
+                            }
+                        }.awaitAll()
+                    }
+                }
+            }
+        }
+    }
+
+    // 静默后台预热全墙 160px 缩略图，让随时触发「随便听听」高速飞掠也有满墙真实或艺术封面而非色块
+    LaunchedEffect(layout, resumed, useRealCover) {
+        val l = layout ?: return@LaunchedEffect
+        if (!resumed || l.tiles.isEmpty()) return@LaunchedEffect
+        delay(180L)
+        val warmSem = Semaphore(3)
+        val anchorY = engine.scrollY + engine.heightCss * 0.5f
+        val ordered = l.tiles.sortedBy { abs((it.y + it.size * 0.5f) - anchorY) }
+        coroutineScope {
+            for (batch in ordered.chunked(12)) {
+                if (!isActive) break
+                if (cache.size() >= 44 * 1024 * 1024) break
+                batch.filter { cache.get(cacheKey(it)) == null && cache.get(previewCacheKey(it)) == null }
+                    .map { t ->
+                        async {
+                            warmSem.withPermit {
+                                loadTexture(t, previewOnly = true)
+                                val y = engine.scrollY
+                                val h = engine.heightCss
+                                if (t.y + t.size >= y - 200f && t.y <= y + h + 200f) {
+                                    wakeUp()
+                                }
+                            }
+                        }
+                    }.awaitAll()
             }
         }
     }
@@ -649,6 +863,7 @@ fun NativeCoverWallScreen(
         if (layout == null || !resumed) return@LaunchedEffect
         var last = withFrameNanos { it }
         var requestedY = Float.NaN
+        var wasFastScroll = false
         var pressHaptic = false
         while (isActive) {
             val frame = withFrameNanos { it }
@@ -670,10 +885,15 @@ fun NativeCoverWallScreen(
                 openFocusRef.value(t, true, null)
             }
             if (needsDraw) drawTick = frame
-            if (requestedY.isNaN() || abs(engine.scrollY - requestedY) > engine.heightCss * 0.35f) {
+            val fastNow = spinning || abs(engine.vel) > 900f
+            if (requestedY.isNaN() ||
+                abs(engine.scrollY - requestedY) > engine.heightCss * 0.35f ||
+                (wasFastScroll && !fastNow)
+            ) {
                 requestedY = engine.scrollY
                 textures.trySend(Unit)
             }
+            wasFastScroll = fastNow
             if (abs(engine.vel) > 180f && engine.anim == null) {
                 engine.fabLastScroll = now
                 mini = true
@@ -914,7 +1134,7 @@ fun NativeCoverWallScreen(
                         else 0f
                         painter.draw(
                             canvas.nativeCanvas,
-                            cache.get(cacheKey(t)),
+                            cache.get(cacheKey(t)) ?: cache.get(previewCacheKey(t)),
                             t.spec,
                             p,
                             6f * d,
@@ -977,10 +1197,21 @@ fun NativeCoverWallScreen(
             }
         val tile = focus
         if (tile != null) {
+            val focusFirstSong = tile.album.tracks.firstOrNull()
+            val focusCoverKey = focusFirstSong?.let { OnlineCover.keyOf(it.title, it.artist) }
+            val realTint = if (useRealCover && focusFirstSong != null) {
+                ArtworkLoader.tintOf(focusFirstSong.albumId, focusFirstSong.uri, focusCoverKey)
+            } else null
+            val targetFocusColor = if (realTint != null) Color(realTint.center) else Color(tile.spec.mainColor)
+            val focusColor by animateColorAsState(
+                targetValue = targetFocusColor,
+                animationSpec = tween(420, easing = FastOutSlowInEasing),
+                label = "wallFocusColor"
+            )
             Canvas(Modifier.fillMaxSize()) {
                 val reveal = ((flight.value - 0.16f) / 0.84f).coerceIn(0f, 1f) *
                     (1f - pull.value.coerceIn(0f, 1f) * 0.6f)
-                val color = Color(tile.spec.mainColor)
+                val color = focusColor
                 val radius = hypot(size.width, size.height) * reveal
                 if (radius > 0f) {
                     val path = androidx.compose.ui.graphics.Path().apply {
@@ -1088,7 +1319,8 @@ fun NativeCoverWallScreen(
                             0f,
                             1.5f,
                             disc.value,
-                            discAngle
+                            discAngle,
+                            labelColorOverride = focusColor.toArgb()
                         )
                     }
             }
@@ -1230,7 +1462,7 @@ fun NativeCoverWallScreen(
                             state = state,
                             album = tile.album,
                             preview = preview,
-                            coverColor = Color(tile.spec.mainColor),
+                            coverColor = focusColor,
                             compact = focusLayout.isCompactLandscape,
                             wide = !focusLayout.isCompactLandscape,
                             onToggle = playToggleAction,
@@ -1279,7 +1511,7 @@ fun NativeCoverWallScreen(
                             state = state,
                             album = tile.album,
                             preview = preview,
-                            coverColor = Color(tile.spec.mainColor),
+                            coverColor = focusColor,
                             onToggle = playToggleAction,
                             onPrev = prevAction,
                             onNext = nextAction,
@@ -1325,7 +1557,25 @@ fun NativeCoverWallScreen(
             containerColor = Color(0xFF121218)
         ) {
             TuneSheet(
-                tune,
+                tune = tune,
+                useRealCover = useRealCover,
+                onUseRealCoverChange = { next ->
+                    if (useRealCover != next) {
+                        prefs.coverWallUseRealCover = next
+                        useRealCover = next
+                        onCoverWallUseRealCoverChange?.invoke(next)
+                        haptic(2, if (next) "真实封面" else "替代封面")
+                        textures.trySend(Unit)
+                        focus?.let { tile ->
+                            scope.launch {
+                                focusBitmap = texture(tile)
+                                wakeUp()
+                            }
+                        }
+                        engine.markInput(wallNow())
+                        wakeUp()
+                    }
+                },
                 onReset = {
                     resetTune(tune)
                     saveTune(context, tune)

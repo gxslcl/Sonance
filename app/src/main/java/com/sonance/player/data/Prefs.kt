@@ -198,6 +198,16 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_PLAYER_SWITCH_MOTION, null) ?: PlayerSwitchMotion.POWERAMP_SLIDE.id
         set(v) = sp.edit().putString(KEY_PLAYER_SWITCH_MOTION, v).apply()
 
+    /** 普通播放主界面样式（见 [PlayerLayoutStyle]）。默认经典样式。 */
+    var playerLayoutStyle: String
+        get() = sp.getString(KEY_PLAYER_LAYOUT_STYLE, null) ?: PlayerLayoutStyle.CLASSIC.id
+        set(v) = sp.edit().putString(KEY_PLAYER_LAYOUT_STYLE, v).apply()
+
+    /** 封面墙样式是否用歌曲真实封面替换程序艺术替代封面（背景与唱片中心色同步重算）。默认关闭。 */
+    var coverWallUseRealCover: Boolean
+        get() = sp.getBoolean(KEY_COVER_WALL_USE_REAL_COVER, false)
+        set(v) = sp.edit().putBoolean(KEY_COVER_WALL_USE_REAL_COVER, v).apply()
+
     /** 全局流体动效手感（见 [MotionFeel]）。 */
     var motionFeel: String
         get() = sp.getString(KEY_MOTION_FEEL, null) ?: MotionFeel.FLUID.id
@@ -1888,6 +1898,8 @@ class Prefs(context: Context) {
         private const val KEY_VINYL_SFX_ENABLED = "player_vinyl_sfx_enabled"
         private const val KEY_VINYL_SFX_VOLUME = "player_vinyl_sfx_volume"
         private const val KEY_PLAYER_SWITCH_MOTION = "player_switch_motion"
+        private const val KEY_PLAYER_LAYOUT_STYLE = "player_layout_style"
+        private const val KEY_COVER_WALL_USE_REAL_COVER = "cover_wall_use_real_cover"
         private const val KEY_MOTION_FEEL = "motion_feel"
         private const val KEY_PLAYER_SHEET_STYLE = "player_sheet_style"
         private const val KEY_PAGE_TRANSITION_STYLE = "page_transition_style"
