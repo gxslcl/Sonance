@@ -108,6 +108,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.LruCache
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -902,11 +903,11 @@ fun FullPlayer(
     val hostView = LocalView.current
     androidx.compose.runtime.DisposableEffect(hostView, coveredByVinyl) {
         if (Build.VERSION.SDK_INT >= 35 && !coveredByVinyl) {
-            hostView.requestedFrameRate = 120f
+            Api35FrameRateHelper.setRequestedFrameRate(hostView, 120f)
         }
         onDispose {
             if (Build.VERSION.SDK_INT >= 35) {
-                hostView.requestedFrameRate = android.view.View.REQUESTED_FRAME_RATE_CATEGORY_DEFAULT
+                Api35FrameRateHelper.resetRequestedFrameRate(hostView)
             }
         }
     }
@@ -917,11 +918,12 @@ fun FullPlayer(
         val isRapid = (now - lastSwitchTriggeredMs) < 380L
         lastSwitchTriggeredMs = now
         if (Build.VERSION.SDK_INT >= 35) {
-            hostView.frameContentVelocity = when (sw.trigger) {
+            val vel = when (sw.trigger) {
                 SwitchTrigger.AUTO_ADVANCE -> 1200f
                 SwitchTrigger.QUEUE_PICK -> 1800f
                 SwitchTrigger.MANUAL_STEP -> 4000f
             }
+            Api35FrameRateHelper.setFrameContentVelocity(hostView, vel)
         }
         val animMs = if (layoutStyle == PlayerLayoutStyle.COVER_WALL) {
             val wallBase = when (sw.trigger) {
@@ -1232,7 +1234,7 @@ fun FullPlayer(
         val raw = customPlayerRaw
         value = if (raw == null) {
             null
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S || customPlayerBgBlurDp <= 0) {
+        } else if (supportsHardwareRenderBlur() || customPlayerBgBlurDp <= 0) {
             raw.asImageBitmap()
         } else {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
@@ -1498,7 +1500,7 @@ fun FullPlayer(
         val currentSong = queue.getOrNull(activeQueueIndex)
         customPlayerImage?.let { bgImg ->
             Box(Modifier.matchParentSize().clipToBounds()) {
-                val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && customPlayerBgBlurDp > 0) {
+                val blurMod = if (supportsHardwareRenderBlur() && customPlayerBgBlurDp > 0) {
                     Modifier.blur(customPlayerBgBlurDp.dp, BlurredEdgeTreatment.Rectangle)
                 } else Modifier
                 Image(
@@ -3864,11 +3866,12 @@ private fun SwitchCoverSlot(
         )
     if (Build.VERSION.SDK_INT >= 35 && activeSwitch != null) {
         SideEffect {
-            hostView.frameContentVelocity = when (activeSwitch.trigger) {
+            val vel = when (activeSwitch.trigger) {
                 SwitchTrigger.AUTO_ADVANCE -> 1200f
                 SwitchTrigger.QUEUE_PICK -> 1800f
                 SwitchTrigger.MANUAL_STEP -> 4000f
             }
+            Api35FrameRateHelper.setFrameContentVelocity(hostView, vel)
         }
     }
 
@@ -5301,3 +5304,18 @@ private fun Modifier.blockSongSwipeInBottomBand(bandPx: Float): Modifier =
             }
         }
     }
+
+@RequiresApi(35)
+private object Api35FrameRateHelper {
+    fun setRequestedFrameRate(view: android.view.View, rate: Float) {
+        view.requestedFrameRate = rate
+    }
+
+    fun resetRequestedFrameRate(view: android.view.View) {
+        view.requestedFrameRate = android.view.View.REQUESTED_FRAME_RATE_CATEGORY_DEFAULT
+    }
+
+    fun setFrameContentVelocity(view: android.view.View, velocity: Float) {
+        view.frameContentVelocity = velocity
+    }
+}

@@ -26,6 +26,7 @@ class WidgetCommandReceiver : BroadcastReceiver() {
         val command = intent.getStringExtra(EXTRA_COMMAND) ?: return
         val widgetId = intent.getIntExtra(EXTRA_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         val app = context.applicationContext
+        SonanceWidgets.invalidateWidgetPresence(true)
 
         when (command) {
             PlaybackCommands.TOGGLE_LYRICS -> {

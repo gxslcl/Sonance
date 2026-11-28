@@ -374,7 +374,7 @@ internal fun FullscreenThemedLyrics(
                     // Quantize/cap blur and only render the seven nearby rows (API 24-30 uses fading).
                     val blur = round(pose.blur / (unit * 0.5f)) * unit * 0.5f
                     val effect = remember(blur) {
-                        if (Build.VERSION.SDK_INT >= 31 && blur > 0f) {
+                        if (supportsHardwareRenderBlur() && blur > 0f) {
                             RenderEffect.createBlurEffect(blur, blur, Shader.TileMode.DECAL).asComposeRenderEffect()
                         } else null
                     }

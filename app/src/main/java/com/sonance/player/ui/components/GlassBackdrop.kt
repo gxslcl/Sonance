@@ -57,6 +57,20 @@ enum class ArtTransition {
  *
  * API 31+ 才有 RenderEffect 真模糊；低于 31 只能靠降不透明度 + 加厚遮罩近似。
  */
+/**
+ * 部分设备（如 Android 12 API 31/32 上的小米 / MIUI 14）对硬件 `RenderEffect` 模糊层与
+ * 离屏圆角裁剪组合存在合成缺陷，开启高半径高斯模糊时可能触发整屏/半屏白屏或闪烁。
+ * 在此类系统上统一下落到软件模糊与暗化遮罩兜底，保持稳定渲染与视觉可读性。
+ */
+internal fun supportsHardwareRenderBlur(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+    if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+        val vendor = "${Build.MANUFACTURER} ${Build.BRAND}".lowercase()
+        if ("xiaomi" in vendor || "redmi" in vendor || "poco" in vendor) return false
+    }
+    return true
+}
+
 @Composable
 fun GlassBackdrop(
     /** 已经加载好的封面；null 时只剩遮罩（仍然比一层纯色有层次） */
@@ -113,7 +127,7 @@ fun GlassBackdrop(
         return
     }
 
-    val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val canBlur = supportsHardwareRenderBlur()
     val artAlpha = GlassStyle.artAlpha(visibility) * if (canBlur) 1f else 0.45f
     val scrim = GlassStyle.scrimAlpha(visibility)
 

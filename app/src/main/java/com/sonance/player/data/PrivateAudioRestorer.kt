@@ -126,6 +126,17 @@ object PrivateAudioRestorer {
      * @param isVpr    是否 VPR 变体
      */
     fun xorChunk(buf: ByteArray, count: Int, startPos: Int, key: ByteArray, isVpr: Boolean) {
+        xorChunk(buf, bufOffset = 0, count = count, startPos = startPos, key = key, isVpr = isVpr)
+    }
+
+    fun xorChunk(
+        buf: ByteArray,
+        bufOffset: Int,
+        count: Int,
+        startPos: Int,
+        key: ByteArray,
+        isVpr: Boolean
+    ) {
         if (count <= 0 || key.isEmpty()) return
         var i = 0
         while (i < count) {
@@ -136,7 +147,7 @@ object PrivateAudioRestorer {
             var j = 0
             while (j < block) {
                 val p = pos + j
-                var med = (key[p % key.size].toInt() and 0xFF) xor (buf[i + j].toInt() and 0xFF)
+                var med = (key[p % key.size].toInt() and 0xFF) xor (buf[bufOffset + i + j].toInt() and 0xFF)
                 med = med xor ((med and 0x0F) shl 4)
 
                 var msk = (MASK_V2_PRE_DEF[p % TABLE_LEN].toInt() and 0xFF) xor foldValue
@@ -144,7 +155,7 @@ object PrivateAudioRestorer {
 
                 var v = (med xor msk) and 0xFF
                 if (isVpr) v = v xor (VPR_MASK_DIFF[p % KEY_CYCLE].toInt() and 0xFF)
-                buf[i + j] = v.toByte()
+                buf[bufOffset + i + j] = v.toByte()
                 j++
             }
             i += block

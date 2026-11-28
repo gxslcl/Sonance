@@ -90,6 +90,7 @@ import com.sonance.player.data.Prefs
 import com.sonance.player.data.Song
 import com.sonance.player.playback.PlayerUiState
 import com.sonance.player.ui.components.InlineLyrics
+import com.sonance.player.ui.components.supportsHardwareRenderBlur
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -979,7 +980,7 @@ fun NativeCoverWallScreen(
                         rotationX = lerp(8f, 3f, details) * p
                         cameraDistance = 900f * d
                         alpha = 1f - lerp(0.68f, 0.55f, details) * p
-                        if (Build.VERSION.SDK_INT >= 31)
+                        if (supportsHardwareRenderBlur())
                             renderEffect = if (p > 0.001f) BlurEffect(
                                 lerp(14f, 7f, details) * d * p,
                                 lerp(14f, 7f, details) * d * p

@@ -197,7 +197,12 @@ class PlaybackService : MediaLibraryService() {
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .setRenderersFactory(TapRenderersFactory(this, audioSink))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(onlineDataSource(), extractorsFactory))
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(
+                    PrefixedAudioDataSource.Factory(onlineDataSource()),
+                    extractorsFactory
+                )
+            )
             .build().apply {
                 setSeekParameters(SeekParameters(100_000L, 100_000L))
             }
@@ -999,16 +1004,29 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    private fun titleFallbackFromUri(uriStr: String?): String {
+        if (uriStr.isNullOrBlank()) return ""
+        val parsed = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return ""
+        val seg = parsed.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')?.trim().orEmpty()
+        return if (seg.isNotBlank() && seg.all { it.isDigit() }) "" else seg
+    }
+
     private fun queryFromPlayer(player: Player): TrackLyricQuery {
         val item = player.currentMediaItem
         val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
         val meta = item?.mediaMetadata
-        val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
-            ?: meta?.title?.toString().orEmpty()
-        val artist = meta?.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
-            ?: meta?.artist?.toString().orEmpty()
-        val album = meta?.albumTitle?.toString().orEmpty()
         val extras = meta?.extras
+        val sourceUri = extras?.getString(PlayerController.EXTRA_URI)?.takeIf { it.isNotBlank() }
+            ?: item?.localConfiguration?.uri?.toString()
+        val title = extras?.getString(PlayerController.EXTRA_ORIG_TITLE)?.takeIf { it.isNotBlank() }
+            ?: meta?.title?.toString()?.takeIf { it.isNotBlank() }
+            ?: meta?.displayTitle?.toString()?.takeIf { it.isNotBlank() }
+            ?: titleFallbackFromUri(sourceUri)
+        val artist = extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)?.takeIf { it.isNotBlank() }
+            ?: meta?.artist?.toString()?.takeIf { it.isNotBlank() }
+            ?: meta?.subtitle?.toString()?.takeIf { it.isNotBlank() }
+            ?: meta?.albumArtist?.toString().orEmpty()
+        val album = meta?.albumTitle?.toString().orEmpty()
         val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
             ?: meta?.durationMs?.takeIf { it > 0L }
             ?: extras?.getLong(PlayerController.EXTRA_DURATION_MS, 0L)?.takeIf { it > 0L }
@@ -1020,7 +1038,7 @@ class PlaybackService : MediaLibraryService() {
             artist = artist,
             album = album,
             durationMs = durationMs,
-            sourceUri = extras?.getString(PlayerController.EXTRA_URI),
+            sourceUri = sourceUri,
             remoteSource = extras?.getString(PlayerController.EXTRA_SOURCE).orEmpty(),
             remoteId = extras?.getString(PlayerController.EXTRA_REMOTE_ID)
         )
@@ -1119,38 +1137,32 @@ class PlaybackService : MediaLibraryService() {
         override fun onEvents(player: Player, events: Player.Events) {
             // 主线程只读内存中的轻量字段，Pref 读写 / 歌词读取 / RemoteViews 构建全部转到后台串行执行，
             // 快速连滑切歌时原子合并待处理状态，避免主线程卡顿。
-            val item = player.currentMediaItem
-            val meta = item?.mediaMetadata
-            val title = meta?.extras?.getString(PlayerController.EXTRA_ORIG_TITLE)
-                ?: meta?.title?.toString().orEmpty()
-            val artist = meta?.extras?.getString(PlayerController.EXTRA_ORIG_ARTIST)
-                ?: meta?.artist?.toString().orEmpty()
-            val mediaId = item?.mediaId?.toLongOrNull() ?: -1L
-            val extras = meta?.extras
-            val durationMs = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
-                ?: meta?.durationMs?.takeIf { it > 0L }
-                ?: extras?.getLong(PlayerController.EXTRA_DURATION_MS, 0L)?.takeIf { it > 0L }
-                ?: 0L
-            activeTrackIdentity = trackPartOfLyricKey(mediaId, title, artist)
+            val q = queryFromPlayer(player)
+            val extras = player.currentMediaItem?.mediaMetadata?.extras
+            activeTrackIdentity = trackPartOfLyricKey(q.mediaId, q.title, q.artist)
             val snapshot = WidgetSyncSnapshot(
-                mediaId = mediaId,
-                title = title,
-                artist = artist,
-                album = meta?.albumTitle?.toString().orEmpty(),
+                mediaId = q.mediaId,
+                title = q.title,
+                artist = q.artist,
+                album = q.album,
                 isPlaying = player.isPlaying,
                 albumId = extras?.getLong(PlayerController.EXTRA_ALBUM_ID, -1L) ?: -1L,
-                sourceUri = extras?.getString(PlayerController.EXTRA_URI),
-                remoteSource = extras?.getString(PlayerController.EXTRA_SOURCE).orEmpty(),
-                remoteId = extras?.getString(PlayerController.EXTRA_REMOTE_ID),
-                coverKey = OnlineCover.keyOf(title, artist),
+                sourceUri = q.sourceUri,
+                remoteSource = q.remoteSource,
+                remoteId = q.remoteId,
+                coverKey = OnlineCover.keyOf(q.title, q.artist),
                 positionMs = player.currentPosition.coerceAtLeast(0L),
-                durationMs = durationMs
+                durationMs = q.durationMs
             )
-            val mediaChanged = mediaId != lastQueuedWidgetMediaId
-            lastQueuedWidgetMediaId = mediaId
+            val mediaChanged = q.mediaId != lastQueuedWidgetMediaId
+            lastQueuedWidgetMediaId = q.mediaId
+            if (mediaChanged) {
+                widgetLyricLines = emptyList()
+                lastPushedWidgetTickSig = null
+            }
             pendingWidgetSync.set(snapshot)
             mainHandler.removeCallbacks(flushWidgetSyncRunnable)
-            mainHandler.postDelayed(flushWidgetSyncRunnable, if (mediaChanged) 750L else 120L)
+            mainHandler.postDelayed(flushWidgetSyncRunnable, if (mediaChanged) 40L else 80L)
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -1177,14 +1189,23 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.removeCallbacks(persistSnapshotRunnable)
             mainHandler.postDelayed(persistSnapshotRunnable, 350L)
             resolveCurrentOnlineStreamInServiceIfNeeded(p, mediaItem)
-            if (p.isPlaying) {
+            widgetLyricLines = emptyList()
+            lastPushedWidgetTickSig = null
+            tickLive()
+            if (p.isPlaying || p.playWhenReady) {
                 scheduleNextPlaybackTick(p)
             }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            val p = mediaSession?.player ?: return
             if (playbackState == Player.STATE_ENDED) {
-                mediaSession?.player?.let { persistServicePlaybackSnapshot(it) }
+                persistServicePlaybackSnapshot(p)
+            } else if (playbackState == Player.STATE_READY) {
+                tickLive()
+                if (p.isPlaying) {
+                    scheduleNextPlaybackTick(p)
+                }
             }
         }
 
@@ -2128,8 +2149,9 @@ private class TapRenderersFactory(
 ) : DefaultRenderersFactory(context) {
 
     init {
-        // 优先系统硬解，遇到系统不支持的无损/多声道格式（ALAC/FLAC/TrueHD/MLP/DTS 等）自动回落内置 FFmpeg 软解
-        setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
+        // 优先内置 FFmpeg 软解（配合回退机制）以便直接兼容酷狗 Ogg/Vorbis/Opus 及各类无损/多声道音频
+        setEnableDecoderFallback(true)
+        setExtensionRendererMode(EXTENSION_RENDERER_MODE_PREFER)
     }
 
     override fun buildAudioSink(

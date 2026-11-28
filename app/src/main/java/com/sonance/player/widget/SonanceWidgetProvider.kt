@@ -193,7 +193,8 @@ abstract class SonanceWidgetProvider internal constructor(
 
     override fun onDisabled(context: Context) {
         super.onDisabled(context)
-        SonanceWidgets.invalidateWidgetPresence(false)
+        // 10 个 Provider 共享全局存在缓存：单个样式被删不应一刀切关掉其余样式的刷新
+        SonanceWidgets.invalidateWidgetPresence(null)
     }
 
     override fun onUpdate(
@@ -267,6 +268,9 @@ object SonanceWidgets {
     @Volatile
     private var cachedHasWidgets: Boolean? = null
 
+    @Volatile
+    private var lastFullRenderedSig: String? = null
+
     fun invalidateWidgetPresence(known: Boolean? = null) {
         cachedHasWidgets = known
     }
@@ -297,7 +301,7 @@ object SonanceWidgets {
         val isFav = resolvedMediaId != 0L && prefs.isAnyFavoriteId(resolvedMediaId)
         val mode = prefs.playMode.ifBlank { "REPEAT_ALL" }
         val snap = WidgetState.Snapshot(
-            hasSong = title.isNotBlank(),
+            hasSong = title.isNotBlank() || resolvedMediaId != -1L || !sourceUri.isNullOrBlank(),
             mediaId = resolvedMediaId,
             title = title,
             artist = artist,
@@ -314,10 +318,24 @@ object SonanceWidgets {
             colorOnAccent = previous.colorOnAccent
         )
         val changed = WidgetState.write(app, snap)
+        val sig = WidgetState.artworkSignature(snap)
         if (!snap.sameArtwork(previous)) WidgetCover.clear()
-        if (refreshUi && changed && hasAnyWidgets(app)) {
+        val needFullRefresh = changed || lastFullRenderedSig != sig
+        if (refreshUi && needFullRefresh && hasAnyWidgets(app)) {
             renderExecutor.execute { refreshAll(app) }
         }
+    }
+
+    fun onCoverUpdated(context: Context, mediaId: Long, coverKey: String?) {
+        val app = context.applicationContext
+        if (!hasAnyWidgets(app)) return
+        val snap = WidgetState.read(app)
+        val matched = (mediaId != -1L && mediaId != 0L && snap.mediaId == mediaId) ||
+            (!coverKey.isNullOrBlank() && snap.coverKey == coverKey)
+        if (!matched) return
+        WidgetCover.clear()
+        lastFullRenderedSig = null
+        renderExecutor.execute { refreshAll(app) }
     }
 
     fun onFavoriteOrModeChanged(context: Context) {
@@ -365,11 +383,13 @@ object SonanceWidgets {
     /** 完整重画所有已放置的小组件（同步版本，调用方负责不在主线程上跑） */
     fun refreshAll(context: Context) {
         val manager = AppWidgetManager.getInstance(context) ?: return
+        val sig = WidgetState.artworkSignature(WidgetState.read(context))
         WidgetStyle.entries.forEach { style ->
             widgetIds(manager, context, style).forEach {
                 WidgetRenderer.render(context, manager, it, style)
             }
         }
+        lastFullRenderedSig = sig
     }
 
     /** 增量刷新进度条、时间数字和歌词行，确保浅色/深色外观下颜色始终一致。 */
@@ -377,6 +397,10 @@ object SonanceWidgets {
         val manager = AppWidgetManager.getInstance(context) ?: return
         val live = WidgetState.readLive(context)
         val snap = WidgetState.read(context)
+        if (lastFullRenderedSig != WidgetState.artworkSignature(snap)) {
+            refreshAll(context)
+            return
+        }
         val palette = WidgetRenderer.resolveCurrentPalette(context, snap, extractIfMissing = false)
         val curTime = formatTime(live.positionSec)
         val totalTime = if (live.durationSec > 0) formatTime(live.durationSec) else "--:--"

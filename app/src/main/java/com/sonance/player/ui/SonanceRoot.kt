@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import com.sonance.player.ui.components.LocalSearchFocusTracker
 import com.sonance.player.ui.components.SearchFocusTracker
+import com.sonance.player.ui.components.supportsHardwareRenderBlur
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -842,23 +843,60 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
     // 之前用 mapNotNull 会把这些 id 静默丢掉，导致页号与播放器索引错位 ——
     // 用户滑到第 N 页时声音切到播放器第 N 首，页面却显示压缩列表里的另一首
     // （表现为「切歌后封面/歌名还停在上一首」）。这里改成占位补位，绝不丢项。
-    val queue = remember(playerState.queueIds, songMap) {
-        playerState.queueIds.map { id ->
-            songMap[id] ?: Song(
-                id = id,
-                title = "未知歌曲",
-                artist = "",
-                album = "",
-                albumId = -1L,
-                durationMs = 0L,
-                uri = android.net.Uri.EMPTY,
-                folderPath = "",
-                folderName = "",
-                displayName = "",
-                sizeBytes = 0L,
-                dateAddedSec = 0L,
-                track = 0
+    val queue = remember(
+        playerState.queueIds,
+        songMap,
+        playerState.hasItem,
+        playerState.mediaId,
+        playerState.title,
+        playerState.artist,
+        playerState.album,
+        playerState.albumId,
+        playerState.durationMs,
+        playerState.sourceUri
+    ) {
+        if (playerState.queueIds.isNotEmpty()) {
+            playerState.queueIds.map { id ->
+                songMap[id] ?: Song(
+                    id = id,
+                    title = if (id == playerState.mediaId && playerState.title.isNotBlank()) playerState.title else "未知歌曲",
+                    artist = if (id == playerState.mediaId) playerState.artist else "",
+                    album = if (id == playerState.mediaId) playerState.album else "",
+                    albumId = if (id == playerState.mediaId) playerState.albumId else -1L,
+                    durationMs = if (id == playerState.mediaId) playerState.durationMs else 0L,
+                    uri = if (id == playerState.mediaId && !playerState.sourceUri.isNullOrBlank()) {
+                        runCatching { android.net.Uri.parse(playerState.sourceUri) }.getOrDefault(android.net.Uri.EMPTY)
+                    } else android.net.Uri.EMPTY,
+                    folderPath = "",
+                    folderName = "",
+                    displayName = "",
+                    sizeBytes = 0L,
+                    dateAddedSec = 0L,
+                    track = 0
+                )
+            }
+        } else if (playerState.hasItem) {
+            listOf(
+                songMap[playerState.mediaId] ?: Song(
+                    id = playerState.mediaId,
+                    title = playerState.title.ifBlank { "未知歌曲" },
+                    artist = playerState.artist,
+                    album = playerState.album,
+                    albumId = playerState.albumId,
+                    durationMs = playerState.durationMs,
+                    uri = playerState.sourceUri?.takeIf { it.isNotBlank() }?.let {
+                        runCatching { android.net.Uri.parse(it) }.getOrDefault(android.net.Uri.EMPTY)
+                    } ?: android.net.Uri.EMPTY,
+                    folderPath = "",
+                    folderName = "",
+                    displayName = "",
+                    sizeBytes = 0L,
+                    dateAddedSec = 0L,
+                    track = 0
+                )
             )
+        } else {
+            emptyList()
         }
     }
     val currentSong = songMap[playerState.mediaId]
@@ -994,7 +1032,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             boxH = screenH,
             skin = skin,
             visibility = vm.shellGlassVisibility,
-            canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            canBlur = supportsHardwareRenderBlur()
         )
     }
 
@@ -1011,7 +1049,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
             boxH = screenH,
             skin = skin,
             visibility = vm.shellGlassVisibility,
-            canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
+            canBlur = supportsHardwareRenderBlur(),
             liquid = true,
             // 与上面 GlassBackdrop 的画法严格同参，字色才对得准
             scrimSpread = 0.10f,
@@ -1043,7 +1081,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
         val raw = customShellRaw
         value = if (raw == null) {
             null
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S || vm.customShellBgBlurDp <= 0) {
+        } else if (supportsHardwareRenderBlur() || vm.customShellBgBlurDp <= 0) {
             raw.asImageBitmap()
         } else {
             withContext(Dispatchers.Default) {
@@ -1213,7 +1251,7 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                     .graphicsLayer { alpha = if (suppressHomeUnderlay) 0f else 1f }
                     .clipToBounds()
             ) {
-                val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && vm.customShellBgBlurDp > 0) {
+                val blurMod = if (supportsHardwareRenderBlur() && vm.customShellBgBlurDp > 0) {
                     Modifier.blur(vm.customShellBgBlurDp.dp, BlurredEdgeTreatment.Rectangle)
                 } else Modifier
                 Image(
@@ -1282,9 +1320,12 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                             val s = 1f - 0.055f * p
                             scaleX = s
                             scaleY = s
-                            if (p < 0.998f) {
-                                shape = RoundedCornerShape((p * 24f).dp)
-                                clip = true
+                            if (p < 0.998f && supportsHardwareRenderBlur()) {
+                                val r = (p * 24f).dp.toPx()
+                                if (r >= 1f) {
+                                    shape = RoundedCornerShape(r)
+                                    clip = true
+                                }
                             }
                         }
                     }
@@ -1377,15 +1418,17 @@ private fun Shell(vm: SonanceViewModel, playerState: PlayerUiState) {
                                 PlayerSheetStyle.DEPTH_SHEET -> {
                                     alpha = 1f
                                     translationY = (1f - p) * screenH
-                                    if (p < 0.998f) {
+                                    if (p < 0.998f && supportsHardwareRenderBlur()) {
                                         val r = ((1f - p) * 28f).dp.toPx()
-                                        shape = RoundedCornerShape(
-                                            topStart = r,
-                                            topEnd = r,
-                                            bottomStart = 0f,
-                                            bottomEnd = 0f
-                                        )
-                                        clip = true
+                                        if (r >= 1f) {
+                                            shape = RoundedCornerShape(
+                                                topStart = r,
+                                                topEnd = r,
+                                                bottomStart = 0f,
+                                                bottomEnd = 0f
+                                            )
+                                            clip = true
+                                        }
                                     }
                                 }
                                 PlayerSheetStyle.SLIDE_UP -> {

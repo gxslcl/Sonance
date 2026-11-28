@@ -322,7 +322,7 @@ fun LyricsOverlay(
         val bands = artBands
         val artW = art?.width ?: 0
         val artH = art?.height ?: 0
-        val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        val canBlur = supportsHardwareRenderBlur()
         // 色带只在"真的会用到"时才算：关掉自适应、或背景玻璃关着（那时背景就是纯皮肤底色，
         // 皮肤自己的配色本来就是照它配的）都直接置空。
         // 「只调当前句」档色带照算，只是非当前句不走它（见 shouldAdapt）。

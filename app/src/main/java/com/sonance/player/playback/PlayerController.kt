@@ -524,6 +524,11 @@ class PlayerController(private val context: Context) {
             }
             builder.build()
         }
+        com.sonance.player.widget.SonanceWidgets.onCoverUpdated(
+            context = context,
+            mediaId = song.id,
+            coverKey = OnlineCover.keyOf(song.title, song.artist)
+        )
     }
 
     /**

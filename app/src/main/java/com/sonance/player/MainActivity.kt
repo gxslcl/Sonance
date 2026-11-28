@@ -24,6 +24,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.decorView.isForceDarkAllowed = false
+        }
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
         requestHighRefreshRate()
         enableEdgeToEdge()

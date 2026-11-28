@@ -101,7 +101,7 @@ object WidgetState {
     ) {
         /** 封面相关字段是否变了：每 500ms 的进度更新不该触发一次位图解码。 */
         fun sameArtwork(other: Snapshot): Boolean =
-            albumId == other.albumId && sourceUri == other.sourceUri && coverKey == other.coverKey
+            mediaId == other.mediaId && albumId == other.albumId && sourceUri == other.sourceUri && coverKey == other.coverKey
     }
 
     fun read(context: Context): Snapshot {
@@ -240,7 +240,7 @@ object WidgetState {
     }
 
     fun artworkSignature(snap: Snapshot): String =
-        "${snap.coverKey.orEmpty()}|${snap.albumId}|${snap.sourceUri.orEmpty()}"
+        "${snap.mediaId}|${snap.coverKey.orEmpty()}|${snap.albumId}|${snap.sourceUri.orEmpty()}"
 
     fun readExtractedRgb(context: Context, sig: String): Pair<Boolean, Int?> {
         val sp = context.applicationContext.getSharedPreferences(SP, Context.MODE_PRIVATE)

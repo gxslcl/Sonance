@@ -17,6 +17,9 @@ import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import android.util.Size
+import androidx.compose.ui.graphics.asAndroidBitmap
+import com.sonance.player.data.ArtworkLoader
+import com.sonance.player.data.AudioTags
 import com.sonance.player.data.CoverCache
 import com.sonance.player.data.isRemoteUrl
 
@@ -38,6 +41,7 @@ internal object WidgetCover {
     )
 
     private data class CachedRgb(val rgb: Int?)
+    private data class DecodedRaw(val bitmap: Bitmap, val owned: Boolean)
 
     private val bitmapCache = LruCache<String, Bitmap>(16)
     private val rgbCache = LruCache<String, CachedRgb>(24)
@@ -59,16 +63,18 @@ internal object WidgetCover {
         rgbCache.get(sig)?.let { return it.rgb }
 
         val (savedHit, savedRgb) = WidgetState.readExtractedRgb(context, sig)
-        if (savedHit) {
+        if (savedHit && savedRgb != null) {
             rgbCache.put(sig, CachedRgb(savedRgb))
             return savedRgb
         }
 
         val sample = decodeRaw(context, snap, 72)
-        val rgb = sample?.let { sampleRawRgb(it) }
-        sample?.recycle()
-        rgbCache.put(sig, CachedRgb(rgb))
-        WidgetState.writeExtractedRgb(context, sig, rgb)
+        val rgb = sample?.let { sampleRawRgb(it.bitmap) }
+        if (sample != null && sample.owned) sample.bitmap.recycle()
+        if (rgb != null) {
+            rgbCache.put(sig, CachedRgb(rgb))
+            WidgetState.writeExtractedRgb(context, sig, rgb)
+        }
         return rgb
     }
 
@@ -91,21 +97,20 @@ internal object WidgetCover {
             return CoverBundle(cachedBmp, rgb)
         }
 
-        val raw = decodeRaw(context, snap, targetPx) ?: run {
-            rgbCache.put(sig, CachedRgb(null))
-            WidgetState.writeExtractedRgb(context, sig, null)
-            return CoverBundle(null, null)
-        }
+        val decoded = decodeRaw(context, snap, targetPx) ?: return CoverBundle(null, null)
+        val raw = decoded.bitmap
 
         val rawRgb = rgbCache.get(sig)?.rgb ?: run {
             val sampled = sampleRawRgb(raw)
-            rgbCache.put(sig, CachedRgb(sampled))
-            WidgetState.writeExtractedRgb(context, sig, sampled)
+            if (sampled != null) {
+                rgbCache.put(sig, CachedRgb(sampled))
+                WidgetState.writeExtractedRgb(context, sig, sampled)
+            }
             sampled
         }
 
         val out = roundedSquareCover(raw, targetPx, cornerRadiusRatio, strokeColor)
-        if (out !== raw) raw.recycle()
+        if (decoded.owned && out !== raw) raw.recycle()
         bitmapCache.put(key, out)
         return CoverBundle(out, rawRgb)
     }
@@ -123,22 +128,41 @@ internal object WidgetCover {
         return WidgetAuraPalette.extractRawColorFromPixels(pixels)
     }
 
-    private fun decodeRaw(context: Context, snap: WidgetState.Snapshot, targetPx: Int): Bitmap? {
-        // 1) 下载好的封面
+    private fun decodeRaw(context: Context, snap: WidgetState.Snapshot, targetPx: Int): DecodedRaw? {
+        val parsedUri = snap.sourceUri?.takeIf { it.isNotBlank() }?.let {
+            runCatching { Uri.parse(it) }.getOrNull()
+        }
+
+        // 1) 用户手动选择的专属封面
+        if (snap.mediaId != -1L && snap.mediaId != 0L) {
+            val selected = runCatching {
+                CoverCache.lookupSelected(context, snap.mediaId, parsedUri)
+            }.getOrNull()
+            if (selected != null) {
+                decodeBytes(selected, targetPx)?.let { return DecodedRaw(it, owned = true) }
+            }
+            // 2) 内存中刚拉到的在线/手选封面
+            ArtworkLoader.online(snap.mediaId)?.let { img ->
+                val bmp = runCatching { img.asAndroidBitmap() }.getOrNull()
+                if (bmp != null && !bmp.isRecycled) return DecodedRaw(bmp, owned = false)
+            }
+        }
+
+        // 3) 下载好的磁盘封面缓存
         val hit = CoverCache.lookup(context, snap.coverKey)
         if (hit is CoverCache.Lookup.Hit) {
-            decodeBytes(hit.bytes, targetPx)?.let { return it }
+            decodeBytes(hit.bytes, targetPx)?.let { return DecodedRaw(it, owned = true) }
         }
 
-        // 2) MediaStore 专辑封面
+        // 4) MediaStore 专辑封面
         if (snap.albumId > 0) {
-            fromAlbumArt(context, snap.albumId, targetPx)?.let { return it }
+            fromAlbumArt(context, snap.albumId, targetPx)?.let { return DecodedRaw(it, owned = true) }
         }
 
-        // 3) 本地文件内嵌封面（严格跳过 http(s) 流地址）
+        // 5) 本地文件内嵌封面（AudioTags 优先 + content/fd 回退，严格跳过 http(s) 流地址）
         val uriStr = snap.sourceUri
         if (!uriStr.isNullOrBlank() && !isRemoteUrl(uriStr)) {
-            fromEmbedded(uriStr, targetPx)?.let { return it }
+            fromEmbedded(context, uriStr, targetPx)?.let { return DecodedRaw(it, owned = true) }
         }
         return null
     }
@@ -157,10 +181,35 @@ internal object WidgetCover {
         return decodeBytes(bytes, targetPx)
     }
 
-    private fun fromEmbedded(uriStr: String, targetPx: Int): Bitmap? {
+    private fun fromEmbedded(context: Context, uriStr: String, targetPx: Int): Bitmap? {
+        val uri = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return null
+        val tagArt = runCatching { AudioTags.readCoverArt(context, uri) }.getOrNull()
+        if (tagArt != null && tagArt.isNotEmpty()) {
+            decodeBytes(tagArt, targetPx)?.let { return it }
+        }
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(uriStr)
+            when (uri.scheme?.lowercase()) {
+                "content" -> {
+                    val setOk = runCatching {
+                        retriever.setDataSource(context, uri)
+                        true
+                    }.getOrDefault(false)
+                    if (!setOk) {
+                        val fdSet = context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                            retriever.setDataSource(pfd.fileDescriptor)
+                            true
+                        } ?: false
+                        if (!fdSet) return null
+                    }
+                }
+                "file" -> {
+                    val path = uri.path ?: return null
+                    retriever.setDataSource(path)
+                }
+                null, "" -> retriever.setDataSource(uriStr)
+                else -> return null
+            }
             val art = retriever.embeddedPicture ?: return null
             decodeBytes(art, targetPx)
         } catch (t: Throwable) {
